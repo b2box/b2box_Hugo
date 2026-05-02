@@ -4,11 +4,11 @@ Hugo necesita:
   - leer productos (con custom fields e imagen principal)
   - desactivar duplicados (updateProduct → enabled: false)
 
-Hugo NO actualiza precios de variantes — eso es trabajo del sistema interno
-con tasa de cambio + margen + IVA.
-
-La query "lite" (sin variants ni todos los assets) es lo que evita que Vendure
-se cuelgue cuando el catálogo tiene cientos de productos.
+El bearer de Vendure expira (típicamente cada 12h). Cuando recibimos un error
+de auth, automáticamente hacemos login con VENDURE_USER/VENDURE_PASS, obtenemos
+un bearer nuevo del header `vendure-auth-token`, actualizamos el transport, y
+reintentamos la request original. El bearer renovado vive en memoria (si Hugo
+restartea, hace login al primer call de nuevo).
 """
 
 from __future__ import annotations
@@ -49,23 +49,111 @@ class VendureProduct:
 # ─── Cliente ───────────────────────────────────────────────────────
 
 
-class VendureClient:
-    """Wrapper async sobre la Admin API de Vendure."""
+# Mensajes de error de auth devueltos por Vendure cuando el bearer expiró
+_AUTH_ERROR_HINTS = (
+    "FORBIDDEN",
+    "UNAUTHORIZED",
+    "NOT_VERIFIED",
+    "no token",
+    "session has expired",
+    "invalid token",
+)
 
-    DEFAULT_PAGE_SIZE = 25  # vendure se estrangula con páginas más grandes
+
+class VendureClient:
+    """Wrapper async sobre la Admin API de Vendure con auto-renovación del bearer."""
+
+    DEFAULT_PAGE_SIZE = 25
 
     def __init__(self) -> None:
         s = get_settings()
-        headers = {"Authorization": f"Bearer {s.vendure_bearer}"}
-        if s.vendure_channel_token:
-            headers["vendure-token"] = s.vendure_channel_token
+        self._url = s.vendure_api_url
+        self._channel_token = s.vendure_channel_token
+        self._user = s.vendure_user
+        self._pass = s.vendure_pass
+        self._source_field = s.vendure_source_url_field
+        # Bearer actual: arranca con el del .env, se reemplaza cuando se renueva
+        self._bearer: str = s.vendure_bearer
+        self._login_lock = asyncio.Lock()  # evita re-logins concurrentes
+        self._build_client()
+
+    def _build_client(self) -> None:
+        """(Re)crea el gql.Client con el bearer actual."""
+        headers = {"Authorization": f"Bearer {self._bearer}"}
+        if self._channel_token:
+            headers["vendure-token"] = self._channel_token
         transport = HTTPXAsyncTransport(
-            url=s.vendure_api_url,
+            url=self._url,
             headers=headers,
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
         self._client = Client(transport=transport, fetch_schema_from_transport=False)
-        self._source_field = s.vendure_source_url_field
+
+    async def _login(self) -> bool:
+        """Hace login con VENDURE_USER/PASS y guarda el nuevo bearer.
+
+        Devuelve True si el login fue exitoso, False si falla (típicamente
+        porque no hay credenciales configuradas).
+        """
+        if not self._user or not self._pass:
+            log.error("VENDURE_USER/PASS no configurados — no puedo renovar el bearer")
+            return False
+
+        async with self._login_lock:
+            log.info("Renovando bearer de Vendure (login con usuario %s)", self._user)
+            mutation = (
+                "mutation Login($u: String!, $p: String!) { "
+                "  login(username: $u, password: $p, rememberMe: true) { "
+                "    __typename "
+                "    ... on CurrentUser { id identifier } "
+                "    ... on InvalidCredentialsError { message } "
+                "    ... on NativeAuthStrategyError { message } "
+                "  } "
+                "}"
+            )
+            headers = {"Content-Type": "application/json"}
+            if self._channel_token:
+                headers["vendure-token"] = self._channel_token
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        self._url,
+                        json={
+                            "query": mutation,
+                            "variables": {"u": self._user, "p": self._pass},
+                        },
+                        headers=headers,
+                    )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                log.error("Login a Vendure falló: %s", exc)
+                return False
+
+            new_bearer = resp.headers.get("vendure-auth-token")
+            if not new_bearer:
+                log.error(
+                    "Login OK pero sin header vendure-auth-token. "
+                    "Vendure tiene que estar configurado con bearer auth (no cookie). Body: %s",
+                    resp.text[:200],
+                )
+                return False
+
+            data = resp.json().get("data", {}).get("login", {})
+            if data.get("__typename") != "CurrentUser":
+                log.error("Login devolvió error: %s", data.get("message") or data)
+                return False
+
+            self._bearer = new_bearer
+            self._build_client()
+            log.info("Bearer de Vendure renovado OK")
+            return True
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        """Detecta si la excepción es por auth/token expirado."""
+        msg = str(exc).upper()
+        return any(hint.upper() in msg for hint in _AUTH_ERROR_HINTS) or "401" in msg
 
     # ── Lectura ────────────────────────────────────────────────
 
@@ -74,11 +162,6 @@ class VendureClient:
         skip: int = 0,
         take: int = DEFAULT_PAGE_SIZE,
     ) -> list[VendureProduct]:
-        """Lista productos paginados, con lo MÍNIMO que Hugo necesita.
-
-        Sin variants, sin todos los assets (solo featured). Esto evita que
-        Vendure se cuelgue cuando el catálogo es grande.
-        """
         query = gql(
             f"""
             query Products($skip: Int!, $take: Int!) {{
@@ -112,8 +195,8 @@ class VendureClient:
                 slug
                 description
                 enabled
-                customFields {{ {self._source_field} }}
-                featuredAsset {{ source }}
+                customFields {{ {self._source_field} b2boxProductCode }}
+                featuredAsset {{ source preview }}
               }}
             }}
             """
@@ -126,7 +209,6 @@ class VendureClient:
     # ── Escritura ──────────────────────────────────────────────
 
     async def disable_product(self, product_id: str) -> None:
-        """Marca un producto como deshabilitado (soft-delete para duplicados)."""
         mutation = gql(
             """
             mutation DisableProduct($input: UpdateProductInput!) {
@@ -149,14 +231,24 @@ class VendureClient:
         what: str,
         max_attempts: int = 3,
     ) -> dict[str, Any]:
-        """Ejecuta la query con retry exponencial ante timeout/transport errors."""
+        """Ejecuta la query con retry exponencial + auto-renovación del bearer."""
         last_exc: Exception | None = None
+        relogged_in = False
         for attempt in range(1, max_attempts + 1):
             try:
                 async with self._client as session:
                     return await session.execute(query, variable_values=variables)
             except (TransportError, TransportQueryError, httpx.HTTPError) as exc:
                 last_exc = exc
+                # Si el error parece ser de auth y todavía no intentamos renovar,
+                # hacemos login y retry SIN consumir attempts del backoff
+                if self._is_auth_error(exc) and not relogged_in:
+                    log.warning(
+                        "%s tiró error de auth, intento renovar el bearer", what
+                    )
+                    relogged_in = True
+                    if await self._login():
+                        continue  # retry inmediato con bearer nuevo
                 if attempt < max_attempts:
                     backoff = 2 ** (attempt - 1)
                     log.warning(
@@ -170,7 +262,6 @@ class VendureClient:
     def _map_product(self, raw: dict[str, Any]) -> VendureProduct:
         custom = raw.get("customFields") or {}
         featured = raw.get("featuredAsset") or {}
-        # Para mostrar usamos preview (más liviana); para image_hash usamos source.
         featured_preview = featured.get("preview") or featured.get("source")
         image_urls: list[str] = []
         if featured.get("source"):
