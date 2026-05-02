@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests (no van a la imagen de prod)
+tests/
+
+# DB local de desarrollo
+*.db
+*.sqlite
+*.sqlite3
+
+# Env (se inyecta en runtime, NUNCA debe entrar en la imagen)
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+dist/
+build/
+Dockerfile
+.dockerignore

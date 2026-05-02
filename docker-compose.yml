@@ -1,0 +1,40 @@
+# ────────────────────────────────────────────────────────────────
+# Hugo — B2Box Catalog QC Agent
+#
+# Sirve para dos casos:
+#   1. Development local:  docker compose up -d --build
+#   2. Coolify:            apuntá al repo, Coolify usa este mismo file.
+#
+# La DB ahora vive en Supabase (Postgres), por eso no hay volumen local.
+# Toda la persistencia es externa al container.
+# ────────────────────────────────────────────────────────────────
+
+services:
+  hugo:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: b2box/hugo:latest
+    container_name: b2box-hugo
+    restart: unless-stopped
+
+    # En Coolify, las env vars se cargan desde el panel.
+    # En local, las toma de ./.env automáticamente.
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"
+
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"

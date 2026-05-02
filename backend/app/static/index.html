@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hugo — Control de calidad del catálogo B2Box</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🤖%3C/text%3E%3C/svg%3E" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef4ff', 100:'#dae6ff', 500:'#3b6df0', 600:'#2c54d4', 700:'#234aab' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .pulse-dot { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .fade-in { animation: fadeIn .3s ease-out; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+    .thumb-fallback { background: linear-gradient(135deg, #e2e8f0 25%, #cbd5e1 25%, #cbd5e1 50%, #e2e8f0 50%, #e2e8f0 75%, #cbd5e1 75%, #cbd5e1); background-size: 12px 12px; }
+    .nav-item.active { background: rgb(59 109 240 / 0.1); color: rgb(35 74 171); border-left-color: rgb(59 109 240); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+
+<!-- ─── Header ───────────────────────────────────────────────── -->
+<header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-brand-500 flex items-center justify-center text-white font-bold shadow-sm">H</div>
+      <div>
+        <h1 class="text-base font-bold text-slate-900">Hugo</h1>
+        <p class="text-xs text-slate-500">Control de calidad · catálogo B2Box</p>
+      </div>
+    </div>
+    <div id="header-status" class="flex items-center gap-3">
+      <div id="working-indicator" class="hidden items-center gap-2 px-3 py-1.5 rounded-full bg-brand-50 text-sm border border-brand-100">
+        <span class="w-2 h-2 rounded-full bg-brand-500 pulse-dot"></span>
+        <span id="working-text" class="text-brand-700 font-medium">Trabajando…</span>
+      </div>
+      <div id="health-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-sm">
+        <span class="w-2 h-2 rounded-full bg-slate-400 pulse-dot"></span>
+        <span class="text-slate-600">Conectando…</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 md:grid-cols-[260px_1fr] gap-6">
+
+  <!-- ─── Sidebar ───────────────────────────────────────────── -->
+  <aside class="bg-white rounded-2xl border border-slate-200 p-3 h-fit shadow-sm sticky md:top-24">
+    <nav id="sections-nav" class="space-y-1">
+      <!-- items renderizados por JS -->
+    </nav>
+    <hr class="my-4 border-slate-200" />
+    <div class="px-3 py-2 space-y-2">
+      <button onclick="runAudit('prices', this)"
+        class="w-full text-sm bg-brand-500 hover:bg-brand-600 text-white font-medium py-2 px-3 rounded-lg transition disabled:opacity-50">
+        Verificar precios
+      </button>
+      <button onclick="runAudit('duplicates', this)"
+        class="w-full text-sm bg-rose-500 hover:bg-rose-600 text-white font-medium py-2 px-3 rounded-lg transition disabled:opacity-50">
+        Buscar duplicados
+      </button>
+      <p id="action-feedback" class="hidden mt-2 p-2 rounded text-xs"></p>
+    </div>
+  </aside>
+
+  <!-- ─── Main content ──────────────────────────────────────── -->
+  <main class="space-y-6 min-w-0">
+
+    <!-- Métricas globales -->
+    <section>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Resumen</h2>
+        <p class="text-xs text-slate-500">Última auditoría: <span id="last-audit" class="font-medium text-slate-700">nunca</span></p>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <p class="text-xs text-slate-500 uppercase tracking-wide">Productos vigilados</p>
+          <p id="m-products" class="text-2xl font-bold text-slate-900 mt-1">—</p>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <p class="text-xs text-slate-500 uppercase tracking-wide">Snapshots</p>
+          <p id="m-snapshots" class="text-2xl font-bold text-slate-900 mt-1">—</p>
+        </div>
+        <div class="bg-white rounded-xl border border-amber-200 p-4 shadow-sm">
+          <p class="text-xs text-amber-700 uppercase tracking-wide">Alertas (24h)</p>
+          <p id="m-alerts" class="text-2xl font-bold text-amber-700 mt-1">—</p>
+        </div>
+        <div class="bg-white rounded-xl border border-rose-200 p-4 shadow-sm">
+          <p class="text-xs text-rose-700 uppercase tracking-wide">Duplicados (7d)</p>
+          <p id="m-duplicates" class="text-2xl font-bold text-rose-700 mt-1">—</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lista de eventos de la sección actual -->
+    <section>
+      <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
+        <h2 id="section-title" class="text-lg font-semibold text-slate-900">Cargando…</h2>
+        <div class="flex items-center gap-3 text-xs text-slate-500">
+          <span id="pagination-info">—</span>
+          <button onclick="loadEvents()" class="hover:text-slate-700 flex items-center gap-1">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
+            Refrescar
+          </button>
+        </div>
+      </div>
+      <p id="section-description" class="text-sm text-slate-500 mb-4">—</p>
+      <div id="events" class="space-y-3">
+        <div class="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-400 text-sm">Cargando…</div>
+      </div>
+      <div class="flex items-center justify-center gap-2 mt-5">
+        <button id="btn-prev" onclick="changePage(-1)" disabled
+          class="px-3 py-1.5 text-sm rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">← Anterior</button>
+        <span id="page-indicator" class="text-sm text-slate-500 px-3">Página 1</span>
+        <button id="btn-next" onclick="changePage(+1)" disabled
+          class="px-3 py-1.5 text-sm rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Siguiente →</button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="max-w-7xl mx-auto px-6 py-6 text-xs text-slate-400 text-center">
+  Hugo · agente B2Box · <a href="/docs" class="underline hover:text-slate-600">API docs</a>
+</footer>
+
+<script>
+const PAGE_SIZE = 25;
+
+// Definición visual de los tabs (la lista canónica viene del backend)
+const SECTION_META = {
+  inbox_luis:    { icon: '📥', desc: 'Productos que Luis nos pasó para verificar antes de mandarlos a Paco.' },
+  inbox_orders:  { icon: '🧾', desc: 'Productos que llegan desde el flujo de pedidos. (Próximamente — pendiente de definición)', placeholder: true },
+  duplicates:    { icon: '🔀', desc: 'Productos detectados como duplicados (deshabilitados o marcados para revisión).' },
+  price_changes: { icon: '💱', desc: 'Cambios de precio detectados en la fuente del proveedor (1688).' },
+  sent_to_paco:  { icon: '🚀', desc: 'Productos que Hugo verificó como nuevos y reenvió a Paco para enriquecimiento.' },
+  all:           { icon: '🗂️', desc: 'Todos los eventos de auditoría en orden cronológico.' },
+};
+
+let currentSection = 'inbox_luis';
+let currentPage = 0;
+let currentTotal = 0;
+
+const TONES = {
+  warning: { ring:'ring-amber-200', dot:'bg-amber-400', badge:'bg-amber-100 text-amber-800' },
+  danger:  { ring:'ring-rose-200',  dot:'bg-rose-500',  badge:'bg-rose-100 text-rose-800' },
+  info:    { ring:'ring-blue-200',  dot:'bg-blue-500',  badge:'bg-blue-100 text-blue-800' },
+  muted:   { ring:'ring-slate-200', dot:'bg-slate-400', badge:'bg-slate-100 text-slate-700' },
+};
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMin = Math.floor((now - d) / 60000);
+  if (diffMin < 0) return d.toLocaleString('es-AR');
+  if (diffMin < 1) return 'hace instantes';
+  if (diffMin < 60) return `hace ${diffMin} min`;
+  if (diffMin < 1440) return `hace ${Math.floor(diffMin/60)} h`;
+  return d.toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function fmtPrice(obj) {
+  if (!obj || obj.price_cents == null) return null;
+  return `${(obj.price_cents/100).toFixed(2)} ${obj.currency || ''}`.trim();
+}
+
+function thumb(imageUrl, alt) {
+  if (imageUrl) {
+    return `<img src="${imageUrl}" alt="${alt||''}" loading="lazy"
+      class="w-16 h-16 rounded-lg object-cover bg-slate-100 shrink-0"
+      onerror="this.outerHTML='<div class=\\'w-16 h-16 rounded-lg thumb-fallback shrink-0\\'></div>'" />`;
+  }
+  return `<div class="w-16 h-16 rounded-lg thumb-fallback shrink-0"></div>`;
+}
+
+function eventCard(e) {
+  const t = TONES[e.tone] || TONES.muted;
+  const p = e.product || {};
+  const r = e.related_product;
+  const beforeStr = fmtPrice(e.before);
+  const afterStr = fmtPrice(e.after);
+  let priceBlock = '';
+  if (beforeStr && afterStr) {
+    priceBlock = `
+      <div class="flex items-center gap-2 text-sm mt-2">
+        <span class="text-slate-500">${beforeStr}</span>
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+        <strong class="text-slate-900">${afterStr}</strong>
+      </div>`;
+  }
+  let relatedBlock = '';
+  if (r && r.id) {
+    relatedBlock = `
+      <div class="text-xs text-slate-500 mt-2 flex items-center gap-1.5">
+        <span>relacionado:</span>
+        ${r.code ? `<span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">${r.code}</span>` : ''}
+        <span class="text-slate-700">${r.name || `#${r.id}`}</span>
+      </div>`;
+  }
+  const sourceBadge = e.source ? `<span class="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${e.source}</span>` : '';
+  return `
+    <div class="bg-white rounded-2xl border border-slate-200 ring-2 ${t.ring} p-4 fade-in flex gap-4">
+      ${thumb(p.image_url, p.name)}
+      <div class="flex-1 min-w-0">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="inline-block w-2 h-2 rounded-full ${t.dot}"></span>
+              <span class="font-semibold text-slate-900">${e.title}</span>
+              ${p.code ? `<span class="text-xs font-mono ${t.badge} px-2 py-0.5 rounded">BX ${p.code}</span>` : ''}
+              ${sourceBadge}
+            </div>
+            <p class="text-sm text-slate-700 mt-1 truncate" title="${p.name||''}">${p.name || `Producto #${p.id}`}</p>
+            <p class="text-xs text-slate-400 mt-0.5">ID: <span class="font-mono">${p.id}</span></p>
+          </div>
+          <p class="text-xs text-slate-400 shrink-0 whitespace-nowrap">${fmtTime(e.created_at)}</p>
+        </div>
+        ${priceBlock}
+        ${e.detail ? `<p class="text-xs text-slate-500 mt-2 leading-relaxed">${e.detail}</p>` : ''}
+        ${relatedBlock}
+      </div>
+    </div>`;
+}
+
+function renderEvents(items) {
+  const wrap = document.getElementById('events');
+  if (!items.length) {
+    const m = SECTION_META[currentSection] || {};
+    if (m.placeholder) {
+      wrap.innerHTML = `<div class="bg-amber-50 border border-amber-200 rounded-2xl p-8 text-center text-amber-900 text-sm">
+        <p class="font-medium mb-1">Sección pendiente</p>
+        <p>Esta vista todavía no tiene datos porque falta definir qué son "Orders" en tu flujo. Avisanos para configurarla.</p>
+      </div>`;
+    } else {
+      wrap.innerHTML = `<div class="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-400 text-sm">
+        Todavía no hay eventos en esta sección.
+      </div>`;
+    }
+    return;
+  }
+  wrap.innerHTML = items.map(eventCard).join('');
+}
+
+function updatePagination(total) {
+  currentTotal = total;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  document.getElementById('page-indicator').textContent = `Página ${currentPage + 1} de ${totalPages}`;
+  document.getElementById('pagination-info').textContent = `${total} eventos`;
+  document.getElementById('btn-prev').disabled = currentPage === 0;
+  document.getElementById('btn-next').disabled = (currentPage + 1) * PAGE_SIZE >= total;
+}
+
+async function loadEvents() {
+  const params = new URLSearchParams({
+    skip: String(currentPage * PAGE_SIZE),
+    limit: String(PAGE_SIZE),
+    section: currentSection,
+  });
+  try {
+    const r = await fetch('/audit-log?' + params);
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    renderEvents(d.items);
+    updatePagination(d.total);
+  } catch (err) {
+    document.getElementById('events').innerHTML = `<div class="bg-rose-50 border border-rose-200 rounded-2xl p-6 text-rose-800 text-sm">
+      No se pudieron cargar los eventos: ${err.message}
+    </div>`;
+  }
+}
+
+async function loadSections() {
+  try {
+    const r = await fetch('/api/sections');
+    const data = await r.json();
+    const nav = document.getElementById('sections-nav');
+    nav.innerHTML = Object.entries(data).map(([key, info]) => {
+      const meta = SECTION_META[key] || { icon: '•' };
+      const active = key === currentSection ? 'active' : '';
+      return `
+        <button onclick="selectSection('${key}')"
+          class="nav-item w-full text-left px-3 py-2 rounded-lg flex items-center justify-between gap-2 text-sm border-l-2 border-transparent hover:bg-slate-50 ${active}">
+          <span class="flex items-center gap-2 truncate">
+            <span class="text-base">${meta.icon}</span>
+            <span class="font-medium">${info.label}</span>
+          </span>
+          <span class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full shrink-0">${info.count}</span>
+        </button>`;
+    }).join('');
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function selectSection(key) {
+  currentSection = key;
+  currentPage = 0;
+  const meta = SECTION_META[key] || {};
+  document.getElementById('section-title').textContent = `${meta.icon || ''} ${(SECTION_META[key]||{}).label || key}`.trim();
+  document.getElementById('section-description').textContent = meta.desc || '';
+  loadSections();  // refresca el highlight
+  loadEvents();
+}
+
+function changePage(delta) {
+  const next = currentPage + delta;
+  if (next < 0 || next * PAGE_SIZE >= currentTotal) return;
+  currentPage = next;
+  loadEvents();
+  document.getElementById('events').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    document.getElementById('health-badge').className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-sm';
+    document.getElementById('health-badge').innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-emerald-700 font-medium">Activo</span>`;
+    const wi = document.getElementById('working-indicator');
+    const inProgress = d.metrics.audit_in_progress || {};
+    if (inProgress.prices || inProgress.duplicates) {
+      const what = [];
+      if (inProgress.prices) what.push('precios');
+      if (inProgress.duplicates) what.push('duplicados');
+      document.getElementById('working-text').textContent = `Verificando ${what.join(' + ')}…`;
+      wi.classList.remove('hidden'); wi.classList.add('flex');
+    } else {
+      wi.classList.add('hidden'); wi.classList.remove('flex');
+    }
+    document.getElementById('m-products').textContent = d.metrics.products_tracked.toLocaleString('es-AR');
+    document.getElementById('m-snapshots').textContent = d.metrics.snapshots_total.toLocaleString('es-AR');
+    document.getElementById('m-alerts').textContent = d.metrics.alerts_last_24h.toLocaleString('es-AR');
+    document.getElementById('m-duplicates').textContent = d.metrics.duplicates_last_7d.toLocaleString('es-AR');
+    document.getElementById('last-audit').textContent = d.last_audit ? fmtTime(d.last_audit) : 'nunca';
+  } catch (err) {
+    document.getElementById('health-badge').className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-rose-50 text-sm';
+    document.getElementById('health-badge').innerHTML = `<span class="w-2 h-2 rounded-full bg-rose-500"></span><span class="text-rose-700 font-medium">Sin conexión</span>`;
+  }
+}
+
+async function runAudit(target, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Disparando…';
+  const fb = document.getElementById('action-feedback');
+  try {
+    const r = await fetch(`/audit?target=${target}`, { method: 'POST' });
+    if (r.status === 409) {
+      const data = await r.json().catch(() => ({ detail: 'Ya hay una en curso.' }));
+      fb.className = 'mt-2 p-2 rounded text-xs bg-amber-50 border border-amber-200 text-amber-900 fade-in';
+      fb.textContent = '⏳ ' + data.detail;
+      fb.classList.remove('hidden');
+      return;
+    }
+    if (!r.ok) throw new Error(r.statusText);
+    fb.className = 'mt-2 p-2 rounded text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 fade-in';
+    fb.textContent = '✓ Auditoría disparada';
+    fb.classList.remove('hidden');
+    [3, 10, 30].forEach(s => setTimeout(() => { loadStatus(); loadSections(); loadEvents(); }, s * 1000));
+  } catch (err) {
+    fb.className = 'mt-2 p-2 rounded text-xs bg-rose-50 border border-rose-200 text-rose-800 fade-in';
+    fb.textContent = '✗ ' + err.message;
+    fb.classList.remove('hidden');
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 3000);
+  }
+}
+
+// Init
+selectSection('inbox_luis');
+loadStatus();
+setInterval(() => { loadStatus(); loadSections(); if (currentPage === 0) loadEvents(); }, 15000);
+</script>
+</body>
+</html>
