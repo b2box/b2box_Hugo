@@ -102,8 +102,20 @@
       </div>
     </section>
 
+    <!-- Vista de configuración (alterna con la lista de eventos) -->
+    <section id="settings-view" class="hidden space-y-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-slate-900">⚙️ Configuración</h2>
+        <p id="settings-saved-feedback" class="hidden text-xs text-emerald-700 font-medium">✓ Guardado</p>
+      </div>
+      <p class="text-sm text-slate-500">Estos valores se aplican en vivo (sin redeploy). Si cambiás algo y querés volver al default del .env, apretá "Restablecer".</p>
+      <div id="settings-list" class="space-y-3">
+        <div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-sm">Cargando configuración…</div>
+      </div>
+    </section>
+
     <!-- Lista de eventos de la sección actual -->
-    <section>
+    <section id="events-view">
       <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
         <h2 id="section-title" class="text-lg font-semibold text-slate-900">Cargando…</h2>
         <div class="flex items-center gap-3 text-xs text-slate-500">
@@ -145,7 +157,10 @@ const SECTION_META = {
   price_changes: { icon: '💱', desc: 'Cambios de precio detectados en la fuente del proveedor (1688).' },
   sent_to_paco:  { icon: '🚀', desc: 'Productos que Hugo verificó como nuevos y reenvió a Paco para enriquecimiento.' },
   all:           { icon: '🗂️', desc: 'Todos los eventos de auditoría en orden cronológico.' },
+  settings:      { icon: '⚙️', desc: 'Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.' },
 };
+
+const GROUP_LABELS = { dedup: 'Deduplicación', pricing: 'Precios', scheduler: 'Scheduler', general: 'General' };
 
 let currentSection = 'inbox_luis';
 let currentPage = 0;
@@ -284,10 +299,15 @@ async function loadSections() {
   try {
     const r = await fetch('/api/sections');
     const data = await r.json();
+    // Agregamos settings como ítem extra (no es un filtro de audit_log)
+    const allItems = { ...data, settings: { label: 'Configuración', count: null } };
     const nav = document.getElementById('sections-nav');
-    nav.innerHTML = Object.entries(data).map(([key, info]) => {
+    nav.innerHTML = Object.entries(allItems).map(([key, info]) => {
       const meta = SECTION_META[key] || { icon: '•' };
       const active = key === currentSection ? 'active' : '';
+      const badge = info.count != null
+        ? `<span class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full shrink-0">${info.count}</span>`
+        : '';
       return `
         <button onclick="selectSection('${key}')"
           class="nav-item w-full text-left px-3 py-2 rounded-lg flex items-center justify-between gap-2 text-sm border-l-2 border-transparent hover:bg-slate-50 ${active}">
@@ -295,7 +315,7 @@ async function loadSections() {
             <span class="text-base">${meta.icon}</span>
             <span class="font-medium">${info.label}</span>
           </span>
-          <span class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full shrink-0">${info.count}</span>
+          ${badge}
         </button>`;
     }).join('');
   } catch (err) {
@@ -307,10 +327,119 @@ function selectSection(key) {
   currentSection = key;
   currentPage = 0;
   const meta = SECTION_META[key] || {};
-  document.getElementById('section-title').textContent = `${meta.icon || ''} ${(SECTION_META[key]||{}).label || key}`.trim();
-  document.getElementById('section-description').textContent = meta.desc || '';
   loadSections();  // refresca el highlight
-  loadEvents();
+
+  const eventsView = document.getElementById('events-view');
+  const settingsView = document.getElementById('settings-view');
+
+  if (key === 'settings') {
+    eventsView.classList.add('hidden');
+    settingsView.classList.remove('hidden');
+    loadSettings();
+  } else {
+    settingsView.classList.add('hidden');
+    eventsView.classList.remove('hidden');
+    document.getElementById('section-title').textContent = `${meta.icon || ''} ${(SECTION_META[key]||{}).label || key}`.trim();
+    document.getElementById('section-description').textContent = meta.desc || '';
+    loadEvents();
+  }
+}
+
+// ─── Settings runtime ───────────────────────────────────────────
+
+async function loadSettings() {
+  const list = document.getElementById('settings-list');
+  list.innerHTML = '<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-sm">Cargando…</div>';
+  try {
+    const r = await fetch('/api/settings');
+    const items = await r.json();
+    // Agrupar por grupo
+    const grouped = {};
+    items.forEach(it => {
+      (grouped[it.group] = grouped[it.group] || []).push(it);
+    });
+    list.innerHTML = Object.entries(grouped).map(([group, settings]) => `
+      <div class="bg-white rounded-2xl border border-slate-200 p-5">
+        <h3 class="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-4">${GROUP_LABELS[group] || group}</h3>
+        <div class="space-y-5">
+          ${settings.map(s => settingCard(s)).join('')}
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="bg-rose-50 border border-rose-200 rounded-2xl p-6 text-rose-800 text-sm">Error: ${err.message}</div>`;
+  }
+}
+
+function settingCard(s) {
+  const isFloat = s.type === 'float';
+  const display = (v) => isFloat ? Number(v).toFixed(2) : Number(v).toString();
+  const modifiedBadge = s.modified
+    ? `<span class="ml-2 text-[10px] uppercase tracking-wide bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">modificado</span>`
+    : '';
+  return `
+    <div class="border-b border-slate-100 last:border-0 pb-5 last:pb-0">
+      <div class="flex items-center justify-between mb-1">
+        <label class="text-sm font-medium text-slate-900" for="set-${s.key}">
+          ${s.label} ${modifiedBadge}
+        </label>
+        <span class="text-sm font-mono text-slate-700" id="val-${s.key}">${display(s.value)}</span>
+      </div>
+      <p class="text-xs text-slate-500 mb-2">${s.description}</p>
+      <div class="flex items-center gap-3">
+        <input id="set-${s.key}" type="range"
+          min="${s.min}" max="${s.max}" step="${s.step}" value="${s.value}"
+          oninput="document.getElementById('val-${s.key}').textContent='${isFloat ? '' : ''}'+ (${isFloat} ? Number(this.value).toFixed(2) : this.value)"
+          class="flex-1 accent-brand-500" />
+        <button onclick="saveSetting('${s.key}', document.getElementById('set-${s.key}').value)"
+          class="text-xs bg-brand-500 hover:bg-brand-600 text-white font-medium px-3 py-1.5 rounded-md">
+          Guardar
+        </button>
+        ${s.modified ? `
+          <button onclick="resetSetting('${s.key}')"
+            class="text-xs text-slate-500 hover:text-slate-700 underline">
+            Restablecer
+          </button>` : ''}
+      </div>
+      <p class="text-[11px] text-slate-400 mt-1">Default del .env: ${display(s.default)}</p>
+    </div>
+  `;
+}
+
+async function saveSetting(key, value) {
+  try {
+    const r = await fetch(`/api/settings/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: Number(value) }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    flashSaved();
+    loadSettings();
+  } catch (err) {
+    alert('No se pudo guardar: ' + err.message);
+  }
+}
+
+async function resetSetting(key) {
+  if (!confirm('¿Restablecer al default del .env?')) return;
+  try {
+    const r = await fetch(`/api/settings/${key}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(r.statusText);
+    flashSaved();
+    loadSettings();
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+}
+
+function flashSaved() {
+  const fb = document.getElementById('settings-saved-feedback');
+  fb.classList.remove('hidden');
+  setTimeout(() => fb.classList.add('hidden'), 2000);
 }
 
 function changePage(delta) {

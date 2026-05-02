@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session, func, select
 
+from app import runtime
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine, get_session
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
@@ -385,6 +386,39 @@ async def list_audit_log(
         "limit": limit,
         "has_more": skip + limit < total,
     }
+
+
+# ─── Settings runtime (configurables desde el dashboard) ──────────
+
+
+class SettingUpdate(BaseModel):
+    value: float | int | str
+
+
+@router.get("/api/settings")
+async def list_settings() -> list[dict[str, Any]]:
+    """Devuelve todos los settings runtime con su valor actual + metadata."""
+    return runtime.get_all_with_meta()
+
+
+@router.put("/api/settings/{key}")
+async def update_setting(key: str, payload: SettingUpdate) -> dict[str, Any]:
+    """Actualiza un setting runtime. Persiste en DB y aplica en la próxima lectura."""
+    try:
+        new_value = runtime.set_value(key, payload.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"key": key, "value": new_value, "ok": True}
+
+
+@router.delete("/api/settings/{key}")
+async def reset_setting(key: str) -> dict[str, Any]:
+    """Borra el override y vuelve al default del .env."""
+    try:
+        new_value = runtime.reset_to_default(key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"key": key, "value": new_value, "ok": True, "reset": True}
 
 
 @router.get("/api/sections")

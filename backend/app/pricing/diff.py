@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.config import get_settings
+from app import runtime
 
 Action = Literal["first_observation", "ok", "alert", "alert_critical", "skip_currency"]
 
@@ -42,7 +42,8 @@ def compare_source_snapshots(
     previous_currency: str | None,
 ) -> PriceDecision:
     """Compara dos observaciones del precio fuente del MISMO producto."""
-    s = get_settings()
+    drift_threshold = runtime.get("price_drift_threshold")
+    drift_max_auto = runtime.get("price_drift_max_auto")
 
     if previous_price_cents is None:
         return PriceDecision(
@@ -80,17 +81,17 @@ def compare_source_snapshots(
     drift = (current_price_cents - previous_price_cents) / previous_price_cents
     abs_drift = abs(drift)
 
-    if abs_drift < s.price_drift_threshold:
+    if abs_drift < drift_threshold:
         return PriceDecision(
             drift_pct=drift,
             action="ok",
             previous_price_cents=previous_price_cents,
             current_price_cents=current_price_cents,
             currency=current_currency,
-            reason=f"Variación {drift:+.2%} < umbral {s.price_drift_threshold:.2%}",
+            reason=f"Variación {drift:+.2%} < umbral {drift_threshold:.2%}",
         )
 
-    if abs_drift > s.price_drift_max_auto:
+    if abs_drift > drift_max_auto:
         return PriceDecision(
             drift_pct=drift,
             action="alert_critical",
@@ -98,7 +99,7 @@ def compare_source_snapshots(
             current_price_cents=current_price_cents,
             currency=current_currency,
             reason=(
-                f"Variación BRUSCA {drift:+.2%} (>{s.price_drift_max_auto:.2%}) "
+                f"Variación BRUSCA {drift:+.2%} (>{drift_max_auto:.2%}) "
                 f"— revisar si la fuente sigue siendo el mismo producto"
             ),
         )

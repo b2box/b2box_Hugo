@@ -38,6 +38,18 @@ class PriceHistory(SQLModel, table=True):
     extra: str | None = Field(default=None, description="JSON con info adicional")
 
 
+class Setting(SQLModel, table=True):
+    """Settings runtime editables desde el dashboard.
+
+    Si una key no existe acá, se usa el default del .env (ver app/runtime.py).
+    """
+    __tablename__ = "settings"
+
+    key: str = Field(primary_key=True)
+    value: str  # se guarda siempre como string; el módulo runtime parsea según tipo
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
 

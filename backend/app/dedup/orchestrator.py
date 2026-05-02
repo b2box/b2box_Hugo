@@ -20,7 +20,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.config import get_settings
+from app import runtime
 from app.dedup.fuzzy_text import text_similarity
 from app.dedup.image_hash import image_similarity
 from app.dedup.url_match import url_similarity
@@ -59,11 +59,13 @@ def _from_vendure(p: VendureProduct) -> CandidateInput:
 
 async def compare(a: CandidateInput, b: CandidateInput) -> DedupVerdict:
     """Compara dos candidatos y emite un veredicto."""
-    s = get_settings()
+    url_th = runtime.get("dedup_url_threshold")
+    image_th = runtime.get("dedup_image_threshold")
+    text_th = runtime.get("dedup_text_threshold")
 
     # 1) URL — barato, exacto, cortocircuita
     url_score = url_similarity(a.source_url, b.source_url)
-    if url_score >= s.dedup_url_threshold:
+    if url_score >= url_th:
         return DedupVerdict(
             is_duplicate=True,
             confidence=url_score,
@@ -78,11 +80,11 @@ async def compare(a: CandidateInput, b: CandidateInput) -> DedupVerdict:
     )
 
     matched: list[Strategy] = []
-    if url_score >= s.dedup_url_threshold:
+    if url_score >= url_th:
         matched.append("url")
-    if image_score >= s.dedup_image_threshold:
+    if image_score >= image_th:
         matched.append("image")
-    if text_score >= s.dedup_text_threshold:
+    if text_score >= text_th:
         matched.append("text")
 
     confidence = max(url_score, image_score, text_score)
