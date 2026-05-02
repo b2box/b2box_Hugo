@@ -73,8 +73,12 @@ class VendureClient:
         self._pass = s.vendure_pass
         self._source_field = s.vendure_source_url_field
         # Bearer actual: arranca con el del .env, se reemplaza cuando se renueva
-        self._bearer: str = s.vendure_bearer
+        self._bearer: str = s.vendure_bearer or ""
         self._login_lock = asyncio.Lock()  # evita re-logins concurrentes
+        if not self._bearer:
+            log.info(
+                "VENDURE_BEARER vacío — Hugo se va a loguear con user/pass al primer call"
+            )
         self._build_client()
 
     def _build_client(self) -> None:
@@ -232,6 +236,10 @@ class VendureClient:
         max_attempts: int = 3,
     ) -> dict[str, Any]:
         """Ejecuta la query con retry exponencial + auto-renovación del bearer."""
+        # Si arrancamos sin bearer, hacemos login proactivo antes del primer call
+        if not self._bearer:
+            await self._login()
+
         last_exc: Exception | None = None
         relogged_in = False
         for attempt in range(1, max_attempts + 1):

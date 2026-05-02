@@ -18,12 +18,14 @@ class Settings(BaseSettings):
 
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")
-    vendure_bearer: str = Field(..., description="Bearer token persistente")
+    # Bearer opcional: si está vacío, Hugo se loguea con user/pass al primer call.
+    # El cliente también renueva automáticamente cuando el bearer expira.
+    vendure_bearer: str = Field(default="", description="Bearer (opcional, se obtiene con login)")
     vendure_channel_token: str | None = Field(
         default=None,
         description="Header vendure-token: define el canal (e.g. 'ar')",
     )
-    # Fallback re-login si el bearer expira (no implementado aún, pero reservado)
+    # Necesarios para el auto-login (renovación automática del bearer)
     vendure_user: str | None = None
     vendure_pass: str | None = None
     vendure_source_url_field: str = Field(
