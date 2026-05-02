@@ -37,13 +37,28 @@ router = APIRouter()
 _ACTION_LABELS: dict[str, dict[str, str]] = {
     "duplicate_disabled": {
         "icon": "duplicate",
-        "title": "Duplicado deshabilitado",
+        "title": "Duplicado deshabilitado en Vendure",
         "tone": "warning",
     },
     "duplicate_flagged": {
         "icon": "duplicate",
-        "title": "Posible duplicado marcado",
+        "title": "Ya existe en el catálogo (no se reenvió a Paco)",
         "tone": "warning",
+    },
+    "verify_passed_to_paco": {
+        "icon": "send",
+        "title": "Producto nuevo · enviado a Paco para enriquecer",
+        "tone": "info",
+    },
+    "paco_failed": {
+        "icon": "alert",
+        "title": "Producto nuevo · pero Paco no respondió",
+        "tone": "danger",
+    },
+    "verify_no_match": {
+        "icon": "info",
+        "title": "Producto nuevo · sin imagen para mandar a Paco",
+        "tone": "muted",
     },
     "price_updated": {
         "icon": "price",
@@ -65,14 +80,6 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Error",
         "tone": "danger",
     },
-}
-
-
-_ACTION_LABELS["verify_passed_to_paco"] = {
-    "icon": "send", "title": "Enviado a Paco", "tone": "info",
-}
-_ACTION_LABELS["verify_no_match"] = {
-    "icon": "info", "title": "Sin match (sin imagen)", "tone": "muted",
 }
 
 
@@ -141,6 +148,11 @@ SECTIONS: dict[str, dict[str, Any]] = {
         "label": "Enviados a Paco",
         "source": None,
         "actions": ["verify_passed_to_paco"],
+    },
+    "paco_errors": {
+        "label": "Errores con Paco",
+        "source": None,
+        "actions": ["paco_failed"],
     },
     "all": {
         "label": "Todo",
@@ -246,21 +258,31 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     # Registrar la verificación en AuditLog
     try:
         with Session(engine) as session:
+            short_name = payload.name[:60] if payload.name else "(sin nombre)"
             if verdict.is_duplicate:
                 action = "duplicate_flagged"
                 detail = (
-                    f"Verify para '{payload.name[:60]}': duplicado de "
-                    f"{verdict.candidate_id} por {','.join(verdict.matched_by)} "
-                    f"(score {verdict.confidence:.3f})"
+                    f"'{short_name}' ya existe en Vendure como producto "
+                    f"#{verdict.candidate_id}. Match por {','.join(verdict.matched_by)} "
+                    f"(confianza {verdict.confidence:.0%})"
+                )
+            elif response.paco_search_id:
+                action = "verify_passed_to_paco"
+                detail = (
+                    f"'{short_name}' es nuevo. Hugo lo envió a Paco "
+                    f"(search_id={response.paco_search_id})"
+                )
+            elif response.paco_error:
+                action = "paco_failed"
+                detail = (
+                    f"'{short_name}' es nuevo, pero Paco no respondió. "
+                    f"Error: {response.paco_error[:120]}"
                 )
             else:
-                action = "verify_passed_to_paco" if response.paco_search_id else "verify_no_match"
-                if response.paco_search_id:
-                    detail = f"Verify para '{payload.name[:60]}': no duplicado, enviado a Paco (search_id={response.paco_search_id})"
-                elif response.paco_error:
-                    detail = f"Verify para '{payload.name[:60]}': no duplicado, Paco falló: {response.paco_error[:120]}"
-                else:
-                    detail = f"Verify para '{payload.name[:60]}': no duplicado, sin image_url para Paco"
+                action = "verify_no_match"
+                detail = (
+                    f"'{short_name}' es nuevo, pero no llegó imagen para mandarle a Paco"
+                )
             # Filtrar imagenes vacías que pueda mandar Luis (image_urls=[""] etc.)
             valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
             session.add(AuditLog(
