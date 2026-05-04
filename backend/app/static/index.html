@@ -198,11 +198,22 @@ function fmtPrice(obj) {
 
 function thumb(imageUrl, alt) {
   if (imageUrl && imageUrl.trim()) {
-    return `<img src="${imageUrl}" alt="${alt||''}" loading="lazy"
+    return `<img src="${esc(imageUrl)}" alt="${esc(alt||'')}" loading="lazy"
       class="w-16 h-16 rounded-lg object-cover bg-slate-100 shrink-0"
       onerror="this.outerHTML='<div class=\\'w-16 h-16 rounded-lg thumb-fallback shrink-0\\'></div>'" />`;
   }
   return `<div class="w-16 h-16 rounded-lg thumb-fallback shrink-0"></div>`;
+}
+
+function esc(s) {
+  // Escapa HTML para evitar que strings con < > & " ' rompan el render.
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function shortUrl(url) {
@@ -233,8 +244,8 @@ function eventCard(e) {
     relatedBlock = `
       <div class="text-xs text-slate-500 mt-2 flex items-center gap-1.5">
         <span>relacionado:</span>
-        ${r.code ? `<span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">${r.code}</span>` : ''}
-        <span class="text-slate-700">${r.name || `#${r.id}`}</span>
+        ${r.code ? `<span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">${esc(r.code)}</span>` : ''}
+        <span class="text-slate-700">${esc(r.name || `#${r.id}`)}</span>
       </div>`;
   }
   let sourceUrlBlock = '';
@@ -242,10 +253,10 @@ function eventCard(e) {
     sourceUrlBlock = `
       <div class="text-xs mt-1 flex items-center gap-1.5 text-slate-500">
         <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/></svg>
-        <a href="${p.source_url}" target="_blank" rel="noopener" class="truncate text-blue-600 hover:underline" title="${p.source_url}">${shortUrl(p.source_url)}</a>
+        <a href="${esc(p.source_url)}" target="_blank" rel="noopener" class="truncate text-blue-600 hover:underline" title="${esc(p.source_url)}">${esc(shortUrl(p.source_url))}</a>
       </div>`;
   }
-  const sourceBadge = e.source ? `<span class="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${e.source}</span>` : '';
+  const sourceBadge = e.source ? `<span class="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${esc(e.source)}</span>` : '';
   return `
     <div class="bg-white rounded-2xl border border-slate-200 ring-2 ${t.ring} p-4 fade-in flex gap-4">
       ${thumb(p.image_url, p.name)}
@@ -254,18 +265,18 @@ function eventCard(e) {
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="inline-block w-2 h-2 rounded-full ${t.dot}"></span>
-              <span class="font-semibold text-slate-900">${e.title}</span>
-              ${p.code ? `<span class="text-xs font-mono ${t.badge} px-2 py-0.5 rounded">BX ${p.code}</span>` : ''}
+              <span class="font-semibold text-slate-900">${esc(e.title)}</span>
+              ${p.code ? `<span class="text-xs font-mono ${t.badge} px-2 py-0.5 rounded">BX ${esc(p.code)}</span>` : ''}
               ${sourceBadge}
             </div>
-            <p class="text-sm text-slate-700 mt-1 truncate" title="${p.name||''}">${p.name || `Producto #${p.id}`}</p>
-            <p class="text-xs text-slate-400 mt-0.5">ID: <span class="font-mono">${p.id}</span></p>
+            <p class="text-sm text-slate-700 mt-1 truncate" title="${esc(p.name||'')}">${esc(p.name || `Producto #${p.id}`)}</p>
+            <p class="text-xs text-slate-400 mt-0.5">ID: <span class="font-mono">${esc(p.id)}</span></p>
             ${sourceUrlBlock}
           </div>
           <p class="text-xs text-slate-400 shrink-0 whitespace-nowrap">${fmtTime(e.created_at)}</p>
         </div>
         ${priceBlock}
-        ${e.detail ? `<p class="text-xs text-slate-500 mt-2 leading-relaxed">${e.detail}</p>` : ''}
+        ${e.detail ? `<p class="text-xs text-slate-500 mt-2 leading-relaxed">${esc(e.detail)}</p>` : ''}
         ${relatedBlock}
       </div>
     </div>`;
