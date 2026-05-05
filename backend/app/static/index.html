@@ -258,18 +258,33 @@ function eventCard(e) {
   }
   const sourceBadge = e.source ? `<span class="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${esc(e.source)}</span>` : '';
 
-  // Botones de acción solo para casos donde podemos reintentar a Paco o descartar
+  // Botones de acción según el tipo de evento
   const canRetry = (e.action === 'paco_failed' || e.action === 'verify_no_match') && p.image_url;
-  const canDismiss = e.action !== 'verify_passed_to_paco';  // los exitosos no necesitan dismiss
+  const canConfirmDuplicate = e.action === 'duplicate_flagged' && p.id && p.id !== '(nuevo)';
+  const canDismiss = e.action !== 'verify_passed_to_paco';
+  const canViewHistory = p.id && p.id !== '(nuevo)';
   let actionsBlock = '';
-  if (canRetry || canDismiss) {
+  if (canRetry || canConfirmDuplicate || canDismiss || canViewHistory) {
     actionsBlock = `
-      <div class="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100">
+      <div class="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100 flex-wrap">
+        ${canConfirmDuplicate ? `
+          <button onclick="confirmDuplicate(${e.id}, this)"
+            class="text-xs bg-rose-500 hover:bg-rose-600 text-white font-medium px-3 py-1.5 rounded-md flex items-center gap-1"
+            title="Deshabilita el producto en Vendure (se puede revertir desde history)">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            Confirmar duplicado
+          </button>` : ''}
         ${canRetry ? `
           <button onclick="retryPaco(${e.id}, this)"
             class="text-xs bg-brand-500 hover:bg-brand-600 text-white font-medium px-3 py-1.5 rounded-md flex items-center gap-1">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
             Reintentar Paco
+          </button>` : ''}
+        ${canViewHistory ? `
+          <button onclick="viewHistory('${esc(p.id)}')"
+            class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium px-3 py-1.5 rounded-md flex items-center gap-1">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            Historial
           </button>` : ''}
         ${canDismiss ? `
           <button onclick="dismissEvent(${e.id}, this)"
@@ -329,6 +344,94 @@ async function retryPaco(eventId, btn) {
     btn.disabled = false;
     btn.innerHTML = original;
     alert('Reintento falló: ' + err.message);
+  }
+}
+
+async function confirmDuplicate(eventId, btn) {
+  if (!confirm('¿Confirmar este duplicado y deshabilitarlo en Vendure? Se puede revertir desde el historial.')) return;
+  btn.disabled = true;
+  const original = btn.innerHTML;
+  btn.textContent = 'Deshabilitando…';
+  try {
+    const r = await fetch(`/api/audit-log/${eventId}/confirm-duplicate`, { method: 'POST' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    const data = await r.json();
+    const card = document.querySelector(`[data-event-id="${eventId}"]`);
+    if (card) {
+      card.style.transition = 'opacity 0.3s';
+      card.style.opacity = '0';
+      setTimeout(() => { card.remove(); loadSections(); }, 300);
+    }
+    if (data.action === 'no-op') {
+      alert('El producto ya estaba deshabilitado en Vendure. Lo descartamos del listado.');
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = original;
+    alert('Error: ' + err.message);
+  }
+}
+
+async function viewHistory(productId) {
+  // Modal simple: mostramos un overlay con la timeline
+  let overlay = document.getElementById('history-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'history-overlay';
+    overlay.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl max-w-3xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+      <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+        <h3 class="font-semibold text-slate-900">Historial del producto <span class="font-mono text-sm">${esc(productId)}</span></h3>
+        <button onclick="document.getElementById('history-overlay').remove()" class="text-slate-400 hover:text-slate-700">✕</button>
+      </div>
+      <div id="history-body" class="flex-1 overflow-y-auto p-6 text-sm text-slate-500">Cargando…</div>
+    </div>`;
+
+  try {
+    const r = await fetch(`/api/products/${encodeURIComponent(productId)}/history`);
+    if (!r.ok) throw new Error(r.statusText);
+    const d = await r.json();
+    const stateBadge = d.current_state_in_vendure.enabled === true
+      ? '<span class="text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">Enabled actualmente</span>'
+      : d.current_state_in_vendure.enabled === false
+        ? '<span class="text-rose-700 bg-rose-100 px-2 py-0.5 rounded">Disabled actualmente</span>'
+        : '<span class="text-slate-600 bg-slate-100 px-2 py-0.5 rounded">No existe en Vendure</span>';
+    const timeline = d.events.length === 0
+      ? '<p class="text-center text-slate-400 py-8">Sin eventos registrados.</p>'
+      : d.events.map(ev => {
+          const t = TONES[ev.tone] || TONES.muted;
+          return `
+            <div class="flex gap-3 pb-4 border-b border-slate-100 last:border-0 mb-4">
+              <div class="w-2 h-2 rounded-full ${t.dot} mt-2 shrink-0"></div>
+              <div class="flex-1">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-medium text-slate-900">${esc(ev.title)}</span>
+                  <span class="text-xs text-slate-400">${fmtTime(ev.created_at)}</span>
+                </div>
+                <p class="text-xs text-slate-600 mt-1">${esc(ev.detail || '')}</p>
+                <div class="flex gap-2 mt-1">
+                  ${ev.source ? `<span class="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${esc(ev.source)}</span>` : ''}
+                  ${ev.dismissed ? `<span class="text-[10px] uppercase tracking-wide bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">descartado</span>` : ''}
+                </div>
+              </div>
+            </div>`;
+        }).join('');
+    document.getElementById('history-body').innerHTML = `
+      <div class="mb-4 p-3 rounded-lg bg-slate-50 flex items-center justify-between">
+        <span class="text-slate-700">Estado actual:</span> ${stateBadge}
+      </div>
+      <p class="text-xs text-slate-400 mb-3">${d.total_events} eventos registrados, en orden cronológico.</p>
+      ${timeline}
+    `;
+  } catch (err) {
+    document.getElementById('history-body').innerHTML = `<p class="text-rose-700">Error: ${esc(err.message)}</p>`;
   }
 }
 

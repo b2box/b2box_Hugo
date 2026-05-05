@@ -218,6 +218,23 @@ class VendureClient:
 
     # ── Escritura ──────────────────────────────────────────────
 
+    async def get_enabled_status(self, product_id: str) -> bool | None:
+        """Devuelve True/False según el flag `enabled` actual del producto, o None si no existe."""
+        query = gql(
+            """
+            query GetEnabled($id: ID!) {
+              product(id: $id) { id enabled }
+            }
+            """
+        )
+        data = await self._execute_with_retry(
+            query, {"id": product_id}, what=f"get_enabled_status({product_id})"
+        )
+        prod = data.get("product")
+        if not prod:
+            return None
+        return bool(prod.get("enabled"))
+
     async def disable_product(self, product_id: str) -> None:
         await self._set_enabled(product_id, False)
 

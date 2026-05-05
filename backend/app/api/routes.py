@@ -609,48 +609,206 @@ async def duplicates_stats(
 @router.post("/api/restore-duplicates")
 async def restore_duplicates(
     confirm: bool = False,
+    safe: bool = True,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Re-habilita en Vendure todos los productos que Hugo deshabilitó (action='duplicate_disabled').
+    """Re-habilita productos que Hugo deshabilitó (action='duplicate_disabled').
 
-    Pasale ?confirm=true para ejecutar de verdad. Sin confirm, solo te dice cuántos restauraría.
+    Params:
+      confirm — sin esto solo hace dry-run, no toca Vendure
+      safe    — (default True) verifica antes que el producto esté ACTUALMENTE disabled.
+                Si está enabled (porque vos ya lo activaste, o nunca lo deshabilitamos), lo deja.
+                Si tiene before.enabled=False registrado (o sea Hugo NUNCA lo deshabilitó porque
+                ya estaba off), lo respeta y NO lo toca.
     """
     stmt = select(AuditLog).where(AuditLog.action == "duplicate_disabled")
     rows = list(session.exec(stmt))
     total = len(rows)
-    unique_ids = sorted({r.product_id for r in rows if r.product_id and r.product_id != "(nuevo)"})
+
+    # Construir mapa product_id → before_enabled (si está registrado)
+    before_state: dict[str, bool | None] = {}
+    for r in rows:
+        if not r.product_id or r.product_id == "(nuevo)":
+            continue
+        before_state.setdefault(r.product_id, None)
+        if r.before:
+            try:
+                data = json.loads(r.before)
+                if "enabled" in data:
+                    before_state[r.product_id] = bool(data["enabled"])
+            except (ValueError, TypeError):
+                pass
+
+    unique_ids = sorted(before_state.keys())
 
     if not confirm:
+        # Categorizar para preview
+        explicit_was_enabled = [pid for pid, st in before_state.items() if st is True]
+        explicit_was_disabled = [pid for pid, st in before_state.items() if st is False]
+        unknown_state = [pid for pid, st in before_state.items() if st is None]
         return {
-            "would_restore": len(unique_ids),
+            "would_restore_max": len(unique_ids),
+            "explicit_was_enabled": len(explicit_was_enabled),
+            "explicit_was_disabled_skip": len(explicit_was_disabled),
+            "unknown_state": len(unknown_state),
             "total_disable_events": total,
+            "safe_mode": safe,
             "preview_ids": unique_ids[:20],
-            "hint": "Llamá de nuevo con ?confirm=true para ejecutar",
+            "hint": (
+                "Pasame ?confirm=true&safe=true para que: "
+                "(1) ignore los que YO sé que vos ya tenías disabled, "
+                "(2) verifique en Vendure que el producto esté actualmente disabled antes de tocarlo. "
+                "Pasame ?confirm=true&safe=false para forzar todos (riesgo: reactivar productos que vos querías off)."
+            ),
         }
 
     client = VendureClient()
     restored: list[str] = []
+    skipped_was_disabled: list[str] = []
+    skipped_already_enabled: list[str] = []
     failed: list[dict[str, str]] = []
+
     for pid in unique_ids:
+        # 1) Si tenemos registro explícito de que estaba disabled, lo respetamos
+        if before_state[pid] is False:
+            skipped_was_disabled.append(pid)
+            continue
+
         try:
+            # 2) Modo seguro: verificar el estado actual antes de tocar
+            if safe:
+                current = await client.get_enabled_status(pid)
+                if current is True:
+                    # Ya está enabled, no hace falta hacer nada
+                    skipped_already_enabled.append(pid)
+                    continue
+                if current is None:
+                    failed.append({"product_id": pid, "error": "Producto no existe en Vendure"})
+                    continue
             await client.enable_product(pid)
             restored.append(pid)
         except Exception as exc:  # noqa: BLE001
             failed.append({"product_id": pid, "error": f"{type(exc).__name__}: {exc}"[:200]})
 
-    # Loguear que se hizo restauración masiva
     session.add(AuditLog(
         action="duplicates_restored_bulk",
         source="manual",
         product_id="(bulk)",
-        detail=f"Restauración masiva: {len(restored)} productos re-habilitados, {len(failed)} fallaron.",
+        detail=(
+            f"Restauración masiva (safe={safe}): "
+            f"{len(restored)} restaurados, "
+            f"{len(skipped_was_disabled)} respetados (estaban disabled antes), "
+            f"{len(skipped_already_enabled)} ya estaban enabled, "
+            f"{len(failed)} fallaron."
+        ),
     ))
     session.commit()
 
     return {
         "restored": len(restored),
+        "skipped_was_disabled": len(skipped_was_disabled),
+        "skipped_already_enabled": len(skipped_already_enabled),
         "failed": len(failed),
         "failed_details": failed[:10],
+    }
+
+
+@router.post("/api/audit-log/{event_id}/confirm-duplicate")
+async def confirm_duplicate(
+    event_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Confirma un duplicado flagged: deshabilita el producto en Vendure.
+
+    Antes de tocar, lee el `enabled` actual y lo guarda en `before` para poder
+    restaurarlo después si te equivocás.
+    """
+    entry = session.get(AuditLog, event_id)
+    if not entry:
+        raise HTTPException(404, "Evento no encontrado")
+    if entry.action != "duplicate_flagged":
+        raise HTTPException(400, "Solo se puede confirmar eventos de tipo duplicate_flagged")
+    if not entry.product_id or entry.product_id == "(nuevo)":
+        raise HTTPException(400, "El evento no tiene product_id válido")
+
+    client = VendureClient()
+    try:
+        previous_enabled = await client.get_enabled_status(entry.product_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"No pude leer estado actual de Vendure: {exc}")
+
+    if previous_enabled is None:
+        raise HTTPException(404, "Producto no existe en Vendure")
+    if previous_enabled is False:
+        # Ya estaba disabled, no hacemos nada (pero descartamos el flag)
+        entry.dismissed = True
+        entry.dismissed_at = datetime.utcnow()
+        session.add(entry)
+        session.commit()
+        return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
+
+    try:
+        await client.disable_product(entry.product_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"No pude deshabilitar en Vendure: {exc}")
+
+    # Crear nuevo evento de tipo duplicate_disabled con tracking del estado previo
+    session.add(AuditLog(
+        action="duplicate_disabled",
+        source="manual",
+        product_id=entry.product_id,
+        related_product_id=entry.related_product_id,
+        confidence=entry.confidence,
+        detail=(
+            f"Confirmado manualmente como duplicado de #{entry.related_product_id}. "
+            f"Deshabilitado en Vendure."
+        ),
+        before=json.dumps({"enabled": True}),
+        after=json.dumps({"enabled": False}),
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+        related_product_name=entry.related_product_name,
+        related_product_code=entry.related_product_code,
+    ))
+    # El evento original se descarta (ya se actuó sobre él)
+    entry.dismissed = True
+    entry.dismissed_at = datetime.utcnow()
+    session.add(entry)
+    session.commit()
+
+    return {"ok": True, "action": "disabled", "product_id": entry.product_id}
+
+
+@router.get("/api/products/{product_id}/history")
+async def product_history(
+    product_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Timeline completo del producto: todos los eventos de Hugo en orden cronológico."""
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.product_id == product_id)
+        .order_by(AuditLog.created_at.asc())
+    )
+    events = [_humanize(e) for e in session.exec(stmt)]
+    # Estado actual real en Vendure
+    try:
+        client = VendureClient()
+        current_enabled = await client.get_enabled_status(product_id)
+        current = {
+            "exists_in_vendure": current_enabled is not None,
+            "enabled": current_enabled,
+        }
+    except Exception as exc:  # noqa: BLE001
+        current = {"exists_in_vendure": None, "enabled": None, "error": str(exc)[:200]}
+
+    return {
+        "product_id": product_id,
+        "current_state_in_vendure": current,
+        "total_events": len(events),
+        "events": events,
     }
 
 
