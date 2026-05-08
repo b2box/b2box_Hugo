@@ -85,6 +85,11 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Producto con problemas (revisar/eliminar)",
         "tone": "warning",
     },
+    "pa_variant_flagged": {
+        "icon": "alert",
+        "title": "Variante con nombre 'PA…' detectada",
+        "tone": "warning",
+    },
 }
 
 
@@ -164,6 +169,11 @@ SECTIONS: dict[str, dict[str, Any]] = {
         "label": "Problemas de calidad",
         "source": None,
         "actions": ["quality_issue_found"],
+    },
+    "pa_variants": {
+        "label": "Variantes PA",
+        "source": None,
+        "actions": ["pa_variant_flagged"],
     },
     "all": {
         "label": "Todo",
@@ -325,6 +335,8 @@ async def audit_now(
         audit_catalog_quality,
         audit_dupes_lock,
         audit_duplicates,
+        audit_pa_variants,
+        audit_pa_variants_lock,
         audit_prices_lock,
         audit_quality_lock,
         audit_source_prices,
@@ -334,6 +346,7 @@ async def audit_now(
     wants_prices = target in ("prices", "all")
     wants_dupes = target in ("duplicates", "all")
     wants_quality = target in ("quality", "all")
+    wants_pa = target in ("pa_variants", "all")
 
     if wants_prices and audit_prices_lock.locked():
         raise HTTPException(409, "Ya hay una auditoría de precios en curso.")
@@ -341,6 +354,8 @@ async def audit_now(
         raise HTTPException(409, "Ya hay una auditoría de duplicados en curso.")
     if wants_quality and audit_quality_lock.locked():
         raise HTTPException(409, "Ya hay una auditoría de calidad en curso.")
+    if wants_pa and audit_pa_variants_lock.locked():
+        raise HTTPException(409, "Ya hay una auditoría de variantes PA en curso.")
 
     if wants_dupes:
         asyncio.create_task(audit_duplicates())
@@ -348,6 +363,8 @@ async def audit_now(
         asyncio.create_task(audit_source_prices())
     if wants_quality:
         asyncio.create_task(audit_catalog_quality())
+    if wants_pa:
+        asyncio.create_task(audit_pa_variants())
     return {"status": "scheduled", "target": target}
 
 

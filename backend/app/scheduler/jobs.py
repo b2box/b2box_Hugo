@@ -33,7 +33,7 @@ from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.notifier.dispatcher import notify, notify_digest
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
-from app.vendure.client import VendureClient, VendureProduct
+from app.vendure.client import VendureClient, VendureProduct, VendureVariant
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ scheduler = AsyncIOScheduler()
 audit_prices_lock = asyncio.Lock()
 audit_dupes_lock = asyncio.Lock()
 audit_quality_lock = asyncio.Lock()
+audit_pa_variants_lock = asyncio.Lock()
 
 # Cuántos productos consultar a OTAPI a la vez (1688 / RapidAPI tolera bien esto)
 PARALLEL_OTAPI = 10
@@ -347,7 +348,89 @@ async def audit_catalog_quality() -> None:
         )
 
 
-# ─── Job 4: digest diario ─────────────────────────────────────────
+# ─── Job 4: variantes con nombre "PA…" ───────────────────────────
+
+
+async def _iter_product_pages_with_variants(
+    client: VendureClient, page_size: int = 25,
+) -> AsyncIterator[list[VendureProduct]]:
+    """Igual que _iter_product_pages pero trae variantes con nombre/SKU."""
+    skip = 0
+    while True:
+        page = await client.list_products_with_variants(skip=skip, take=page_size)
+        if not page:
+            return
+        yield page
+        if len(page) < page_size:
+            return
+        skip += page_size
+
+
+async def audit_pa_variants() -> None:
+    """Detecta productos con variantes cuyo nombre empieza por 'PA'.
+
+    Crea un AuditLog con action='pa_variant_flagged' por cada producto
+    que tenga al menos una variante con nombre que empiece por 'PA'.
+    """
+    if audit_pa_variants_lock.locked():
+        log.warning("audit_pa_variants ya está corriendo, ignoro")
+        return
+    async with audit_pa_variants_lock:
+        log.info("Iniciando audit_pa_variants")
+        client = VendureClient()
+        flagged = 0
+        total_products = 0
+
+        with Session(engine) as session:
+            async for page in _iter_product_pages_with_variants(client):
+                for prod in page:
+                    total_products += 1
+                    if not prod.enabled or not prod.variants:
+                        continue
+                    pa_variants = [
+                        v for v in prod.variants
+                        if v.name.strip().upper().startswith("PA")
+                    ]
+                    if not pa_variants:
+                        continue
+                    variant_names = ", ".join(v.name for v in pa_variants[:5])
+                    extra = f" (y {len(pa_variants) - 5} más)" if len(pa_variants) > 5 else ""
+                    session.add(AuditLog(
+                        action="pa_variant_flagged",
+                        source="audit",
+                        product_id=prod.id,
+                        detail=(
+                            f"Producto con {len(pa_variants)} variante(s) que empiezan por 'PA': "
+                            f"{variant_names}{extra}. Revisalo manualmente."
+                        )[:500],
+                        after=json.dumps({
+                            "pa_variants": [
+                                {"id": v.id, "name": v.name, "sku": v.sku}
+                                for v in pa_variants
+                            ],
+                        }),
+                        product_name=prod.name,
+                        product_code=prod.product_code,
+                        product_image_url=prod.featured_image_url,
+                        product_source_url=prod.source_url,
+                    ))
+                    session.commit()
+                    flagged += 1
+
+        if flagged:
+            await notify(
+                f"{flagged} productos con variantes 'PA…'",
+                f"Hugo revisó {total_products} productos y encontró {flagged} con variantes "
+                "cuyo nombre empieza por 'PA'. Revisalos en el dashboard → tab 'Variantes PA'.",
+            )
+
+        log.info(
+            "audit_pa_variants terminado: %d productos revisados, %d flagged",
+            total_products, flagged,
+        )
+
+
+# ─── Job 5: digest diario ─────────────────────────────────────────
 
 
 async def daily_digest() -> None:
@@ -388,6 +471,12 @@ def register_jobs() -> None:
         audit_catalog_quality,
         IntervalTrigger(hours=s.audit_interval_hours),
         id="audit_catalog_quality",
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    scheduler.add_job(
+        audit_pa_variants,
+        IntervalTrigger(hours=s.audit_interval_hours),
+        id="audit_pa_variants",
         replace_existing=True, coalesce=True, max_instances=1,
     )
     scheduler.add_job(

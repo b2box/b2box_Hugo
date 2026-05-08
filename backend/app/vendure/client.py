@@ -32,6 +32,15 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class VendureVariant:
+    """Vista mínima de una variante Vendure."""
+
+    id: str
+    name: str
+    sku: str
+
+
+@dataclass(slots=True)
 class VendureProduct:
     """Vista mínima de un producto Vendure que Hugo necesita."""
 
@@ -46,6 +55,7 @@ class VendureProduct:
     featured_image_url: str | None  # primera imagen (preview/source)
     first_variant_price_cents: int | None  # precio de la 1ra variante (centavos)
     variant_count: int  # cuántas variantes tiene
+    variants: list[VendureVariant] | None = None  # solo se llena con list_products_with_variants
 
 
 # ─── Cliente ───────────────────────────────────────────────────────
@@ -194,6 +204,54 @@ class VendureClient:
             query, {"skip": skip, "take": take}, what=f"list_products(skip={skip})"
         )
         return [self._map_product(p) for p in (data.get("products", {}).get("items") or [])]
+
+    async def list_products_with_variants(
+        self,
+        skip: int = 0,
+        take: int = DEFAULT_PAGE_SIZE,
+    ) -> list[VendureProduct]:
+        """Como list_products pero trae TODAS las variantes con nombre y SKU."""
+        query = gql(
+            f"""
+            query ProductsWithVariants($skip: Int!, $take: Int!) {{
+              products(options: {{ skip: $skip, take: $take }}) {{
+                items {{
+                  id
+                  name
+                  slug
+                  description
+                  enabled
+                  customFields {{ {self._source_field} b2boxProductCode }}
+                  featuredAsset {{ source preview }}
+                  variantList(options: {{ take: 100 }}) {{
+                    items {{ id name sku priceWithTax }}
+                    totalItems
+                  }}
+                }}
+                totalItems
+              }}
+            }}
+            """
+        )
+        data = await self._execute_with_retry(
+            query, {"skip": skip, "take": take}, what=f"list_products_with_variants(skip={skip})"
+        )
+        products = []
+        for raw in data.get("products", {}).get("items") or []:
+            prod = self._map_product(raw)
+            # Rellenar variantes
+            variant_list = raw.get("variantList") or {}
+            variant_items = variant_list.get("items") or []
+            prod.variants = [
+                VendureVariant(
+                    id=str(v["id"]),
+                    name=v.get("name", ""),
+                    sku=v.get("sku", ""),
+                )
+                for v in variant_items
+            ]
+            products.append(prod)
+        return products
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
         query = gql(
