@@ -170,6 +170,18 @@ SECTIONS: dict[str, dict[str, Any]] = {
         "source": None,
         "actions": ["quality_issue_found"],
     },
+    "quality_no_image": {
+        "label": "Sin imagen",
+        "source": None,
+        "actions": ["quality_issue_found"],
+        "detail_contains": "sin imagen",
+    },
+    "quality_zero_price": {
+        "label": "Precio en 0",
+        "source": None,
+        "actions": ["quality_issue_found"],
+        "detail_contains": "precio = 0",
+    },
     "pa_variants": {
         "label": "Variantes PA",
         "source": None,
@@ -192,6 +204,8 @@ def _apply_section_filter(stmt, section_key: str | None):
         stmt = stmt.where(AuditLog.source == s["source"])
     if s["actions"]:
         stmt = stmt.where(AuditLog.action.in_(s["actions"]))  # type: ignore[attr-defined]
+    if s.get("detail_contains"):
+        stmt = stmt.where(AuditLog.detail.ilike(f"%{s['detail_contains']}%"))  # type: ignore[union-attr]
     return stmt
 
 
