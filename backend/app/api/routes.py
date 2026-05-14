@@ -90,6 +90,16 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Variante con nombre 'PA…' detectada",
         "tone": "warning",
     },
+    "bx_no_image_flagged": {
+        "icon": "alert",
+        "title": "Nombre 'BX…' sin imagen (confirmar para deshabilitar)",
+        "tone": "danger",
+    },
+    "bx_no_image_disabled": {
+        "icon": "duplicate",
+        "title": "Producto 'BX…' sin imagen deshabilitado en Vendure",
+        "tone": "warning",
+    },
 }
 
 
@@ -186,6 +196,11 @@ SECTIONS: dict[str, dict[str, Any]] = {
         "label": "Variantes PA",
         "source": None,
         "actions": ["pa_variant_flagged"],
+    },
+    "bx_no_image": {
+        "label": "BX sin imagen",
+        "source": None,
+        "actions": ["bx_no_image_flagged", "bx_no_image_disabled"],
     },
     "all": {
         "label": "Todo",
@@ -346,6 +361,8 @@ async def audit_now(
     target: "all" (default) | "duplicates" | "prices" | "quality"
     """
     from app.scheduler.jobs import (
+        audit_bx_no_image,
+        audit_bx_no_image_lock,
         audit_catalog_quality,
         audit_dupes_lock,
         audit_duplicates,
@@ -361,6 +378,7 @@ async def audit_now(
     wants_dupes = target in ("duplicates", "all")
     wants_quality = target in ("quality", "all")
     wants_pa = target in ("pa_variants", "all")
+    wants_bx = target in ("bx_no_image", "all")
 
     if wants_prices and audit_prices_lock.locked():
         raise HTTPException(409, "Ya hay una auditoría de precios en curso.")
@@ -370,6 +388,8 @@ async def audit_now(
         raise HTTPException(409, "Ya hay una auditoría de calidad en curso.")
     if wants_pa and audit_pa_variants_lock.locked():
         raise HTTPException(409, "Ya hay una auditoría de variantes PA en curso.")
+    if wants_bx and audit_bx_no_image_lock.locked():
+        raise HTTPException(409, "Ya hay una auditoría de BX sin imagen en curso.")
 
     if wants_dupes:
         asyncio.create_task(audit_duplicates())
@@ -379,6 +399,8 @@ async def audit_now(
         asyncio.create_task(audit_catalog_quality())
     if wants_pa:
         asyncio.create_task(audit_pa_variants())
+    if wants_bx:
+        asyncio.create_task(audit_bx_no_image())
     return {"status": "scheduled", "target": target}
 
 
@@ -804,6 +826,66 @@ async def confirm_duplicate(
         related_product_code=entry.related_product_code,
     ))
     # El evento original se descarta (ya se actuó sobre él)
+    entry.dismissed = True
+    entry.dismissed_at = datetime.utcnow()
+    session.add(entry)
+    session.commit()
+
+    return {"ok": True, "action": "disabled", "product_id": entry.product_id}
+
+
+@router.post("/api/audit-log/{event_id}/confirm-disable-bx")
+async def confirm_disable_bx(
+    event_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Confirma un bx_no_image_flagged: deshabilita el producto en Vendure.
+
+    Mismo patrón que confirm-duplicate, pero para productos con nombre 'BX…' sin imagen.
+    """
+    entry = session.get(AuditLog, event_id)
+    if not entry:
+        raise HTTPException(404, "Evento no encontrado")
+    if entry.action != "bx_no_image_flagged":
+        raise HTTPException(400, "Solo se puede confirmar eventos de tipo bx_no_image_flagged")
+    if not entry.product_id or entry.product_id == "(nuevo)":
+        raise HTTPException(400, "El evento no tiene product_id válido")
+
+    client = VendureClient()
+    try:
+        previous_enabled = await client.get_enabled_status(entry.product_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"No pude leer estado actual de Vendure: {exc}")
+
+    if previous_enabled is None:
+        raise HTTPException(404, "Producto no existe en Vendure")
+    if previous_enabled is False:
+        entry.dismissed = True
+        entry.dismissed_at = datetime.utcnow()
+        session.add(entry)
+        session.commit()
+        return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
+
+    try:
+        await client.disable_product(entry.product_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"No pude deshabilitar en Vendure: {exc}")
+
+    session.add(AuditLog(
+        action="bx_no_image_disabled",
+        source="manual",
+        product_id=entry.product_id,
+        detail=(
+            f"Confirmado manualmente: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
+            "Deshabilitado en Vendure."
+        ),
+        before=json.dumps({"enabled": True}),
+        after=json.dumps({"enabled": False}),
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+    ))
     entry.dismissed = True
     entry.dismissed_at = datetime.utcnow()
     session.add(entry)

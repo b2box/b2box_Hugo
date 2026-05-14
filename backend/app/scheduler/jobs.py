@@ -44,6 +44,7 @@ audit_prices_lock = asyncio.Lock()
 audit_dupes_lock = asyncio.Lock()
 audit_quality_lock = asyncio.Lock()
 audit_pa_variants_lock = asyncio.Lock()
+audit_bx_no_image_lock = asyncio.Lock()
 
 # Cuántos productos consultar a OTAPI a la vez (1688 / RapidAPI tolera bien esto)
 PARALLEL_OTAPI = 10
@@ -73,6 +74,29 @@ async def _flatten_products(client: VendureClient) -> list[VendureProduct]:
     async for page in _iter_product_pages(client):
         out.extend(page)
     return out
+
+
+def _audit_already_logged(
+    session: Session,
+    action: str,
+    product_id: str | None,
+    related_product_id: str | None = None,
+) -> bool:
+    """¿Ya hay una fila de AuditLog para este (action, product_id[, related_product_id])?
+
+    Incluye filas dismissed a propósito: si el usuario ya descartó el alerta,
+    no re-creamos otra en la próxima corrida — eso justamente fue el bug que
+    inflaba la tabla cada vez que corría el scheduler.
+    """
+    if product_id is None:
+        return False
+    stmt = select(AuditLog.id).where(
+        AuditLog.action == action,
+        AuditLog.product_id == product_id,
+    )
+    if related_product_id is not None:
+        stmt = stmt.where(AuditLog.related_product_id == related_product_id)
+    return session.exec(stmt.limit(1)).first() is not None
 
 
 # ─── Job 1: duplicados ────────────────────────────────────────────
@@ -111,6 +135,10 @@ async def audit_duplicates() -> None:
                 keep, drop = sorted([prod.id, verdict.candidate_id])
                 if drop != prod.id:
                     continue  # el otro producto será visto en su propia iteración
+                # Idempotencia: si ya flagueamos este par antes (dismissed o no),
+                # no creamos una fila nueva. Sin esto el scheduler infla la tabla.
+                if _audit_already_logged(session, "duplicate_flagged", product_id=drop, related_product_id=keep):
+                    continue
                 # Buscar el "kept" en la lista para denormalizar sus datos también
                 keep_prod = next((p for p in products if p.id == keep), None)
                 # MODO SOLO-FLAGEAR: NO deshabilitamos en Vendure, solo logueamos.
@@ -311,6 +339,10 @@ async def audit_catalog_quality() -> None:
                 issues = _detect_quality_issues(prod)
                 if not issues:
                     continue
+                # Idempotencia: si ya hay un quality_issue_found para este producto,
+                # no creamos uno nuevo. El usuario corrige o descarta manualmente.
+                if _audit_already_logged(session, "quality_issue_found", product_id=prod.id):
+                    continue
                 price_str = (
                     f"{prod.first_variant_price_cents/100:.2f}"
                     if prod.first_variant_price_cents is not None
@@ -393,6 +425,9 @@ async def audit_pa_variants() -> None:
                     ]
                     if not pa_variants:
                         continue
+                    # Idempotencia: no flagueamos dos veces el mismo producto.
+                    if _audit_already_logged(session, "pa_variant_flagged", product_id=prod.id):
+                        continue
                     variant_names = ", ".join(v.name for v in pa_variants[:5])
                     extra = f" (y {len(pa_variants) - 5} más)" if len(pa_variants) > 5 else ""
                     session.add(AuditLog(
@@ -430,7 +465,69 @@ async def audit_pa_variants() -> None:
         )
 
 
-# ─── Job 5: digest diario ─────────────────────────────────────────
+# ─── Job 5: productos con nombre 'BX…' y sin imagen ───────────────
+
+
+async def audit_bx_no_image() -> None:
+    """Detecta productos cuyo nombre empieza por 'BX' y no tiene imagen.
+
+    Solo flaguea. El usuario revisa en el dashboard y aprieta
+    "Confirmar deshabilitar" para que se deshabilite en Vendure.
+    """
+    if audit_bx_no_image_lock.locked():
+        log.warning("audit_bx_no_image ya está corriendo, ignoro")
+        return
+    async with audit_bx_no_image_lock:
+        log.info("Iniciando audit_bx_no_image")
+        client = VendureClient()
+        flagged = 0
+        total_products = 0
+
+        with Session(engine) as session:
+            async for page in _iter_product_pages(client):
+                for prod in page:
+                    total_products += 1
+                    if not prod.enabled:
+                        continue
+                    name = (prod.name or "").strip()
+                    if not name.upper().startswith("BX"):
+                        continue
+                    if prod.featured_image_url:
+                        continue
+                    # Idempotencia: no re-flagear el mismo producto.
+                    if _audit_already_logged(session, "bx_no_image_flagged", product_id=prod.id):
+                        continue
+                    session.add(AuditLog(
+                        action="bx_no_image_flagged",
+                        source="audit",
+                        product_id=prod.id,
+                        detail=(
+                            f"Nombre '{name}' empieza con 'BX' y no tiene imagen destacada. "
+                            "Confirmá para deshabilitarlo en Vendure."
+                        )[:500],
+                        product_name=prod.name,
+                        product_code=prod.product_code,
+                        product_image_url=None,
+                        product_source_url=prod.source_url,
+                    ))
+                    session.commit()
+                    flagged += 1
+
+        if flagged:
+            await notify(
+                f"{flagged} productos 'BX…' sin imagen",
+                f"Hugo revisó {total_products} productos y encontró {flagged} con nombre 'BX…' "
+                "y sin imagen. Revisalos en el dashboard → tab 'BX sin imagen' y confirmá para "
+                "deshabilitarlos en Vendure.",
+            )
+
+        log.info(
+            "audit_bx_no_image terminado: %d productos revisados, %d flagged",
+            total_products, flagged,
+        )
+
+
+# ─── Job 6: digest diario ─────────────────────────────────────────
 
 
 async def daily_digest() -> None:
@@ -477,6 +574,12 @@ def register_jobs() -> None:
         audit_pa_variants,
         IntervalTrigger(hours=s.audit_interval_hours),
         id="audit_pa_variants",
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    scheduler.add_job(
+        audit_bx_no_image,
+        IntervalTrigger(hours=s.audit_interval_hours),
+        id="audit_bx_no_image",
         replace_existing=True, coalesce=True, max_instances=1,
     )
     scheduler.add_job(
