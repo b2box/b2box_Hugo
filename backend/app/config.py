@@ -61,7 +61,14 @@ class Settings(BaseSettings):
     price_drift_max_auto: float = 0.30
 
     # ── Scheduler ──────────────────────────────────────────────
-    audit_interval_hours: int = 24
+    # Default 336h = 14 días. Las auditorías hacen poco "cambio real" día a día
+    # y la de precios consume RapidAPI/OTAPI ($) — convenientemente bajo.
+    audit_interval_hours: int = 336
+
+    # ── Budget diario de calls a OTAPI (RapidAPI) ──────────────
+    # Cap defensivo: si llegamos a este número de snapshots 1688_otapi
+    # en el día (UTC), los siguientes fetch devuelven None (skip).
+    otapi_daily_budget: int = 300
 
     # ── Alertas: email (SMTP) ──────────────────────────────────
     alert_smtp_host: str = "smtp.gmail.com"

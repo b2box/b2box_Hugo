@@ -90,10 +90,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
     SettingMeta(
         key="audit_interval_hours",
         label="Cada cuántas horas correr la auditoría",
-        description="Intervalo automático de las auditorías de duplicados y precios.",
+        description="Intervalo automático de las auditorías (duplicados, precios, calidad, PA, BX). 336h = 14 días.",
         type="int", parser=int,
         default_attr="audit_interval_hours",
-        min=1, max=168, step=1, group="scheduler",
+        min=1, max=720, step=1, group="scheduler",
+    ),
+    SettingMeta(
+        key="otapi_daily_budget",
+        label="Budget diario OTAPI (calls)",
+        description="Máximo de llamadas a RapidAPI/OTAPI por día (UTC). Al llegar, los siguientes fetch se saltean.",
+        type="int", parser=int,
+        default_attr="otapi_daily_budget",
+        min=0, max=5000, step=10, group="scheduler",
     ),
 ]
 

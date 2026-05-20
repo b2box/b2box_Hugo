@@ -16,15 +16,48 @@ adaptar el parser. Este es un módulo pensado para evolucionar.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import ClassVar
 
 import httpx
 from bs4 import BeautifulSoup
+from sqlmodel import Session, func, select
 
+from app import runtime as runtime_settings
 from app.config import get_settings
+from app.db.models import PriceHistory
+from app.db.session import engine
+
+log = logging.getLogger(__name__)
+
+
+def _otapi_calls_today() -> int:
+    """Cuántos snapshots 1688_otapi llevamos hoy (UTC).
+
+    Sirve para gatear el budget diario antes de cada call.
+    """
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        with Session(engine) as s:
+            return int(s.exec(
+                select(func.count(PriceHistory.id))  # type: ignore[arg-type]
+                .where(PriceHistory.source == "1688_otapi",
+                       PriceHistory.captured_at >= start)
+            ).one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo leer contador OTAPI: %s", exc)
+        return 0
+
+
+def otapi_budget_status() -> dict:
+    """Helper para que el dashboard muestre el consumo del día."""
+    used = _otapi_calls_today()
+    budget = int(runtime_settings.get("otapi_daily_budget") or get_settings().otapi_daily_budget)
+    return {"used": used, "budget": budget, "remaining": max(0, budget - used)}
 
 _HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _USER_AGENT = (
@@ -169,6 +202,18 @@ class Detail1688Fetcher(SourceFetcher):
         s = get_settings()
         if not s.rapidapi_key:
             return None  # API no configurada
+
+        # Budget guard: corta antes de hacer la HTTP call si ya pasamos el
+        # límite diario de OTAPI. Esto previene billazos por loops o triggers
+        # manuales repetidos.
+        budget = int(runtime_settings.get("otapi_daily_budget") or s.otapi_daily_budget)
+        used_today = _otapi_calls_today()
+        if used_today >= budget:
+            log.warning(
+                "OTAPI daily budget alcanzado (%d/%d) — skipping fetch para %s",
+                used_today, budget, item_id,
+            )
+            return None
 
         endpoint = f"https://{s.otapi_1688_host}/BatchGetItemFullInfo"
         params = {
