@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     # ── Auth: API key para que Luis se autentique al pegarle a /verify ──
     hugo_api_key: str = Field(default="", description="Si vacío, /verify queda abierto (no recomendado)")
 
+    # ── Auth: login del dashboard (UI humana) ──────────────────
+    # Usuario/contraseña que protegen el dashboard y sus endpoints /api/*.
+    # Si dashboard_password está vacío, el login queda DESHABILITADO (modo dev,
+    # mismo criterio que hugo_api_key). En producción, setealo siempre.
+    dashboard_user: str = Field(default="admin", description="Usuario del login del dashboard")
+    dashboard_password: str = Field(default="", description="Si vacío, el dashboard queda abierto (no recomendado)")
+    # Secreto para firmar la cookie de sesión. Si vacío, se deriva de la
+    # password (estable entre reinicios/workers mientras la password no cambie).
+    dashboard_secret: str = Field(default="", description="Secreto para firmar la cookie de sesión")
+    # Duración de la sesión en horas.
+    dashboard_session_hours: int = 12
+
     # ── Integración con Paco (cuando NO es duplicado, le reenviamos) ──
     paco_url: str = Field(default="https://paco.b2box.app")
     paco_api_key: str = ""

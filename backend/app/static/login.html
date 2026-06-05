@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hugo — Ingresar</title>
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230F172A'/%3E%3Ctext x='50%25' y='50%25' dy='.35em' text-anchor='middle' font-family='ui-sans-serif,system-ui' font-size='38' font-weight='700' fill='%23FFFFFF'%3EH%3C/text%3E%3C/svg%3E" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <script>
+    (function () {
+      const _origWarn = console.warn;
+      console.warn = function (...args) {
+        const first = args[0];
+        if (typeof first === 'string' && first.includes('cdn.tailwindcss.com should not be used in production')) return;
+        _origWarn.apply(console, args);
+      };
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Fira Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['"Fira Code"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+          },
+          colors: {
+            navy: {
+              50:'#F8FAFC', 100:'#F1F5F9', 200:'#E2E8F0', 300:'#CBD5E1',
+              400:'#94A3B8', 500:'#64748B', 600:'#475569', 700:'#334155',
+              800:'#1E293B', 900:'#0F172A', 950:'#020617',
+            },
+            brand: {
+              50:'#F0F9FF', 100:'#E0F2FE', 200:'#BAE6FD', 300:'#7DD3FC',
+              400:'#38BDF8', 500:'#0284C7', 600:'#0369A1', 700:'#075985',
+              800:'#0C4A6E', 900:'#082F49',
+            },
+          },
+          boxShadow: {
+            'card':       '0 1px 2px 0 rgba(15,23,42,.04), 0 1px 3px 0 rgba(15,23,42,.06)',
+            'card-hover': '0 4px 12px -2px rgba(15,23,42,.08), 0 2px 4px -2px rgba(15,23,42,.06)',
+          },
+        }
+      }
+    }
+  </script>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: 'Fira Sans', ui-sans-serif, system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+    .fade-in { animation: fadeIn .22s ease-out; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }
+    button:focus-visible, a:focus-visible, input:focus-visible {
+      outline: 2px solid #0369A1; outline-offset: 2px; border-radius: 6px;
+    }
+  </style>
+</head>
+<body class="bg-navy-50 text-navy-900 min-h-screen flex items-center justify-center px-4">
+
+  <div class="w-full max-w-sm">
+    <div class="flex flex-col items-center mb-6">
+      <div class="w-14 h-14 rounded-2xl bg-navy-900 flex items-center justify-center text-white font-bold text-2xl shadow-card tracking-tight">H</div>
+      <h1 class="text-lg font-bold text-navy-900 mt-3">Hugo</h1>
+      <p class="text-xs text-navy-500">Control de calidad · catálogo B2Box</p>
+    </div>
+
+    <form id="login-form" class="bg-white rounded-2xl border border-navy-200 shadow-card p-6 fade-in">
+      <h2 class="text-base font-semibold text-navy-900 mb-4">Ingresar</h2>
+
+      <label class="block text-sm font-medium text-navy-700 mb-1" for="username">Usuario</label>
+      <input id="username" name="username" type="text" autocomplete="username" required
+        class="w-full px-3 py-2 rounded-lg border border-navy-300 bg-navy-50 text-sm focus:bg-white focus:border-brand-500 outline-none transition mb-4" />
+
+      <label class="block text-sm font-medium text-navy-700 mb-1" for="password">Contraseña</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required
+        class="w-full px-3 py-2 rounded-lg border border-navy-300 bg-navy-50 text-sm focus:bg-white focus:border-brand-500 outline-none transition mb-4" />
+
+      <div id="error" class="hidden mb-4 p-2.5 rounded-lg text-xs bg-rose-50 border border-rose-200 text-rose-800"></div>
+
+      <button id="submit" type="submit"
+        class="w-full bg-navy-900 hover:bg-navy-800 text-white font-semibold text-sm px-4 py-2.5 rounded-lg transition disabled:opacity-60 disabled:cursor-not-allowed">
+        Entrar
+      </button>
+    </form>
+
+    <p class="text-center text-xs text-navy-400 mt-4">Acceso restringido al equipo B2Box</p>
+  </div>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const errorBox = document.getElementById('error');
+    const submitBtn = document.getElementById('submit');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorBox.classList.add('hidden');
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Entrando…';
+      try {
+        const r = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.ok) {
+          window.location.href = '/';
+          return;
+        }
+        throw new Error(data.detail || 'No se pudo iniciar sesión');
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Entrar';
+      }
+    });
+  </script>
+</body>
+</html>

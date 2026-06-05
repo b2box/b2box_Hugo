@@ -121,6 +121,11 @@
         <span class="w-2 h-2 rounded-full bg-navy-400 pulse-dot"></span>
         <span class="text-navy-600">Conectando…</span>
       </div>
+      <button id="logout-btn" onclick="logout()" title="Cerrar sesión"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-navy-100 hover:bg-navy-200 text-navy-700 text-sm font-medium transition">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+        Salir
+      </button>
     </div>
   </div>
 </header>
@@ -251,6 +256,23 @@
 
 <script>
 const PAGE_SIZE = 25;
+
+// ─── Sesión: si el backend responde 401, la sesión expiró → al login ──
+const _origFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const resp = await _origFetch(...args);
+  if (resp.status === 401) {
+    window.location.href = '/login';
+    // Frenamos la cadena para que el código que llamó no procese el 401.
+    throw new Error('No autenticado — redirigiendo al login');
+  }
+  return resp;
+};
+
+async function logout() {
+  try { await _origFetch('/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
+  window.location.href = '/login';
+}
 
 // Lucide-style SVG icons (sin emoji)
 const ICON_INBOX     = '<svg viewBox="0 0 24 24" class="w-full h-full" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>';
