@@ -34,16 +34,45 @@ def _configure_logging() -> None:
     )
 
 
+def _enforce_prod_secrets() -> None:
+    """En producción, faltar credenciales NO puede ser solo un warning.
+
+    Si HUGO_ENV=production y falta DASHBOARD_PASSWORD o HUGO_API_KEY, abortamos
+    el arranque: mejor caer que quedar expuestos a internet sin auth.
+    """
+    s = get_settings()
+    if s.hugo_env.strip().lower() != "production":
+        return
+    missing = []
+    if not s.dashboard_password:
+        missing.append("DASHBOARD_PASSWORD")
+    if not s.hugo_api_key:
+        missing.append("HUGO_API_KEY")
+    if missing:
+        raise RuntimeError(
+            "HUGO_ENV=production pero faltan credenciales obligatorias: "
+            f"{', '.join(missing)}. Seteálas o poné HUGO_ENV=development."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     _configure_logging()
+    _enforce_prod_secrets()
     init_db()
-    register_jobs()
-    scheduler.start()
+    # Solo el líder corre el scheduler (evita jobs y gasto OTAPI duplicados si
+    # hay más de una réplica).
+    from app.leader import try_become_leader
+
+    is_leader = try_become_leader()
+    if is_leader:
+        register_jobs()
+        scheduler.start()
     try:
         yield
     finally:
-        scheduler.shutdown(wait=False)
+        if is_leader:
+            scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -75,8 +104,16 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     if not auth.login_enabled():
         # Login deshabilitado (sin password en .env): dejamos pasar.
         return JSONResponse({"ok": True, "disabled": True})
+    ip = auth.client_ip(request)
+    if auth.is_locked(ip):
+        return JSONResponse(
+            {"ok": False, "detail": "Demasiados intentos. Esperá unos minutos."},
+            status_code=429,
+        )
     if not auth.check_credentials(payload.username, payload.password):
+        auth.record_failed_login(ip)
         return JSONResponse({"ok": False, "detail": "Usuario o contraseña incorrectos"}, status_code=401)
+    auth.record_successful_login(ip)
     resp = JSONResponse({"ok": True})
     auth.set_session_cookie(resp, request, payload.username)
     return resp

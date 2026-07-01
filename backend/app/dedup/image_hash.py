@@ -10,6 +10,7 @@ Las imágenes se descargan via httpx con un cache simple en memoria por URL.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from io import BytesIO
 from typing import Iterable
 
@@ -17,31 +18,49 @@ import httpx
 import imagehash
 from PIL import Image
 
-# Cache LRU básica por URL (proceso-vivo). Para producción conviene Redis.
-_HASH_CACHE: dict[str, imagehash.ImageHash] = {}
+from app.config import get_settings
+from app.net_guard import safe_get
+
+# Cache LRU acotada por URL (proceso-vivo). El tope evita que crezca sin techo
+# (OOM en el container). Para producción multi-instancia conviene Redis.
+_HASH_CACHE: "OrderedDict[str, imagehash.ImageHash]" = OrderedDict()
 _HASH_BITS = 64  # phash default
 
 _HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+# Tope de bytes por imagen (evita descargar archivos gigantes → memoria/DoS).
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _cache_put(url: str, h: imagehash.ImageHash) -> None:
+    maxlen = get_settings().dedup_image_cache_max
+    _HASH_CACHE[url] = h
+    _HASH_CACHE.move_to_end(url)
+    while len(_HASH_CACHE) > maxlen:
+        _HASH_CACHE.popitem(last=False)
 
 
 async def _fetch(url: str) -> bytes:
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as c:
-        r = await c.get(url)
-        r.raise_for_status()
-        return r.content
+    # safe_get valida scheme + IP pública y cada redirect (anti-SSRF).
+    r = await safe_get(url, timeout=_HTTP_TIMEOUT)
+    r.raise_for_status()
+    if len(r.content) > _MAX_IMAGE_BYTES:
+        raise ValueError(f"imagen demasiado grande: {len(r.content)} bytes")
+    return r.content
 
 
 async def hash_image(url: str) -> imagehash.ImageHash | None:
     """Devuelve el pHash de la imagen, o None si no se pudo procesar."""
-    if url in _HASH_CACHE:
-        return _HASH_CACHE[url]
+    cached = _HASH_CACHE.get(url)
+    if cached is not None:
+        _HASH_CACHE.move_to_end(url)
+        return cached
     try:
         raw = await _fetch(url)
         img = Image.open(BytesIO(raw)).convert("RGB")
         h = imagehash.phash(img)
-        _HASH_CACHE[url] = h
+        _cache_put(url, h)
         return h
-    except Exception:
+    except Exception:  # incluye SsrfBlocked, HTTP, PIL, etc.
         return None
 
 

@@ -16,6 +16,11 @@ class Settings(BaseSettings):
         extra="ignore",  # ignora vars de otros agentes (img-paco, R2, supabase, etc.)
     )
 
+    # ── Entorno ────────────────────────────────────────────────
+    # "production" hace que el arranque FALLE si faltan credenciales
+    # (DASHBOARD_PASSWORD / HUGO_API_KEY). En "development" solo warnea.
+    hugo_env: str = Field(default="development", description="development | production")
+
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")
     # Bearer opcional: si está vacío, Hugo se loguea con user/pass al primer call.
@@ -67,6 +72,17 @@ class Settings(BaseSettings):
     dedup_url_threshold: float = 1.0
     dedup_image_threshold: float = 0.92
     dedup_text_threshold: float = 0.88
+    # Gate de costo: solo descargamos+hasheamos imágenes (network $) para comparar
+    # un par cuando su similitud de texto ya supera este umbral. Corta el O(N²) de
+    # descargas de imagen entre productos claramente no relacionados. 0.0 = sin gate.
+    dedup_image_text_gate: float = 0.35
+    # Tope de la cache in-process de pHash (evita OOM en procesos long-running).
+    dedup_image_cache_max: int = 5000
+
+    # ── Cache del catálogo para /verify ────────────────────────
+    # Segundos que Hugo cachea el catálogo Vendure entre llamadas de /verify,
+    # para no re-descargar todo el catálogo (y sus imágenes) en cada 👍 de Luis.
+    verify_catalog_ttl_seconds: int = 300
 
     # ── Pricing ────────────────────────────────────────────────
     price_drift_threshold: float = 0.05
@@ -76,6 +92,10 @@ class Settings(BaseSettings):
     # Default 336h = 14 días. Las auditorías hacen poco "cambio real" día a día
     # y la de precios consume RapidAPI/OTAPI ($) — convenientemente bajo.
     audit_interval_hours: int = 336
+
+    # Retención de snapshots de precio: se borran los PriceHistory más viejos
+    # que esto (días). Evita que la tabla crezca sin techo en Supabase. 0 = nunca.
+    price_history_retention_days: int = 120
 
     # ── Budget diario de calls a OTAPI (RapidAPI) ──────────────
     # Cap defensivo: si llegamos a este número de snapshots 1688_otapi

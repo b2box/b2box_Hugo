@@ -12,7 +12,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from sqlalchemy import Index
 from sqlmodel import Field, SQLModel
+
+from app.clock import utcnow
 
 PriceSource = Literal["vendure", "source", "competitor"]
 ActionType = Literal[
@@ -27,14 +30,19 @@ ActionType = Literal[
 
 class PriceHistory(SQLModel, table=True):
     __tablename__ = "price_history"
+    # Índice compuesto: la query de snapshot-anterior y el budget-guard filtran
+    # por (product_id, source, captured_at). Acelera ambos y baja costo Supabase.
+    __table_args__ = (
+        Index("ix_price_history_prod_source_time", "product_id", "source", "captured_at"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     product_id: str = Field(index=True)
     variant_id: str | None = Field(default=None, index=True)
-    source: str = Field(description="vendure | source | competitor name")
+    source: str = Field(index=True, description="vendure | source | competitor name")
     price_cents: int
     currency: str = Field(default="USD", max_length=8)
-    captured_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    captured_at: datetime = Field(default_factory=utcnow, index=True)
     extra: str | None = Field(default=None, description="JSON con info adicional")
 
 
@@ -47,7 +55,7 @@ class Setting(SQLModel, table=True):
 
     key: str = Field(primary_key=True)
     value: str  # se guarda siempre como string; el módulo runtime parsea según tipo
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class AuditLog(SQLModel, table=True):
@@ -64,7 +72,7 @@ class AuditLog(SQLModel, table=True):
     before: str | None = Field(default=None, description="JSON del estado previo")
     after: str | None = Field(default=None, description="JSON del estado nuevo")
     confidence: float | None = Field(default=None)
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
     notified: bool = Field(default=False, description="Si ya se incluyó en algún email")
 
     # Datos denormalizados del producto (snapshot al momento del evento, para

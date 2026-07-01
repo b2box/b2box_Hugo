@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
+from app.clock import utcnow
 from app.config import get_settings
 from app.db.models import Setting
 from app.db.session import engine
@@ -68,6 +69,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="float", parser=float,
         default_attr="dedup_text_threshold",
         min=0.5, max=1.0, step=0.01, group="dedup",
+    ),
+    SettingMeta(
+        key="dedup_image_text_gate",
+        label="Gate de imagen (ahorro de costo)",
+        description=(
+            "Solo se descargan/hashean imágenes para comparar un par cuando su "
+            "similitud de texto supera este valor. Más alto = menos descargas = "
+            "menos costo, pero puede perder duplicados con misma foto y título muy "
+            "distinto. 0 = sin gate (compara imagen siempre)."
+        ),
+        type="float", parser=float,
+        default_attr="dedup_image_text_gate",
+        min=0.0, max=1.0, step=0.05, group="dedup",
     ),
     # Pricing
     SettingMeta(
@@ -188,7 +202,7 @@ def set_value(key: str, value: Any) -> Any:
         existing = session.get(Setting, key)
         if existing:
             existing.value = str(parsed)
-            existing.updated_at = __import__("datetime").datetime.utcnow()
+            existing.updated_at = utcnow()
             session.add(existing)
         else:
             session.add(Setting(key=key, value=str(parsed)))

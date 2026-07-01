@@ -68,13 +68,37 @@ def _add_missing_columns() -> None:
                                 table_name, col.name, placeholder_val)
 
 
+def _ensure_indexes() -> None:
+    """Crea índices declarados que create_all() no agrega a tablas ya existentes.
+
+    create_all() solo crea índices al crear la tabla; si la tabla ya existe (prod),
+    un índice nuevo no se aplica. Lo forzamos con CREATE INDEX IF NOT EXISTS
+    (soportado por Postgres y SQLite).
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.tables.values():
+            if table.name not in existing_tables:
+                continue
+            existing_idx = {ix["name"] for ix in inspector.get_indexes(table.name)}
+            for index in table.indexes:
+                if index.name in existing_idx:
+                    continue
+                cols = ", ".join(f'"{c.name}"' for c in index.columns)
+                ddl = f'CREATE INDEX IF NOT EXISTS "{index.name}" ON "{table.name}" ({cols})'
+                log.warning("Migración: creando índice %s", index.name)
+                conn.execute(text(ddl))
+
+
 def init_db() -> None:
-    """Crea tablas si no existen, y agrega columnas faltantes a tablas existentes."""
+    """Crea tablas si no existen, y agrega columnas/índices faltantes."""
     # Asegurar que los modelos están registrados
     from app.db import models  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
     _add_missing_columns()
+    _ensure_indexes()
 
 
 def get_session() -> Iterator[Session]:

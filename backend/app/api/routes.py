@@ -11,20 +11,22 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, func, select
 
 from app import runtime
+from app.clock import utcnow
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine, get_session
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
 from app.security import verify_api_key
+from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient
 
 log = logging.getLogger(__name__)
@@ -227,11 +229,23 @@ def _apply_section_filter(stmt, section_key: str | None):
 # ─── DTOs ────────────────────────────────────────────────────────
 
 
+MAX_IMAGE_URLS = 5
+
+
 class VerifyRequest(BaseModel):
     name: str = ""
     description: str = ""
     source_url: str | None = None
     image_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("image_urls")
+    @classmethod
+    def _cap_images(cls, v: list[str]) -> list[str]:
+        # Tope defensivo: sin rechazar el request (no rompemos a Luis), nos
+        # quedamos con las primeras MAX_IMAGE_URLS válidas para no disparar
+        # descargas masivas (costo de red / DoS).
+        clean = [u for u in (v or []) if u and u.strip()]
+        return clean[:MAX_IMAGE_URLS]
     # De qué sistema viene este verify. Se usa en el dashboard para tabs.
     # Valores típicos: "luis" (default), "orders", "manual"
     source: str = "luis"
@@ -272,8 +286,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
 
     Auditoría: cada verify queda registrado en AuditLog para trazabilidad.
     """
-    client = VendureClient()
-    existing = await client.list_products(skip=0, take=500)
+    # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify,
+    # y sin el viejo tope de 500 que perdía duplicados en catálogos grandes.
+    existing = await vendure_catalog.get_catalog()
     verdict = await find_duplicate_in(
         CandidateInput(
             name=payload.name,
@@ -526,7 +541,7 @@ async def dismiss_event(
     if not entry:
         raise HTTPException(404, "Evento no encontrado")
     entry.dismissed = True
-    entry.dismissed_at = datetime.utcnow()
+    entry.dismissed_at = utcnow()
     session.add(entry)
     session.commit()
     return {"ok": True, "id": event_id}
@@ -569,7 +584,7 @@ async def retry_paco(
         ))
         # Marcar el evento original como dismissed (ya se resolvió)
         entry.dismissed = True
-        entry.dismissed_at = datetime.utcnow()
+        entry.dismissed_at = utcnow()
         session.add(entry)
         session.commit()
         return {"ok": True, "paco_search_id": result.search_id, "paco_status": result.status}
@@ -757,6 +772,7 @@ async def restore_duplicates(
     ))
     session.commit()
 
+    vendure_catalog.invalidate()  # cambió el enabled de varios productos
     return {
         "restored": len(restored),
         "skipped_was_disabled": len(skipped_was_disabled),
@@ -795,7 +811,7 @@ async def confirm_duplicate(
     if previous_enabled is False:
         # Ya estaba disabled, no hacemos nada (pero descartamos el flag)
         entry.dismissed = True
-        entry.dismissed_at = datetime.utcnow()
+        entry.dismissed_at = utcnow()
         session.add(entry)
         session.commit()
         return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
@@ -827,10 +843,11 @@ async def confirm_duplicate(
     ))
     # El evento original se descarta (ya se actuó sobre él)
     entry.dismissed = True
-    entry.dismissed_at = datetime.utcnow()
+    entry.dismissed_at = utcnow()
     session.add(entry)
     session.commit()
 
+    vendure_catalog.invalidate()  # el catálogo cacheado ya no refleja este disable
     return {"ok": True, "action": "disabled", "product_id": entry.product_id}
 
 
@@ -861,7 +878,7 @@ async def confirm_disable_bx(
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
         entry.dismissed = True
-        entry.dismissed_at = datetime.utcnow()
+        entry.dismissed_at = utcnow()
         session.add(entry)
         session.commit()
         return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
@@ -887,10 +904,11 @@ async def confirm_disable_bx(
         product_source_url=entry.product_source_url,
     ))
     entry.dismissed = True
-    entry.dismissed_at = datetime.utcnow()
+    entry.dismissed_at = utcnow()
     session.add(entry)
     session.commit()
 
+    vendure_catalog.invalidate()
     return {"ok": True, "action": "disabled", "product_id": entry.product_id}
 
 
@@ -936,14 +954,11 @@ async def debug_config() -> dict[str, Any]:
     s = get_settings()
 
     def _mask(v: str | None) -> dict[str, Any]:
+        # No exponemos ningún fragmento del secreto: solo si está seteado y su
+        # longitud. Suficiente para diagnosticar config sin filtrar valores.
         if not v:
-            return {"set": False, "preview": None, "length": 0}
-        # mostramos solo los primeros 4 chars y los últimos 2 (suficiente para identificar)
-        if len(v) <= 8:
-            preview = v[:1] + "***"
-        else:
-            preview = f"{v[:4]}…{v[-2:]}"
-        return {"set": True, "preview": preview, "length": len(v)}
+            return {"set": False, "length": 0}
+        return {"set": True, "length": len(v)}
 
     return {
         "vendure": {
@@ -1006,7 +1021,7 @@ async def dashboard_status(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Resumen agregado para el dashboard: conteos, último audit y eventos recientes."""
-    now = datetime.utcnow()
+    now = utcnow()
     last_24h = now - timedelta(hours=24)
     last_7d = now - timedelta(days=7)
 

@@ -23,6 +23,8 @@ from urllib.parse import quote_plus
 import httpx
 from bs4 import BeautifulSoup
 
+from app.net_guard import safe_get
+
 _HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -46,14 +48,13 @@ class CompetitorScraper(ABC):
     async def search(self, query: str, limit: int = 5) -> list[CompetitorQuote]: ...
 
     async def _get(self, url: str) -> str:
-        async with httpx.AsyncClient(
+        r = await safe_get(
+            url,
             timeout=_HTTP_TIMEOUT,
             headers={"User-Agent": _USER_AGENT, "Accept-Language": "es-AR,es;q=0.9"},
-            follow_redirects=True,
-        ) as c:
-            r = await c.get(url)
-            r.raise_for_status()
-            return r.text
+        )
+        r.raise_for_status()
+        return r.text
 
 
 # ─── Scraper de ejemplo: MercadoLibre Argentina ────────────────────

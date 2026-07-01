@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import AsyncIterator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
 
+from app.clock import utcnow
 from app.config import get_settings
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine
@@ -530,8 +531,29 @@ async def audit_bx_no_image() -> None:
 # ─── Job 6: digest diario ─────────────────────────────────────────
 
 
+async def prune_price_history() -> None:
+    """Borra snapshots de precio más viejos que `price_history_retention_days`.
+
+    Evita que la tabla `price_history` crezca sin techo en Supabase (storage $ +
+    queries más lentas). Con 0 días, la retención queda deshabilitada.
+    """
+    days = get_settings().price_history_retention_days
+    if days <= 0:
+        return
+    cutoff = utcnow() - timedelta(days=days)
+    with Session(engine) as session:
+        stmt = select(PriceHistory).where(PriceHistory.captured_at < cutoff)
+        rows = list(session.exec(stmt))
+        if not rows:
+            return
+        for r in rows:
+            session.delete(r)
+        session.commit()
+    log.info("prune_price_history: borrados %d snapshots < %s", len(rows), cutoff.date())
+
+
 async def daily_digest() -> None:
-    cutoff = datetime.utcnow() - timedelta(hours=24)
+    cutoff = utcnow() - timedelta(hours=24)
     with Session(engine) as session:
         stmt = (
             select(AuditLog)
@@ -587,4 +609,10 @@ def register_jobs() -> None:
         CronTrigger(hour=9, minute=0),
         id="daily_digest",
         replace_existing=True,
+    )
+    scheduler.add_job(
+        prune_price_history,
+        CronTrigger(hour=4, minute=30),
+        id="prune_price_history",
+        replace_existing=True, coalesce=True, max_instances=1,
     )

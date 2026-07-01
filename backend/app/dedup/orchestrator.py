@@ -73,11 +73,18 @@ async def compare(a: CandidateInput, b: CandidateInput) -> DedupVerdict:
             per_strategy_scores={"url": url_score, "image": 0.0, "text": 0.0},
         )
 
-    # 2) imagen + texto en paralelo
-    image_score, text_score = await asyncio.gather(
-        image_similarity(a.image_urls, b.image_urls),
-        asyncio.to_thread(text_similarity, a.name, a.description, b.name, b.description),
+    # 2) texto primero (CPU barato, sin red). La imagen cuesta $/red: solo la
+    #    calculamos si el texto ya sugiere parentesco (gate) o si el par ya
+    #    matchearía por texto. Esto corta el O(N²) de descargas de imagen entre
+    #    productos claramente distintos.
+    text_score = await asyncio.to_thread(
+        text_similarity, a.name, a.description, b.name, b.description
     )
+    image_gate = runtime.get("dedup_image_text_gate") or 0.0
+    if text_score >= image_gate or text_score >= text_th:
+        image_score = await image_similarity(a.image_urls, b.image_urls)
+    else:
+        image_score = 0.0
 
     matched: list[Strategy] = []
     if url_score >= url_th:

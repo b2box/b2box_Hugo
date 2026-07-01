@@ -31,6 +31,7 @@ from app import runtime as runtime_settings
 from app.config import get_settings
 from app.db.models import PriceHistory
 from app.db.session import engine
+from app.net_guard import safe_get
 
 log = logging.getLogger(__name__)
 
@@ -89,14 +90,15 @@ class SourceFetcher(ABC):
 
     # helpers compartidos
     async def _get(self, url: str) -> str:
-        async with httpx.AsyncClient(
+        # safe_get valida scheme + IP pública + cada redirect (anti-SSRF): la URL
+        # viene de un campo custom de Vendure, no es de confianza.
+        r = await safe_get(
+            url,
             timeout=_HTTP_TIMEOUT,
             headers={"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            follow_redirects=True,
-        ) as c:
-            r = await c.get(url)
-            r.raise_for_status()
-            return r.text
+        )
+        r.raise_for_status()
+        return r.text
 
     @staticmethod
     def _extract_json_ld_price(html: str) -> tuple[float, str] | None:

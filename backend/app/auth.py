@@ -37,6 +37,48 @@ log = logging.getLogger(__name__)
 
 COOKIE_NAME = "hugo_session"
 
+# ── Rate-limit / lockout del login (in-memory, por IP) ─────────────
+# Tras _MAX_FAILS intentos fallidos en _WINDOW segundos, bloqueamos esa IP por
+# _LOCKOUT segundos. Simple y suficiente para 1 instancia; para multi-instancia
+# convendría Redis. Frena fuerza bruta contra el único usuario/contraseña.
+_MAX_FAILS = 5
+_WINDOW = 300.0
+_LOCKOUT = 300.0
+_fail_log: dict[str, list[float]] = {}
+_locked_until: dict[str, float] = {}
+
+
+def client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def is_locked(ip: str) -> bool:
+    until = _locked_until.get(ip, 0.0)
+    if until and time.time() < until:
+        return True
+    if until:
+        _locked_until.pop(ip, None)
+    return False
+
+
+def record_failed_login(ip: str) -> None:
+    now = time.time()
+    hits = [t for t in _fail_log.get(ip, []) if now - t < _WINDOW]
+    hits.append(now)
+    _fail_log[ip] = hits
+    if len(hits) >= _MAX_FAILS:
+        _locked_until[ip] = now + _LOCKOUT
+        _fail_log.pop(ip, None)
+        log.warning("Login bloqueado para IP %s por %ds (demasiados intentos)", ip, int(_LOCKOUT))
+
+
+def record_successful_login(ip: str) -> None:
+    _fail_log.pop(ip, None)
+    _locked_until.pop(ip, None)
+
 # Prefijos que NO requieren sesión. El resto del sitio queda protegido.
 _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/login",
