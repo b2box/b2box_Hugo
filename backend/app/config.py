@@ -45,10 +45,21 @@ class Settings(BaseSettings):
     # ── Auth: API key para que Luis se autentique al pegarle a /verify ──
     hugo_api_key: str = Field(default="", description="Si vacío, /verify queda abierto (no recomendado)")
 
-    # ── Auth: login del dashboard (UI humana) ──────────────────
+    # ── Auth: login del dashboard vía Supabase (mismo pool que Paco) ──
+    # Si supabase_url + supabase_anon_key están seteados, el login del dashboard
+    # valida email+contraseña contra el Supabase Auth de Cloud_B2BOX (mismos
+    # usuarios que Paco). Es el método PREFERIDO; el user/pass local de abajo
+    # queda solo como fallback de desarrollo.
+    supabase_url: str = Field(default="", description="https://<ref>.supabase.co (Cloud_B2BOX)")
+    supabase_anon_key: str = Field(default="", description="anon/publishable key de Cloud_B2BOX")
+    # Allowlist opcional de emails con acceso a Hugo (coma-separada). Vacío = todo
+    # usuario válido de Cloud_B2BOX puede entrar (igual que Paco).
+    supabase_allowed_emails: str = Field(default="", description="emails permitidos, coma-separados")
+
+    # ── Auth: login local (FALLBACK de desarrollo) ─────────────
     # Usuario/contraseña que protegen el dashboard y sus endpoints /api/*.
-    # Si dashboard_password está vacío, el login queda DESHABILITADO (modo dev,
-    # mismo criterio que hugo_api_key). En producción, setealo siempre.
+    # Solo se usa si Supabase NO está configurado. Si ambos están vacíos, el
+    # login queda DESHABILITADO (modo dev). En producción, usá Supabase.
     dashboard_user: str = Field(default="admin", description="Usuario del login del dashboard")
     dashboard_password: str = Field(default="", description="Si vacío, el dashboard queda abierto (no recomendado)")
     # Secreto para firmar la cookie de sesión. Si vacío, se deriva de la

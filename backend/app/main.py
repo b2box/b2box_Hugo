@@ -44,8 +44,10 @@ def _enforce_prod_secrets() -> None:
     if s.hugo_env.strip().lower() != "production":
         return
     missing = []
-    if not s.dashboard_password:
-        missing.append("DASHBOARD_PASSWORD")
+    # Login del dashboard: vale Supabase (preferido) o password local.
+    has_supabase = bool(s.supabase_url and s.supabase_anon_key)
+    if not has_supabase and not s.dashboard_password:
+        missing.append("SUPABASE_URL+SUPABASE_ANON_KEY (o DASHBOARD_PASSWORD)")
     if not s.hugo_api_key:
         missing.append("HUGO_API_KEY")
     if missing:
@@ -110,12 +112,23 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
             {"ok": False, "detail": "Demasiados intentos. Esperá unos minutos."},
             status_code=429,
         )
-    if not auth.check_credentials(payload.username, payload.password):
+
+    # Método preferido: Supabase Auth de Cloud_B2BOX (mismo login que Paco).
+    # Fallback: user/pass local (solo si Supabase no está configurado).
+    if auth.supabase_enabled():
+        ok, identity = await auth.supabase_login(payload.username, payload.password)
+    else:
+        ok = auth.check_credentials(payload.username, payload.password)
+        identity = payload.username
+
+    if not ok:
         auth.record_failed_login(ip)
-        return JSONResponse({"ok": False, "detail": "Usuario o contraseña incorrectos"}, status_code=401)
+        return JSONResponse(
+            {"ok": False, "detail": "Email o contraseña incorrectos"}, status_code=401
+        )
     auth.record_successful_login(ip)
     resp = JSONResponse({"ok": True})
-    auth.set_session_cookie(resp, request, payload.username)
+    auth.set_session_cookie(resp, request, identity or payload.username)
     return resp
 
 

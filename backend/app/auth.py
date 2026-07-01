@@ -28,6 +28,7 @@ import logging
 import secrets
 import time
 
+import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -111,9 +112,65 @@ def _signing_secret() -> bytes:
     return hashlib.sha256(b"hugo-session::" + s.dashboard_password.encode("utf-8")).digest()
 
 
+def supabase_enabled() -> bool:
+    """True si el login debe validar contra el Supabase Auth de Cloud_B2BOX."""
+    s = get_settings()
+    return bool(s.supabase_url and s.supabase_anon_key)
+
+
 def login_enabled() -> bool:
-    """True si hay password configurada. Si no, el dashboard queda abierto (dev)."""
-    return bool(get_settings().dashboard_password)
+    """True si hay algún método de login activo (Supabase o password local).
+
+    Si no hay ninguno, el dashboard queda abierto (solo modo dev)."""
+    s = get_settings()
+    return supabase_enabled() or bool(s.dashboard_password)
+
+
+def _email_allowed(email: str) -> bool:
+    """Aplica la allowlist opcional de emails. Vacía = todos permitidos."""
+    raw = get_settings().supabase_allowed_emails.strip()
+    if not raw:
+        return True
+    allow = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    return email.strip().lower() in allow
+
+
+async def supabase_login(email: str, password: str) -> tuple[bool, str | None]:
+    """Valida email+password contra el Supabase Auth (GoTrue) de Cloud_B2BOX.
+
+    Devuelve (ok, email_normalizado). Mismo pool de usuarios que Paco.
+    """
+    s = get_settings()
+    if not email or not password:
+        return (False, None)
+    url = f"{s.supabase_url.rstrip('/')}/auth/v1/token"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                url,
+                params={"grant_type": "password"},
+                headers={"apikey": s.supabase_anon_key, "Content-Type": "application/json"},
+                json={"email": email, "password": password},
+            )
+    except httpx.HTTPError as exc:
+        log.error("Supabase login: error de red: %s", exc)
+        return (False, None)
+
+    if resp.status_code != 200:
+        # 400 = credenciales inválidas / email no confirmado. No logueamos el body.
+        log.info("Supabase login rechazado (%s) para %s", resp.status_code, email)
+        return (False, None)
+
+    try:
+        data = resp.json()
+        user_email = (data.get("user") or {}).get("email") or email
+    except ValueError:
+        return (False, None)
+
+    if not _email_allowed(user_email):
+        log.warning("Supabase login OK pero email %s no está en la allowlist", user_email)
+        return (False, None)
+    return (True, user_email)
 
 
 def issue_session_token(username: str) -> str:

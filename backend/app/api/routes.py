@@ -288,7 +288,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     """
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify,
     # y sin el viejo tope de 500 que perdía duplicados en catálogos grandes.
-    existing = await vendure_catalog.get_catalog()
+    try:
+        existing = await vendure_catalog.get_catalog()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
+        raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
     verdict = await find_duplicate_in(
         CandidateInput(
             name=payload.name,
