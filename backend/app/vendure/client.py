@@ -31,6 +31,14 @@ log = logging.getLogger(__name__)
 # ─── DTOs ──────────────────────────────────────────────────────────
 
 
+def _safe_int(v: Any) -> int | None:
+    """priceWithTax/stock a int, o None si no parsea."""
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class VendureVariant:
     """Vista mínima de una variante Vendure."""
@@ -273,6 +281,73 @@ class VendureClient:
             query, {"id": product_id}, what=f"get_product({product_id})"
         )
         return self._map_product(data["product"]) if data.get("product") else None
+
+    async def get_product_full(self, product_id: str) -> dict[str, Any] | None:
+        """Data COMPLETA de un producto para devolver en /verify cuando es duplicado.
+
+        A diferencia de get_product (mínimo), trae TODAS las fotos (assets),
+        TODAS las variantes con precio/sku/stock y los customFields. Devuelve un
+        dict listo para serializar en la respuesta HTTP (no un VendureProduct).
+        """
+        query = gql(
+            f"""
+            query ProductFull($id: ID!) {{
+              product(id: $id) {{
+                id
+                name
+                slug
+                description
+                enabled
+                customFields {{ {self._source_field} b2boxProductCode }}
+                featuredAsset {{ source preview }}
+                assets {{ source preview }}
+                variantList(options: {{ take: 100 }}) {{
+                  items {{ id name sku priceWithTax currencyCode stockLevel }}
+                  totalItems
+                }}
+              }}
+            }}
+            """
+        )
+        data = await self._execute_with_retry(
+            query, {"id": product_id}, what=f"get_product_full({product_id})"
+        )
+        raw = data.get("product")
+        if not raw:
+            return None
+        custom = raw.get("customFields") or {}
+        featured = raw.get("featuredAsset") or {}
+        assets = raw.get("assets") or []
+        image_urls = [a.get("source") for a in assets if a.get("source")]
+        if featured.get("source") and featured["source"] not in image_urls:
+            image_urls.insert(0, featured["source"])
+        vlist = raw.get("variantList") or {}
+        variants = [
+            {
+                "id": str(v.get("id")),
+                "name": v.get("name", ""),
+                "sku": v.get("sku", ""),
+                "price_cents": _safe_int(v.get("priceWithTax")),
+                "currency": v.get("currencyCode"),
+                "stock": v.get("stockLevel"),
+            }
+            for v in (vlist.get("items") or [])
+        ]
+        first_price = variants[0]["price_cents"] if variants else None
+        return {
+            "id": str(raw["id"]),
+            "name": raw.get("name", ""),
+            "slug": raw.get("slug", ""),
+            "description": raw.get("description", "") or "",
+            "enabled": bool(raw.get("enabled", True)),
+            "source_url": custom.get(self._source_field),
+            "product_code": custom.get("b2boxProductCode"),
+            "featured_image_url": featured.get("preview") or featured.get("source"),
+            "image_urls": image_urls,
+            "first_variant_price_cents": first_price,
+            "variant_count": int(vlist.get("totalItems") or len(variants)),
+            "variants": variants,
+        }
 
     # ── Escritura ──────────────────────────────────────────────
 

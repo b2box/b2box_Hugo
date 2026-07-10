@@ -14,6 +14,7 @@ Contrato (espejo del cliente que tiene Luis):
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -72,6 +73,62 @@ async def submit(image_url: str) -> PacoSubmitResult:
         raise PacoError(f"respuesta no-JSON: {resp.text[:200]}")
 
     search_id = data.get("search_id") or data.get("id")
+    if not search_id:
+        raise PacoError(f"respuesta sin 'search_id' ni 'id': {data}")
+
+    return PacoSubmitResult(
+        search_id=str(search_id),
+        status=str(data.get("status", "unknown")),
+        raw=data,
+    )
+
+
+async def submit_pro(
+    image_url: str,
+    callback_ctx: dict[str, Any] | None = None,
+    text_specs: str = "",
+) -> PacoSubmitResult:
+    """Envía a Paco PRO (b2box_sourcing) POST /api/tech/start como multipart form.
+
+    A diferencia de submit() (Paco APP, JSON), acá mandamos:
+      - image_url + text_specs (specs libres del producto)
+      - callback_ctx (JSON) → Paco escribe de vuelta al quotation_item vía paco-ingest
+
+    Destino = paco_pro_url (o paco_url si está vacío) + paco_pro_submit_path.
+    """
+    if not image_url:
+        raise PacoError("image_url vacío")
+    s = get_settings()
+    base = (s.paco_pro_url or s.paco_url).rstrip("/")
+    if not base:
+        raise PacoError("PACO_PRO_URL/PACO_URL no configurado")
+
+    url = f"{base}{s.paco_pro_submit_path}"
+    form: dict[str, str] = {"text_specs": text_specs or "", "source": "hugo-pro"}
+    if image_url:
+        form["image_url"] = image_url
+    if callback_ctx:
+        form["callback_ctx"] = json.dumps(callback_ctx)
+
+    headers = _headers()
+    # Paco PRO se expone por ngrok → sin este header ngrok devuelve una interstitial HTML.
+    headers["ngrok-skip-browser-warning"] = "true"
+    # FastAPI Form() acepta application/x-www-form-urlencoded (httpx `data=`).
+    headers.pop("Content-Type", None)
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        resp = await client.post(url, data=form, headers=headers)
+
+    if resp.status_code >= 400:
+        log.error("Paco PRO %s: %s %s", url, resp.status_code, resp.text[:300])
+        raise PacoError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise PacoError(f"respuesta no-JSON: {resp.text[:200]}")
+
+    search_id = data.get("search_id") or data.get("sid") or data.get("id")
     if not search_id:
         raise PacoError(f"respuesta sin 'search_id' ni 'id': {data}")
 

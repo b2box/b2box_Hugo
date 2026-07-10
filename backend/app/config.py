@@ -69,12 +69,18 @@ class Settings(BaseSettings):
     dashboard_session_hours: int = 12
 
     # ── Integración con Paco (cuando NO es duplicado, le reenviamos) ──
+    # Luis / b2box-app  → Paco APP  (paco_url, /api/search/start, JSON).
+    # Admin / b2box-pro → Paco PRO  (paco_pro_url, /api/tech/start, form + callback_ctx).
     paco_url: str = Field(default="https://paco.b2box.app")
     paco_api_key: str = ""
     paco_submit_path: str = "/api/search/start"
     paco_status_path: str = "/api/searches"  # se completa con /{id}
     paco_cf_client_id: str = ""
     paco_cf_client_secret: str = ""
+    # Paco PRO = b2box_sourcing. Misma URL que usa el edge fn (PACO_PRO_URL).
+    # Vacío → cae a paco_url (útil en dev si PRO y APP son el mismo host).
+    paco_pro_url: str = Field(default="", description="URL de Paco PRO (b2box_sourcing)")
+    paco_pro_submit_path: str = "/api/tech/start"
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

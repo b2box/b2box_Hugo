@@ -246,9 +246,24 @@ class VerifyRequest(BaseModel):
         # descargas masivas (costo de red / DoS).
         clean = [u for u in (v or []) if u and u.strip()]
         return clean[:MAX_IMAGE_URLS]
-    # De qué sistema viene este verify. Se usa en el dashboard para tabs.
-    # Valores típicos: "luis" (default), "orders", "manual"
+    # De qué sistema viene este verify. Se usa en el dashboard para tabs Y para
+    # rutear a la Paco correcta: "b2box-pro"/"admin" → Paco PRO; el resto → Paco APP.
+    # Valores típicos: "luis" (default), "orders", "manual", "b2box-pro".
     source: str = "luis"
+    # Solo para el flujo PRO: lo reenviamos a Paco PRO para que escriba de vuelta
+    # al quotation_item correcto (paco-ingest) cuando NO es duplicado.
+    callback_ctx: dict[str, Any] | None = None
+    # Specs libres del producto (nombre/desc/colores…) → text_specs de Paco PRO.
+    text_specs: str | None = None
+
+
+# Orígenes que van a Paco PRO (b2box_sourcing) en vez de Paco APP.
+_PRO_SOURCES = {"b2box-pro", "admin", "pro", "orders-pro"}
+
+
+def _is_pro_source(source: str | None) -> bool:
+    s = (source or "").strip().lower()
+    return s in _PRO_SOURCES
 
 
 class VerifyResponse(BaseModel):
@@ -261,6 +276,10 @@ class VerifyResponse(BaseModel):
     paco_search_id: str | None = None
     paco_status: str | None = None
     paco_error: str | None = None
+    # Si ERA duplicado, la data COMPLETA del producto del catálogo que matcheó
+    # (fotos, variantes con precio, código BX, descripción). El admin la usa para
+    # llenar el quotation_item sin gastar en Paco.
+    matched_product: dict[str, Any] | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────────
@@ -311,10 +330,43 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         candidate_id=verdict.candidate_id,
     )
 
-    # Si no es duplicado y tenemos imagen, le pasamos a Paco automáticamente
+    is_pro = _is_pro_source(payload.source)
+
+    if verdict.is_duplicate and verdict.candidate_id:
+        # DUPLICADO → traer la data COMPLETA del producto del catálogo (fotos,
+        # variantes, precio, código BX) para que el admin llene el item sin Paco.
+        try:
+            response.matched_product = await VendureClient().get_product_full(
+                verdict.candidate_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_product_full(%s) falló: %s", verdict.candidate_id, exc)
+            # Fallback: el mínimo que ya está en el catálogo cacheado.
+            cached = next((p for p in existing if p.id == verdict.candidate_id), None)
+            if cached is not None:
+                response.matched_product = {
+                    "id": cached.id,
+                    "name": cached.name,
+                    "description": cached.description,
+                    "source_url": cached.source_url,
+                    "product_code": cached.product_code,
+                    "featured_image_url": cached.featured_image_url,
+                    "image_urls": cached.image_urls,
+                    "first_variant_price_cents": cached.first_variant_price_cents,
+                    "variant_count": cached.variant_count,
+                }
+
+    # Si NO es duplicado y tenemos imagen, le pasamos a Paco (APP o PRO según origen).
     if not verdict.is_duplicate and payload.image_urls:
         try:
-            result = await paco_integration.submit(payload.image_urls[0])
+            if is_pro:
+                result = await paco_integration.submit_pro(
+                    payload.image_urls[0],
+                    callback_ctx=payload.callback_ctx,
+                    text_specs=payload.text_specs or "",
+                )
+            else:
+                result = await paco_integration.submit(payload.image_urls[0])
             response.paco_search_id = result.search_id
             response.paco_status = result.status
         except paco_integration.PacoError as exc:
