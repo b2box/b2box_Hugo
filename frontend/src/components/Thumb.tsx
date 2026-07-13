@@ -21,7 +21,7 @@ export default function Thumb({
         alt={alt || ""}
         loading="lazy"
         onError={() => setFailed(true)}
-        className="w-16 h-16 rounded-lg object-cover bg-navy-100 shrink-0"
+        className="w-16 h-16 rounded-lg object-cover bg-muted shrink-0"
       />
     );
   }

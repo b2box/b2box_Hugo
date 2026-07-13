@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { SECTION_ICON, IconLayers } from "../icons";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import type { AuditTarget, SectionsResponse } from "../types";
+import type { ButtonProps } from "@/components/ui/button";
 
 export interface AuditFeedback {
   kind: "ok" | "busy" | "error";
@@ -14,38 +18,18 @@ interface SidebarProps {
   onRunAudit: (target: AuditTarget) => Promise<AuditFeedback>;
 }
 
-const AUDIT_BUTTONS: { target: AuditTarget; label: string; className: string }[] = [
-  {
-    target: "prices",
-    label: "Verificar precios",
-    className: "bg-brand-600 hover:bg-brand-700 text-white",
-  },
-  {
-    target: "duplicates",
-    label: "Buscar duplicados",
-    className: "bg-navy-900 hover:bg-navy-800 text-white",
-  },
-  {
-    target: "quality",
-    label: "Revisar calidad",
-    className: "bg-white hover:bg-navy-50 text-navy-700 border border-navy-200",
-  },
-  {
-    target: "pa_variants",
-    label: "Detectar variantes PA",
-    className: "bg-white hover:bg-navy-50 text-navy-700 border border-navy-200",
-  },
-  {
-    target: "bx_no_image",
-    label: "Detectar BX sin imagen",
-    className: "bg-white hover:bg-navy-50 text-navy-700 border border-navy-200",
-  },
+const AUDIT_BUTTONS: { target: AuditTarget; label: string; variant: ButtonProps["variant"] }[] = [
+  { target: "prices", label: "Verificar precios", variant: "default" },
+  { target: "duplicates", label: "Buscar duplicados", variant: "secondary" },
+  { target: "quality", label: "Revisar calidad", variant: "outline" },
+  { target: "pa_variants", label: "Detectar variantes PA", variant: "outline" },
+  { target: "bx_no_image", label: "Detectar BX sin imagen", variant: "outline" },
 ];
 
 const FEEDBACK_CLASS: Record<AuditFeedback["kind"], string> = {
-  ok: "bg-emerald-50 border border-emerald-200 text-emerald-800",
-  busy: "bg-amber-50 border border-amber-200 text-amber-900",
-  error: "bg-rose-50 border border-rose-200 text-rose-800",
+  ok: "bg-success/10 border border-success/40 text-success",
+  busy: "bg-warning/10 border border-warning/40 text-warning",
+  error: "bg-destructive/10 border border-destructive/40 text-destructive",
 };
 
 export default function Sidebar({
@@ -76,7 +60,7 @@ export default function Sidebar({
   ];
 
   return (
-    <aside className="bg-white rounded-2xl border border-navy-200 p-3 h-fit shadow-card sticky md:top-24">
+    <Card className="bg-sidebar p-3 h-fit shadow-sm sticky md:top-24">
       <nav className="space-y-0.5">
         {items.map(([key, info]) => {
           const Icon = SECTION_ICON[key] ?? IconLayers;
@@ -85,18 +69,26 @@ export default function Sidebar({
             <button
               key={key}
               onClick={() => onSelect(key)}
-              className={`nav-item w-full text-left px-3 py-2 rounded-lg flex items-center justify-between gap-2 text-sm border-l-2 border-transparent hover:bg-navy-50 ${
-                active ? "active" : ""
-              }`}
+              className={cn(
+                "w-full text-left px-3 py-2 rounded-md flex items-center justify-between gap-2 text-sm border-l-2 border-transparent transition-colors",
+                active
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground border-l-primary font-medium"
+                  : "text-sidebar-foreground hover:bg-muted",
+              )}
             >
               <span className="flex items-center gap-2.5 truncate">
-                <span className="nav-icon w-4 h-4 shrink-0 text-navy-400 inline-flex items-center justify-center">
+                <span
+                  className={cn(
+                    "w-4 h-4 shrink-0 inline-flex items-center justify-center",
+                    active ? "text-primary" : "text-muted-foreground",
+                  )}
+                >
                   <Icon className="w-full h-full" />
                 </span>
                 <span className="font-medium">{info.label}</span>
               </span>
               {info.count != null && (
-                <span className="text-xs bg-navy-100 text-navy-600 px-2 py-0.5 rounded-full shrink-0 num-tabular">
+                <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full shrink-0 num-tabular">
                   {info.count}
                 </span>
               )}
@@ -105,25 +97,26 @@ export default function Sidebar({
         })}
       </nav>
 
-      <hr className="my-4 border-navy-200" />
+      <hr className="my-4 border-border" />
 
       <div className="px-1.5 py-1 space-y-2">
         {AUDIT_BUTTONS.map((b) => (
-          <button
+          <Button
             key={b.target}
+            variant={b.variant}
             onClick={() => handleAudit(b.target)}
             disabled={busyTarget === b.target}
-            className={`w-full text-sm font-medium py-2 px-3 rounded-lg transition disabled:opacity-50 ${b.className}`}
+            className="w-full"
           >
             {busyTarget === b.target ? "Disparando…" : b.label}
-          </button>
+          </Button>
         ))}
         {feedback && (
-          <p className={`mt-2 p-2 rounded text-xs fade-in ${FEEDBACK_CLASS[feedback.kind]}`}>
+          <p className={cn("mt-2 p-2 rounded-md text-xs animate-fade-in", FEEDBACK_CLASS[feedback.kind])}>
             {feedback.message}
           </p>
         )}
       </div>
-    </aside>
+    </Card>
   );
 }

@@ -198,9 +198,9 @@ export default function DashboardPage() {
         </main>
       </div>
 
-      <footer className="max-w-7xl mx-auto px-6 py-6 text-xs text-navy-400 text-center">
+      <footer className="max-w-7xl mx-auto px-6 py-6 text-xs text-muted-foreground text-center">
         Hugo · agente B2Box ·{" "}
-        <a href="/docs" className="underline hover:text-navy-600 transition">
+        <a href="/docs" className="text-primary underline hover:no-underline transition-colors">
           API docs
         </a>
       </footer>

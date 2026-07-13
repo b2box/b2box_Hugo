@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { getSettings, resetSetting, saveSetting } from "../api";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { GROUP_LABELS } from "../sections";
 import { IconCheck } from "../icons";
 import type { Setting } from "../types";
@@ -61,35 +64,33 @@ export default function SettingsView() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold text-navy-900 flex items-center gap-2">
-          <IconCheck className="w-5 h-5 text-navy-600" />
+        <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+          <IconCheck className="w-5 h-5 text-muted-foreground" />
           Configuración
         </h2>
         {saved && (
-          <p className="text-xs text-emerald-700 font-medium flex items-center gap-1">
+          <p className="text-xs text-success font-medium flex items-center gap-1">
             <IconCheck className="w-3.5 h-3.5" />
             Guardado
           </p>
         )}
       </div>
-      <p className="text-sm text-navy-500">
+      <p className="text-sm text-muted-foreground">
         Estos valores se aplican en vivo (sin redeploy). Si cambiás algo y querés volver al default
         del .env, apretá "Restablecer".
       </p>
 
       {error ? (
-        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 text-rose-800 text-sm">
+        <Card className="bg-destructive/10 border-destructive/40 p-6 text-destructive text-sm">
           Error: {error}
-        </div>
+        </Card>
       ) : settings === null ? (
-        <div className="bg-white rounded-2xl border border-navy-200 p-8 text-center text-navy-400 text-sm">
-          Cargando configuración…
-        </div>
+        <Card className="p-8 text-center text-muted-foreground text-sm">Cargando configuración…</Card>
       ) : (
         <div className="space-y-3">
           {Object.entries(grouped).map(([group, items]) => (
-            <div key={group} className="bg-white rounded-2xl border border-navy-200 p-5 shadow-card">
-              <h3 className="text-sm font-semibold text-navy-700 uppercase tracking-wide mb-4">
+            <Card key={group} className="p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-foreground uppercase tracking-wide mb-4">
                 {GROUP_LABELS[group] || group}
               </h3>
               <div className="space-y-5">
@@ -104,7 +105,7 @@ export default function SettingsView() {
                   />
                 ))}
               </div>
-            </div>
+            </Card>
           ))}
         </div>
       )}
@@ -129,19 +130,15 @@ function SettingRow({
   const display = (v: number) => (isFloat ? Number(v).toFixed(2) : String(Number(v)));
 
   return (
-    <div className="border-b border-navy-100 last:border-0 pb-5 last:pb-0">
+    <div className="border-b border-border last:border-0 pb-5 last:pb-0">
       <div className="flex items-center justify-between mb-1">
-        <label className="text-sm font-medium text-navy-900" htmlFor={`set-${s.key}`}>
+        <label className="text-sm font-medium text-foreground flex items-center gap-2" htmlFor={`set-${s.key}`}>
           {s.label}
-          {s.modified && (
-            <span className="ml-2 text-[10px] uppercase tracking-wide bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
-              modificado
-            </span>
-          )}
+          {s.modified && <Badge variant="warning">modificado</Badge>}
         </label>
-        <span className="text-sm font-mono text-navy-700 num-tabular">{display(draftValue)}</span>
+        <span className="text-sm font-mono text-foreground num-tabular">{display(draftValue)}</span>
       </div>
-      <p className="text-xs text-navy-500 mb-2">{s.description}</p>
+      <p className="text-xs text-muted-foreground mb-2">{s.description}</p>
       <div className="flex items-center gap-3">
         <input
           id={`set-${s.key}`}
@@ -151,21 +148,18 @@ function SettingRow({
           step={s.step}
           value={draftValue}
           onChange={(e) => onDraft(Number(e.target.value))}
-          className="flex-1 accent-brand-600"
+          className="flex-1 accent-primary"
         />
-        <button
-          onClick={onSave}
-          className="text-xs bg-brand-600 hover:bg-brand-700 text-white font-medium px-3 py-1.5 rounded-md transition"
-        >
+        <Button size="sm" onClick={onSave}>
           Guardar
-        </button>
+        </Button>
         {s.modified && (
-          <button onClick={onReset} className="text-xs text-navy-500 hover:text-navy-700 underline">
+          <Button variant="link" size="sm" onClick={onReset} className="px-1">
             Restablecer
-          </button>
+          </Button>
         )}
       </div>
-      <p className="text-[11px] text-navy-400 mt-1">Default del .env: {display(s.default)}</p>
+      <p className="text-[11px] text-muted-foreground mt-1">Default del .env: {display(s.default)}</p>
     </div>
   );
 }

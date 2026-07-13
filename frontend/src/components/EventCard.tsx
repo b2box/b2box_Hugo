@@ -1,5 +1,8 @@
 import { useState } from "react";
 import Thumb from "./Thumb";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { TONES } from "../sections";
 import { fmtPrice, fmtTime, shortUrl } from "../lib/format";
 import {
@@ -51,41 +54,39 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
   }
 
   return (
-    <div
-      className={`audit-card bg-white rounded-2xl border border-navy-200 border-l-4 ${t.border} p-4 fade-in flex gap-4 shadow-card`}
-    >
+    <Card className={cn("border-l-4 p-4 animate-fade-in flex gap-4 shadow-sm", t.border)}>
       <Thumb imageUrl={p.image_url} alt={p.name} />
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`inline-block w-2 h-2 rounded-full ${t.dot}`}></span>
-              <span className="font-semibold text-navy-900">{e.title}</span>
+              <span className={cn("inline-block w-2 h-2 rounded-full", t.dot)}></span>
+              <span className="font-semibold text-foreground">{e.title}</span>
               {p.code && (
-                <span className={`text-xs font-mono ${t.badge} px-2 py-0.5 rounded`}>
+                <span className={cn("text-xs font-mono px-2 py-0.5 rounded", t.badge)}>
                   BX {p.code}
                 </span>
               )}
               {e.source && (
-                <span className="text-[10px] uppercase tracking-wide bg-navy-100 text-navy-600 px-1.5 py-0.5 rounded">
+                <span className="text-[10px] uppercase tracking-wide bg-muted text-muted-foreground px-1.5 py-0.5 rounded">
                   {e.source}
                 </span>
               )}
             </div>
-            <p className="text-sm text-navy-700 mt-1 truncate" title={p.name || ""}>
+            <p className="text-sm text-foreground mt-1 truncate" title={p.name || ""}>
               {p.name || `Producto #${p.id}`}
             </p>
-            <p className="text-xs text-navy-400 mt-0.5">
+            <p className="text-xs text-muted-foreground mt-0.5">
               ID: <span className="font-mono">{p.id}</span>
             </p>
             {p.source_url && (
-              <div className="text-xs mt-1 flex items-center gap-1.5 text-navy-500">
+              <div className="text-xs mt-1 flex items-center gap-1.5 text-muted-foreground">
                 <IconExternalLink className="w-3 h-3" />
                 <a
                   href={p.source_url}
                   target="_blank"
                   rel="noopener"
-                  className="truncate text-brand-600 hover:underline"
+                  className="truncate text-primary hover:underline"
                   title={p.source_url}
                 >
                   {shortUrl(p.source_url)}
@@ -93,35 +94,39 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
               </div>
             )}
           </div>
-          <p className="text-xs text-navy-400 shrink-0 whitespace-nowrap">{fmtTime(e.created_at)}</p>
+          <p className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
+            {fmtTime(e.created_at)}
+          </p>
         </div>
 
         {beforeStr && afterStr && (
           <div className="flex items-center gap-2 text-sm mt-2 num-tabular">
-            <span className="text-navy-500">{beforeStr}</span>
-            <IconArrowRight className="w-4 h-4 text-navy-400" />
-            <strong className="text-navy-900">{afterStr}</strong>
+            <span className="text-muted-foreground">{beforeStr}</span>
+            <IconArrowRight className="w-4 h-4 text-muted-foreground" />
+            <strong className="text-foreground">{afterStr}</strong>
           </div>
         )}
 
         {e.detail && (
-          <p className="text-xs text-navy-500 mt-2 leading-relaxed">{e.detail}</p>
+          <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{e.detail}</p>
         )}
 
         {r && r.id && (
-          <div className="text-xs text-navy-500 mt-2 flex items-center gap-1.5">
+          <div className="text-xs text-muted-foreground mt-2 flex items-center gap-1.5">
             <span>relacionado:</span>
             {r.code && (
-              <span className="font-mono bg-navy-100 px-1.5 py-0.5 rounded">{r.code}</span>
+              <span className="font-mono bg-muted px-1.5 py-0.5 rounded">{r.code}</span>
             )}
-            <span className="text-navy-700">{r.name || `#${r.id}`}</span>
+            <span className="text-foreground">{r.name || `#${r.id}`}</span>
           </div>
         )}
 
         {(canRetry || canConfirmDuplicate || canConfirmDisableBx || canDismiss || canViewHistory) && (
-          <div className="flex items-center gap-2 mt-3 pt-3 border-t border-navy-100 flex-wrap">
+          <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border flex-wrap">
             {canConfirmDuplicate && (
-              <button
+              <Button
+                variant="destructive"
+                size="sm"
                 onClick={() =>
                   run(
                     "dup",
@@ -131,14 +136,15 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
                 }
                 disabled={busy === "dup"}
                 title="Deshabilita el producto en Vendure (se puede revertir desde history)"
-                className="text-xs bg-rose-600 hover:bg-rose-700 text-white font-medium px-3 py-1.5 rounded-md flex items-center gap-1 transition disabled:opacity-50"
               >
                 <IconCheckCircle className="w-3 h-3" />
                 {busy === "dup" ? "Deshabilitando…" : "Confirmar duplicado"}
-              </button>
+              </Button>
             )}
             {canConfirmDisableBx && (
-              <button
+              <Button
+                variant="destructive"
+                size="sm"
                 onClick={() =>
                   run(
                     "bx",
@@ -148,33 +154,32 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
                 }
                 disabled={busy === "bx"}
                 title="Deshabilita este producto en Vendure por no tener imagen y nombre placeholder (BX…)"
-                className="text-xs bg-rose-600 hover:bg-rose-700 text-white font-medium px-3 py-1.5 rounded-md flex items-center gap-1 transition disabled:opacity-50"
               >
                 <IconCheckCircle className="w-3 h-3" />
                 {busy === "bx" ? "Deshabilitando…" : "Confirmar deshabilitar"}
-              </button>
+              </Button>
             )}
             {canRetry && (
-              <button
+              <Button
+                variant="default"
+                size="sm"
                 onClick={() => run("retry", null, () => actions.onRetryPaco(e.id))}
                 disabled={busy === "retry"}
-                className="text-xs bg-brand-600 hover:bg-brand-700 text-white font-medium px-3 py-1.5 rounded-md flex items-center gap-1 transition disabled:opacity-50"
               >
                 <IconRefresh className="w-3 h-3" />
                 {busy === "retry" ? "Reintentando…" : "Reintentar Paco"}
-              </button>
+              </Button>
             )}
             {canViewHistory && (
-              <button
-                onClick={() => actions.onViewHistory(p.id as string)}
-                className="text-xs bg-navy-100 hover:bg-navy-200 text-navy-700 font-medium px-3 py-1.5 rounded-md flex items-center gap-1 transition"
-              >
+              <Button variant="secondary" size="sm" onClick={() => actions.onViewHistory(p.id as string)}>
                 <IconClock className="w-3 h-3" />
                 Historial
-              </button>
+              </Button>
             )}
             {canDismiss && (
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() =>
                   run(
                     "dismiss",
@@ -183,15 +188,14 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
                   )
                 }
                 disabled={busy === "dismiss"}
-                className="text-xs bg-navy-100 hover:bg-navy-200 text-navy-700 font-medium px-3 py-1.5 rounded-md flex items-center gap-1 transition disabled:opacity-50"
               >
                 <IconX className="w-3 h-3" />
                 Descartar
-              </button>
+              </Button>
             )}
           </div>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

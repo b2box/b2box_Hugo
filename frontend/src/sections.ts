@@ -64,10 +64,10 @@ interface ToneStyle {
 }
 
 export const TONES: Record<Tone, ToneStyle> = {
-  warning: { border: "tone-warning", dot: "bg-amber-500", badge: "bg-amber-100 text-amber-800" },
-  danger: { border: "tone-danger", dot: "bg-rose-600", badge: "bg-rose-100 text-rose-800" },
-  info: { border: "tone-info", dot: "bg-brand-600", badge: "bg-brand-100 text-brand-800" },
-  muted: { border: "tone-muted", dot: "bg-navy-400", badge: "bg-navy-100 text-navy-700" },
+  warning: { border: "tone-warning", dot: "bg-warning", badge: "bg-warning/10 text-warning" },
+  danger: { border: "tone-danger", dot: "bg-destructive", badge: "bg-destructive/10 text-destructive" },
+  info: { border: "tone-info", dot: "bg-primary", badge: "bg-primary/10 text-primary" },
+  muted: { border: "tone-muted", dot: "bg-muted-foreground", badge: "bg-muted text-muted-foreground" },
 };
 
 export const PAGE_SIZE = 25;
