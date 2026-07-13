@@ -71,16 +71,22 @@ class Settings(BaseSettings):
     # ── Integración con Paco (cuando NO es duplicado, le reenviamos) ──
     # Luis / b2box-app  → Paco APP  (paco_url, /api/search/start, JSON).
     # Admin / b2box-pro → Paco PRO  (paco_pro_url, /api/tech/start, form + callback_ctx).
-    paco_url: str = Field(default="https://paco.b2box.app")
-    paco_api_key: str = ""
+    paco_url: str = Field(default="https://paco-app.b2box.app")
+    paco_api_key: str = ""  # X-API-Key: gate PACO_INGEST_API_KEY del endpoint (image_url).
+    # Auth máquina-a-máquina del middleware de Paco APP (PACO_SUPABASE_AUTH on):
+    # se manda como `Authorization: Bearer <token>`. Es el PACO_ADMIN_TOKEN de Paco APP.
+    paco_admin_token: str = ""
     paco_submit_path: str = "/api/search/start"
     paco_status_path: str = "/api/searches"  # se completa con /{id}
     paco_cf_client_id: str = ""
     paco_cf_client_secret: str = ""
     # Paco PRO = b2box_sourcing. Misma URL que usa el edge fn (PACO_PRO_URL).
-    # Vacío → cae a paco_url (útil en dev si PRO y APP son el mismo host).
+    # OBLIGATORIO para el flujo PRO — vacío → submit_pro FALLA (ya no cae a Paco APP).
     paco_pro_url: str = Field(default="", description="URL de Paco PRO (b2box_sourcing)")
     paco_pro_submit_path: str = "/api/tech/start"
+    # X-API-Key de b2box_sourcing (su PACO_API_KEY). b2box_sourcing NO usa Bearer:
+    # el bypass máquina es por X-API-Key. Es un secreto DISTINTO al de Paco APP.
+    paco_pro_api_key: str = ""
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

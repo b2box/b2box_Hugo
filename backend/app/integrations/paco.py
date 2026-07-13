@@ -40,6 +40,10 @@ class PacoSubmitResult:
 def _headers() -> dict[str, str]:
     s = get_settings()
     h: dict[str, str] = {"Content-Type": "application/json"}
+    # Middleware de Paco APP/PRO (PACO_SUPABASE_AUTH): auth máquina vía Bearer estático.
+    if s.paco_admin_token:
+        h["Authorization"] = f"Bearer {s.paco_admin_token}"
+    # Gate del endpoint (PACO_INGEST_API_KEY, solo image_url).
     if s.paco_api_key:
         h["X-API-Key"] = s.paco_api_key
     if s.paco_cf_client_id and s.paco_cf_client_secret:
@@ -94,14 +98,18 @@ async def submit_pro(
       - image_url + text_specs (specs libres del producto)
       - callback_ctx (JSON) → Paco escribe de vuelta al quotation_item vía paco-ingest
 
-    Destino = paco_pro_url (o paco_url si está vacío) + paco_pro_submit_path.
+    Destino = paco_pro_url + paco_pro_submit_path. NO cae a paco_url (Paco APP):
+    un job PRO (Requests) en la Paco equivocada es peor que un error visible.
     """
     if not image_url:
         raise PacoError("image_url vacío")
     s = get_settings()
-    base = (s.paco_pro_url or s.paco_url).rstrip("/")
+    base = (s.paco_pro_url or "").rstrip("/")
     if not base:
-        raise PacoError("PACO_PRO_URL/PACO_URL no configurado")
+        raise PacoError(
+            "PACO_PRO_URL no configurado — un job PRO (Requests) NO debe caer a Paco APP. "
+            "Seteá PACO_PRO_URL a la URL de b2box_sourcing (ej. https://paco-pro.b2box.pro)."
+        )
 
     url = f"{base}{s.paco_pro_submit_path}"
     form: dict[str, str] = {"text_specs": text_specs or "", "source": "hugo-pro"}
@@ -110,11 +118,14 @@ async def submit_pro(
     if callback_ctx:
         form["callback_ctx"] = json.dumps(callback_ctx)
 
-    headers = _headers()
-    # Paco PRO se expone por ngrok → sin este header ngrok devuelve una interstitial HTML.
-    headers["ngrok-skip-browser-warning"] = "true"
-    # FastAPI Form() acepta application/x-www-form-urlencoded (httpx `data=`).
-    headers.pop("Content-Type", None)
+    # b2box_sourcing autentica la máquina por X-API-Key (== su PACO_API_KEY);
+    # NO usa Bearer. Headers propios, distintos a los de Paco APP.
+    headers: dict[str, str] = {}
+    if s.paco_pro_api_key:
+        headers["X-API-Key"] = s.paco_pro_api_key
+    elif s.paco_api_key:
+        # Fallback dev si PRO y APP comparten key.
+        headers["X-API-Key"] = s.paco_api_key
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(url, data=form, headers=headers)
