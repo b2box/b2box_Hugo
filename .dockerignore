@@ -1,0 +1,52 @@
+# El contexto de build ahora es la raíz del repo (necesitamos frontend/ + backend/).
+# Este .dockerignore evita mandar basura pesada al daemon.
+
+# ─── Node / frontend ───────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+**/node_modules/
+
+# ─── Python / backend ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/tests/
+
+# DB local de desarrollo
+*.db
+*.sqlite
+*.sqlite3
+
+# Env (se inyecta en runtime, NUNCA debe entrar en la imagen)
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Build artifacts / infra
+dist/
+build/
+Dockerfile
+.dockerignore
+docker-compose*.yml

@@ -11,9 +11,11 @@
 
 services:
   hugo:
+    # Context = raíz del repo: el Dockerfile multi-stage necesita frontend/ y
+    # backend/ para compilar React y empaquetarlo junto al backend.
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     image: b2box/hugo:latest
     container_name: b2box-hugo
     restart: unless-stopped

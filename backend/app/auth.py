@@ -11,11 +11,12 @@ Diseño deliberadamente simple y sin dependencias nuevas:
   el criterio de HUGO_API_KEY. Loguea un warning al primer chequeo.
 
 Lo que NO requiere login (allowlist):
-- `/login`, `/logout`     → la propia pantalla de acceso
-- `/health`               → liveness probe (orquestadores/monitoreo)
-- `/static/*`             → assets de la UI (incluye la propia login.html)
-- `/verify`               → lo consume Luis con su X-API-Key (auth propia)
-- `/favicon.ico`          → ruido del browser
+- `/login`                     → pantalla de acceso (SPA de React)
+- `/api/login`, `/api/logout`  → endpoints de sesión
+- `/health`                    → liveness probe (orquestadores/monitoreo)
+- `/static/*`                  → assets del build de React (JS/CSS)
+- `/verify`                    → lo consume Luis con su X-API-Key (auth propia)
+- `/favicon.ico`               → ruido del browser
 """
 
 from __future__ import annotations
@@ -82,10 +83,11 @@ def record_successful_login(ip: str) -> None:
 
 # Prefijos que NO requieren sesión. El resto del sitio queda protegido.
 _PUBLIC_PREFIXES: tuple[str, ...] = (
-    "/login",
-    "/logout",
+    "/login",       # GET: pantalla de login (SPA React)
+    "/api/login",   # POST: valida credenciales y setea la cookie
+    "/api/logout",  # POST: borra la cookie
     "/health",
-    "/static/",
+    "/static/",     # assets del build de React (JS/CSS)
     "/verify",
     "/favicon.ico",
 )

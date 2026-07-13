@@ -1,0 +1,4 @@
+# El contenido de este directorio lo genera el build de React (Vite) en el
+# Dockerfile: `COPY --from=frontend-builder /fe/dist ./app/static`.
+# Para desarrollo local del backend sin build, corré el frontend con `npm run dev`
+# (Vite en :5173, con proxy al backend en :8000).

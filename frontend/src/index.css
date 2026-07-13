@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+
+body {
+  font-family: 'Fira Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+code, .font-mono {
+  font-family: 'Fira Code', ui-monospace, monospace;
+  font-feature-settings: 'tnum' on, 'lnum' on;
+}
+.num-tabular { font-variant-numeric: tabular-nums; }
+
+.pulse-dot { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+.fade-in { animation: fadeIn .22s ease-out; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }
+
+.thumb-fallback {
+  background:
+    linear-gradient(135deg, transparent 46%, #cbd5e1 46%, #cbd5e1 54%, transparent 54%) 0 0/8px 8px,
+    #f1f5f9;
+}
+
+.nav-item {
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+.nav-item.active {
+  background: #F0F9FF;
+  color: #075985;
+  border-left-color: #0369A1;
+}
+.nav-item.active .nav-icon { color: #0369A1; }
+
+.audit-card {
+  transition: box-shadow .18s ease, transform .18s ease;
+}
+.audit-card:hover { box-shadow: 0 4px 12px -2px rgba(15,23,42,.08), 0 2px 4px -2px rgba(15,23,42,.06); }
+
+/* Tone accents (left border) */
+.tone-warning { border-left-color:#F59E0B; }
+.tone-danger  { border-left-color:#E11D48; }
+.tone-info    { border-left-color:#0284C7; }
+.tone-muted   { border-left-color:#94A3B8; }
+
+button:focus-visible, a:focus-visible, [role="button"]:focus-visible, input:focus-visible {
+  outline: 2px solid #0369A1; outline-offset: 2px; border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

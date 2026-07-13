@@ -85,7 +85,8 @@ app = FastAPI(
 )
 
 # ─── Login del dashboard (cookie de sesión) ────────────────────────
-# El middleware protege todo salvo /login, /logout, /health, /static y /verify.
+# El middleware protege todo salvo /login, /api/login, /api/logout, /health,
+# /static y /verify.
 app.middleware("http")(auth.auth_middleware)
 
 
@@ -96,11 +97,15 @@ class LoginRequest(BaseModel):
 
 @app.get("/login", include_in_schema=False)
 async def login_page() -> FileResponse:
-    """Pantalla de login."""
-    return FileResponse(_STATIC_DIR / "login.html")
+    """Pantalla de login.
+
+    Servimos la misma SPA de React (index.html); el router del front detecta la
+    ruta /login y muestra el formulario de acceso.
+    """
+    return FileResponse(_STATIC_DIR / "index.html")
 
 
-@app.post("/login", include_in_schema=False)
+@app.post("/api/login", include_in_schema=False)
 async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     """Valida credenciales y, si son correctas, setea la cookie de sesión."""
     if not auth.login_enabled():
@@ -132,7 +137,7 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     return resp
 
 
-@app.post("/logout", include_in_schema=False)
+@app.post("/api/logout", include_in_schema=False)
 async def logout() -> JSONResponse:
     """Cierra la sesión borrando la cookie."""
     resp = JSONResponse({"ok": True})
@@ -148,7 +153,11 @@ app.include_router(router)
 
 @app.get("/", include_in_schema=False)
 async def dashboard() -> FileResponse:
-    """Sirve el dashboard amigable de Hugo en la raíz."""
+    """Sirve el dashboard (SPA de React) en la raíz.
+
+    El build de React (Vite) se copia a app/static/ en el Dockerfile. Los assets
+    (JS/CSS) se referencian bajo /static/ y se sirven vía el mount de más abajo.
+    """
     return FileResponse(_STATIC_DIR / "index.html")
 
 

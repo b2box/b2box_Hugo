@@ -1,11 +1,29 @@
 # ────────────────────────────────────────────────────────────────
 # Hugo — B2Box Catalog QC Agent
-# Multi-stage build: el stage `builder` compila las wheels (Pillow,
-# lxml, etc.) y el stage final solo lleva las wheels instaladas.
-# Imagen final ~150-200 MB en lugar de 600+.
+#
+# Imagen ÚNICA que empaqueta frontend (React/Vite) + backend (FastAPI).
+# El contexto de build es la RAÍZ del repo (necesitamos frontend/ y backend/).
+#
+# Stages:
+#   1. frontend-builder → compila el React a estáticos (dist/)
+#   2. builder          → compila las wheels de Python (Pillow, lxml, …)
+#   3. runtime          → imagen final: Python + deps + código + dist/ de React
 # ────────────────────────────────────────────────────────────────
 
-# ─── Stage 1: builder ───────────────────────────────────────────
+# ─── Stage 1: frontend-builder ──────────────────────────────────
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /fe
+
+# Instalamos deps primero (cache de capa mientras no cambie package.json)
+COPY frontend/package*.json ./
+RUN npm install
+
+# Código del front y build. Vite emite a /fe/dist con base '/static/'.
+COPY frontend/ ./
+RUN npm run build
+
+# ─── Stage 2: builder (Python wheels) ───────────────────────────
 FROM python:3.11-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -23,13 +41,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY pyproject.toml ./
-COPY app ./app
+COPY backend/pyproject.toml ./
+COPY backend/app ./app
 
 # Instalamos en un prefix aislado que después copiamos al stage final
 RUN pip install --prefix=/install .
 
-# ─── Stage 2: runtime ───────────────────────────────────────────
+# ─── Stage 3: runtime ───────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
@@ -50,9 +68,12 @@ RUN useradd --create-home --shell /bin/bash hugo
 # Copiamos las deps instaladas por el builder
 COPY --from=builder /install /usr/local
 
-# Código del agente (incluye app/static/ con el dashboard)
+# Código del agente (backend)
 WORKDIR /app
-COPY --chown=hugo:hugo app ./app
+COPY --chown=hugo:hugo backend/app ./app
+
+# Build de React → app/static/ (FastAPI lo sirve: '/' y '/static/*')
+COPY --from=frontend-builder --chown=hugo:hugo /fe/dist ./app/static
 
 # DATABASE_URL viene del .env (Postgres/Supabase en prod, SQLite en local).
 # Si no está definida, en config.py default es sqlite:///./hugo.db.
