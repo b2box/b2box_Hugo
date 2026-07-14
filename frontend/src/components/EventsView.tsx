@@ -1,5 +1,5 @@
 import EventCard, { EventActions } from "./EventCard";
-import { SECTION_ICON, IconLayers, IconRefresh } from "../icons";
+import { SECTION_ICON, IconLayers, IconRefresh, IconX } from "../icons";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PAGE_SIZE, SECTION_META } from "../sections";
@@ -15,6 +15,7 @@ interface EventsViewProps {
   error: string | null;
   onRefresh: () => void;
   onChangePage: (delta: number) => void;
+  onArchiveAll: () => void;
   actions: EventActions;
 }
 
@@ -28,6 +29,7 @@ export default function EventsView({
   error,
   onRefresh,
   onChangePage,
+  onArchiveAll,
   actions,
 }: EventsViewProps) {
   const meta = SECTION_META[section] ?? { desc: "" };
@@ -52,6 +54,16 @@ export default function EventsView({
             <IconRefresh className="w-3 h-3" />
             Refrescar
           </button>
+          {total > 0 && (
+            <button
+              onClick={onArchiveAll}
+              title="Archiva todos los eventos de esta sección (no borra nada en Vendure)"
+              className="hover:text-foreground flex items-center gap-1 transition-colors"
+            >
+              <IconX className="w-3 h-3" />
+              Archivar todos
+            </button>
+          )}
         </div>
       </div>
       <p className="text-sm text-muted-foreground mb-4">{meta.desc || "—"}</p>

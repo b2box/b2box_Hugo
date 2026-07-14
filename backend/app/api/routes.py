@@ -608,7 +608,14 @@ async def list_audit_log(
         count_q = count_q.where(AuditLog.action == action)
 
     total = session.exec(count_q).one() or 0
-    stmt = base.order_by(AuditLog.created_at.desc()).offset(skip).limit(limit)
+    # Desempate por id: sin esto, filas con el mismo created_at pueden salir en
+    # distinto orden entre requests → el listado se "reordena" y titila en cada
+    # auto-refresh. Con (created_at desc, id desc) el orden es determinístico.
+    stmt = (
+        base.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())  # type: ignore[union-attr]
+        .offset(skip)
+        .limit(limit)
+    )
     items = [_humanize(e) for e in session.exec(stmt)]
     return {
         "items": items,
@@ -650,6 +657,30 @@ async def reset_setting(key: str) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"key": key, "value": new_value, "ok": True, "reset": True}
+
+
+@router.post("/api/audit-log/dismiss-section")
+async def dismiss_section(
+    section: str | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Archiva (dismiss) en bloque todos los eventos NO descartados de una sección.
+
+    Sirve para que tabs como "Enviados a Paco" o "Llegan de Orders" no se
+    acumulen: una vez procesados, se archivan de una. No borra nada de Vendure
+    ni de la DB, solo los saca del listado (dismissed=True).
+    """
+    from sqlalchemy import update as sa_update
+
+    stmt = (
+        sa_update(AuditLog)
+        .where(AuditLog.dismissed.is_not(True))  # type: ignore[union-attr]
+        .values(dismissed=True, dismissed_at=utcnow())
+    )
+    stmt = _apply_section_filter(stmt, section)
+    result = session.execute(stmt)
+    session.commit()
+    return {"ok": True, "dismissed": int(result.rowcount or 0)}
 
 
 @router.post("/api/audit-log/{event_id}/dismiss")

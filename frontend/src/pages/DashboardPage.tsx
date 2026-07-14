@@ -11,6 +11,7 @@ import {
   confirmDisableBx as apiConfirmBx,
   confirmDuplicate as apiConfirmDup,
   dismissEvent as apiDismiss,
+  dismissSection as apiDismissSection,
   getEvents,
   getSections,
   getStatus,
@@ -112,6 +113,21 @@ export default function DashboardPage() {
     onViewHistory: (productId) => setHistoryProductId(productId),
   };
 
+  async function handleArchiveAll() {
+    if (
+      !window.confirm(
+        `¿Archivar todos los eventos de "${label}"? No borra nada en Vendure, solo los saca del listado.`,
+      )
+    )
+      return;
+    try {
+      await apiDismissSection(currentSection);
+      invalidateAll();
+    } catch (err) {
+      window.alert("No se pudo archivar: " + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
   async function handleLogout() {
     await apiLogout();
     window.location.href = "/login";
@@ -146,10 +162,11 @@ export default function DashboardPage() {
               events={events}
               total={total}
               page={page}
-              loading={eventsQ.isPending || (eventsQ.isFetching && eventsQ.isPlaceholderData)}
+              loading={eventsQ.isPending}
               error={eventsQ.error instanceof Error ? eventsQ.error.message : null}
               onRefresh={() => eventsQ.refetch()}
               onChangePage={changePage}
+              onArchiveAll={handleArchiveAll}
               actions={actions}
             />
           )}

@@ -37,7 +37,9 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
   const canRetry = (e.action === "paco_failed" || e.action === "verify_no_match") && !!p.image_url;
   const canConfirmDuplicate = e.action === "duplicate_flagged" && hasId;
   const canConfirmDisableBx = e.action === "bx_no_image_flagged" && hasId;
-  const canDismiss = e.action !== "verify_passed_to_paco";
+  // Todos los eventos se pueden archivar (incluye los ya enviados a Paco, para
+  // que "Enviados a Paco" / "Llegan de Orders" no se acumulen).
+  const canDismiss = true;
   const canViewHistory = hasId;
 
   async function run(key: ActionKey, confirmMsg: string | null, fn: () => Promise<void>) {

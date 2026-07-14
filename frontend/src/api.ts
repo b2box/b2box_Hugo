@@ -114,6 +114,11 @@ export async function dismissEvent(eventId: number): Promise<void> {
   await asJson(await apiFetch(`/api/audit-log/${eventId}/dismiss`, { method: "POST" }));
 }
 
+export async function dismissSection(section: string): Promise<{ dismissed: number }> {
+  const params = new URLSearchParams({ section });
+  return asJson(await apiFetch("/api/audit-log/dismiss-section?" + params, { method: "POST" }));
+}
+
 export async function getHistory(productId: string): Promise<HistoryResponse> {
   return asJson<HistoryResponse>(
     await apiFetch(`/api/products/${encodeURIComponent(productId)}/history`),

@@ -70,10 +70,10 @@ export default function Sidebar({
               key={key}
               onClick={() => onSelect(key)}
               className={cn(
-                "w-full text-left px-3 py-2 rounded-md flex items-center justify-between gap-2 text-sm border-l-2 border-transparent transition-colors",
+                "w-full text-left px-3 py-2 rounded-md flex items-center justify-between gap-2 text-sm border-l-2 transition-colors",
                 active
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground border-l-primary font-medium"
-                  : "text-sidebar-foreground hover:bg-muted",
+                  ? "bg-primary/10 text-primary border-l-primary font-semibold"
+                  : "text-sidebar-foreground border-transparent hover:bg-muted",
               )}
             >
               <span className="flex items-center gap-2.5 truncate">
