@@ -14,7 +14,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, func, select
 
@@ -154,7 +154,9 @@ SECTIONS: dict[str, dict[str, Any]] = {
     },
     "inbox_orders": {
         "label": "Llegan de Orders",
-        "source": "orders",
+        # 'orders' = botón HUGO de Forms (→ Paco APP). 'orders-pro' = Requests
+        # "Enviar a Paco" / "Re-buscar" (→ Paco PRO). Ambos son "pedidos" → misma tab.
+        "source": ["orders", "orders-pro"],
         "actions": None,
     },
     "duplicates": {
@@ -218,7 +220,11 @@ def _apply_section_filter(stmt, section_key: str | None):
         return stmt
     s = SECTIONS[section_key]
     if s["source"]:
-        stmt = stmt.where(AuditLog.source == s["source"])
+        src = s["source"]
+        if isinstance(src, (list, tuple, set)):
+            stmt = stmt.where(AuditLog.source.in_(list(src)))  # type: ignore[union-attr]
+        else:
+            stmt = stmt.where(AuditLog.source == src)
     if s["actions"]:
         stmt = stmt.where(AuditLog.action.in_(s["actions"]))  # type: ignore[attr-defined]
     if s.get("detail_contains"):
@@ -346,71 +352,31 @@ def _record_verify(
         log.exception("No se pudo registrar AuditLog del verify")
 
 
-async def _submit_paco_and_record(
-    payload: "VerifyRequest", verdict, is_pro: bool, valid_imgs: list[str],
-) -> None:
-    """Background: manda el producto nuevo a Paco (APP o PRO) y loguea el resultado.
-
-    Corre DESPUÉS de responderle a Luis/admin, así el HTTP de Paco (hasta ~3 min)
-    no bloquea la respuesta del /verify.
-    """
-    short_name = payload.name[:60] if payload.name else "(sin nombre)"
-    # Re-chequeo dentro del background task: si otra request encoló el mismo
-    # source_url mientras esta esperaba, no dupliquemos el job en Paco.
-    if _source_already_sent_to_paco(payload.source_url):
-        log.info("Paco submit omitido: %s ya fue enviado (idempotencia)", payload.source_url)
-        return
-    try:
-        if is_pro:
-            result = await paco_integration.submit_pro(
-                valid_imgs[0],
-                callback_ctx=payload.callback_ctx,
-                text_specs=payload.text_specs or "",
-            )
-        else:
-            result = await paco_integration.submit(valid_imgs[0])
-        _record_verify(
-            payload, verdict,
-            action="verify_passed_to_paco",
-            detail=(
-                f"'{short_name}' es nuevo. Hugo lo envió a Paco "
-                f"{'PRO' if is_pro else 'APP'} (search_id={result.search_id})"
-            ),
-        )
-    except paco_integration.PacoError as exc:
-        log.warning("Paco submit falló: %s", exc)
-        _record_verify(
-            payload, verdict, action="paco_failed",
-            detail=f"'{short_name}' es nuevo, pero Paco no respondió. Error: {str(exc)[:120]}",
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Paco submit error inesperado")
-        _record_verify(
-            payload, verdict, action="paco_failed",
-            detail=f"'{short_name}' es nuevo, pero Paco falló: {type(exc).__name__}: {exc}"[:120],
-        )
-
-
 @router.post(
     "/verify",
     response_model=VerifyResponse,
     dependencies=[Depends(verify_api_key)],
 )
-async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> VerifyResponse:
+async def verify(payload: VerifyRequest) -> VerifyResponse:
     """Llamado por Luis (app) o el admin (pro) cuando aprueban un producto viral.
 
     Hugo:
       1. Compara contra el catálogo Vendure (URL + imagen + texto).
       2. Si ES duplicado → devuelve la data completa del match (fotos, variantes,
          precio, código BX) para llenar el item sin gastar en Paco.
-      3. Si NO es duplicado → encola el envío a Paco (APP para Luis, PRO para
-         admin) en BACKGROUND y responde al toque con paco_status="queued".
+      3. Si NO es duplicado → lo reenvía a Paco (APP o PRO según `source`) y
+         devuelve el `paco_search_id` en la MISMA respuesta.
 
     Ruteo Paco: `source` decide el destino (ver _PRO_SOURCES). Luis manda
-    source="luis" → Paco APP. El admin manda "b2box-pro"/"admin" → Paco PRO.
+    source="luis" → Paco APP. El admin manda "b2box-pro"/"admin"/"orders-pro"
+    → Paco PRO.
 
-    El registro en AuditLog también se hace en background para no demorar la
-    respuesta. Cada verify queda trazado.
+    IMPORTANTE: el envío a Paco es SÍNCRONO a propósito — las integraciones
+    (send-to-hugo, convert-pro-to-paco) leen `paco_search_id` de esta respuesta
+    para guardarlo y evitar reenviar. No lo pases a background sin actualizarlas.
+
+    Idempotencia: si el mismo source_url ya se mandó a Paco y sigue vigente
+    (no descartado), NO reenvía — devuelve paco_status="already_sent".
     """
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
     try:
@@ -439,10 +405,10 @@ async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> V
 
     is_pro = _is_pro_source(payload.source)
     valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
+    short_name = payload.name[:60] if payload.name else "(sin nombre)"
 
     # ── DUPLICADO ──────────────────────────────────────────────────
     if verdict.is_duplicate and verdict.candidate_id:
-        # Data COMPLETA del match (sync: es lo que el admin necesita ya).
         try:
             response.matched_product = await VendureClient().get_product_full(
                 verdict.candidate_id
@@ -462,10 +428,8 @@ async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> V
                     "first_variant_price_cents": cached.first_variant_price_cents,
                     "variant_count": cached.variant_count,
                 }
-        short_name = payload.name[:60] if payload.name else "(sin nombre)"
-        background_tasks.add_task(
-            _record_verify, payload, verdict,
-            action="duplicate_flagged",
+        _record_verify(
+            payload, verdict, action="duplicate_flagged",
             detail=(
                 f"'{short_name}' ya existe en Vendure como producto "
                 f"#{verdict.candidate_id}. Match por {','.join(verdict.matched_by)} "
@@ -475,26 +439,51 @@ async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> V
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
-    # Idempotencia: si este source_url ya se mandó a Paco y sigue vigente (no
-    # descartado), NO reenviamos — evita duplicar el job en Paco cuando el
-    # producto todavía no entró a Vendure (por eso el dedup lo ve "nuevo").
-    already_sent = _source_already_sent_to_paco(payload.source_url)
-    if already_sent is not None:
+    # Idempotencia: si este source_url ya se mandó a Paco y sigue vigente, NO
+    # reenviamos (evita duplicar el job cuando el producto aún no entró a Vendure).
+    if _source_already_sent_to_paco(payload.source_url) is not None:
         response.paco_status = "already_sent"
         return response
 
-    if valid_imgs:
-        # Encolamos el envío a Paco: responde ya, Paco corre después.
-        response.paco_status = "queued"
-        background_tasks.add_task(
-            _submit_paco_and_record, payload, verdict, is_pro, valid_imgs,
-        )
-    else:
-        short_name = payload.name[:60] if payload.name else "(sin nombre)"
-        background_tasks.add_task(
-            _record_verify, payload, verdict,
-            action="verify_no_match",
+    if not valid_imgs:
+        _record_verify(
+            payload, verdict, action="verify_no_match",
             detail=f"'{short_name}' es nuevo, pero no llegó imagen para mandarle a Paco",
+        )
+        return response
+
+    # Reenvío SÍNCRONO a Paco (APP o PRO). Devolvemos el search_id en la respuesta.
+    try:
+        if is_pro:
+            result = await paco_integration.submit_pro(
+                valid_imgs[0],
+                callback_ctx=payload.callback_ctx,
+                text_specs=payload.text_specs or "",
+            )
+        else:
+            result = await paco_integration.submit(valid_imgs[0])
+        response.paco_search_id = result.search_id
+        response.paco_status = result.status
+        _record_verify(
+            payload, verdict, action="verify_passed_to_paco",
+            detail=(
+                f"'{short_name}' es nuevo. Hugo lo envió a Paco "
+                f"{'PRO' if is_pro else 'APP'} (search_id={result.search_id})"
+            ),
+        )
+    except paco_integration.PacoError as exc:
+        response.paco_error = str(exc)
+        log.warning("Paco submit falló: %s", exc)
+        _record_verify(
+            payload, verdict, action="paco_failed",
+            detail=f"'{short_name}' es nuevo, pero Paco no respondió. Error: {str(exc)[:120]}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        response.paco_error = f"{type(exc).__name__}: {exc}"
+        log.exception("Paco submit error inesperado")
+        _record_verify(
+            payload, verdict, action="paco_failed",
+            detail=f"'{short_name}' es nuevo, pero Paco falló: {type(exc).__name__}: {exc}"[:120],
         )
     return response
 
@@ -1164,7 +1153,11 @@ async def section_counts(
             stmt = _apply_section_filter(stmt, key)
             count = session.exec(stmt).one() or 0
         elif s["source"]:
-            count = source_counts.get(s["source"], 0)
+            src = s["source"]
+            if isinstance(src, (list, tuple, set)):
+                count = sum(source_counts.get(x, 0) for x in src)
+            else:
+                count = source_counts.get(src, 0)
         elif s["actions"]:
             count = sum(action_counts.get(a, 0) for a in s["actions"])
         else:  # "all"
