@@ -21,7 +21,9 @@ import {
 import { PAGE_SIZE } from "../sections";
 import type { AuditTarget } from "../types";
 
-const POLL_MS = 15_000;
+// Auto-refresh en background: React Query trae la data nueva y la MERGEA en el
+// lugar (los cards con la misma id no se re-montan), sin skeleton ni flash.
+const POLL_MS = 20_000;
 
 export default function DashboardPage() {
   const qc = useQueryClient();
@@ -30,7 +32,11 @@ export default function DashboardPage() {
   const [historyProductId, setHistoryProductId] = useState<string | null>(null);
 
   // ─── Queries (con polling que pausa al ocultar la pestaña) ───────
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: POLL_MS });
+  const statusQ = useQuery({
+    queryKey: ["status"],
+    queryFn: getStatus,
+    refetchInterval: POLL_MS,
+  });
   const sectionsQ = useQuery({
     queryKey: ["sections"],
     queryFn: getSections,
@@ -41,7 +47,7 @@ export default function DashboardPage() {
     queryFn: () => getEvents(currentSection, page * PAGE_SIZE, PAGE_SIZE),
     enabled: currentSection !== "settings",
     placeholderData: keepPreviousData, // paginación sin flicker
-    refetchInterval: page === 0 ? POLL_MS : false, // solo la 1ra página se auto-refresca
+    refetchInterval: POLL_MS, // auto-refresh silencioso en background
   });
 
   const status = statusQ.data ?? null;

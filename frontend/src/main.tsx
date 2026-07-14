@@ -13,8 +13,8 @@ import DashboardPage from "./pages/DashboardPage";
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 10_000,
-      refetchOnWindowFocus: true,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false, // no re-fetchear (ni flashear) al volver a la pestaña
       retry: 1,
     },
   },

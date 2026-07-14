@@ -54,7 +54,7 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
   }
 
   return (
-    <Card className={cn("border-l-4 p-4 animate-fade-in flex gap-4 shadow-sm", t.border)}>
+    <Card className={cn("border-l-4 p-4 flex gap-4 shadow-sm", t.border)}>
       <Thumb imageUrl={p.image_url} alt={p.name} />
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-3">
