@@ -290,6 +290,36 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "agent": "hugo"}
 
 
+def _source_already_sent_to_paco(source_url: str | None) -> str | None:
+    """¿Ya mandamos este producto (por source_url) a Paco y sigue vigente?
+
+    El dedup de /verify compara contra el catálogo de Vendure. Un producto que
+    todavía NO entró a Vendure (lo está enriqueciendo Paco) da "nuevo" en cada
+    verify → se re-enviaba a Paco N veces. Este chequeo corta eso: si ya hay un
+    `verify_passed_to_paco` NO descartado con el mismo source_url, no reenviamos.
+
+    Devuelve el product_id de la fila existente (o None si no hay).
+    """
+    if not source_url:
+        return None
+    try:
+        with Session(engine) as session:
+            row = session.exec(
+                select(AuditLog)
+                .where(
+                    AuditLog.product_source_url == source_url,
+                    AuditLog.action == "verify_passed_to_paco",
+                    AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+                )
+                .order_by(AuditLog.created_at.desc())
+                .limit(1)
+            ).first()
+            return row.product_id if row else None
+    except Exception:  # noqa: BLE001
+        log.exception("Chequeo de idempotencia Paco falló")
+        return None
+
+
 def _record_verify(
     payload: "VerifyRequest",
     verdict,
@@ -325,6 +355,11 @@ async def _submit_paco_and_record(
     no bloquea la respuesta del /verify.
     """
     short_name = payload.name[:60] if payload.name else "(sin nombre)"
+    # Re-chequeo dentro del background task: si otra request encoló el mismo
+    # source_url mientras esta esperaba, no dupliquemos el job en Paco.
+    if _source_already_sent_to_paco(payload.source_url):
+        log.info("Paco submit omitido: %s ya fue enviado (idempotencia)", payload.source_url)
+        return
     try:
         if is_pro:
             result = await paco_integration.submit_pro(
@@ -440,6 +475,14 @@ async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> V
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
+    # Idempotencia: si este source_url ya se mandó a Paco y sigue vigente (no
+    # descartado), NO reenviamos — evita duplicar el job en Paco cuando el
+    # producto todavía no entró a Vendure (por eso el dedup lo ve "nuevo").
+    already_sent = _source_already_sent_to_paco(payload.source_url)
+    if already_sent is not None:
+        response.paco_status = "already_sent"
+        return response
+
     if valid_imgs:
         # Encolamos el envío a Paco: responde ya, Paco corre después.
         response.paco_status = "queued"
