@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { getHistory } from "../api";
 import { TONES } from "../sections";
 import { fmtTime } from "../lib/format";
@@ -15,18 +15,12 @@ export default function HistoryModal({
   productId: string;
   onClose: () => void;
 }) {
-  const [data, setData] = useState<HistoryResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    getHistory(productId)
-      .then((d) => alive && setData(d))
-      .catch((err) => alive && setError(err instanceof Error ? err.message : "Error"));
-    return () => {
-      alive = false;
-    };
-  }, [productId]);
+  const historyQ = useQuery({
+    queryKey: ["history", productId],
+    queryFn: () => getHistory(productId),
+  });
+  const data = historyQ.data ?? null;
+  const error = historyQ.error instanceof Error ? historyQ.error.message : null;
 
   return (
     <div

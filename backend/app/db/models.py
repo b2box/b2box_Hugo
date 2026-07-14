@@ -60,6 +60,14 @@ class Setting(SQLModel, table=True):
 
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
+    # Índices compuestos para las queries del dashboard (que corren cada 15s):
+    #  - listado/counts por sección: filtran dismissed + action|source y ordenan
+    #    por created_at desc. Estos índices evitan full-scans en Supabase.
+    __table_args__ = (
+        Index("ix_audit_dismissed_action_time", "dismissed", "action", "created_at"),
+        Index("ix_audit_dismissed_source_time", "dismissed", "source", "created_at"),
+        Index("ix_audit_product_created", "product_id", "created_at"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     action: str = Field(index=True, description=str(ActionType))

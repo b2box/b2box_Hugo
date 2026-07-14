@@ -26,18 +26,8 @@ _lock = asyncio.Lock()
 
 
 async def _fetch_all(client: VendureClient) -> list[VendureProduct]:
-    out: list[VendureProduct] = []
-    skip = 0
-    page_size = VendureClient.DEFAULT_PAGE_SIZE
-    while True:
-        page = await client.list_products(skip=skip, take=page_size)
-        if not page:
-            break
-        out.extend(page)
-        if len(page) < page_size:
-            break
-        skip += page_size
-    return out
+    # Páginas de 100 en paralelo (ver VendureClient.fetch_all_products).
+    return await client.fetch_all_products(with_variants=False)
 
 
 def invalidate() -> None:

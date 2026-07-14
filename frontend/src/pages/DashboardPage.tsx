@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import Header from "../components/Header";
 import Sidebar, { AuditFeedback } from "../components/Sidebar";
 import MetricsRow from "../components/MetricsRow";
@@ -18,84 +19,52 @@ import {
   runAudit as apiRunAudit,
 } from "../api";
 import { PAGE_SIZE } from "../sections";
-import type { AuditEvent, AuditTarget, SectionsResponse, StatusResponse } from "../types";
+import type { AuditTarget } from "../types";
+
+const POLL_MS = 15_000;
 
 export default function DashboardPage() {
-  const [sections, setSections] = useState<SectionsResponse>({});
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [connected, setConnected] = useState<boolean | null>(null);
-
+  const qc = useQueryClient();
   const [currentSection, setCurrentSection] = useState("inbox_luis");
   const [page, setPage] = useState(0);
-  const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [total, setTotal] = useState(0);
-  const [eventsLoading, setEventsLoading] = useState(true);
-  const [eventsError, setEventsError] = useState<string | null>(null);
-
   const [historyProductId, setHistoryProductId] = useState<string | null>(null);
 
-  // Refs para que el setInterval lea siempre el valor actual sin recrearse.
-  const sectionRef = useRef(currentSection);
-  const pageRef = useRef(page);
-  sectionRef.current = currentSection;
-  pageRef.current = page;
+  // ─── Queries (con polling que pausa al ocultar la pestaña) ───────
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: POLL_MS });
+  const sectionsQ = useQuery({
+    queryKey: ["sections"],
+    queryFn: getSections,
+    refetchInterval: POLL_MS,
+  });
+  const eventsQ = useQuery({
+    queryKey: ["events", currentSection, page],
+    queryFn: () => getEvents(currentSection, page * PAGE_SIZE, PAGE_SIZE),
+    enabled: currentSection !== "settings",
+    placeholderData: keepPreviousData, // paginación sin flicker
+    refetchInterval: page === 0 ? POLL_MS : false, // solo la 1ra página se auto-refresca
+  });
 
-  const loadSections = useCallback(async () => {
-    try {
-      setSections(await getSections());
-    } catch {
-      /* el badge de salud ya refleja la desconexión */
-    }
-  }, []);
+  const status = statusQ.data ?? null;
+  const connected = statusQ.isError ? false : statusQ.isSuccess ? true : null;
+  const sections = sectionsQ.data ?? {};
+  const events = eventsQ.data?.items ?? [];
+  const total = eventsQ.data?.total ?? 0;
 
-  const loadStatus = useCallback(async () => {
-    try {
-      setStatus(await getStatus());
-      setConnected(true);
-    } catch {
-      setConnected(false);
-    }
-  }, []);
-
-  const loadEvents = useCallback(async (section: string, pg: number) => {
-    if (section === "settings") return;
-    setEventsLoading(true);
-    setEventsError(null);
-    try {
-      const d = await getEvents(section, pg * PAGE_SIZE, PAGE_SIZE);
-      setEvents(d.items);
-      setTotal(d.total);
-    } catch (err) {
-      setEventsError(err instanceof Error ? err.message : "Error");
-    } finally {
-      setEventsLoading(false);
-    }
-  }, []);
-
-  // Init + polling cada 15s.
-  useEffect(() => {
-    loadSections();
-    loadStatus();
-    loadEvents("inbox_luis", 0);
-    const id = setInterval(() => {
-      loadStatus();
-      loadSections();
-      if (pageRef.current === 0) loadEvents(sectionRef.current, 0);
-    }, 15000);
-    return () => clearInterval(id);
-  }, [loadSections, loadStatus, loadEvents]);
+  const invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ["events"] });
+    qc.invalidateQueries({ queryKey: ["sections"] });
+    qc.invalidateQueries({ queryKey: ["status"] });
+  };
 
   function selectSection(key: string) {
     setCurrentSection(key);
     setPage(0);
-    if (key !== "settings") loadEvents(key, 0);
   }
 
   function changePage(delta: number) {
     const next = page + delta;
     if (next < 0 || next * PAGE_SIZE >= total) return;
     setPage(next);
-    loadEvents(currentSection, next);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -106,50 +75,33 @@ export default function DashboardPage() {
       return { kind: "busy", message: data.detail };
     }
     if (!r.ok) return { kind: "error", message: r.statusText };
-    // Refrescos escalonados: la auditoría corre async en el backend.
-    [3, 10, 30].forEach((s) =>
-      setTimeout(() => {
-        loadStatus();
-        loadSections();
-        loadEvents(sectionRef.current, pageRef.current);
-      }, s * 1000),
-    );
+    // La auditoría corre async en el backend → refrescamos escalonado.
+    [3, 10, 30].forEach((s) => setTimeout(invalidateAll, s * 1000));
     return { kind: "ok", message: "Auditoría disparada" };
   }
-
-  // Tras una acción que resuelve un evento: lo sacamos del listado y refrescamos
-  // contadores/estado.
-  const removeAndRefresh = useCallback(
-    (id: number) => {
-      setEvents((prev) => prev.filter((e) => e.id !== id));
-      loadSections();
-      loadStatus();
-    },
-    [loadSections, loadStatus],
-  );
 
   const actions: EventActions = {
     onRetryPaco: async (id) => {
       await apiRetry(id);
-      removeAndRefresh(id);
+      invalidateAll();
     },
     onConfirmDuplicate: async (id) => {
       const res = await apiConfirmDup(id);
       if (res.action === "no-op") {
         window.alert("El producto ya estaba deshabilitado en Vendure. Lo descartamos del listado.");
       }
-      removeAndRefresh(id);
+      invalidateAll();
     },
     onConfirmDisableBx: async (id) => {
       const res = await apiConfirmBx(id);
       if (res.action === "no-op") {
         window.alert("El producto ya estaba deshabilitado en Vendure. Lo descartamos del listado.");
       }
-      removeAndRefresh(id);
+      invalidateAll();
     },
     onDismiss: async (id) => {
       await apiDismiss(id);
-      removeAndRefresh(id);
+      invalidateAll();
     },
     onViewHistory: (productId) => setHistoryProductId(productId),
   };
@@ -188,9 +140,9 @@ export default function DashboardPage() {
               events={events}
               total={total}
               page={page}
-              loading={eventsLoading}
-              error={eventsError}
-              onRefresh={() => loadEvents(currentSection, page)}
+              loading={eventsQ.isPending || (eventsQ.isFetching && eventsQ.isPlaceholderData)}
+              error={eventsQ.error instanceof Error ? eventsQ.error.message : null}
+              onRefresh={() => eventsQ.refetch()}
               onChangePage={changePage}
               actions={actions}
             />

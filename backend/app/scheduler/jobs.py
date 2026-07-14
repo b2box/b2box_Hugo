@@ -30,7 +30,7 @@ from app.clock import utcnow
 from app.config import get_settings
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine
-from app.dedup.orchestrator import CandidateInput, find_duplicate_in
+from app.dedup.orchestrator import find_duplicate_pairs
 from app.notifier.dispatcher import notify, notify_digest
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
@@ -55,9 +55,12 @@ PARALLEL_OTAPI = 10
 
 
 async def _iter_product_pages(
-    client: VendureClient, page_size: int = 25,
+    client: VendureClient, page_size: int = 100,
 ) -> AsyncIterator[list[VendureProduct]]:
-    """Itera por páginas de productos. Hace streaming: yield apenas llega cada página."""
+    """Itera por páginas de productos. Hace streaming: yield apenas llega cada página.
+
+    Páginas de 100 (antes 25) → ~4x menos round-trips a Vendure.
+    """
     skip = 0
     while True:
         page = await client.list_products(skip=skip, take=page_size)
@@ -70,11 +73,11 @@ async def _iter_product_pages(
 
 
 async def _flatten_products(client: VendureClient) -> list[VendureProduct]:
-    """Para casos donde necesitamos TODO el catálogo en memoria (ej. duplicados)."""
-    out: list[VendureProduct] = []
-    async for page in _iter_product_pages(client):
-        out.extend(page)
-    return out
+    """Para casos donde necesitamos TODO el catálogo en memoria (ej. duplicados).
+
+    Trae todas las páginas en paralelo (ver VendureClient.fetch_all_products).
+    """
+    return await client.fetch_all_products(with_variants=False)
 
 
 def _audit_already_logged(
@@ -113,61 +116,49 @@ async def audit_duplicates() -> None:
         products = await _flatten_products(client)
         log.info("Catálogo: %d productos a comparar", len(products))
 
+        try:
+            pairs = await find_duplicate_pairs(products)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("find_duplicate_pairs falló: %s", exc)
+            return
+
+        flagged = 0
         with Session(engine) as session:
-            for i, prod in enumerate(products):
-                if not prod.enabled:
-                    continue
-                try:
-                    others = [p for j, p in enumerate(products) if j != i and p.enabled]
-                    verdict = await find_duplicate_in(
-                        CandidateInput(
-                            name=prod.name,
-                            description=prod.description,
-                            source_url=prod.source_url,
-                            image_urls=prod.image_urls,
-                        ),
-                        others,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("dedup falló para %s: %s", prod.id, exc)
-                    continue
-                if not (verdict.is_duplicate and verdict.candidate_id):
-                    continue
-                keep, drop = sorted([prod.id, verdict.candidate_id])
-                if drop != prod.id:
-                    continue  # el otro producto será visto en su propia iteración
+            for pair in pairs:
+                drop, keep, verdict = pair.drop, pair.keep, pair.verdict
                 # Idempotencia: si ya flagueamos este par antes (dismissed o no),
                 # no creamos una fila nueva. Sin esto el scheduler infla la tabla.
-                if _audit_already_logged(session, "duplicate_flagged", product_id=drop, related_product_id=keep):
+                if _audit_already_logged(
+                    session, "duplicate_flagged", product_id=drop.id, related_product_id=keep.id
+                ):
                     continue
-                # Buscar el "kept" en la lista para denormalizar sus datos también
-                keep_prod = next((p for p in products if p.id == keep), None)
                 # MODO SOLO-FLAGEAR: NO deshabilitamos en Vendure, solo logueamos.
                 # El usuario revisa la lista y decide manualmente cuáles deshabilitar.
-                # Guardamos los scores detallados para que pueda analizar por qué disparó.
                 session.add(AuditLog(
                     action="duplicate_flagged",
                     source="audit",
-                    product_id=drop,
-                    related_product_id=keep,
+                    product_id=drop.id,
+                    related_product_id=keep.id,
                     confidence=verdict.confidence,
                     detail=(
-                        f"Posible duplicado de #{keep} por {','.join(verdict.matched_by)} "
+                        f"Posible duplicado de #{keep.id} por {','.join(verdict.matched_by)} "
                         f"(confianza {verdict.confidence:.0%}). Revisalo manualmente."
                     ),
                     after=json.dumps({
                         "per_strategy_scores": verdict.per_strategy_scores,
                         "matched_by": verdict.matched_by,
                     }),
-                    product_name=prod.name,
-                    product_code=prod.product_code,
-                    product_image_url=prod.featured_image_url,
-                    product_source_url=prod.source_url,
-                    related_product_name=keep_prod.name if keep_prod else None,
-                    related_product_code=keep_prod.product_code if keep_prod else None,
+                    product_name=drop.name,
+                    product_code=drop.product_code,
+                    product_image_url=drop.featured_image_url,
+                    product_source_url=drop.source_url,
+                    related_product_name=keep.name,
+                    related_product_code=keep.product_code,
                 ))
                 session.commit()
-        log.info("audit_duplicates terminado")
+                flagged += 1
+        log.info("audit_duplicates terminado: %d pares flagueados de %d candidatos",
+                 flagged, len(pairs))
 
 
 # ─── Job 2: precios fuente (streaming + paralelo) ─────────────────
@@ -385,7 +376,7 @@ async def audit_catalog_quality() -> None:
 
 
 async def _iter_product_pages_with_variants(
-    client: VendureClient, page_size: int = 25,
+    client: VendureClient, page_size: int = 100,
 ) -> AsyncIterator[list[VendureProduct]]:
     """Igual que _iter_product_pages pero trae variantes con nombre/SKU."""
     skip = 0

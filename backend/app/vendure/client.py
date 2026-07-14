@@ -181,12 +181,21 @@ class VendureClient:
 
     # ── Lectura ────────────────────────────────────────────────
 
-    async def list_products(
-        self,
-        skip: int = 0,
-        take: int = DEFAULT_PAGE_SIZE,
-    ) -> list[VendureProduct]:
-        query = gql(
+    # Tamaño de página para lecturas masivas del catálogo. 100 baja los
+    # round-trips ~4x vs 25 (1494 productos: ~15 páginas en vez de ~60).
+    BULK_PAGE_SIZE = 100
+    # Cuántas páginas pedir a Vendure en paralelo al traer todo el catálogo.
+    FETCH_CONCURRENCY = 6
+
+    def _products_query(self, with_variants: bool):
+        """Query de listado. Con variantes trae id/name/sku de cada variante;
+        sin variantes trae solo la 1ra (para precio) — más liviano."""
+        variant_block = (
+            "variantList(options: { take: 100 }) { items { id name sku priceWithTax } totalItems }"
+            if with_variants
+            else "variantList(options: { take: 1 }) { items { priceWithTax } totalItems }"
+        )
+        return gql(
             f"""
             query Products($skip: Int!, $take: Int!) {{
               products(options: {{ skip: $skip, take: $take }}) {{
@@ -198,68 +207,78 @@ class VendureClient:
                   enabled
                   customFields {{ {self._source_field} b2boxProductCode }}
                   featuredAsset {{ source preview }}
-                  variantList(options: {{ take: 1 }}) {{
-                    items {{ priceWithTax }}
-                    totalItems
-                  }}
+                  {variant_block}
                 }}
                 totalItems
               }}
             }}
             """
         )
+
+    def _map_page(self, raw_items: list[dict[str, Any]], with_variants: bool) -> list[VendureProduct]:
+        out: list[VendureProduct] = []
+        for raw in raw_items:
+            prod = self._map_product(raw)
+            if with_variants:
+                variant_items = (raw.get("variantList") or {}).get("items") or []
+                prod.variants = [
+                    VendureVariant(id=str(v["id"]), name=v.get("name", ""), sku=v.get("sku", ""))
+                    for v in variant_items
+                ]
+            out.append(prod)
+        return out
+
+    async def _fetch_page(
+        self, skip: int, take: int, with_variants: bool,
+    ) -> tuple[list[VendureProduct], int]:
+        """Trae una página y devuelve (productos, totalItems)."""
         data = await self._execute_with_retry(
-            query, {"skip": skip, "take": take}, what=f"list_products(skip={skip})"
+            self._products_query(with_variants),
+            {"skip": skip, "take": take},
+            what=f"products(skip={skip}, take={take}, variants={with_variants})",
         )
-        return [self._map_product(p) for p in (data.get("products", {}).get("items") or [])]
+        block = data.get("products", {}) or {}
+        items = self._map_page(block.get("items") or [], with_variants)
+        total = int(block.get("totalItems") or len(items))
+        return items, total
+
+    async def list_products(
+        self, skip: int = 0, take: int = DEFAULT_PAGE_SIZE,
+    ) -> list[VendureProduct]:
+        items, _ = await self._fetch_page(skip, take, with_variants=False)
+        return items
 
     async def list_products_with_variants(
-        self,
-        skip: int = 0,
-        take: int = DEFAULT_PAGE_SIZE,
+        self, skip: int = 0, take: int = DEFAULT_PAGE_SIZE,
     ) -> list[VendureProduct]:
         """Como list_products pero trae TODAS las variantes con nombre y SKU."""
-        query = gql(
-            f"""
-            query ProductsWithVariants($skip: Int!, $take: Int!) {{
-              products(options: {{ skip: $skip, take: $take }}) {{
-                items {{
-                  id
-                  name
-                  slug
-                  description
-                  enabled
-                  customFields {{ {self._source_field} b2boxProductCode }}
-                  featuredAsset {{ source preview }}
-                  variantList(options: {{ take: 100 }}) {{
-                    items {{ id name sku priceWithTax }}
-                    totalItems
-                  }}
-                }}
-                totalItems
-              }}
-            }}
-            """
-        )
-        data = await self._execute_with_retry(
-            query, {"skip": skip, "take": take}, what=f"list_products_with_variants(skip={skip})"
-        )
-        products = []
-        for raw in data.get("products", {}).get("items") or []:
-            prod = self._map_product(raw)
-            # Rellenar variantes
-            variant_list = raw.get("variantList") or {}
-            variant_items = variant_list.get("items") or []
-            prod.variants = [
-                VendureVariant(
-                    id=str(v["id"]),
-                    name=v.get("name", ""),
-                    sku=v.get("sku", ""),
-                )
-                for v in variant_items
-            ]
-            products.append(prod)
-        return products
+        items, _ = await self._fetch_page(skip, take, with_variants=True)
+        return items
+
+    async def fetch_all_products(
+        self, with_variants: bool = False, page_size: int | None = None,
+    ) -> list[VendureProduct]:
+        """Trae TODO el catálogo. La 1ra página da totalItems; el resto se piden
+        en paralelo (semáforo FETCH_CONCURRENCY). Mucho más rápido que iterar
+        secuencialmente página por página."""
+        take = page_size or self.BULK_PAGE_SIZE
+        first, total = await self._fetch_page(0, take, with_variants)
+        if len(first) >= total or len(first) < take:
+            return first
+
+        out: list[VendureProduct | None] = list(first)
+        skips = list(range(take, total, take))
+        sem = asyncio.Semaphore(self.FETCH_CONCURRENCY)
+
+        async def _one(skip: int) -> list[VendureProduct]:
+            async with sem:
+                items, _ = await self._fetch_page(skip, take, with_variants)
+                return items
+
+        pages = await asyncio.gather(*(_one(s) for s in skips))
+        for page in pages:
+            out.extend(page)
+        return [p for p in out if p is not None]
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
         query = gql(

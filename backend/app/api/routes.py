@@ -14,7 +14,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, func, select
 
@@ -290,122 +290,17 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "agent": "hugo"}
 
 
-@router.post(
-    "/verify",
-    response_model=VerifyResponse,
-    dependencies=[Depends(verify_api_key)],
-)
-async def verify(payload: VerifyRequest) -> VerifyResponse:
-    """Llamado por Luis cuando alguien pone 👍 en un producto viral.
-
-    Hugo:
-      1. Compara contra Vendure (URL + imagen + texto).
-      2. Si NO es duplicado → reenvía la imagen a Paco (similarity search).
-      3. Devuelve a Luis el veredicto + el search_id de Paco (si aplica).
-
-    Auditoría: cada verify queda registrado en AuditLog para trazabilidad.
-    """
-    # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify,
-    # y sin el viejo tope de 500 que perdía duplicados en catálogos grandes.
+def _record_verify(
+    payload: "VerifyRequest",
+    verdict,
+    *,
+    action: str,
+    detail: str,
+) -> None:
+    """Escribe la fila de AuditLog de un verify. Sync (corre en background task)."""
     try:
-        existing = await vendure_catalog.get_catalog()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
-        raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
-    verdict = await find_duplicate_in(
-        CandidateInput(
-            name=payload.name,
-            description=payload.description,
-            source_url=payload.source_url,
-            image_urls=payload.image_urls,
-        ),
-        existing,
-    )
-
-    response = VerifyResponse(
-        is_duplicate=verdict.is_duplicate,
-        confidence=verdict.confidence,
-        matched_by=list(verdict.matched_by),
-        per_strategy_scores={k: v for k, v in verdict.per_strategy_scores.items()},
-        candidate_id=verdict.candidate_id,
-    )
-
-    is_pro = _is_pro_source(payload.source)
-
-    if verdict.is_duplicate and verdict.candidate_id:
-        # DUPLICADO → traer la data COMPLETA del producto del catálogo (fotos,
-        # variantes, precio, código BX) para que el admin llene el item sin Paco.
-        try:
-            response.matched_product = await VendureClient().get_product_full(
-                verdict.candidate_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("get_product_full(%s) falló: %s", verdict.candidate_id, exc)
-            # Fallback: el mínimo que ya está en el catálogo cacheado.
-            cached = next((p for p in existing if p.id == verdict.candidate_id), None)
-            if cached is not None:
-                response.matched_product = {
-                    "id": cached.id,
-                    "name": cached.name,
-                    "description": cached.description,
-                    "source_url": cached.source_url,
-                    "product_code": cached.product_code,
-                    "featured_image_url": cached.featured_image_url,
-                    "image_urls": cached.image_urls,
-                    "first_variant_price_cents": cached.first_variant_price_cents,
-                    "variant_count": cached.variant_count,
-                }
-
-    # Si NO es duplicado y tenemos imagen, le pasamos a Paco (APP o PRO según origen).
-    if not verdict.is_duplicate and payload.image_urls:
-        try:
-            if is_pro:
-                result = await paco_integration.submit_pro(
-                    payload.image_urls[0],
-                    callback_ctx=payload.callback_ctx,
-                    text_specs=payload.text_specs or "",
-                )
-            else:
-                result = await paco_integration.submit(payload.image_urls[0])
-            response.paco_search_id = result.search_id
-            response.paco_status = result.status
-        except paco_integration.PacoError as exc:
-            response.paco_error = str(exc)
-            log.warning("Paco submit falló: %s", exc)
-        except Exception as exc:  # noqa: BLE001
-            response.paco_error = f"{type(exc).__name__}: {exc}"
-            log.exception("Paco submit error inesperado")
-
-    # Registrar la verificación en AuditLog
-    try:
+        valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
         with Session(engine) as session:
-            short_name = payload.name[:60] if payload.name else "(sin nombre)"
-            if verdict.is_duplicate:
-                action = "duplicate_flagged"
-                detail = (
-                    f"'{short_name}' ya existe en Vendure como producto "
-                    f"#{verdict.candidate_id}. Match por {','.join(verdict.matched_by)} "
-                    f"(confianza {verdict.confidence:.0%})"
-                )
-            elif response.paco_search_id:
-                action = "verify_passed_to_paco"
-                detail = (
-                    f"'{short_name}' es nuevo. Hugo lo envió a Paco "
-                    f"(search_id={response.paco_search_id})"
-                )
-            elif response.paco_error:
-                action = "paco_failed"
-                detail = (
-                    f"'{short_name}' es nuevo, pero Paco no respondió. "
-                    f"Error: {response.paco_error[:120]}"
-                )
-            else:
-                action = "verify_no_match"
-                detail = (
-                    f"'{short_name}' es nuevo, pero no llegó imagen para mandarle a Paco"
-                )
-            # Filtrar imagenes vacías que pueda mandar Luis (image_urls=[""] etc.)
-            valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
             session.add(AuditLog(
                 action=action,
                 source=payload.source or "luis",
@@ -420,6 +315,144 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     except Exception:  # noqa: BLE001
         log.exception("No se pudo registrar AuditLog del verify")
 
+
+async def _submit_paco_and_record(
+    payload: "VerifyRequest", verdict, is_pro: bool, valid_imgs: list[str],
+) -> None:
+    """Background: manda el producto nuevo a Paco (APP o PRO) y loguea el resultado.
+
+    Corre DESPUÉS de responderle a Luis/admin, así el HTTP de Paco (hasta ~3 min)
+    no bloquea la respuesta del /verify.
+    """
+    short_name = payload.name[:60] if payload.name else "(sin nombre)"
+    try:
+        if is_pro:
+            result = await paco_integration.submit_pro(
+                valid_imgs[0],
+                callback_ctx=payload.callback_ctx,
+                text_specs=payload.text_specs or "",
+            )
+        else:
+            result = await paco_integration.submit(valid_imgs[0])
+        _record_verify(
+            payload, verdict,
+            action="verify_passed_to_paco",
+            detail=(
+                f"'{short_name}' es nuevo. Hugo lo envió a Paco "
+                f"{'PRO' if is_pro else 'APP'} (search_id={result.search_id})"
+            ),
+        )
+    except paco_integration.PacoError as exc:
+        log.warning("Paco submit falló: %s", exc)
+        _record_verify(
+            payload, verdict, action="paco_failed",
+            detail=f"'{short_name}' es nuevo, pero Paco no respondió. Error: {str(exc)[:120]}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Paco submit error inesperado")
+        _record_verify(
+            payload, verdict, action="paco_failed",
+            detail=f"'{short_name}' es nuevo, pero Paco falló: {type(exc).__name__}: {exc}"[:120],
+        )
+
+
+@router.post(
+    "/verify",
+    response_model=VerifyResponse,
+    dependencies=[Depends(verify_api_key)],
+)
+async def verify(payload: VerifyRequest, background_tasks: BackgroundTasks) -> VerifyResponse:
+    """Llamado por Luis (app) o el admin (pro) cuando aprueban un producto viral.
+
+    Hugo:
+      1. Compara contra el catálogo Vendure (URL + imagen + texto).
+      2. Si ES duplicado → devuelve la data completa del match (fotos, variantes,
+         precio, código BX) para llenar el item sin gastar en Paco.
+      3. Si NO es duplicado → encola el envío a Paco (APP para Luis, PRO para
+         admin) en BACKGROUND y responde al toque con paco_status="queued".
+
+    Ruteo Paco: `source` decide el destino (ver _PRO_SOURCES). Luis manda
+    source="luis" → Paco APP. El admin manda "b2box-pro"/"admin" → Paco PRO.
+
+    El registro en AuditLog también se hace en background para no demorar la
+    respuesta. Cada verify queda trazado.
+    """
+    # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
+    try:
+        existing = await vendure_catalog.get_catalog()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
+        raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
+
+    verdict = await find_duplicate_in(
+        CandidateInput(
+            name=payload.name,
+            description=payload.description,
+            source_url=payload.source_url,
+            image_urls=payload.image_urls,
+        ),
+        existing,
+    )
+
+    response = VerifyResponse(
+        is_duplicate=verdict.is_duplicate,
+        confidence=verdict.confidence,
+        matched_by=list(verdict.matched_by),
+        per_strategy_scores=dict(verdict.per_strategy_scores),
+        candidate_id=verdict.candidate_id,
+    )
+
+    is_pro = _is_pro_source(payload.source)
+    valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
+
+    # ── DUPLICADO ──────────────────────────────────────────────────
+    if verdict.is_duplicate and verdict.candidate_id:
+        # Data COMPLETA del match (sync: es lo que el admin necesita ya).
+        try:
+            response.matched_product = await VendureClient().get_product_full(
+                verdict.candidate_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_product_full(%s) falló: %s", verdict.candidate_id, exc)
+            cached = next((p for p in existing if p.id == verdict.candidate_id), None)
+            if cached is not None:
+                response.matched_product = {
+                    "id": cached.id,
+                    "name": cached.name,
+                    "description": cached.description,
+                    "source_url": cached.source_url,
+                    "product_code": cached.product_code,
+                    "featured_image_url": cached.featured_image_url,
+                    "image_urls": cached.image_urls,
+                    "first_variant_price_cents": cached.first_variant_price_cents,
+                    "variant_count": cached.variant_count,
+                }
+        short_name = payload.name[:60] if payload.name else "(sin nombre)"
+        background_tasks.add_task(
+            _record_verify, payload, verdict,
+            action="duplicate_flagged",
+            detail=(
+                f"'{short_name}' ya existe en Vendure como producto "
+                f"#{verdict.candidate_id}. Match por {','.join(verdict.matched_by)} "
+                f"(confianza {verdict.confidence:.0%})"
+            ),
+        )
+        return response
+
+    # ── PRODUCTO NUEVO ─────────────────────────────────────────────
+    if valid_imgs:
+        # Encolamos el envío a Paco: responde ya, Paco corre después.
+        response.paco_status = "queued"
+        background_tasks.add_task(
+            _submit_paco_and_record, payload, verdict, is_pro, valid_imgs,
+        )
+    else:
+        short_name = payload.name[:60] if payload.name else "(sin nombre)"
+        background_tasks.add_task(
+            _record_verify, payload, verdict,
+            action="verify_no_match",
+            detail=f"'{short_name}' es nuevo, pero no llegó imagen para mandarle a Paco",
+        )
     return response
 
 
@@ -1057,18 +1090,43 @@ async def debug_config() -> dict[str, Any]:
 async def section_counts(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Devuelve los conteos de cada sección/tab del dashboard. Excluye eventos descartados."""
+    """Conteos de cada sección/tab del dashboard (excluye descartados).
+
+    Antes: 1 COUNT por sección (13 queries por request, cada 15s). Ahora:
+    2 GROUP BY (por action y por source) + 1 LIKE por cada sección con
+    `detail_contains`. La mayoría de los conteos salen en memoria.
+    """
+    not_dismissed = AuditLog.dismissed.is_not(True)  # type: ignore[union-attr]
+
+    # Conteos agregados en una sola pasada cada uno.
+    action_counts: dict[str, int] = {
+        a: c
+        for a, c in session.exec(
+            select(AuditLog.action, func.count(AuditLog.id)).where(not_dismissed).group_by(AuditLog.action)  # type: ignore[arg-type]
+        )
+    }
+    source_counts: dict[str, int] = {
+        (src or ""): c
+        for src, c in session.exec(
+            select(AuditLog.source, func.count(AuditLog.id)).where(not_dismissed).group_by(AuditLog.source)  # type: ignore[arg-type]
+        )
+    }
+    total = sum(action_counts.values())
+
     out: dict[str, Any] = {}
     for key, s in SECTIONS.items():
-        stmt = (
-            select(func.count(AuditLog.id))  # type: ignore[arg-type]
-            .where(AuditLog.dismissed.is_not(True))  # type: ignore[union-attr]
-        )
-        stmt = _apply_section_filter(stmt, key)
-        out[key] = {
-            "label": s["label"],
-            "count": session.exec(stmt).one() or 0,
-        }
+        if s.get("detail_contains"):
+            # Necesita LIKE — una query puntual (solo 2 secciones la usan).
+            stmt = select(func.count(AuditLog.id)).where(not_dismissed)  # type: ignore[arg-type]
+            stmt = _apply_section_filter(stmt, key)
+            count = session.exec(stmt).one() or 0
+        elif s["source"]:
+            count = source_counts.get(s["source"], 0)
+        elif s["actions"]:
+            count = sum(action_counts.get(a, 0) for a in s["actions"])
+        else:  # "all"
+            count = total
+        out[key] = {"label": s["label"], "count": count}
     return out
 
 

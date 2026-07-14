@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getSettings, resetSetting, saveSetting } from "../api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,26 +10,18 @@ import type { Setting } from "../types";
 
 // Vista de configuración runtime: sliders agrupados que se aplican en vivo.
 export default function SettingsView() {
-  const [settings, setSettings] = useState<Setting[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const qc = useQueryClient();
+  const settingsQ = useQuery({ queryKey: ["settings"], queryFn: getSettings });
+  const settings = settingsQ.data ?? null;
+  const error = settingsQ.error instanceof Error ? settingsQ.error.message : null;
   const [saved, setSaved] = useState(false);
   // Valor local de cada slider mientras el usuario lo arrastra (antes de guardar).
   const [draft, setDraft] = useState<Record<string, number>>({});
 
-  async function load() {
-    setError(null);
-    try {
-      const items = await getSettings();
-      setSettings(items);
-      setDraft(Object.fromEntries(items.map((s) => [s.key, s.value])));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Error");
-    }
-  }
-
+  // Sincronizamos el draft cuando llegan/cambian los settings del server.
   useEffect(() => {
-    load();
-  }, []);
+    if (settings) setDraft(Object.fromEntries(settings.map((s) => [s.key, s.value])));
+  }, [settings]);
 
   function flashSaved() {
     setSaved(true);
@@ -39,7 +32,7 @@ export default function SettingsView() {
     try {
       await saveSetting(key, Number(draft[key]));
       flashSaved();
-      load();
+      qc.invalidateQueries({ queryKey: ["settings"] });
     } catch (err) {
       window.alert("No se pudo guardar: " + (err instanceof Error ? err.message : String(err)));
     }
@@ -50,7 +43,7 @@ export default function SettingsView() {
     try {
       await resetSetting(key);
       flashSaved();
-      load();
+      qc.invalidateQueries({ queryKey: ["settings"] });
     } catch (err) {
       window.alert("Error: " + (err instanceof Error ? err.message : String(err)));
     }
