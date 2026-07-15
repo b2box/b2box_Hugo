@@ -6,12 +6,13 @@ import { cn } from "@/lib/utils";
 import { TONES } from "../sections";
 import { fmtPrice, fmtTime, shortUrl } from "../lib/format";
 import {
+  IconArchive,
   IconArrowRight,
   IconCheckCircle,
   IconClock,
   IconExternalLink,
+  IconMessage,
   IconRefresh,
-  IconX,
 } from "../icons";
 import type { AuditEvent } from "../types";
 
@@ -20,6 +21,7 @@ export interface EventActions {
   onConfirmDuplicate: (id: number) => Promise<void>;
   onConfirmDisableBx: (id: number) => Promise<void>;
   onDismiss: (id: number) => Promise<void>;
+  onComment: (id: number, note: string) => Promise<void>;
   onViewHistory: (productId: string) => void;
 }
 
@@ -27,6 +29,21 @@ type ActionKey = "retry" | "dup" | "bx" | "dismiss";
 
 export default function EventCard({ e, actions }: { e: AuditEvent; actions: EventActions }) {
   const [busy, setBusy] = useState<ActionKey | null>(null);
+  const [showComment, setShowComment] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(e.note ?? "");
+  const [savingNote, setSavingNote] = useState(false);
+
+  async function saveNote() {
+    setSavingNote(true);
+    try {
+      await actions.onComment(e.id, noteDraft.trim());
+      setShowComment(false);
+    } catch (err) {
+      window.alert(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingNote(false);
+    }
+  }
   const t = TONES[e.tone] ?? TONES.muted;
   const p = e.product;
   const r = e.related_product;
@@ -123,6 +140,40 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
           </div>
         )}
 
+        {e.note && !showComment && (
+          <div className="mt-2 flex items-start gap-1.5 text-xs bg-primary/5 border border-primary/20 rounded-md px-2.5 py-1.5">
+            <IconMessage className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+            <span className="text-foreground whitespace-pre-wrap">{e.note}</span>
+          </div>
+        )}
+
+        {showComment && (
+          <div className="mt-3">
+            <textarea
+              value={noteDraft}
+              onChange={(ev) => setNoteDraft(ev.target.value)}
+              placeholder="Ej: el link no anda / sin foto por X motivo…"
+              rows={2}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y"
+            />
+            <div className="flex items-center gap-2 mt-2">
+              <Button size="sm" onClick={saveNote} disabled={savingNote}>
+                {savingNote ? "Guardando…" : "Guardar comentario"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setNoteDraft(e.note ?? "");
+                  setShowComment(false);
+                }}
+              >
+                Cancelar
+              </Button>
+            </div>
+          </div>
+        )}
+
         {(canRetry || canConfirmDuplicate || canConfirmDisableBx || canDismiss || canViewHistory) && (
           <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border flex-wrap">
             {canConfirmDuplicate && (
@@ -178,6 +229,17 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
                 Historial
               </Button>
             )}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setNoteDraft(e.note ?? "");
+                setShowComment((v) => !v);
+              }}
+            >
+              <IconMessage className="w-3 h-3" />
+              {e.note ? "Editar comentario" : "Comentarios"}
+            </Button>
             {canDismiss && (
               <Button
                 variant="ghost"
@@ -185,14 +247,14 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
                 onClick={() =>
                   run(
                     "dismiss",
-                    "¿Descartar este evento? No se elimina nada en Vendure, solo desaparece de esta lista.",
+                    "¿Archivar este evento? No se elimina nada en Vendure, solo desaparece de esta lista.",
                     () => actions.onDismiss(e.id),
                   )
                 }
                 disabled={busy === "dismiss"}
               >
-                <IconX className="w-3 h-3" />
-                Descartar
+                <IconArchive className="w-3 h-3" />
+                Archivar
               </Button>
             )}
           </div>

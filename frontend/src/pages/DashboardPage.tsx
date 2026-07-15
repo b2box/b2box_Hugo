@@ -20,6 +20,7 @@ import {
   logout as apiLogout,
   retryPaco as apiRetry,
   runAudit as apiRunAudit,
+  setComment as apiSetComment,
 } from "../api";
 import { PAGE_SIZE } from "../sections";
 import type { AuditTarget } from "../types";
@@ -125,6 +126,11 @@ export default function DashboardPage() {
     onDismiss: async (id) => {
       await apiDismiss(id);
       invalidateAll();
+    },
+    onComment: async (id, note) => {
+      await apiSetComment(id, note);
+      // Refresca la lista para mostrar el comentario (no saca la card).
+      qc.invalidateQueries({ queryKey: ["events"] });
     },
     onViewHistory: (productId) => setHistoryProductId(productId),
   };

@@ -135,6 +135,16 @@ export async function dismissEvent(eventId: number): Promise<void> {
   await asJson(await apiFetch(`/api/audit-log/${eventId}/dismiss`, { method: "POST" }));
 }
 
+export async function setComment(eventId: number, note: string): Promise<void> {
+  await asJson(
+    await apiFetch(`/api/audit-log/${eventId}/comment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
+  );
+}
+
 export async function dismissSection(section: string): Promise<{ dismissed: number }> {
   const params = new URLSearchParams({ section });
   return asJson(await apiFetch("/api/audit-log/dismiss-section?" + params, { method: "POST" }));

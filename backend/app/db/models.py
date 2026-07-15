@@ -109,3 +109,5 @@ class AuditLog(SQLModel, table=True):
     # Acciones manuales del usuario sobre el evento
     dismissed: bool = Field(default=False, index=True, description="Descartado por el usuario")
     dismissed_at: datetime | None = Field(default=None)
+    # Comentario libre del usuario (ej: "el link no anda", motivo real del flag).
+    note: str | None = Field(default=None)

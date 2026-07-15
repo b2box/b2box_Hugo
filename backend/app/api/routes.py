@@ -134,6 +134,7 @@ def _humanize(entry: AuditLog) -> dict[str, Any]:
             else None
         ),
         "detail": entry.detail,
+        "note": entry.note,
         "before": before,
         "after": after,
         "confidence": entry.confidence,
@@ -696,6 +697,27 @@ async def dismiss_section(
     result = session.execute(stmt)
     session.commit()
     return {"ok": True, "dismissed": int(result.rowcount or 0)}
+
+
+class CommentBody(BaseModel):
+    note: str = ""
+
+
+@router.post("/api/audit-log/{event_id}/comment")
+async def set_comment(
+    event_id: int,
+    payload: CommentBody,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Guarda (o borra, si viene vacío) el comentario libre de un evento."""
+    entry = session.get(AuditLog, event_id)
+    if not entry:
+        raise HTTPException(404, "Evento no encontrado")
+    text = (payload.note or "").strip()
+    entry.note = text[:1000] or None
+    session.add(entry)
+    session.commit()
+    return {"ok": True, "id": event_id, "note": entry.note}
 
 
 @router.post("/api/audit-log/{event_id}/dismiss")

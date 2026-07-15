@@ -27,6 +27,7 @@ export interface AuditEvent {
   product: ProductRef;
   related_product: ProductRef | null;
   detail: string | null;
+  note: string | null;
   before: PriceSnapshot | null;
   after: PriceSnapshot | null;
   confidence: number | null;
