@@ -56,6 +56,7 @@ export default function Sidebar({
   // La lista de secciones viene del backend; sumamos "settings" como ítem extra.
   const items: [string, { label: string; count: number | null }][] = [
     ...Object.entries(sections),
+    ["salud", { label: "Salud", count: null }],
     ["settings", { label: "Configuración", count: null }],
   ];
 

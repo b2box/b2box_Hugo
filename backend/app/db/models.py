@@ -46,6 +46,21 @@ class PriceHistory(SQLModel, table=True):
     extra: str | None = Field(default=None, description="JSON con info adicional")
 
 
+class ImageHashCache(SQLModel, table=True):
+    """pHash perceptual de una imagen, cacheado por URL.
+
+    Antes el cache de hashes vivía SOLO en memoria (LRU) → al reiniciar el
+    container se perdía y la próxima auditoría de duplicados re-descargaba TODAS
+    las imágenes (lento + costo de red). Persistiéndolo, el hash sobrevive
+    reinicios y se reusa entre corridas.
+    """
+    __tablename__ = "image_hash_cache"
+
+    url: str = Field(primary_key=True, max_length=1024)
+    phash: str = Field(description="pHash en hex (imagehash.ImageHash → str)")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class Setting(SQLModel, table=True):
     """Settings runtime editables desde el dashboard.
 

@@ -90,6 +90,25 @@ export interface HistoryResponse {
   events: HistoryEvent[];
 }
 
+export interface HealthMetrics {
+  otapi_budget: { used: number; budget: number; remaining: number };
+  paco: { passed: number; failed: number; success_rate: number | null };
+  duplicates: { pending_flagged: number; disabled_total: number };
+  quality_pending: number;
+  errors_pending: number;
+  image_hash_cache: { in_memory: number; persisted: number };
+  last_price_snapshot: string | null;
+  last_dedup_marker: string | null;
+}
+
+export interface BulkConfirmResult {
+  would_disable?: number;
+  preview_ids?: string[];
+  disabled?: number;
+  skipped_already_disabled?: number;
+  failed?: number;
+}
+
 export type AuditTarget =
   | "prices"
   | "duplicates"

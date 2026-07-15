@@ -48,6 +48,9 @@ export const SECTION_META: Record<string, SectionMeta> = {
   settings: {
     desc: "Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.",
   },
+  salud: {
+    desc: "Estado del sistema: budget OTAPI, tasa de éxito con Paco, últimas auditorías y cache.",
+  },
 };
 
 export const GROUP_LABELS: Record<string, string> = {

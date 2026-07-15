@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import Header from "../components/Header";
 import Sidebar, { AuditFeedback } from "../components/Sidebar";
 import MetricsRow from "../components/MetricsRow";
 import EventsView from "../components/EventsView";
 import SettingsView from "../components/SettingsView";
+import HealthView from "../components/HealthView";
 import HistoryModal from "../components/HistoryModal";
 import { EventActions } from "../components/EventCard";
 import {
+  bulkConfirmDuplicates as apiBulkConfirm,
   confirmDisableBx as apiConfirmBx,
   confirmDuplicate as apiConfirmDup,
   dismissEvent as apiDismiss,
@@ -30,7 +32,18 @@ export default function DashboardPage() {
   const qc = useQueryClient();
   const [currentSection, setCurrentSection] = useState("inbox_luis");
   const [page, setPage] = useState(0);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [historyProductId, setHistoryProductId] = useState<string | null>(null);
+
+  // Debounce del buscador: no dispara un request por tecla.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(0);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [search]);
 
   // ─── Queries (con polling que pausa al ocultar la pestaña) ───────
   const statusQ = useQuery({
@@ -43,10 +56,11 @@ export default function DashboardPage() {
     queryFn: getSections,
     refetchInterval: POLL_MS,
   });
+  const isListSection = currentSection !== "settings" && currentSection !== "salud";
   const eventsQ = useQuery({
-    queryKey: ["events", currentSection, page],
-    queryFn: () => getEvents(currentSection, page * PAGE_SIZE, PAGE_SIZE),
-    enabled: currentSection !== "settings",
+    queryKey: ["events", currentSection, page, debouncedSearch],
+    queryFn: () => getEvents(currentSection, page * PAGE_SIZE, PAGE_SIZE, debouncedSearch),
+    enabled: isListSection,
     placeholderData: keepPreviousData, // paginación sin flicker
     refetchInterval: POLL_MS, // auto-refresh silencioso en background
   });
@@ -66,6 +80,8 @@ export default function DashboardPage() {
   function selectSection(key: string) {
     setCurrentSection(key);
     setPage(0);
+    setSearch("");
+    setDebouncedSearch("");
   }
 
   function changePage(delta: number) {
@@ -128,6 +144,30 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleBulkConfirmDuplicates() {
+    try {
+      const dry = await apiBulkConfirm(0.99, false);
+      const n = dry.would_disable ?? 0;
+      if (n === 0) {
+        window.alert("No hay duplicados con confianza ≥99% para confirmar.");
+        return;
+      }
+      if (
+        !window.confirm(
+          `¿Deshabilitar en Vendure ${n} duplicados con confianza ≥99%? Se puede revertir desde el historial.`,
+        )
+      )
+        return;
+      const res = await apiBulkConfirm(0.99, true);
+      window.alert(
+        `Deshabilitados: ${res.disabled ?? 0} · ya estaban off: ${res.skipped_already_disabled ?? 0} · fallidos: ${res.failed ?? 0}`,
+      );
+      invalidateAll();
+    } catch (err) {
+      window.alert("Error: " + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
   async function handleLogout() {
     await apiLogout();
     window.location.href = "/login";
@@ -155,6 +195,8 @@ export default function DashboardPage() {
 
           {currentSection === "settings" ? (
             <SettingsView />
+          ) : currentSection === "salud" ? (
+            <HealthView />
           ) : (
             <EventsView
               section={currentSection}
@@ -164,9 +206,14 @@ export default function DashboardPage() {
               page={page}
               loading={eventsQ.isPending}
               error={eventsQ.error instanceof Error ? eventsQ.error.message : null}
+              search={search}
+              onSearchChange={setSearch}
               onRefresh={() => eventsQ.refetch()}
               onChangePage={changePage}
               onArchiveAll={handleArchiveAll}
+              onBulkConfirmDuplicates={
+                currentSection === "duplicates" ? handleBulkConfirmDuplicates : undefined
+              }
               actions={actions}
             />
           )}

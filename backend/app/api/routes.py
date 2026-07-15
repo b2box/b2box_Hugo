@@ -25,7 +25,7 @@ from app.db.session import engine, get_session
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
-from app.security import verify_api_key
+from app.security import verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient
 
@@ -355,7 +355,7 @@ def _record_verify(
 @router.post(
     "/verify",
     response_model=VerifyResponse,
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_api_key), Depends(verify_rate_limit)],
 )
 async def verify(payload: VerifyRequest) -> VerifyResponse:
     """Llamado por Luis (app) o el admin (pro) cuando aprueban un producto viral.
@@ -574,12 +574,23 @@ async def check_product(product_id: str) -> dict[str, Any]:
     return payload
 
 
+def _apply_search(stmt, q: str):
+    """Filtra por texto: nombre, código BX o ID de producto (case-insensitive)."""
+    like = f"%{q.strip()}%"
+    return stmt.where(
+        AuditLog.product_name.ilike(like)  # type: ignore[union-attr]
+        | AuditLog.product_code.ilike(like)  # type: ignore[union-attr]
+        | AuditLog.product_id.ilike(like)  # type: ignore[union-attr]
+    )
+
+
 @router.get("/audit-log")
 async def list_audit_log(
     skip: int = 0,
     limit: int = 25,
     section: str | None = None,
     action: str | None = None,
+    q: str | None = None,
     include_dismissed: bool = False,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -590,6 +601,7 @@ async def list_audit_log(
       limit              — page size (max 100)
       section            — filtra por tab
       action             — filtra por action puntual
+      q                  — busca por nombre / código BX / ID de producto
       include_dismissed  — por defecto False, ocultar eventos descartados
     """
     limit = max(1, min(100, limit))
@@ -606,6 +618,9 @@ async def list_audit_log(
     if action:
         base = base.where(AuditLog.action == action)
         count_q = count_q.where(AuditLog.action == action)
+    if q and q.strip():
+        base = _apply_search(base, q)
+        count_q = _apply_search(count_q, q)
 
     total = session.exec(count_q).one() or 0
     # Desempate por id: sin esto, filas con el mismo created_at pueden salir en
@@ -934,6 +949,92 @@ async def restore_duplicates(
     }
 
 
+@router.post("/api/duplicates/bulk-confirm")
+async def bulk_confirm_duplicates(
+    min_confidence: float = 0.99,
+    confirm: bool = False,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Confirma en bloque los duplicados flagged con confianza >= min_confidence.
+
+    Sin `confirm=true` es un dry-run (solo dice cuántos tocaría). Con confirm=true,
+    deshabilita cada uno en Vendure (guardando estado previo para revertir) y los
+    archiva. Sirve para limpiar el backlog de duplicados de alta confianza rápido.
+    """
+    stmt = select(AuditLog).where(
+        AuditLog.action == "duplicate_flagged",
+        AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+        AuditLog.confidence >= min_confidence,  # type: ignore[operator]
+    )
+    rows = [r for r in session.exec(stmt) if r.product_id and r.product_id != "(nuevo)"]
+
+    if not confirm:
+        return {
+            "would_disable": len(rows),
+            "min_confidence": min_confidence,
+            "preview_ids": [r.product_id for r in rows[:20]],
+            "hint": "Pasá ?confirm=true&min_confidence=0.99 para deshabilitarlos en Vendure.",
+        }
+
+    client = VendureClient()
+    disabled: list[str] = []
+    skipped_already_disabled: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    for entry in rows:
+        try:
+            previous = await client.get_enabled_status(entry.product_id)
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            continue
+        if previous is None:
+            failed.append({"product_id": entry.product_id, "error": "No existe en Vendure"})
+            continue
+        if previous is False:
+            entry.dismissed = True
+            entry.dismissed_at = utcnow()
+            session.add(entry)
+            skipped_already_disabled.append(entry.product_id)
+            continue
+        try:
+            await client.disable_product(entry.product_id)
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            continue
+        session.add(AuditLog(
+            action="duplicate_disabled",
+            source="manual",
+            product_id=entry.product_id,
+            related_product_id=entry.related_product_id,
+            confidence=entry.confidence,
+            detail=(
+                f"Confirmado en bloque (confianza >= {min_confidence:.0%}) como duplicado de "
+                f"#{entry.related_product_id}. Deshabilitado en Vendure."
+            ),
+            before=json.dumps({"enabled": True}),
+            after=json.dumps({"enabled": False}),
+            product_name=entry.product_name,
+            product_code=entry.product_code,
+            product_image_url=entry.product_image_url,
+            product_source_url=entry.product_source_url,
+            related_product_name=entry.related_product_name,
+            related_product_code=entry.related_product_code,
+        ))
+        entry.dismissed = True
+        entry.dismissed_at = utcnow()
+        session.add(entry)
+        disabled.append(entry.product_id)
+
+    session.commit()
+    vendure_catalog.invalidate()
+    return {
+        "disabled": len(disabled),
+        "skipped_already_disabled": len(skipped_already_disabled),
+        "failed": len(failed),
+        "failed_details": failed[:10],
+    }
+
+
 @router.post("/api/audit-log/{event_id}/confirm-duplicate")
 async def confirm_duplicate(
     event_id: int,
@@ -1195,6 +1296,62 @@ async def section_counts(
             count = total
         out[key] = {"label": s["label"], "count": count}
     return out
+
+
+@router.get("/api/health-metrics")
+async def health_metrics(
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Salud del sistema: budget OTAPI, tasa de éxito con Paco, últimas auditorías,
+    tamaño del cache de imágenes. Para ver el estado de un vistazo."""
+    from app.db.models import ImageHashCache, Setting
+    from app.pricing.source_check import otapi_budget_status
+
+    def _count(*where) -> int:
+        stmt = select(func.count(AuditLog.id))  # type: ignore[arg-type]
+        for w in where:
+            stmt = stmt.where(w)
+        return session.exec(stmt).one() or 0
+
+    passed = _count(AuditLog.action == "verify_passed_to_paco")
+    failed = _count(AuditLog.action == "paco_failed")
+    total_paco = passed + failed
+    paco_rate = (passed / total_paco) if total_paco else None
+
+    last_price = session.exec(
+        select(PriceHistory.captured_at).order_by(PriceHistory.captured_at.desc()).limit(1)
+    ).first()
+    dedup_marker = session.get(Setting, "_meta:last_dedup_updated_at")
+    image_hashes_db = session.exec(select(func.count(ImageHashCache.url))).one() or 0  # type: ignore[arg-type]
+
+    from app.dedup.image_hash import _HASH_CACHE  # tamaño del L1 en memoria
+
+    return {
+        "otapi_budget": otapi_budget_status(),
+        "paco": {
+            "passed": passed,
+            "failed": failed,
+            "success_rate": paco_rate,
+        },
+        "duplicates": {
+            "pending_flagged": _count(
+                AuditLog.action == "duplicate_flagged",
+                AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+            ),
+            "disabled_total": _count(AuditLog.action == "duplicate_disabled"),
+        },
+        "quality_pending": _count(
+            AuditLog.action == "quality_issue_found",
+            AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+        ),
+        "errors_pending": _count(
+            AuditLog.action == "error",
+            AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+        ),
+        "image_hash_cache": {"in_memory": len(_HASH_CACHE), "persisted": image_hashes_db},
+        "last_price_snapshot": (last_price.isoformat() + "Z") if last_price else None,
+        "last_dedup_marker": dedup_marker.value if dedup_marker else None,
+    }
 
 
 @router.get("/api/status")

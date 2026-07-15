@@ -12,12 +12,48 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
+from collections import defaultdict, deque
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from app.config import get_settings
 
 log = logging.getLogger(__name__)
+
+
+# ─── Rate limit de /verify (sliding window por IP, in-memory) ──────
+# /verify baja el catálogo de Vendure y puede pegarle a Paco → es caro. Sin
+# límite, un cliente mal configurado (o abuso) puede disparar costo. Ventana
+# deslizante simple, suficiente para 1 instancia (multi-instancia → Redis).
+_VERIFY_MAX_PER_WINDOW = 120
+_VERIFY_WINDOW_SECONDS = 60.0
+_verify_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def verify_rate_limit(request: Request) -> None:
+    """FastAPI dependency: limita /verify a N requests por IP por ventana."""
+    ip = _client_ip(request)
+    now = time.time()
+    hits = _verify_hits[ip]
+    cutoff = now - _VERIFY_WINDOW_SECONDS
+    while hits and hits[0] < cutoff:
+        hits.popleft()
+    if len(hits) >= _VERIFY_MAX_PER_WINDOW:
+        retry = max(1, int(hits[0] + _VERIFY_WINDOW_SECONDS - now))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Demasiados /verify desde {ip}. Reintentá en {retry}s.",
+            headers={"Retry-After": str(retry)},
+        )
+    hits.append(now)
 
 
 def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:

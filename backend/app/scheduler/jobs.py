@@ -31,6 +31,7 @@ from app.config import get_settings
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine
 from app.dedup.orchestrator import find_duplicate_pairs
+from app.dedup.url_match import normalize_url
 from app.notifier.dispatcher import notify, notify_digest
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
@@ -106,6 +107,67 @@ def _audit_already_logged(
 # ─── Job 1: duplicados ────────────────────────────────────────────
 
 
+def _get_meta(key: str) -> str | None:
+    """Lee un valor kv de la tabla settings (para marcadores internos de Hugo)."""
+    from app.db.models import Setting
+
+    with Session(engine) as session:
+        row = session.get(Setting, key)
+        return row.value if row else None
+
+
+def _set_meta(key: str, value: str) -> None:
+    from app.db.models import Setting
+
+    with Session(engine) as session:
+        row = session.get(Setting, key)
+        if row is None:
+            session.add(Setting(key=key, value=value))
+        else:
+            row.value = value
+            row.updated_at = utcnow()
+            session.add(row)
+        session.commit()
+
+
+_DEDUP_MARKER_KEY = "_meta:last_dedup_updated_at"
+
+
+def _auto_archive_sent_to_paco(products: list[VendureProduct]) -> int:
+    """Archiva los eventos 'verify_passed_to_paco' cuyo producto YA entró a Vendure.
+
+    Cuando Paco termina de enriquecer un producto, este aparece en el catálogo.
+    El evento "enviado a Paco" ya cumplió su función → lo descartamos para que la
+    tab no se acumule. Match por source_url normalizado.
+    """
+    catalog_urls = {
+        normalize_url(p.source_url) for p in products if p.source_url
+    }
+    catalog_urls.discard(None)
+    if not catalog_urls:
+        return 0
+    archived = 0
+    with Session(engine) as session:
+        rows = session.exec(
+            select(AuditLog).where(
+                AuditLog.action == "verify_passed_to_paco",
+                AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
+                AuditLog.product_source_url.is_not(None),  # type: ignore[union-attr]
+            )
+        )
+        for row in rows:
+            if normalize_url(row.product_source_url) in catalog_urls:
+                row.dismissed = True
+                row.dismissed_at = utcnow()
+                session.add(row)
+                archived += 1
+        if archived:
+            session.commit()
+    if archived:
+        log.info("auto-archive: %d eventos 'enviado a Paco' archivados (ya en Vendure)", archived)
+    return archived
+
+
 async def audit_duplicates() -> None:
     if audit_dupes_lock.locked():
         log.warning("audit_duplicates ya está corriendo, ignoro la nueva invocación")
@@ -116,8 +178,24 @@ async def audit_duplicates() -> None:
         products = await _flatten_products(client)
         log.info("Catálogo: %d productos a comparar", len(products))
 
+        # Cierre de loop: archivar los "enviado a Paco" que ya entraron a Vendure.
+        _auto_archive_sent_to_paco(products)
+
+        # Dedup incremental: si ya corrimos antes, solo comparamos pares que
+        # incluyan un producto nuevo/cambiado (updatedAt > marcador). Los pares
+        # viejo-viejo ya se compararon. La 1ra corrida (sin marcador) es full.
+        marker = _get_meta(_DEDUP_MARKER_KEY)
+        changed_ids: set[str] | None = None
+        if marker:
+            changed_ids = {
+                p.id for p in products
+                if not p.updated_at or p.updated_at > marker
+            }
+            log.info("dedup incremental: %d productos nuevos/cambiados de %d",
+                     len(changed_ids), len(products))
+
         try:
-            pairs = await find_duplicate_pairs(products)
+            pairs = await find_duplicate_pairs(products, changed_ids=changed_ids)
         except Exception as exc:  # noqa: BLE001
             log.exception("find_duplicate_pairs falló: %s", exc)
             return
@@ -157,6 +235,11 @@ async def audit_duplicates() -> None:
                 ))
                 session.commit()
                 flagged += 1
+        # Marcador para el próximo run incremental: el updatedAt más nuevo visto.
+        updated_ats = [p.updated_at for p in products if p.updated_at]
+        if updated_ats:
+            _set_meta(_DEDUP_MARKER_KEY, max(updated_ats))
+
         log.info("audit_duplicates terminado: %d pares flagueados de %d candidatos",
                  flagged, len(pairs))
 
@@ -522,6 +605,17 @@ async def audit_bx_no_image() -> None:
 # ─── Job 6: digest diario ─────────────────────────────────────────
 
 
+async def refresh_catalog() -> None:
+    """Refresca el cache del catálogo Vendure para que /verify nunca lo baje en
+    frío (cold-start). Mantiene el cache caliente entre auditorías."""
+    from app.vendure import catalog as vendure_catalog
+
+    try:
+        await vendure_catalog.get_catalog(force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("refresh_catalog falló: %s", exc)
+
+
 async def prune_price_history() -> None:
     """Borra snapshots de precio más viejos que `price_history_retention_days`.
 
@@ -605,5 +699,14 @@ def register_jobs() -> None:
         prune_price_history,
         CronTrigger(hour=4, minute=30),
         id="prune_price_history",
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
+    # de /verify, para que Luis/admin nunca esperen un cold-fetch.
+    ttl = max(60, s.verify_catalog_ttl_seconds)
+    scheduler.add_job(
+        refresh_catalog,
+        IntervalTrigger(seconds=max(60, ttl - 30)),
+        id="refresh_catalog",
         replace_existing=True, coalesce=True, max_instances=1,
     )

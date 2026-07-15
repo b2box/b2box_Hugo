@@ -7,6 +7,8 @@
 import type {
   AuditLogResponse,
   AuditTarget,
+  BulkConfirmResult,
+  HealthMetrics,
   HistoryResponse,
   SectionsResponse,
   Setting,
@@ -79,13 +81,32 @@ export async function getEvents(
   section: string,
   skip: number,
   limit: number,
+  q?: string,
 ): Promise<AuditLogResponse> {
   const params = new URLSearchParams({
     skip: String(skip),
     limit: String(limit),
     section,
   });
+  if (q && q.trim()) params.set("q", q.trim());
   return asJson<AuditLogResponse>(await apiFetch("/audit-log?" + params));
+}
+
+export async function getHealthMetrics(): Promise<HealthMetrics> {
+  return asJson<HealthMetrics>(await apiFetch("/api/health-metrics"));
+}
+
+export async function bulkConfirmDuplicates(
+  minConfidence: number,
+  confirm: boolean,
+): Promise<BulkConfirmResult> {
+  const params = new URLSearchParams({
+    min_confidence: String(minConfidence),
+    confirm: String(confirm),
+  });
+  return asJson<BulkConfirmResult>(
+    await apiFetch("/api/duplicates/bulk-confirm?" + params, { method: "POST" }),
+  );
 }
 
 export async function runAudit(target: AuditTarget): Promise<Response> {

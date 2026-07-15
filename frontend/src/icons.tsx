@@ -242,6 +242,23 @@ export function IconCopySquare({ className }: IconProps) {
   );
 }
 
+export function IconActivity({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </svg>
+  );
+}
+
+export function IconSearch({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
 // Mapa de icono por clave de sección (usado por Sidebar y título de sección).
 import type { ComponentType } from "react";
 
@@ -259,4 +276,5 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   bx_no_image: IconBan,
   all: IconLayers,
   settings: IconSettings,
+  salud: IconActivity,
 };

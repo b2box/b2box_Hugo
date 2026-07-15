@@ -14,17 +14,63 @@ from collections import OrderedDict
 from io import BytesIO
 from typing import Iterable
 
+import logging
+
 import httpx
 import imagehash
 from PIL import Image
+from sqlmodel import Session
 
 from app.config import get_settings
 from app.net_guard import safe_get
 
-# Cache LRU acotada por URL (proceso-vivo). El tope evita que crezca sin techo
-# (OOM en el container). Para producción multi-instancia conviene Redis.
+log = logging.getLogger(__name__)
+
+# Cache LRU acotada por URL (proceso-vivo, L1). El tope evita que crezca sin
+# techo (OOM en el container). L2 = tabla image_hash_cache en la DB, que
+# sobrevive reinicios (ver _db_get / _db_put).
 _HASH_CACHE: "OrderedDict[str, imagehash.ImageHash]" = OrderedDict()
 _HASH_BITS = 64  # phash default
+_MAX_URL_LEN = 1024  # coincide con ImageHashCache.url
+
+
+def _db_get(url: str) -> imagehash.ImageHash | None:
+    """L2: lee el pHash de la DB (persistente entre reinicios)."""
+    if len(url) > _MAX_URL_LEN:
+        return None
+    try:
+        from app.db.models import ImageHashCache
+        from app.db.session import engine
+
+        with Session(engine) as session:
+            row = session.get(ImageHashCache, url)
+            if row is None:
+                return None
+            return imagehash.hex_to_hash(row.phash)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _db_put(url: str, h: imagehash.ImageHash) -> None:
+    """L2: persiste el pHash en la DB para reusarlo tras reiniciar."""
+    if len(url) > _MAX_URL_LEN:
+        return
+    try:
+        from app.clock import utcnow
+        from app.db.models import ImageHashCache
+        from app.db.session import engine
+
+        with Session(engine) as session:
+            row = session.get(ImageHashCache, url)
+            if row is None:
+                session.add(ImageHashCache(url=url, phash=str(h)))
+            else:
+                row.phash = str(h)
+                row.updated_at = utcnow()
+                session.add(row)
+            session.commit()
+    except Exception:  # noqa: BLE001
+        log.debug("No se pudo persistir pHash de %s", url, exc_info=True)
 
 _HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # Tope de bytes por imagen (evita descargar archivos gigantes → memoria/DoS).
@@ -49,16 +95,28 @@ async def _fetch(url: str) -> bytes:
 
 
 async def hash_image(url: str) -> imagehash.ImageHash | None:
-    """Devuelve el pHash de la imagen, o None si no se pudo procesar."""
+    """Devuelve el pHash de la imagen, o None si no se pudo procesar.
+
+    Orden de búsqueda: L1 (memoria) → L2 (DB) → descarga+hash.
+    """
     cached = _HASH_CACHE.get(url)
     if cached is not None:
         _HASH_CACHE.move_to_end(url)
         return cached
+    # L2: DB (persistente). La lectura es sync y rápida; la corremos en thread
+    # para no bloquear el event loop.
+    import asyncio
+
+    db_hash = await asyncio.to_thread(_db_get, url)
+    if db_hash is not None:
+        _cache_put(url, db_hash)
+        return db_hash
     try:
         raw = await _fetch(url)
         img = Image.open(BytesIO(raw)).convert("RGB")
         h = imagehash.phash(img)
         _cache_put(url, h)
+        await asyncio.to_thread(_db_put, url, h)
         return h
     except Exception:  # incluye SsrfBlocked, HTTP, PIL, etc.
         return None

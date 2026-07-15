@@ -200,11 +200,20 @@ def _candidate_pairs(products: list[VendureProduct]) -> set[tuple[int, int]]:
     return pairs
 
 
-async def find_duplicate_pairs(products: list[VendureProduct]) -> list[DuplicatePair]:
+async def find_duplicate_pairs(
+    products: list[VendureProduct],
+    changed_ids: set[str] | None = None,
+) -> list[DuplicatePair]:
     """Detecta duplicados en todo el catálogo de forma eficiente.
 
     Devuelve, por cada producto marcado como duplicado (`drop`), el mejor match
     canónico (`keep`) y el veredicto. Solo productos habilitados se consideran.
+
+    Si `changed_ids` viene (dedup incremental), las comparaciones de texto/imagen
+    solo se corren para pares que incluyen al menos un producto nuevo/cambiado —
+    los pares viejo-viejo ya se compararon en corridas anteriores. Los buckets de
+    URL exacta se evalúan siempre (son baratos y no queremos perder un match
+    seguro).
     """
     enabled = [p for p in products if p.enabled]
     if len(enabled) < 2:
@@ -248,6 +257,12 @@ async def find_duplicate_pairs(products: list[VendureProduct]) -> list[Duplicate
 
     # 2) Pares candidatos por texto → compare() (con gate de imagen).
     pairs = _candidate_pairs(enabled)
+    if changed_ids is not None:
+        # Incremental: quedarse solo con pares donde al menos un producto cambió.
+        pairs = {
+            (i, j) for (i, j) in pairs
+            if enabled[i].id in changed_ids or enabled[j].id in changed_ids
+        }
 
     async def _score(i: int, j: int) -> None:
         a, b = enabled[i], enabled[j]

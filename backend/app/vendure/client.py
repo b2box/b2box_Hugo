@@ -64,6 +64,7 @@ class VendureProduct:
     first_variant_price_cents: int | None  # precio de la 1ra variante (centavos)
     variant_count: int  # cuántas variantes tiene
     variants: list[VendureVariant] | None = None  # solo se llena con list_products_with_variants
+    updated_at: str | None = None  # ISO8601 (Vendure updatedAt) — para dedup incremental
 
 
 # ─── Cliente ───────────────────────────────────────────────────────
@@ -205,6 +206,7 @@ class VendureClient:
                   slug
                   description
                   enabled
+                  updatedAt
                   customFields {{ {self._source_field} b2boxProductCode }}
                   featuredAsset {{ source preview }}
                   {variant_block}
@@ -476,4 +478,5 @@ class VendureClient:
             featured_image_url=featured_preview,
             first_variant_price_cents=first_price,
             variant_count=int(variant_list.get("totalItems") or len(variant_items)),
+            updated_at=raw.get("updatedAt"),
         )

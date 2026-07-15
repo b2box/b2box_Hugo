@@ -1,7 +1,8 @@
 import EventCard, { EventActions } from "./EventCard";
-import { SECTION_ICON, IconLayers, IconRefresh, IconX } from "../icons";
+import { SECTION_ICON, IconLayers, IconRefresh, IconSearch, IconX } from "../icons";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { PAGE_SIZE, SECTION_META } from "../sections";
 import type { AuditEvent } from "../types";
 
@@ -13,9 +14,12 @@ interface EventsViewProps {
   page: number;
   loading: boolean;
   error: string | null;
+  search: string;
+  onSearchChange: (v: string) => void;
   onRefresh: () => void;
   onChangePage: (delta: number) => void;
   onArchiveAll: () => void;
+  onBulkConfirmDuplicates?: () => void;
   actions: EventActions;
 }
 
@@ -27,9 +31,12 @@ export default function EventsView({
   page,
   loading,
   error,
+  search,
+  onSearchChange,
   onRefresh,
   onChangePage,
   onArchiveAll,
+  onBulkConfirmDuplicates,
   actions,
 }: EventsViewProps) {
   const meta = SECTION_META[section] ?? { desc: "" };
@@ -54,6 +61,15 @@ export default function EventsView({
             <IconRefresh className="w-3 h-3" />
             Refrescar
           </button>
+          {onBulkConfirmDuplicates && total > 0 && (
+            <button
+              onClick={onBulkConfirmDuplicates}
+              title="Deshabilita en Vendure todos los duplicados con confianza ≥ 99%"
+              className="text-destructive hover:opacity-80 flex items-center gap-1 transition-opacity font-medium"
+            >
+              Confirmar ≥99%
+            </button>
+          )}
           {total > 0 && (
             <button
               onClick={onArchiveAll}
@@ -66,7 +82,20 @@ export default function EventsView({
           )}
         </div>
       </div>
-      <p className="text-sm text-muted-foreground mb-4">{meta.desc || "—"}</p>
+      <p className="text-sm text-muted-foreground mb-3">{meta.desc || "—"}</p>
+
+      <div className="relative mb-4">
+        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none">
+          <IconSearch className="w-4 h-4" />
+        </span>
+        <Input
+          type="search"
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Buscar por nombre, código BX o ID…"
+          className="pl-9"
+        />
+      </div>
 
       <div className="space-y-3">
         {error ? (

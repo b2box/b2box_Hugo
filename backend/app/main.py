@@ -59,9 +59,23 @@ def _enforce_prod_secrets() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
+    import asyncio
+
     _configure_logging()
     _enforce_prod_secrets()
     init_db()
+
+    # Precalentar el catálogo de Vendure en background: así el primer /verify tras
+    # el deploy no espera un cold-fetch de todo el catálogo. No bloquea el arranque.
+    async def _warm_catalog() -> None:
+        from app.vendure import catalog as vendure_catalog
+
+        try:
+            await vendure_catalog.get_catalog()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning("warm catalog falló: %s", exc)
+
+    asyncio.create_task(_warm_catalog())
     # Solo el líder corre el scheduler (evita jobs y gasto OTAPI duplicados si
     # hay más de una réplica).
     from app.leader import try_become_leader
