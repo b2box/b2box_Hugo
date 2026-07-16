@@ -52,8 +52,16 @@ def _headers() -> dict[str, str]:
     return h
 
 
-async def submit(image_url: str) -> PacoSubmitResult:
-    """Envía image_url a Paco y devuelve el search_id."""
+async def submit(image_url: str, product_url: str | None = None) -> PacoSubmitResult:
+    """Envía image_url a Paco y devuelve el search_id.
+
+    `product_url` es el link de origen (1688) cuando lo conocemos: los productos
+    de Luis vienen de OTAPI, así que el item ya está identificado y Paco puede
+    resolverlo por ID en vez de re-buscarlo por imagen contra todo 1688. Paco
+    parsea la URL él mismo (detail/m.1688.com/offer/NNN, ?offerId=, ?num_iid=).
+    Es opcional y aditivo: si Paco no lo soporta, ignora el campo y busca por
+    imagen como siempre.
+    """
     if not image_url:
         raise PacoError("image_url vacío")
     s = get_settings()
@@ -62,6 +70,8 @@ async def submit(image_url: str) -> PacoSubmitResult:
 
     url = f"{s.paco_url.rstrip('/')}{s.paco_submit_path}"
     payload = {"image_url": image_url, "source": "hugo"}
+    if product_url:
+        payload["product_url"] = product_url
 
     # Paco puede tardar 1-2 min en responder el submit (procesa + devuelve id).
     async with httpx.AsyncClient(timeout=180.0) as client:

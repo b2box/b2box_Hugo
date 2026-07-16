@@ -462,7 +462,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
                 text_specs=payload.text_specs or "",
             )
         else:
-            result = await paco_integration.submit(valid_imgs[0])
+            result = await paco_integration.submit(
+                valid_imgs[0], product_url=payload.source_url,
+            )
         response.paco_search_id = result.search_id
         response.paco_status = result.status
         _record_verify(
@@ -753,7 +755,9 @@ async def retry_paco(
 
     # Llamar a Paco
     try:
-        result = await paco_integration.submit(entry.product_image_url)
+        result = await paco_integration.submit(
+            entry.product_image_url, product_url=entry.product_source_url,
+        )
         new_action = "verify_passed_to_paco"
         new_detail = (
             f"Reintento manual exitoso. '{(entry.product_name or '?')[:60]}' "
