@@ -100,10 +100,17 @@ class VendureClient:
             log.info(
                 "VENDURE_BEARER vacío — Hugo se va a loguear con user/pass al primer call"
             )
-        self._build_client()
 
-    def _build_client(self) -> None:
-        """(Re)crea el gql.Client con el bearer actual."""
+    def _new_client(self) -> Client:
+        """Crea un gql.Client NUEVO con el bearer actual.
+
+        Devuelve una instancia fresca (transport propio) en vez de un cliente
+        compartido: fetch_all_products lanza hasta FETCH_CONCURRENCY páginas con
+        asyncio.gather, y un gql.Client con un solo HTTPXAsyncTransport no
+        soporta sesiones concurrentes — el 2do `async with` sobre el mismo
+        transport tira TransportAlreadyConnected. Con un client por ejecución
+        cada corrutina tiene su propio transport y no colisionan.
+        """
         headers = {"Authorization": f"Bearer {self._bearer}"}
         if self._channel_token:
             headers["vendure-token"] = self._channel_token
@@ -112,7 +119,7 @@ class VendureClient:
             headers=headers,
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
-        self._client = Client(transport=transport, fetch_schema_from_transport=False)
+        return Client(transport=transport, fetch_schema_from_transport=False)
 
     async def _login(self) -> bool:
         """Hace login con VENDURE_USER/PASS y guarda el nuevo bearer.
@@ -170,7 +177,8 @@ class VendureClient:
                 return False
 
             self._bearer = new_bearer
-            self._build_client()
+            # No hay client compartido que reconstruir: cada _execute_with_retry
+            # arma el suyo con self._bearer, que acabamos de actualizar.
             log.info("Bearer de Vendure renovado OK")
             return True
 
@@ -427,7 +435,7 @@ class VendureClient:
         relogged_in = False
         for attempt in range(1, max_attempts + 1):
             try:
-                async with self._client as session:
+                async with self._new_client() as session:
                     return await session.execute(query, variable_values=variables)
             except (TransportError, TransportQueryError, httpx.HTTPError) as exc:
                 last_exc = exc
