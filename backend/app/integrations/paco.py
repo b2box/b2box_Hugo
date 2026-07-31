@@ -101,12 +101,14 @@ async def submit_pro(
     image_url: str,
     callback_ctx: dict[str, Any] | None = None,
     text_specs: str = "",
+    use_browser: bool = False,
 ) -> PacoSubmitResult:
     """Envía a Paco PRO (b2box_sourcing) POST /api/tech/start como multipart form.
 
     A diferencia de submit() (Paco APP, JSON), acá mandamos:
       - image_url + text_specs (specs libres del producto)
       - callback_ctx (JSON) → Paco escribe de vuelta al quotation_item vía paco-ingest
+      - use_browser → Paco abre además un browser real contra 1688 (botón del admin)
 
     Destino = paco_pro_url + paco_pro_submit_path. NO cae a paco_url (Paco APP):
     un job PRO (Requests) en la Paco equivocada es peor que un error visible.
@@ -127,6 +129,10 @@ async def submit_pro(
         form["image_url"] = image_url
     if callback_ctx:
         form["callback_ctx"] = json.dumps(callback_ctx)
+    # Solo se manda cuando está pedido: el default de Paco PRO ya es False y mandar
+    # "false" explícito no aporta nada (y rompería con una versión vieja de Paco).
+    if use_browser:
+        form["use_browser"] = "true"
 
     # b2box_sourcing autentica la máquina por X-API-Key (== su PACO_API_KEY);
     # NO usa Bearer. Headers propios, distintos a los de Paco APP.

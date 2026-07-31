@@ -262,6 +262,11 @@ class VerifyRequest(BaseModel):
     callback_ctx: dict[str, Any] | None = None
     # Specs libres del producto (nombre/desc/colores…) → text_specs de Paco PRO.
     text_specs: str | None = None
+    # Solo PRO: pedirle a Paco que además busque con un BROWSER real en 1688 (botón
+    # "Buscar con navegador" del admin). Caro (browser + sesión + riesgo de captcha)
+    # → default False. Es la única vía al índice REAL de 1688: la API que usa Paco es
+    # un revendedor que ordena por VENTAS, así que un proveedor chico no aparece nunca.
+    use_browser: bool = False
 
 
 # Orígenes que van a Paco PRO (b2box_sourcing) en vez de Paco APP.
@@ -460,6 +465,7 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
                 valid_imgs[0],
                 callback_ctx=payload.callback_ctx,
                 text_specs=payload.text_specs or "",
+                use_browser=payload.use_browser,
             )
         else:
             result = await paco_integration.submit(
