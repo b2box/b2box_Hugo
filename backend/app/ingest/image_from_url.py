@@ -31,6 +31,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from app.ingest import meli
 from app.net_guard import SsrfBlocked, safe_get
 
 log = logging.getLogger(__name__)
@@ -292,6 +293,21 @@ async def extract(url: str) -> ExtractedProduct:
     url = url.strip()
     marketplace = detect_marketplace(url)
 
+    # MercadoLibre primero por la API oficial: su web no le contesta a un
+    # servidor (ver meli.py). Si no hay credenciales o la API falla, seguimos
+    # con el scraping — que para ML va a terminar en BlockedByCaptcha, pero el
+    # camino queda igual para no tratar a ML distinto sin necesidad.
+    if marketplace == "mercadolibre" and meli.enabled():
+        item = await meli.fetch_from_url(url)
+        if item is not None:
+            return ExtractedProduct(
+                image_urls=item.image_urls[:_MAX_IMAGES],
+                title=item.title[:300],
+                marketplace=marketplace,
+                canonical_url=item.permalink or url,
+                kind="page",
+            )
+
     try:
         resp = await safe_get(url, timeout=_TIMEOUT, headers=_BROWSER_HEADERS)
     except SsrfBlocked as exc:
@@ -333,9 +349,15 @@ async def extract(url: str) -> ExtractedProduct:
 
     if not images:
         if _looks_like_antibot(html):
+            extra = (
+                " Configurá MELI_CLIENT_ID / MELI_CLIENT_SECRET para leerlo por la API "
+                "oficial de MercadoLibre."
+                if marketplace == "mercadolibre" and not meli.enabled()
+                else " La foto tiene que mandarla el app en `image_url`."
+            )
             raise BlockedByCaptcha(
-                f"{marketplace} bloqueó el pedido desde el servidor (página anti-bot). "
-                "La foto tiene que mandarla el app en `image_url`."
+                f"{marketplace} bloqueó el pedido desde el servidor (página anti-bot)."
+                + extra
             )
         raise ExtractError(
             "No se encontró ninguna imagen de producto en la página "

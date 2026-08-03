@@ -99,9 +99,21 @@ class Settings(BaseSettings):
     )
     # form-app-submit tiene verify_jwt=false, así que la anon key es opcional.
     cloud_anon_key: str = Field(default="", description="anon key de Supabase (header apikey)")
-    cloud_api_key: str = Field(default="", description="X-API-Key, si Cloud agrega un bypass server-to-server")
+    cloud_api_key: str = Field(
+        default="", description="X-API-Key, si Cloud agrega un bypass server-to-server"
+    )
     cloud_bearer: str = Field(default="", description="Authorization: Bearer (pisa a la anon key)")
     cloud_timeout_seconds: float = 30.0
+
+    # ── MercadoLibre (API oficial) ─────────────────────────────
+    # ML no le contesta a un servidor: pedirle la ficha desde la IP de Hugo
+    # devuelve su página anti-bot. La vía legítima es su API con OAuth. Se
+    # registra una app en developers.mercadolibre.com y se usan estas dos
+    # credenciales (grant client_credentials: no requiere que ningún usuario
+    # autorice nada, solo leemos publicaciones públicas).
+    # Vacías → Hugo cae al scraping, que para ML falla y devuelve site_blocked.
+    meli_client_id: str = Field(default="", description="Client ID de la app de ML")
+    meli_client_secret: str = Field(default="", description="Client Secret de la app de ML")
 
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
