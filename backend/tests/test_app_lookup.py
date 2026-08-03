@@ -378,6 +378,73 @@ async def test_indice_construyendose_no_abre_pedido(env, monkeypatch):
     assert env["cloud_calls"] == []
 
 
+# ─── `action`: qué pantalla muestra el app ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_action_show_product_cuando_lo_tenemos(env, monkeypatch):
+    _use_embeddings(monkeypatch, score=0.94)
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+    assert resp.action == "show_product"
+    assert "Lámpara LED táctil" in resp.message
+
+
+@pytest.mark.asyncio
+async def test_action_ask_photo_cuando_el_sitio_bloquea(env, monkeypatch):
+    """Caso MercadoLibre: no hay reintento posible con la misma URL."""
+    async def blocked(url):  # noqa: ARG001
+        raise app_routes.image_from_url.BlockedByCaptcha("anti-bot")
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", blocked)
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.status == "site_blocked"
+    assert resp.action == "ask_photo"
+    assert "foto" in resp.message.lower()
+    assert env["cloud_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_action_ask_client_data(env, monkeypatch):
+    _use_embeddings(monkeypatch, score=0.10)
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+    assert resp.action == "ask_client_data"
+
+
+@pytest.mark.asyncio
+async def test_action_none_cuando_el_pedido_quedo_registrado(env, monkeypatch):
+    _use_embeddings(monkeypatch, score=0.10)
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+    assert resp.action == "none"
+    assert "te contactamos" in resp.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_action_retry_later_mientras_indexa(env, monkeypatch):
+    _use_embeddings(monkeypatch, score=0.99, ready=False)
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+    assert resp.action == "retry_later"
+
+
+@pytest.mark.asyncio
+async def test_la_foto_del_cliente_resuelve_el_link_bloqueado(env, monkeypatch):
+    """El flujo completo del caso ML: link bloqueado → el cliente manda la foto."""
+    async def blocked(url):  # noqa: ARG001
+        raise app_routes.image_from_url.BlockedByCaptcha("anti-bot")
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", blocked)
+    _use_embeddings(monkeypatch, score=0.93)
+
+    # Segundo intento: mismo link, ahora con la foto que subió el cliente.
+    resp = await app_lookup(AppLookupRequest(
+        url=PRODUCT_URL, image_url="https://cdn.b2box.app/foto-del-cliente.jpg",
+    ))
+
+    assert resp.action == "show_product"
+    assert resp.product.pa == "PA-1001-BL"
+
+
 # ─── 4. Sin foto ───────────────────────────────────────────────────
 
 

@@ -296,8 +296,36 @@ Los tres `/app/*` se autentican con `X-API-Key: $HUGO_API_KEY` (igual que `/veri
   "cloud_request": { "sent": false, "missing_fields": ["client.email", "client.phone"] } }
 ```
 
+### Integración del app: mirá `action`, no `status`
+
+La respuesta trae `action` y `message`. El app decide la pantalla con `action`
+solo — no hace falta interpretar combinaciones de `status` + `cloud_request` +
+`product`. `message` ya viene redactado para mostrárselo al cliente.
+
+| `action` | Qué hace el app |
+|---|---|
+| `show_product` | Muestra el producto: PA, precio y botón "comprar ahora" |
+| `ask_photo` | Pide una foto del producto y reintenta el lookup con `image_url` |
+| `ask_client_data` | Pide nombre, email y teléfono, y reintenta con `client` |
+| `retry_later` | Avisa que reintente en unos minutos |
+| `none` | Muestra `message` y listo |
+
+**MercadoLibre necesita el paso de la foto.** ML no le contesta a un servidor y su
+API no ofrece leer publicaciones de otros vendedores — no es falta de permisos ni
+de certificación: ese scope no existe. Ver `ingest/meli.py`. Los links de ML
+devuelven `action: "ask_photo"`, y con la foto del cliente el flujo sigue normal.
+Las fichas de catálogo de ML (`/p/MLA…`) sí se leen por la API oficial.
+
+El flujo completo del caso ML queda así:
+
+```
+cliente pega link de ML  → action: "ask_photo"
+cliente sube una foto    → mismo lookup + image_url → action: "show_product"
+```
+
 Otros `status`: `"indexing"` (el índice se está construyendo — reintentar, **no**
-se abre pedido) y `"no_image"` (no se pudo sacar ninguna foto de la URL).
+se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
+(el sitio bloquea a los servidores).
 
 ## Variables de entorno
 

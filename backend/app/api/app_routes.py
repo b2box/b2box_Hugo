@@ -162,6 +162,75 @@ class AppLookupResponse(BaseModel):
     cloud_request: CloudRequestInfo | None = None
     detail: str | None = None
 
+    # Qué tiene que hacer el app ahora. Es lo único que necesita mirar para
+    # decidir la pantalla siguiente; `status` queda para diagnóstico.
+    #   show_product     → mostrar el producto con el PA y el botón de comprar
+    #   ask_photo        → pedirle una foto al cliente y reintentar con image_url
+    #   ask_client_data  → pedir nombre/email/teléfono y reintentar
+    #   retry_later      → volver a probar en unos minutos
+    #   none             → no hay nada más que hacer, mostrar el mensaje y listo
+    action: str = "none"
+    # Texto listo para mostrarle al cliente, sin jerga. El app puede usarlo tal
+    # cual o escribir el suyo.
+    message: str = ""
+
+
+def _decide_action(resp: AppLookupResponse) -> AppLookupResponse:
+    """Traduce el estado interno a "qué hace el app ahora" + texto para el cliente.
+
+    Vive acá y no en el app para que el mensaje sea uno solo: si mañana ML
+    desbloquea la lectura, o sumamos otro marketplace, el app no cambia.
+    """
+    if resp.status == "found" and resp.product is not None:
+        resp.action = "show_product"
+        resp.message = f"Lo tenemos: {resp.product.name}"
+        return resp
+
+    if resp.status == "site_blocked":
+        resp.action = "ask_photo"
+        resp.message = (
+            f"{resp.marketplace.replace('-', ' ').title()} no nos deja leer el link "
+            "desde acá. Mandanos una foto del producto y lo buscamos igual."
+        )
+        return resp
+
+    if resp.status == "no_image":
+        resp.action = "ask_photo"
+        resp.message = (
+            "No pudimos sacar la foto de ese link. Mandanos una foto del producto "
+            "y lo buscamos."
+        )
+        return resp
+
+    if resp.status == "indexing":
+        resp.action = "retry_later"
+        resp.message = "Estamos actualizando el catálogo. Probá de nuevo en un rato."
+        return resp
+
+    # not_found
+    if resp.cloud_request is not None and resp.cloud_request.missing_fields:
+        resp.action = "ask_client_data"
+        resp.message = (
+            "Todavía no lo tenemos. Dejanos tu nombre, email y teléfono y lo "
+            "buscamos para vos."
+        )
+        return resp
+
+    if resp.cloud_request is not None and resp.cloud_request.sent:
+        resp.action = "none"
+        resp.message = (
+            "Todavía no lo tenemos. Registramos tu pedido y te contactamos con "
+            "una cotización."
+        )
+        return resp
+
+    resp.action = "none"
+    resp.message = (
+        "Todavía no lo tenemos y no pudimos registrar tu pedido. Probá de nuevo "
+        "en unos minutos."
+    )
+    return resp
+
 
 # ─── Helpers ───────────────────────────────────────────────────────
 
@@ -316,7 +385,15 @@ async def _phash_scan(
     dependencies=[Depends(verify_api_key), Depends(verify_rate_limit)],
 )
 async def app_lookup(payload: AppLookupRequest) -> AppLookupResponse:
-    """El b2box app manda una URL; Hugo responde PA + comprar ahora, o abre pedido."""
+    """El b2box app manda una URL; Hugo responde PA + comprar ahora, o abre pedido.
+
+    El `action` de la respuesta ya dice qué pantalla mostrar: el app no tiene que
+    interpretar combinaciones de status + cloud_request + product.
+    """
+    return _decide_action(await _lookup(payload))
+
+
+async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     raw_url = (payload.url or "").strip()
     direct_image = (payload.image_url or "").strip()
     if not raw_url and not direct_image:
