@@ -140,10 +140,13 @@ class CloudRequestInfo(BaseModel):
 
 
 class AppLookupResponse(BaseModel):
-    # found      → está en el catálogo, viene `product` con PA y comprar ahora
-    # not_found  → no está; se abrió el pedido en Cloud (ver `cloud_request`)
-    # indexing   → el índice de imágenes todavía se está construyendo, reintentar
-    # no_image   → no se pudo sacar ninguna foto de la URL
+    # found        → está en el catálogo, viene `product` con PA y comprar ahora
+    # not_found    → no está; se abrió el pedido en Cloud (ver `cloud_request`)
+    # indexing     → el índice de imágenes todavía se está construyendo, reintentar
+    # no_image     → no se pudo sacar ninguna foto de la URL
+    # site_blocked → el sitio no le contesta a un servidor (anti-bot). El app
+    #                tiene que mandar la foto en `image_url`: es el único caso
+    #                donde reintentar con la misma URL nunca va a funcionar.
     status: str
     found: bool = False
     confidence: float = 0.0
@@ -337,6 +340,7 @@ async def app_lookup(payload: AppLookupRequest) -> AppLookupResponse:
             canonical = extracted.canonical_url
         except image_from_url.ExtractError as exc:
             if not image_urls:
+                blocked = isinstance(exc, image_from_url.BlockedByCaptcha)
                 _record(
                     action="app_lookup_no_image",
                     detail=f"No se pudo sacar la foto de {raw_url[:200]} — {exc}",
@@ -345,7 +349,7 @@ async def app_lookup(payload: AppLookupRequest) -> AppLookupResponse:
                     source_url=raw_url,
                 )
                 return AppLookupResponse(
-                    status="no_image",
+                    status="site_blocked" if blocked else "no_image",
                     marketplace=image_from_url.detect_marketplace(raw_url),
                     canonical_url=raw_url,
                     detail=str(exc),

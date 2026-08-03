@@ -169,6 +169,36 @@ async def test_page_without_images_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pagina_antibot_se_distingue_de_pagina_sin_fotos(monkeypatch):
+    """ML devuelve HTTP 200 con su interstitial de tráfico sospechoso.
+
+    Hay que distinguirlo: "no encontré imágenes" manda a arreglar el parser,
+    cuando en realidad el sitio no le contesta a un servidor y la única salida
+    es que la foto la mande el cliente.
+    """
+    url = "https://www.mercadolibre.com.ar/algo/up/MLAU391"
+    html = (
+        b'<!DOCTYPE html><html lang="es-AR" data-assets-prefix='
+        b'"https://http2.mlstatic.com/frontend-assets/suspicious-traffic-frontend/">'
+        b"<head></head><body></body></html>"
+    )
+    _patch_get(monkeypatch, _response(url, body=html))
+
+    with pytest.raises(image_from_url.BlockedByCaptcha):
+        await extract(url)
+
+
+@pytest.mark.asyncio
+async def test_pagina_normal_sin_fotos_no_es_bloqueo(monkeypatch):
+    url = "https://tienda.example.com/p/1"
+    _patch_get(monkeypatch, _response(url, body=b"<html><body>hola</body></html>"))
+
+    with pytest.raises(ExtractError) as exc:
+        await extract(url)
+    assert not isinstance(exc.value, image_from_url.BlockedByCaptcha)
+
+
+@pytest.mark.asyncio
 async def test_http_error_raises(monkeypatch):
     url = "https://tienda.example.com/p/1"
     _patch_get(monkeypatch, _response(url, body=b"", status=404))

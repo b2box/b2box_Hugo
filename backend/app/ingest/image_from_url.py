@@ -75,6 +75,15 @@ class ExtractError(RuntimeError):
     """No se pudo sacar ninguna imagen de la URL."""
 
 
+class BlockedByCaptcha(ExtractError):
+    """El sitio nos devolvió su página anti-bot en vez de la ficha.
+
+    Es distinto de "no encontré imágenes": acá el problema no tiene arreglo
+    del lado del parser. El sitio no le contesta a un servidor, y la única
+    salida es que la foto la mande el cliente desde su dispositivo.
+    """
+
+
 @dataclass(slots=True)
 class ExtractedProduct:
     image_urls: list[str] = field(default_factory=list)
@@ -245,6 +254,25 @@ def _from_cdn_regex(html: str, base: str) -> list[str]:
     return images
 
 
+# Marcadores de página anti-bot. MercadoLibre devuelve HTTP 200 con su
+# interstitial de "tráfico sospechoso" cuando el request sale de una IP de
+# datacenter (como la de Hugo): la página no trae ni og:image ni JSON-LD.
+# Sin esta detección el error sería "no se encontró ninguna imagen", que manda
+# a buscar el problema al lado equivocado.
+_ANTIBOT_MARKERS = (
+    "suspicious-traffic",
+    "captcha",
+    "unusual traffic",
+    "tráfico inusual",
+    "are you a robot",
+)
+
+
+def _looks_like_antibot(html: str) -> bool:
+    head = html[:4000].lower()
+    return any(m in head for m in _ANTIBOT_MARKERS)
+
+
 def _drop_placeholders(urls: list[str]) -> list[str]:
     """Saca logos/sprites/íconos que no son la foto del producto."""
     bad = ("logo", "sprite", "placeholder", "icon", "favicon", "/ui/", "banner")
@@ -304,6 +332,11 @@ async def extract(url: str) -> ExtractedProduct:
         images = _dedupe(_drop_placeholders(_from_cdn_regex(html, final_url)))
 
     if not images:
+        if _looks_like_antibot(html):
+            raise BlockedByCaptcha(
+                f"{marketplace} bloqueó el pedido desde el servidor (página anti-bot). "
+                "La foto tiene que mandarla el app en `image_url`."
+            )
         raise ExtractError(
             "No se encontró ninguna imagen de producto en la página "
             f"({marketplace}). Puede que la ficha se arme por JavaScript."
