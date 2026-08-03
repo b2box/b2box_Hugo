@@ -72,9 +72,30 @@ def _db_put(url: str, h: imagehash.ImageHash) -> None:
     except Exception:  # noqa: BLE001
         log.debug("No se pudo persistir pHash de %s", url, exc_info=True)
 
-_HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+_HTTP_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 # Tope de bytes por imagen (evita descargar archivos gigantes → memoria/DoS).
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+# Cabeceras de cliente normal. Sin esto httpx se anuncia como "python-httpx/0.x"
+# y varios CDN de marketplace (mlstatic entre ellos) cortan o tiran 403. No es
+# disfrazarse de nadie: es mandar lo que manda cualquier cliente HTTP que pide
+# una imagen para mostrarla.
+_IMAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+}
+
+# Reintentos ante fallos transitorios. Indexar el catálogo son miles de descargas
+# seguidas contra el mismo CDN, y ahí aparecen cortes intermitentes: sin
+# reintento, cada uno es un producto que queda fuera del índice para siempre.
+_FETCH_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (0.5, 1.5)
+# Códigos que vale la pena reintentar (throttling y errores de servidor).
+_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 def _cache_put(url: str, h: imagehash.ImageHash) -> None:
@@ -86,12 +107,37 @@ def _cache_put(url: str, h: imagehash.ImageHash) -> None:
 
 
 async def _fetch(url: str) -> bytes:
-    # safe_get valida scheme + IP pública y cada redirect (anti-SSRF).
-    r = await safe_get(url, timeout=_HTTP_TIMEOUT)
-    r.raise_for_status()
-    if len(r.content) > _MAX_IMAGE_BYTES:
-        raise ValueError(f"imagen demasiado grande: {len(r.content)} bytes")
-    return r.content
+    """Descarga una imagen, reintentando los fallos transitorios.
+
+    safe_get valida scheme + IP pública y cada redirect (anti-SSRF); el guard
+    sigue corriendo en cada intento.
+    """
+    last_error: Exception | None = None
+    for attempt in range(_FETCH_ATTEMPTS):
+        try:
+            r = await safe_get(url, timeout=_HTTP_TIMEOUT, headers=_IMAGE_HEADERS)
+            if r.status_code in _RETRYABLE_STATUS:
+                raise httpx.HTTPStatusError(
+                    f"HTTP {r.status_code}", request=r.request, response=r
+                )
+            r.raise_for_status()
+            if len(r.content) > _MAX_IMAGE_BYTES:
+                # No es transitorio: reintentar solo gastaría red.
+                raise ValueError(f"imagen demasiado grande: {len(r.content)} bytes")
+            return r.content
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            # Un 404 o un 403 no mejoran reintentando: propagamos ya.
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = exc.response.status_code if exc.response is not None else None
+                if status not in _RETRYABLE_STATUS:
+                    raise
+            last_error = exc
+            if attempt + 1 >= _FETCH_ATTEMPTS:
+                break
+            await asyncio.sleep(_RETRY_BACKOFF_SECONDS[attempt])
+    log.debug("No se pudo descargar %s tras %d intentos: %s",
+              url, _FETCH_ATTEMPTS, last_error)
+    raise last_error if last_error else RuntimeError(f"fetch falló: {url}")
 
 
 async def hash_image(url: str) -> imagehash.ImageHash | None:
