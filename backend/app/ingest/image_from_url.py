@@ -58,6 +58,7 @@ _MARKETPLACE_HOSTS = {
     "alibaba": ("alibaba.com",),
     "aliexpress": ("aliexpress.", "ae01.alicdn.com"),
     "1688": ("1688.com", "alicdn.com"),
+    "made-in-china": ("made-in-china.com",),
     "amazon": ("amazon.",),
 }
 
@@ -66,6 +67,7 @@ _CDN_PATTERNS = [
     re.compile(r"https?://http2\.mlstatic\.com/[\w\-./]+\.(?:jpe?g|png|webp)", re.I),
     re.compile(r"https?://[\w.\-]*alicdn\.com/[\w\-./%]+\.(?:jpe?g|png|webp)", re.I),
     re.compile(r"https?://[\w.\-]*alibaba\.com/[\w\-./%]+\.(?:jpe?g|png|webp)", re.I),
+    re.compile(r"https?://image\.made-in-china\.com/[\w\-./%]+\.(?:jpe?g|png|webp)", re.I),
 ]
 
 

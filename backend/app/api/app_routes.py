@@ -55,6 +55,11 @@ router = APIRouter(prefix="/app", tags=["b2box-app"])
 # botella es la descarga de imágenes, no la CPU.
 _PHASH_CONCURRENCY = 8
 
+# Cuántas fotos de la publicación se comparan contra el catálogo. Las páginas de
+# producto traen varias (galería) y la principal no siempre es la que mejor
+# matchea; nos quedamos con el mejor score entre todas.
+_MAX_QUERY_IMAGES = 4
+
 
 # ─── Modelos ───────────────────────────────────────────────────────
 
@@ -392,11 +397,20 @@ async def app_lookup(payload: AppLookupRequest) -> AppLookupResponse:
             )
             return base
 
-        query = await image_embed.embed_url(image_urls[0])
-        if query is not None:
-            hits = catalog_index.search(query, top_k=1)
-            if hits:
-                product, hit_score, _ = hits[0]
+        # Comparamos TODAS las fotos de la publicación, no solo la primera: la
+        # foto principal suele ser la de marketing (packaging, con modelo, de
+        # perfil) y la que se parece a la nuestra puede ser la tercera. Cada
+        # imagen extra cuesta ~25 ms de inferencia — barato al lado de perder
+        # un match que sí teníamos.
+        query_vecs = await image_embed.embed_urls(image_urls[:_MAX_QUERY_IMAGES])
+        if query_vecs:
+            best_hit: tuple[VendureProduct, float] | None = None
+            for vec in query_vecs:
+                hits = catalog_index.search(vec, top_k=1)
+                if hits and (best_hit is None or hits[0][1] > best_hit[1]):
+                    best_hit = (hits[0][0], hits[0][1])
+            if best_hit is not None:
+                product, hit_score = best_hit
                 # Thresholds por runtime: se ajustan desde el dashboard sin redeploy.
                 threshold = float(runtime.get("embed_match_threshold"))
                 if hit_score >= threshold:

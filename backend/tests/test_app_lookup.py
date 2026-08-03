@@ -178,6 +178,82 @@ async def test_match_exacto_por_source_url_sin_bajar_imagenes(env, monkeypatch):
     assert called["embed"] is False
 
 
+@pytest.mark.asyncio
+async def test_matchea_con_la_mejor_foto_no_con_la_primera(env, monkeypatch):
+    """La foto principal de una publicación suele ser la de marketing.
+
+    Si solo comparáramos esa, perderíamos productos que sí tenemos porque la
+    que se parece a la nuestra es la tercera de la galería.
+    """
+    fotos = [
+        "https://cdn.ml/1-packaging.jpg",   # caja del producto → no se parece
+        "https://cdn.ml/2-con-modelo.jpg",  # foto de estilo de vida → tampoco
+        "https://cdn.ml/3-producto.jpg",    # el producto sobre fondo blanco → clavada
+    ]
+    puntajes = {"1": 0.42, "2": 0.61, "3": 0.95}
+
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=fotos, title="Lámpara", marketplace="mercadolibre",
+            canonical_url=url, kind="page",
+        )
+
+    async def fake_embed_urls(urls, concurrency=4):  # noqa: ARG001
+        # El vector codifica de qué foto vino, así search() sabe qué devolver.
+        return [np.full(4, float(u.split("/")[-1][0]), dtype=np.float32) for u in urls]
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
+    monkeypatch.setattr(app_routes.image_embed, "embed_urls", fake_embed_urls)
+    monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(app_routes.catalog_index, "ensure_index", noop)
+    monkeypatch.setattr(
+        app_routes.catalog_index, "search",
+        lambda v, top_k=1: [(_product(), puntajes[str(int(v[0]))], "x")],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.status == "found"
+    assert resp.confidence == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_solo_se_comparan_las_primeras_n_fotos(env, monkeypatch):
+    """Tope defensivo: una galería enorme no debe disparar N inferencias."""
+    vistas: list[list[str]] = []
+
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=[f"https://cdn.ml/{i}.jpg" for i in range(10)],
+            title="x", marketplace="mercadolibre", canonical_url=url, kind="page",
+        )
+
+    async def fake_embed_urls(urls, concurrency=4):  # noqa: ARG001
+        vistas.append(list(urls))
+        return [np.ones(4, dtype=np.float32) for _ in urls]
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
+    monkeypatch.setattr(app_routes.image_embed, "embed_urls", fake_embed_urls)
+    monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
+    monkeypatch.setattr(app_routes.catalog_index, "ensure_index", noop)
+    monkeypatch.setattr(
+        app_routes.catalog_index, "search", lambda v, top_k=1: [(_product(), 0.99, "x")]
+    )
+
+    await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert len(vistas[0]) == app_routes._MAX_QUERY_IMAGES
+
+
 # ─── 2. No lo tenemos ──────────────────────────────────────────────
 
 
