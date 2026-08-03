@@ -106,6 +106,12 @@ imagen Docker; corre en CPU sin torch (~24 ms/imagen). Los embeddings del
 catálogo se precalculan en un índice en memoria y se persisten en
 `image_embed_cache`, así un reinicio no vuelve a descargar ni inferir nada.
 
+Medido en producción (ago 2026): el primer build del índice tardó **~19 min**
+para 2052 imágenes (~1026 productos × 2), a ~1.8 img/s — el cuello es la
+descarga, no la inferencia. Los rebuilds posteriores salen del cache. Mientras
+construye, `/app/lookup` devuelve `status:"indexing"`; seguilo con
+`GET /app/index-status`.
+
 > **Memoria**: el modelo suma ~500 MB de RSS. El límite del container pasó de
 > 512M a **2G** — en Coolify hay que subirlo en el panel del servicio.
 
