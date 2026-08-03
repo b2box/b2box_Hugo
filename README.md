@@ -305,10 +305,25 @@ solo — no hace falta interpretar combinaciones de `status` + `cloud_request` +
 | `action` | Qué hace el app |
 |---|---|
 | `show_product` | Muestra el producto: PA, precio y botón "comprar ahora" |
+| `confirm_product` | Muestra `suggestion` y pregunta "¿es este?". Si el cliente dice que no, repetir el lookup con `reject_suggestion: true` |
 | `ask_photo` | Pide una foto del producto y reintenta el lookup con `image_url` |
 | `ask_client_data` | Pide nombre, email y teléfono, y reintenta con `client` |
 | `retry_later` | Avisa que reintente en unos minutos |
 | `none` | Muestra `message` y listo |
+
+**Por qué se pregunta en vez de afirmar.** Medido con productos reales del
+catálogo: los aciertos caen entre 0.84 y 0.87 y el ruido en 0.80. Cuatro
+centésimas de margen no alcanzan para decirle a un cliente "sí, lo tenemos" —
+equivocarse ahí es peor que no encontrarlo. Por eso arriba de
+`EMBED_MATCH_THRESHOLD` (0.88) se afirma, y entre `EMBED_SUGGEST_THRESHOLD`
+(0.82) y ese valor se pregunta. El cliente resuelve en un toque lo que el modelo
+no puede decidir solo.
+
+Mientras hay una pregunta abierta **no se abre la consulta en Cloud**: si el
+candidato resulta ser el correcto, ese pedido nacería muerto y alguien tendría
+que descartarlo a mano. Cuando el cliente dice que no, el app repite el lookup
+con `reject_suggestion: true` y ahí sí se abre — con el candidato descartado
+anotado, para que nadie vuelva a proponer lo mismo.
 
 **MercadoLibre necesita el paso de la foto.** ML no le contesta a un servidor y su
 API no ofrece leer publicaciones de otros vendedores — no es falta de permisos ni

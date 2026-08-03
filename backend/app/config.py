@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     embed_match_threshold: float = 0.88
     # Por debajo del threshold pero por encima de esto, el match viaja igual en el
     # formulario a Cloud como "mejor candidato" (no se muestra como encontrado).
-    embed_suggest_threshold: float = 0.78
+    embed_suggest_threshold: float = 0.82
     # Cuántas imágenes por producto se indexan (la featured primero).
     embed_images_per_product: int = 2
     embed_cache_max: int = 5000

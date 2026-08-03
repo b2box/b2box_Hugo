@@ -90,6 +90,10 @@ class AppLookupRequest(BaseModel):
     note: str | None = None
     client: AppLookupClient = Field(default_factory=AppLookupClient)
     source: str = "b2box-app"
+    # El cliente ya vio la sugerencia y dijo que NO era ese producto. Hugo deja
+    # de sugerir y abre la consulta en Cloud. Sin esto, un "no" del cliente
+    # volvería a mostrarle el mismo candidato para siempre.
+    reject_suggestion: bool = False
 
 
 class LookupVariant(BaseModel):
@@ -121,12 +125,22 @@ class LookupProduct(BaseModel):
 
 
 class LookupSuggestion(BaseModel):
-    """Casi-match: no alcanza para decir "lo tenemos", pero vale mostrarlo."""
+    """Casi-match: no alcanza para afirmar, sí para preguntar "¿es este?".
+
+    Medido con productos reales: los aciertos caen entre 0.84 y 0.87 y el ruido
+    en 0.80. Cuatro centésimas de margen es poco para afirmarle a un cliente que
+    lo tenemos, y equivocarse ahí es peor que no encontrarlo. Así que en esa
+    franja preguntamos en vez de afirmar: el cliente resuelve en un toque lo que
+    la máquina no puede decidir sola.
+    """
     product_id: str
     name: str = ""
     product_code: str | None = None
     image_url: str | None = None
     score: float = 0.0
+    # Data completa, para que el app pueda mostrar PA y precio apenas el cliente
+    # confirme, sin una segunda vuelta al servidor.
+    product: LookupProduct | None = None
 
 
 class CloudRequestInfo(BaseModel):
@@ -165,6 +179,7 @@ class AppLookupResponse(BaseModel):
     # Qué tiene que hacer el app ahora. Es lo único que necesita mirar para
     # decidir la pantalla siguiente; `status` queda para diagnóstico.
     #   show_product     → mostrar el producto con el PA y el botón de comprar
+    #   confirm_product  → mostrar la sugerencia y preguntar "¿es este?"
     #   ask_photo        → pedirle una foto al cliente y reintentar con image_url
     #   ask_client_data  → pedir nombre/email/teléfono y reintentar
     #   retry_later      → volver a probar en unos minutos
@@ -205,6 +220,14 @@ def _decide_action(resp: AppLookupResponse) -> AppLookupResponse:
     if resp.status == "indexing":
         resp.action = "retry_later"
         resp.message = "Estamos actualizando el catálogo. Probá de nuevo en un rato."
+        return resp
+
+    # not_found con casi-match: preguntar antes de dar por perdido. Va primero
+    # que pedir los datos del cliente — si el producto es ese, no hace falta
+    # pedirle nada.
+    if resp.suggestion is not None:
+        resp.action = "confirm_product"
+        resp.message = f"¿Es este? {resp.suggestion.name}"
         return resp
 
     # not_found
@@ -457,6 +480,9 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     score = 0.0
     matched_by: list[str] = []
     suggestion: LookupSuggestion | None = None
+    # Candidato que el cliente ya descartó: no se le muestra de nuevo, pero
+    # viaja en la consulta a Cloud para que nadie vuelva a proponerlo.
+    rejected: LookupSuggestion | None = None
 
     # 2a. URL exacta del proveedor — gratis y seguro.
     if raw_url:
@@ -497,7 +523,7 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                 if hit_score >= threshold:
                     matched, score, matched_by = product, hit_score, ["image_embed"]
                 elif hit_score >= float(runtime.get("embed_suggest_threshold")):
-                    suggestion = LookupSuggestion(
+                    candidate = LookupSuggestion(
                         product_id=product.id,
                         name=product.name,
                         product_code=product.product_code,
@@ -505,6 +531,16 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                         score=round(hit_score, 4),
                     )
                     score = hit_score
+                    if payload.reject_suggestion:
+                        # El cliente ya lo vio y dijo que no. No se lo volvemos a
+                        # mostrar, pero viaja a Cloud: quien revise la consulta
+                        # tiene que saber que ese candidato ya se descartó, para
+                        # no volver a proponerlo.
+                        rejected = candidate
+                    else:
+                        suggestion = candidate
+                else:
+                    score = max(score, hit_score)
 
     # 2c. Fallback pHash (CLIP no disponible).
     if matched is None and not image_embed.available():
@@ -542,6 +578,36 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             product_id=matched.id,
             confidence=score,
             product_name=matched.name,
+            image_url=image_urls[0],
+            source_url=canonical,
+        )
+        return base
+
+    # ── 3a-bis. Casi-match → preguntarle al cliente antes de nada ──
+    # No abrimos la consulta en Cloud todavía: si el candidato es el correcto,
+    # ese pedido nace muerto y alguien lo tiene que descartar a mano. Esperamos
+    # la respuesta; si dice que no, el app vuelve con reject_suggestion=true.
+    if suggestion is not None:
+        try:
+            full = await VendureClient().get_product_full(suggestion.product_id)
+            if full:
+                suggestion.product = _product_from_full(full)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_product_full(%s) falló para la sugerencia: %s",
+                        suggestion.product_id, exc)
+        base.confidence = round(score, 4)
+        base.suggestion = suggestion
+        _record(
+            action="app_lookup_suggested",
+            detail=(
+                f"El app buscó {canonical[:130]} y Hugo propuso "
+                f"'{suggestion.name[:50]}' (BX {suggestion.product_code or '—'}) "
+                f"con {score:.0%} — esperando que el cliente confirme"
+            ),
+            source=payload.source,
+            product_id=suggestion.product_id,
+            confidence=score,
+            product_name=suggestion.name,
             image_url=image_urls[0],
             source_url=canonical,
         )
@@ -600,7 +666,7 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         marketplace=marketplace,
         note=payload.note,
         score=score,
-        best_match=suggestion.model_dump() if suggestion else None,
+        best_match=(rejected.model_dump(exclude={'product'}) if rejected else None),
         source=payload.source,
     )
 

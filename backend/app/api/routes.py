@@ -108,6 +108,11 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "El app buscó un producto y lo tenemos en el catálogo",
         "tone": "info",
     },
+    "app_lookup_suggested": {
+        "icon": "info",
+        "title": "El app buscó algo parecido · esperando que el cliente confirme",
+        "tone": "info",
+    },
     "app_lookup_request_sent": {
         "icon": "send",
         "title": "El app buscó algo que no tenemos · pedido abierto en Cloud",
@@ -231,7 +236,7 @@ SECTIONS: dict[str, dict[str, Any]] = {
     "app_matches": {
         "label": "Búsquedas del app",
         "source": None,
-        "actions": ["app_lookup_match"],
+        "actions": ["app_lookup_match", "app_lookup_suggested"],
     },
     "app_requests": {
         "label": "Pedidos del app",

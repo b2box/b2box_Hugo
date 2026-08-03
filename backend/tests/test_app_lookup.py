@@ -287,23 +287,72 @@ async def test_sin_match_abre_pedido_en_cloud(env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_casi_match_viaja_como_sugerencia(env, monkeypatch):
-    """Score en la banda de sugerencia: no se muestra como encontrado, pero el
-    que revisa el pedido en Cloud ve el candidato."""
-    _use_embeddings(monkeypatch, score=0.82)
+async def test_casi_match_pregunta_y_no_abre_consulta(env, monkeypatch):
+    """Medido con productos reales: los aciertos caen en 0.84-0.87 y el ruido en
+    0.80. Ahí no se afirma, se pregunta — y NO se abre la consulta en Cloud,
+    porque si el candidato es el correcto ese pedido nace muerto."""
+    _use_embeddings(monkeypatch, score=0.8719)
 
     resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
 
-    assert resp.status == "not_found"
-    assert resp.suggestion is not None
-    assert resp.suggestion.product_id == "42"
-    assert resp.suggestion.score == pytest.approx(0.82)
-    # El candidato viaja en las notas del producto: form-app-submit no tiene un
-    # campo estructurado para esto, y quien revisa la consulta lo lee ahí.
+    assert resp.action == "confirm_product"
+    assert resp.message.startswith("¿Es este?")
+    assert resp.suggestion.product_code == "BX-1001"
+    # Data completa lista: si el cliente dice que sí, el app muestra el PA sin
+    # volver a preguntarle al servidor.
+    assert resp.suggestion.product.pa == "PA-1001-BL"
+    assert env["cloud_calls"] == []
+    assert env["recorded"][0]["action"] == "app_lookup_suggested"
+
+
+@pytest.mark.asyncio
+async def test_si_el_cliente_dice_que_no_se_abre_la_consulta(env, monkeypatch):
+    """El app vuelve con reject_suggestion=true. Sin esto, el mismo candidato
+    se le mostraría al cliente para siempre."""
+    _use_embeddings(monkeypatch, score=0.8719)
+
+    resp = await app_lookup(AppLookupRequest(
+        url=PRODUCT_URL, client=CLIENTE, reject_suggestion=True,
+    ))
+
+    assert resp.action == "none"
+    assert resp.suggestion is None
+    assert resp.cloud_request.sent is True
+    assert env["cloud_calls"][0]["client_name"] == "Juan Pérez"
+
+
+@pytest.mark.asyncio
+async def test_debajo_del_piso_no_se_sugiere_nada(env, monkeypatch):
+    """0.80 es ruido medido: sugerirlo ensucia la pantalla del cliente."""
+    _use_embeddings(monkeypatch, score=0.80)
+    monkeypatch.setattr(
+        app_routes.runtime, "get",
+        lambda k: {"embed_match_threshold": 0.88, "embed_suggest_threshold": 0.82,
+                   "dedup_image_threshold": 0.92}[k],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.suggestion is None
+    assert resp.action == "none"
+    assert env["cloud_calls"] != []
+
+
+@pytest.mark.asyncio
+async def test_el_candidato_descartado_viaja_a_cloud(env, monkeypatch):
+    """Si el cliente dijo que no, quien revise la consulta tiene que enterarse:
+    si no, vuelve a proponer exactamente lo mismo que ya se descartó."""
+    _use_embeddings(monkeypatch, score=0.86)
+
+    await app_lookup(AppLookupRequest(
+        url=PRODUCT_URL, client=CLIENTE, reject_suggestion=True,
+    ))
+
+    # form-app-submit no tiene campo estructurado para esto: va en las notas.
     notes = env["cloud_calls"][0]["products"][0]["notes"]
     assert "Mejor candidato" in notes
     assert "BX-1001" in notes
-    assert "82%" in notes
+    assert "86%" in notes
 
 
 @pytest.mark.asyncio
