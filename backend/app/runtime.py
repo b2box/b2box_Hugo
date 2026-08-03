@@ -83,6 +83,31 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="dedup_image_text_gate",
         min=0.0, max=1.0, step=0.05, group="dedup",
     ),
+    # Match por imagen del b2box app (/app/lookup)
+    SettingMeta(
+        key="embed_match_threshold",
+        label="Threshold CLIP (match del app)",
+        description=(
+            "Coseno mínimo para decirle al app 'lo tenemos'. Referencia: misma foto ≈ 1.0, "
+            "mismo producto en otra foto ≈ 0.85-0.95, productos distintos de la misma "
+            "categoría ≈ 0.70-0.80. Bajarlo trae más matches y más falsos positivos."
+        ),
+        type="float", parser=float,
+        default_attr="embed_match_threshold",
+        min=0.5, max=1.0, step=0.01, group="app",
+    ),
+    SettingMeta(
+        key="embed_suggest_threshold",
+        label="Threshold de sugerencia",
+        description=(
+            "Por debajo del threshold de match pero por encima de este valor, el producto "
+            "no se muestra como encontrado pero viaja como 'mejor candidato' en el "
+            "formulario que se abre en Cloud."
+        ),
+        type="float", parser=float,
+        default_attr="embed_suggest_threshold",
+        min=0.3, max=1.0, step=0.01, group="app",
+    ),
     # Pricing
     SettingMeta(
         key="price_drift_threshold",

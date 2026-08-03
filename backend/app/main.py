@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import auth
+from app.api.app_routes import router as app_router
 from app.api.routes import router
 from app.config import get_settings
 from app.db.session import init_db
@@ -76,6 +77,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             logging.getLogger(__name__).warning("warm catalog falló: %s", exc)
 
     asyncio.create_task(_warm_catalog())
+
+    # Índice vectorial (CLIP) para /app/lookup. El primer build baja y embebe las
+    # imágenes del catálogo: minutos en 1 CPU. Va en background para no demorar
+    # el arranque; mientras tanto /app/lookup responde status="indexing".
+    async def _warm_image_index() -> None:
+        from app.dedup import catalog_index, image_embed
+
+        if not image_embed.available():
+            return
+        try:
+            await catalog_index.build()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning("warm image index falló: %s", exc)
+
+    asyncio.create_task(_warm_image_index())
     # Solo el líder corre el scheduler (evita jobs y gasto OTAPI duplicados si
     # hay más de una réplica).
     from app.leader import try_become_leader
@@ -160,6 +176,7 @@ async def logout() -> JSONResponse:
 
 
 app.include_router(router)
+app.include_router(app_router)
 
 
 # ─── Dashboard estático ────────────────────────────────────────────

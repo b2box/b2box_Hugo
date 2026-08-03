@@ -25,6 +25,11 @@ ActionType = Literal[
     "price_flagged",
     "no_change",
     "error",
+    # /app/lookup (b2box app manda una URL)
+    "app_lookup_match",
+    "app_lookup_request_sent",
+    "app_lookup_request_failed",
+    "app_lookup_no_image",
 ]
 
 
@@ -58,6 +63,25 @@ class ImageHashCache(SQLModel, table=True):
 
     url: str = Field(primary_key=True, max_length=1024)
     phash: str = Field(description="pHash en hex (imagehash.ImageHash → str)")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ImageEmbedCache(SQLModel, table=True):
+    """Embedding CLIP de una imagen, cacheado por URL.
+
+    Mismo rol que ImageHashCache pero para el vector semántico (512 floats).
+    Embeder el catálogo entero es caro (descarga + inferencia en CPU): sin este
+    cache, cada reinicio del container re-indexaría los ~1500 productos.
+
+    El vector se guarda en base64 de float32 little-endian, ya L2-normalizado,
+    así el score coseno es un producto punto directo.
+    """
+    __tablename__ = "image_embed_cache"
+
+    url: str = Field(primary_key=True, max_length=1024)
+    model: str = Field(default="clip-vit-b32", max_length=64)
+    dim: int = Field(default=512)
+    vector_b64: str = Field(description="float32 LE normalizado, en base64")
     updated_at: datetime = Field(default_factory=utcnow)
 
 

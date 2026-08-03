@@ -88,6 +88,54 @@ class Settings(BaseSettings):
     # el bypass máquina es por X-API-Key. Es un secreto DISTINTO al de Paco APP.
     paco_pro_api_key: str = ""
 
+    # ── Cloud_B2BOX (formulario de "producto no encontrado") ───
+    # Cuando el app manda una URL y el producto NO está en el catálogo, Hugo abre
+    # el MISMO formulario del app que ya vive en Cloud_B2BOX (b2b-flow-pro): la
+    # edge function form-app-submit → form_app_consultations.
+    cloud_url: str = Field(default="", description="https://<ref>.supabase.co de Cloud_B2BOX")
+    cloud_request_path: str = Field(
+        default="/functions/v1/form-app-submit",
+        description="Edge function que recibe el formulario del app",
+    )
+    # form-app-submit tiene verify_jwt=false, así que la anon key es opcional.
+    cloud_anon_key: str = Field(default="", description="anon key de Supabase (header apikey)")
+    cloud_api_key: str = Field(default="", description="X-API-Key, si Cloud agrega un bypass server-to-server")
+    cloud_bearer: str = Field(default="", description="Authorization: Bearer (pisa a la anon key)")
+    cloud_timeout_seconds: float = 30.0
+
+    # ── Storefront (botón "comprar ahora") ─────────────────────
+    storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
+    storefront_product_path: str = Field(
+        default="/product/{slug}",
+        description="Template del link al producto. Placeholders: {slug} {id} {code}",
+    )
+
+    # ── Matching por embeddings (CLIP) para /app/lookup ────────
+    # pHash solo pesca imágenes casi idénticas. Para la foto de un cliente
+    # (otro ángulo/fondo) hace falta similitud semántica → CLIP ViT-B-32.
+    embed_enabled: bool = Field(default=True, description="Usar CLIP en /app/lookup")
+    embed_model_path: str = Field(
+        default="/opt/models/clip-vit-b32-vision.onnx",
+        description="Path local al modelo ONNX (se bakea en la imagen Docker)",
+    )
+    embed_model_url: str = Field(
+        default="https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx",
+        description="De dónde se baja el modelo en el build (no se usa en runtime)",
+    )
+    # Cosine sobre vectores normalizados. Misma foto ≈ 1.0; mismo producto en
+    # otra foto ≈ 0.85-0.95; productos distintos de la misma categoría ≈ 0.70-0.80.
+    embed_match_threshold: float = 0.88
+    # Por debajo del threshold pero por encima de esto, el match viaja igual en el
+    # formulario a Cloud como "mejor candidato" (no se muestra como encontrado).
+    embed_suggest_threshold: float = 0.78
+    # Cuántas imágenes por producto se indexan (la featured primero).
+    embed_images_per_product: int = 2
+    embed_cache_max: int = 5000
+    # TTL del índice vectorial del catálogo (segundos).
+    embed_index_ttl_seconds: int = 900
+    # Threads de ONNX Runtime. 1 = el límite de CPU del container.
+    embed_onnx_threads: int = 1
+
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")
 

@@ -45,7 +45,71 @@ El módulo `dedup/orchestrator.py` combina las tres y devuelve un score de confi
 - **Programado (scheduler)**: APScheduler corre auditorías periódicas (configurable).
 - **On-demand**: `POST /audit` para correr una auditoría completa manualmente.
 
-### 4. Acción
+### 4. Búsqueda por imagen del b2box app (`POST /app/lookup`)
+
+El app manda **una URL** y Hugo responde si el producto está en el catálogo.
+
+```
+URL del cliente (MercadoLibre / Alibaba / 1688 / AliExpress / foto propia)
+   │
+   ▼  ingest/image_from_url.py — saca la foto (JSON-LD → og:image → regex de CDN)
+   ▼  match contra el catálogo:
+        1. source URL exacta          (gratis, seguro)
+        2. embeddings CLIP            (mismo producto aunque sea otra foto)
+        3. pHash                      (fallback si el modelo no está)
+   │
+   ├── match → PA (código de variante) + precio + botón "comprar ahora"
+   └── sin match → se abre el formulario del app en Cloud_B2BOX
+```
+
+Sin match, Hugo abre **el mismo formulario que ya usa el app**: la edge function
+`form-app-submit` de `b2b-flow-pro`, que escribe en `form_app_consultations` +
+`form_app_consultation_products`. Aparece en la sección Forms del tablero, igual
+que si el cliente lo hubiera cargado a mano. El link original va en
+`reference_link`, la foto en `image_urls`, y Hugo agrega en `notes` por qué no lo
+encontró y cuál fue el mejor candidato del catálogo.
+
+Como el formulario exige **nombre, email y teléfono**, el app tiene que mandarlos
+en `client`. Si faltan, Hugo no llama a Cloud y devuelve `cloud_request.missing_fields`
+para que el app los pida y reintente.
+
+> **Dos límites de `form-app-submit` que hay que mirar antes de escalar:**
+>
+> * `checkRateLimit` permite **5 submissions cada 10 min por IP**. Está pensado
+>   para un browser, pero Hugo es un solo servidor: del 6º lookup sin match en
+>   10 minutos en adelante, Cloud responde 429. Para volumen real hace falta un
+>   bypass server-to-server en la edge function.
+> * `verifyRecaptcha` corre en modo `monitor` por defecto y deja pasar a Hugo.
+>   Si alguien pone `RECAPTCHA_MODE=enforce`, Hugo empieza a comer 403: no puede
+>   generar un token de reCAPTCHA v3.
+>
+> Hugo detecta los dos casos y devuelve el error explicado en `cloud_request.error`.
+
+**Por qué CLIP y no solo pHash.** pHash compara píxeles: sirve cuando la
+publicación reusa la foto oficial del proveedor, pero se cae con la foto propia
+del cliente. Medido sobre la misma foto transformada (recorte + brillo, rotación
+18°, espejo + desaturado):
+
+| variante                      | CLIP  | pHash |
+|-------------------------------|-------|-------|
+| misma foto                    | 1.000 | 1.000 |
+| recorte + brillo              | 0.923 | 0.500 |
+| rotada 18°                    | 0.929 | 0.594 |
+| espejo + fondo desaturado     | 0.982 | 0.500 |
+| **otro producto sin relación**| 0.544 | 0.625 |
+
+pHash puntúa **más bajo** al mismo producto que a uno sin relación. Por eso el
+threshold por defecto (`EMBED_MATCH_THRESHOLD=0.88`) es sobre CLIP.
+
+El modelo es la torre visual de CLIP ViT-B/32 en ONNX (~350 MB), bakeada en la
+imagen Docker; corre en CPU sin torch (~24 ms/imagen). Los embeddings del
+catálogo se precalculan en un índice en memoria y se persisten en
+`image_embed_cache`, así un reinicio no vuelve a descargar ni inferir nada.
+
+> **Memoria**: el modelo suma ~500 MB de RSS. El límite del container pasó de
+> 512M a **2G** — en Coolify hay que subirlo en el panel del servicio.
+
+### 5. Acción
 
 - Auto-actualiza precios cuando la desviación es razonable.
 - Marca duplicados de alta confianza como `disabled` en Vendure.
@@ -63,9 +127,13 @@ backend/
 │   │   └── client.py        # Cliente GraphQL Vendure Admin API
 │   ├── dedup/
 │   │   ├── url_match.py
-│   │   ├── image_hash.py
+│   │   ├── image_hash.py     # pHash (píxeles)
+│   │   ├── image_embed.py    # CLIP ONNX (semántico)
+│   │   ├── catalog_index.py  # índice vectorial del catálogo
 │   │   ├── fuzzy_text.py
 │   │   └── orchestrator.py
+│   ├── ingest/
+│   │   └── image_from_url.py # saca la foto de una URL de marketplace
 │   ├── pricing/
 │   │   ├── source_check.py
 │   │   ├── competitor_check.py
@@ -172,6 +240,58 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `POST /audit?target=all|duplicates|prices` — auditoría on-demand
 - `GET  /products/{id}/check` — chequea un producto puntual (precio fuente)
 - `GET  /audit-log?limit=N` — últimas N acciones (para dashboard)
+- `POST /app/lookup` — el b2box app manda una URL: PA + comprar ahora, o pedido a Cloud
+- `GET  /app/index-status` — si el índice de imágenes ya está listo
+- `POST /app/index-rebuild` — fuerza la reconstrucción del índice
+
+Los tres `/app/*` se autentican con `X-API-Key: $HUGO_API_KEY` (igual que `/verify`).
+
+### `POST /app/lookup`
+
+```jsonc
+// request — alcanza con `url`; `image_url` es para cuando el app ya subió la foto.
+// `client` solo se usa si NO lo tenemos (es lo que pide el formulario de Cloud).
+{
+  "url": "https://articulo.mercadolibre.com.ar/MLA-123-lampara-led",
+  "image_url": null,
+  "note": "lo quiero en negro",
+  "client": {
+    "name": "Juan Pérez", "email": "juan@ejemplo.com", "phone": "+5491155551234",
+    "country": "Argentina", "quantity": "200 u"
+  }
+}
+```
+
+```jsonc
+// response — lo tenemos
+{
+  "status": "found", "found": true,
+  "confidence": 0.94, "matched_by": ["image_embed"],
+  "image_url": "https://http2.mlstatic.com/…jpg",
+  "product": {
+    "product_id": "42", "name": "Lámpara LED táctil",
+    "product_code": "BX-1001",          // código del producto
+    "pa": "PA-1001-BL",                 // PA = código de la 1ra variante
+    "price_cents": 189900, "currency": "ARS",
+    "variants": [{ "id": "101", "name": "Blanco", "pa": "PA-1001-BL", "price_cents": 189900 }],
+    "buy_now_url": "https://b2box.app/product/lampara-led-tactil"
+  }
+}
+```
+
+```jsonc
+// response — no lo tenemos: se abrió la consulta en Cloud
+{ "status": "not_found", "found": false,
+  "cloud_request": { "sent": true, "request_id": "<uuid de form_app_consultations>" },
+  "suggestion": { "product_id": "42", "score": 0.82 } }  // casi-match, si lo hubo
+
+// response — no lo tenemos pero faltan datos del cliente: el app los pide y reintenta
+{ "status": "not_found",
+  "cloud_request": { "sent": false, "missing_fields": ["client.email", "client.phone"] } }
+```
+
+Otros `status`: `"indexing"` (el índice se está construyendo — reintentar, **no**
+se abre pedido) y `"no_image"` (no se pudo sacar ninguna foto de la URL).
 
 ## Variables de entorno
 

@@ -89,6 +89,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/health",
     "/static/",     # assets del build de React (JS/CSS)
     "/verify",
+    "/app/",        # b2box app → /app/lookup (autentica por X-API-Key, no por cookie)
     "/favicon.ico",
 )
 

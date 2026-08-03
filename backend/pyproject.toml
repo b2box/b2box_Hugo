@@ -23,6 +23,10 @@ dependencies = [
     "imagehash>=4.3",      # perceptual hashing
     "Pillow>=10.2",        # imagenes
     "rapidfuzz>=3.6",      # fuzzy text
+    # Matching semántico de imagen (CLIP ViT-B/32 en ONNX, sin torch).
+    # onnxruntime CPU pesa ~50 MB; el modelo (.onnx) se bakea en la imagen.
+    "onnxruntime>=1.17",
+    "numpy>=1.26",
     # DB
     "sqlmodel>=0.0.16",
     "psycopg[binary]>=3.1",   # driver Postgres (para Supabase)

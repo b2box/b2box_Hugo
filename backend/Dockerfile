@@ -47,6 +47,21 @@ COPY backend/app ./app
 # Instalamos en un prefix aislado que después copiamos al stage final
 RUN pip install --prefix=/install .
 
+# ─── Stage 2b: modelo CLIP (torre visual, ONNX) ─────────────────
+# Lo bajamos en build y lo bakeamos en la imagen: sin volumen que montar y sin
+# descargar 350 MB en cada arranque del container. Stage aparte para que la capa
+# quede cacheada y no se rebaje en cada cambio de código.
+FROM debian:bookworm-slim AS model
+
+ARG CLIP_ONNX_URL=https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/models \
+    && curl -fsSL --retry 3 -o /opt/models/clip-vit-b32-vision.onnx "${CLIP_ONNX_URL}" \
+    && test -s /opt/models/clip-vit-b32-vision.onnx
+
 # ─── Stage 3: runtime ───────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
@@ -67,6 +82,10 @@ RUN useradd --create-home --shell /bin/bash hugo
 
 # Copiamos las deps instaladas por el builder
 COPY --from=builder /install /usr/local
+
+# Modelo CLIP (ver EMBED_MODEL_PATH en config.py). Si este COPY se saca, Hugo
+# sigue arrancando: /app/lookup cae a pHash y loguea un warning.
+COPY --from=model /opt/models /opt/models
 
 # Código del agente (backend)
 WORKDIR /app

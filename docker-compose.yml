@@ -42,5 +42,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # 2G porque /app/lookup corre CLIP ViT-B/32 en ONNX Runtime dentro de
+          # este mismo proceso: el modelo ocupa ~350 MB de RSS más los buffers de
+          # inferencia. Con 512M el container muere por OOM al primer lookup.
+          #
+          # Este archivo ES la fuente de verdad del límite: en Coolify la app
+          # b2box-hugo usa build_pack=dockercompose apuntando acá, y sus campos
+          # de Resource Limits están en 0 (sin límite). Cambiar el número en el
+          # panel no hace nada; hay que tocarlo acá y redeployar.
+          memory: 2G
           cpus: "1.0"

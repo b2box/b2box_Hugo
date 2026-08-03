@@ -292,6 +292,8 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   quality_zero_price: IconDollar,
   pa_variants: IconTag,
   bx_no_image: IconBan,
+  app_matches: IconSearch,
+  app_requests: IconInbox,
   all: IconLayers,
   settings: IconSettings,
   salud: IconActivity,

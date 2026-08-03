@@ -42,6 +42,12 @@ export const SECTION_META: Record<string, SectionMeta> = {
   bx_no_image: {
     desc: 'Productos con nombre "BX…" y sin imagen. Revisá cada uno y confirmá para deshabilitarlo en Vendure.',
   },
+  app_matches: {
+    desc: "Links que mandó el b2box app y encontramos en el catálogo. Al cliente se le devolvió el PA y el botón de comprar.",
+  },
+  app_requests: {
+    desc: "Links que mandó el b2box app y NO tenemos. Se abrió un pedido en Cloud para decidir si salimos a buscar el producto.",
+  },
   all: {
     desc: "Todos los eventos de auditoría en orden cronológico.",
   },
@@ -55,6 +61,7 @@ export const SECTION_META: Record<string, SectionMeta> = {
 
 export const GROUP_LABELS: Record<string, string> = {
   dedup: "Deduplicación",
+  app: "Búsqueda del app",
   pricing: "Precios",
   scheduler: "Scheduler",
   general: "General",

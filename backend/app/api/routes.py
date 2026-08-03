@@ -102,6 +102,27 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Producto 'BX…' sin imagen deshabilitado en Vendure",
         "tone": "warning",
     },
+    # b2box app → /app/lookup
+    "app_lookup_match": {
+        "icon": "check",
+        "title": "El app buscó un producto y lo tenemos en el catálogo",
+        "tone": "info",
+    },
+    "app_lookup_request_sent": {
+        "icon": "send",
+        "title": "El app buscó algo que no tenemos · pedido abierto en Cloud",
+        "tone": "warning",
+    },
+    "app_lookup_request_failed": {
+        "icon": "alert",
+        "title": "El app buscó algo que no tenemos · Cloud no aceptó el pedido",
+        "tone": "danger",
+    },
+    "app_lookup_no_image": {
+        "icon": "alert",
+        "title": "El app mandó un link del que no se pudo sacar la foto",
+        "tone": "danger",
+    },
 }
 
 
@@ -206,6 +227,20 @@ SECTIONS: dict[str, dict[str, Any]] = {
         "label": "BX sin imagen",
         "source": None,
         "actions": ["bx_no_image_flagged", "bx_no_image_disabled"],
+    },
+    "app_matches": {
+        "label": "Búsquedas del app",
+        "source": None,
+        "actions": ["app_lookup_match"],
+    },
+    "app_requests": {
+        "label": "Pedidos del app",
+        "source": None,
+        "actions": [
+            "app_lookup_request_sent",
+            "app_lookup_request_failed",
+            "app_lookup_no_image",
+        ],
     },
     "all": {
         "label": "Todo",
