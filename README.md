@@ -280,7 +280,7 @@ Los tres `/app/*` se autentican con `X-API-Key: $HUGO_API_KEY` (igual que `/veri
     "pa": "PA-1001-BL",                 // PA = código de la 1ra variante
     "price_cents": 189900, "currency": "ARS",
     "variants": [{ "id": "101", "name": "Blanco", "pa": "PA-1001-BL", "price_cents": 189900 }],
-    "buy_now_url": "https://b2box.app/product/lampara-led-tactil"
+    "buy_now_url": "https://b2box.app/ar/products/lampara-led-tactil"
   }
 }
 ```

@@ -92,7 +92,7 @@ def env(monkeypatch):
 
     class FakeSettings:
         storefront_url = "https://b2box.app"
-        storefront_product_path = "/product/{slug}"
+        storefront_product_path = "/ar/products/{slug}"
 
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     monkeypatch.setattr(app_routes.vendure_catalog, "get_catalog", fake_catalog)
@@ -151,7 +151,7 @@ async def test_match_devuelve_pa_y_link_de_compra(env, monkeypatch):
     assert resp.product.pa == "PA-1001-BL"
     assert [v.pa for v in resp.product.variants] == ["PA-1001-BL", "PA-1001-NE"]
     assert resp.product.product_code == "BX-1001"
-    assert resp.product.buy_now_url == "https://b2box.app/product/lampara-led-tactil"
+    assert resp.product.buy_now_url == "https://b2box.app/ar/products/lampara-led-tactil"
     assert resp.product.price_cents == 189900
     # Si lo tenemos, NO se molesta a Cloud.
     assert env["cloud_calls"] == []

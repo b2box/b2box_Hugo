@@ -106,7 +106,10 @@ class Settings(BaseSettings):
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
     storefront_product_path: str = Field(
-        default="/product/{slug}",
+        # Verificado contra la tienda: /ar/products/<slug> responde 200,
+        # /ar/product/<slug> y /product/<slug> dan 404. El /ar es el prefijo de
+        # país/canal (mismo canal que vendure_channel_token).
+        default="/ar/products/{slug}",
         description="Template del link al producto. Placeholders: {slug} {id} {code}",
     )
 
