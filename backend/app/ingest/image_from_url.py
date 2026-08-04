@@ -92,6 +92,11 @@ class ExtractedProduct:
     marketplace: str = "other"
     canonical_url: str = ""
     kind: str = "page"  # "image" (link directo) | "page" (ficha de producto)
+    # Precio al que se vende en el marketplace de origen, si lo sabemos.
+    # Hoy solo MercadoLibre, vía su API oficial.
+    market_price_cents: int | None = None
+    market_currency: str | None = None
+    market_seller_count: int = 0
 
 
 # ─── Helpers ───────────────────────────────────────────────────────
@@ -306,6 +311,9 @@ async def extract(url: str) -> ExtractedProduct:
                 marketplace=marketplace,
                 canonical_url=item.permalink or url,
                 kind="page",
+                market_price_cents=item.price_cents,
+                market_currency=item.currency,
+                market_seller_count=item.seller_count,
             )
 
     try:

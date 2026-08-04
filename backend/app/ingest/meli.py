@@ -41,6 +41,8 @@ _TIMEOUT = httpx.Timeout(15.0, connect=6.0)
 # de un lookup por un token que expiró entre el chequeo y el request.
 _TOKEN_MARGIN_SECONDS = 300
 _MAX_PICTURES = 6
+# Vendedores que miramos para sacar el precio más barato de una ficha.
+_MAX_SELLERS = 20
 
 # ─── Formas de URL que usa ML ──────────────────────────────────────
 # Las publicaciones viven en varias formas y conviene reconocerlas todas:
@@ -64,6 +66,14 @@ class MeliItem:
     title: str = ""
     image_urls: list[str] = field(default_factory=list)
     permalink: str = ""
+    # Precio al que se vende en MercadoLibre, en centavos. Es el MÁS BARATO de
+    # los vendedores de la ficha: es contra ese contra el que compite quien
+    # quiera revender, así que es el que hace honesto el cálculo de margen.
+    price_cents: int | None = None
+    currency: str | None = None
+    # Cuántos vendedores hay en la ficha. Sirve para decir "desde $X entre N
+    # vendedores" en vez de dar un número suelto sin contexto.
+    seller_count: int = 0
 
 
 @dataclass(slots=True)
@@ -227,16 +237,64 @@ async def _get(path: str) -> dict:
     return data
 
 
-async def fetch(ref: ParsedRef) -> MeliItem:
-    """Trae título y fotos de una publicación o ficha de catálogo."""
+async def fetch_market_price(product_id: str) -> tuple[int | None, str | None, int]:
+    """Precio más barato al que se vende esa ficha en ML, en centavos.
+
+    `/products/{id}` NO trae precio, pero `/products/{id}/items` lista a los
+    vendedores de la ficha con el suyo. Devolvemos el mínimo: es contra ese
+    contra el que compite quien quiera revender.
+
+    Devuelve (centavos, moneda, cantidad de vendedores). Todo None/0 si no se
+    pudo — nunca lanza: sin precio de mercado el lookup sigue siendo útil.
+    """
+    try:
+        raw = await _get(f"/products/{product_id}/items?limit={_MAX_SELLERS}")
+    except MeliError as exc:
+        log.info("Sin precio de mercado para %s: %s", product_id, exc)
+        return None, None, 0
+
+    results = raw.get("results")
+    if not isinstance(results, list) or not results:
+        return None, None, 0
+
+    prices: list[tuple[float, str]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        price = r.get("price")
+        if isinstance(price, (int, float)) and price > 0:
+            prices.append((float(price), str(r.get("currency_id") or "")))
+    if not prices:
+        return None, None, len(results)
+
+    cheapest, currency = min(prices, key=lambda p: p[0])
+    return round(cheapest * 100), currency or None, len(prices)
+
+
+async def fetch(ref: ParsedRef, *, with_price: bool = True) -> MeliItem:
+    """Trae título, fotos y —para fichas de catálogo— el precio de mercado."""
     path = f"/items/{ref.id}" if ref.kind == "item" else f"/products/{ref.id}"
     raw = await _get(path)
-    return MeliItem(
+    item = MeliItem(
         id=str(raw.get("id") or ref.id),
         title=str(raw.get("title") or raw.get("name") or ""),
         image_urls=_pictures_from(raw),
         permalink=str(raw.get("permalink") or ""),
     )
+    # Solo las fichas de catálogo tienen lista de vendedores; una publicación
+    # suelta trae su propio precio en el mismo payload.
+    if with_price:
+        if ref.kind == "product":
+            item.price_cents, item.currency, item.seller_count = (
+                await fetch_market_price(item.id)
+            )
+        else:
+            price = raw.get("price")
+            if isinstance(price, (int, float)) and price > 0:
+                item.price_cents = round(float(price) * 100)
+                item.currency = str(raw.get("currency_id") or "") or None
+                item.seller_count = 1
+    return item
 
 
 async def fetch_from_url(url: str) -> MeliItem | None:

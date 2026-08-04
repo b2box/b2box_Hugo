@@ -171,6 +171,12 @@ class AppLookupResponse(BaseModel):
     title: str = ""
     marketplace: str = "other"
     canonical_url: str = ""
+    # A cuánto se vende en el marketplace de origen (el más barato entre los
+    # vendedores de esa ficha). Hoy solo MercadoLibre, vía su API oficial.
+    # Con esto y el precio del catálogo sale el margen real.
+    market_price_cents: int | None = None
+    market_currency: str | None = None
+    market_seller_count: int = 0
     product: LookupProduct | None = None
     suggestion: LookupSuggestion | None = None
     cloud_request: CloudRequestInfo | None = None
@@ -426,6 +432,9 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     title = ""
     marketplace = "other"
     canonical = raw_url or direct_image
+    market_price_cents: int | None = None
+    market_currency: str | None = None
+    market_seller_count = 0
     image_urls: list[str] = []
 
     if direct_image:
@@ -436,6 +445,9 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             extracted = await image_from_url.extract(raw_url)
             image_urls = image_urls + [u for u in extracted.image_urls if u not in image_urls]
             title = extracted.title
+            market_price_cents = extracted.market_price_cents
+            market_currency = extracted.market_currency
+            market_seller_count = extracted.market_seller_count
             marketplace = extracted.marketplace if not direct_image else marketplace
             canonical = extracted.canonical_url
         except image_from_url.ExtractError as exc:
@@ -467,6 +479,9 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         title=title,
         marketplace=marketplace,
         canonical_url=canonical,
+        market_price_cents=market_price_cents,
+        market_currency=market_currency,
+        market_seller_count=market_seller_count,
     )
 
     # ── 2. Match contra el catálogo ────────────────────────────────

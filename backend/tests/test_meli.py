@@ -253,3 +253,83 @@ async def test_usa_thumbnail_si_no_hay_pictures(monkeypatch):
 
     item = await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x")
     assert item.image_urls == ["https://http2.mlstatic.com/t.jpg"]
+
+
+# ─── Precio de mercado ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_precio_de_mercado_es_el_mas_barato(monkeypatch):
+    """Una ficha de catálogo tiene varios vendedores con precios distintos.
+
+    Devolvemos el más barato: es contra ese contra el que compite quien quiera
+    revender, así que es el que hace honesto el cálculo de margen.
+    """
+    def handler(method, url):
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        return _resp(200, {"results": [
+            {"item_id": "MLA1", "price": 11055.07, "currency_id": "ARS"},
+            {"item_id": "MLA2", "price": 8937.12, "currency_id": "ARS"},
+            {"item_id": "MLA3", "price": 11456.2, "currency_id": "ARS"},
+        ]})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    cents, currency, sellers = await meli.fetch_market_price("MLA2062278024")
+
+    assert cents == 893712
+    assert currency == "ARS"
+    assert sellers == 3
+
+
+@pytest.mark.asyncio
+async def test_sin_vendedores_no_hay_precio(monkeypatch):
+    def handler(method, url):
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        return _resp(200, {"results": []})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    assert await meli.fetch_market_price("MLA1") == (None, None, 0)
+
+
+@pytest.mark.asyncio
+async def test_si_falla_el_precio_el_lookup_sigue(monkeypatch):
+    """Sin precio de mercado el resultado sigue siendo útil: foto y título."""
+    def handler(method, url):
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        if "/items?" in url:
+            return _resp(500, {})
+        return _resp(200, {**_ITEM, "id": "MLA2062278024"})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    item = await meli.fetch_from_url("https://www.mercadolibre.com.ar/x/p/MLA2062278024")
+
+    assert item is not None
+    assert item.image_urls
+    assert item.price_cents is None
+
+
+@pytest.mark.asyncio
+async def test_una_publicacion_trae_su_propio_precio(monkeypatch):
+    """Las publicaciones sueltas no tienen lista de vendedores: el precio viene
+    en el mismo payload."""
+    def handler(method, url):
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        return _resp(200, {**_ITEM, "price": 8937.12, "currency_id": "ARS"})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    item = await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x")
+
+    assert item.price_cents == 893712
+    assert item.seller_count == 1
