@@ -204,7 +204,9 @@ async def test_matchea_con_la_mejor_foto_no_con_la_primera(env, monkeypatch):
 
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
-    monkeypatch.setattr(app_routes.image_embed, "embed_urls", fake_embed_urls)
+    monkeypatch.setattr(
+        app_routes.image_embed, "embed_urls_aligned", fake_embed_urls
+    )
     monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
 
     async def noop():
@@ -242,7 +244,9 @@ async def test_solo_se_comparan_las_primeras_n_fotos(env, monkeypatch):
 
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
-    monkeypatch.setattr(app_routes.image_embed, "embed_urls", fake_embed_urls)
+    monkeypatch.setattr(
+        app_routes.image_embed, "embed_urls_aligned", fake_embed_urls
+    )
     monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
     monkeypatch.setattr(app_routes.catalog_index, "ensure_index", noop)
     monkeypatch.setattr(

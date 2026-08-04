@@ -27,7 +27,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
 
@@ -74,6 +74,13 @@ class MeliItem:
     # Cuántos vendedores hay en la ficha. Sirve para decir "desde $X entre N
     # vendedores" en vez de dar un número suelto sin contexto.
     seller_count: int = 0
+    # Cómo llegamos al producto:
+    #   "direct"  → la API nos dio la ficha del link. Es exactamente ese.
+    #   "catalog" → la API bloqueó el link y lo resolvimos buscando su nombre en
+    #               el catálogo de ML. Es el mismo producto casi siempre, pero
+    #               puede ser uno parecido: el llamador tiene que tratarlo como
+    #               aproximado y no afirmarlo.
+    resolved_by: str = "direct"
 
 
 @dataclass(slots=True)
@@ -297,27 +304,136 @@ async def fetch(ref: ParsedRef, *, with_price: bool = True) -> MeliItem:
     return item
 
 
-async def fetch_from_url(url: str) -> MeliItem | None:
-    """Atajo: URL de ML → item. None si no se pudo identificar o leer.
+# Sitio de ML por dominio. Hace falta para buscar en el catálogo correcto: el
+# mismo producto tiene fichas distintas en cada país.
+_SITE_BY_TLD = {
+    ".com.ar": "MLA", ".com.mx": "MLM", ".com.br": "MLB", ".com.co": "MCO",
+    ".com.uy": "MLU", ".com.pe": "MPE", ".com.ec": "MEC", ".cl": "MLC",
+}
+# Palabras de la URL que no describen al producto.
+_SLUG_NOISE = {"mercadolibre", "mercadolivre", "articulo", "produto", "www",
+               "com", "ar", "mx", "br", "co", "up", "p", "jm",
+               "mla", "mlb", "mlm", "mlc", "mco", "mlu", "mpe", "mec"}
+_MAX_SEARCH_RESULTS = 6
+# Candidatos que devolvemos para que los desempate el match de imagen.
+_MAX_CANDIDATES = 4
+
+
+def site_for(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    for tld, site in _SITE_BY_TLD.items():
+        if host.endswith(tld):
+            return site
+    return "MLA"
+
+
+def name_from_url(url: str) -> str:
+    """Saca el nombre del producto del slug de la URL.
+
+    `/masajeador-cervical-inteligente-con-calor-portatil-zevya/up/MLAU409…`
+    → "masajeador cervical inteligente con calor portatil zevya".
+
+    Es lo único que queda cuando ML bloquea la ficha: el nombre viaja en la
+    propia URL que pegó el cliente.
+    """
+    path = urlparse(unquote(url)).path
+    best = ""
+    for segment in path.split("/"):
+        if not segment or "-" not in segment:
+            continue
+        words = [
+            w for w in segment.lower().split("-")
+            if w and not w.isdigit() and w not in _SLUG_NOISE
+            and not re.fullmatch(r"(?:ml[a-z]u?|mco)\d+", w)
+        ]
+        candidate = " ".join(words)
+        if len(candidate) > len(best):
+            best = candidate
+    return best[:120]
+
+
+async def search_catalog(query: str, site: str) -> list[MeliItem]:
+    """Busca `query` en el catálogo de ML y devuelve las fichas con fotos.
+
+    Es el plan B para los links que la API no deja leer (`/up/`, `articulo…`).
+    Devuelve VARIOS candidatos a propósito: por texto no se puede desempatar
+    —"masajeador cervical inteligente… zevya" matchea igual de bien a dos
+    productos distintos— y el que decide es el match de imagen contra nuestro
+    catálogo. Todos salen marcados `resolved_by="catalog"`: es el mismo producto
+    casi siempre, pero puede ser uno parecido.
+    """
+    if not query:
+        return []
+    try:
+        raw = await _get(
+            f"/products/search?status=active&site_id={site}"
+            f"&q={quote(query)}&limit={_MAX_SEARCH_RESULTS}"
+        )
+    except MeliError as exc:
+        log.info("Búsqueda en catálogo de ML falló para %r: %s", query[:60], exc)
+        return []
+
+    out: list[MeliItem] = []
+    for result in (raw.get("results") or []):
+        if not isinstance(result, dict):
+            continue
+        pictures = _pictures_from(result)
+        if not pictures:
+            continue
+        item = MeliItem(
+            id=str(result.get("id") or ""),
+            title=str(result.get("name") or ""),
+            image_urls=pictures,
+            permalink=str(result.get("permalink") or ""),
+            resolved_by="catalog",
+        )
+        item.price_cents, item.currency, item.seller_count = (
+            await fetch_market_price(item.id)
+        )
+        out.append(item)
+        if len(out) >= _MAX_CANDIDATES:
+            break
+    return out
+
+
+async def fetch_from_url(url: str) -> list[MeliItem]:
+    """URL de ML → candidatos. Lista vacía si no se pudo resolver.
+
+    Uno solo cuando la API devolvió la ficha del link; varios cuando hubo que
+    caer al catálogo, porque ahí el desempate lo hace el match de imagen.
 
     No propaga errores: si la API falla, el llamador tiene que poder seguir con
     el scraping normal en vez de romper el lookup entero.
     """
     ref = parse_url(url)
-    if ref is None:
-        log.info("No pude sacar el id de ML de %s", url[:120])
-        return None
-    try:
-        item = await fetch(ref)
-    except MeliError as exc:
-        log.warning("API de ML falló para %s (%s): %s", ref.id, ref.kind, exc)
-        # Una URL /up/ puede apuntar a una ficha que no existe como catálogo;
-        # probamos como publicación antes de rendirnos.
-        if ref.kind == "product":
-            try:
-                item = await fetch(ParsedRef(id=ref.id, kind="item"))
-            except MeliError:
-                return None
-        else:
-            return None
-    return item if item.image_urls else None
+    item: MeliItem | None = None
+
+    if ref is not None:
+        try:
+            item = await fetch(ref)
+        except MeliError as exc:
+            log.info("API de ML no devolvió %s (%s): %s", ref.id, ref.kind, exc)
+            # Una URL /up/ puede apuntar a una ficha que no existe como
+            # catálogo; probamos como publicación antes de rendirnos.
+            if ref.kind == "product":
+                try:
+                    item = await fetch(ParsedRef(id=ref.id, kind="item"))
+                except MeliError:
+                    item = None
+        if item is not None and not item.image_urls:
+            item = None
+
+    if item is not None:
+        return [item]
+
+    # Plan B: ML bloquea la lectura directa de las publicaciones de otros
+    # vendedores (403 en /items y en /products para los ids MLAU…), pero el
+    # nombre del producto viaja en la propia URL. Lo buscamos en su catálogo:
+    # de ahí salen las fotos y los precios de los vendedores de esa ficha.
+    # Es el mismo producto casi siempre, pero puede ser uno parecido, así que
+    # vuelve marcado como aproximado.
+    query = name_from_url(url)
+    if not query:
+        return []
+    log.info("Resolviendo %s por catálogo de ML: %r", url[:80], query[:60])
+    return await search_catalog(query, site_for(url))

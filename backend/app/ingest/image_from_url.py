@@ -97,6 +97,15 @@ class ExtractedProduct:
     market_price_cents: int | None = None
     market_currency: str | None = None
     market_seller_count: int = 0
+    # Cuando la ficha del link está bloqueada y hubo que resolverla buscando
+    # su nombre en el catálogo del marketplace, el producto puede ser uno
+    # parecido en vez del exacto. El llamador no debe afirmarlo.
+    approximate: bool = False
+    # Precio por URL de foto: con varios candidatos, el precio que vale es el
+    # del que terminó matcheando contra nuestro catálogo, no el del primero.
+    price_by_image: dict[str, tuple[int | None, str | None, int]] = field(
+        default_factory=dict
+    )
 
 
 # ─── Helpers ───────────────────────────────────────────────────────
@@ -303,17 +312,36 @@ async def extract(url: str) -> ExtractedProduct:
     # con el scraping — que para ML va a terminar en BlockedByCaptcha, pero el
     # camino queda igual para no tratar a ML distinto sin necesidad.
     if marketplace == "mercadolibre" and meli.enabled():
-        item = await meli.fetch_from_url(url)
-        if item is not None:
+        candidates = await meli.fetch_from_url(url)
+        if candidates:
+            # Con un candidato es la ficha del link. Con varios, ML bloqueó el
+            # link y los sacamos del catálogo por nombre: juntamos las fotos de
+            # todos y que desempate el match de imagen contra nuestro catálogo.
+            images: list[str] = []
+            price_by_image: dict[str, tuple[int | None, str | None, int]] = {}
+            per_candidate = max(1, _MAX_IMAGES // len(candidates))
+            for candidate in candidates:
+                for image in candidate.image_urls[:per_candidate]:
+                    if image in price_by_image:
+                        continue
+                    images.append(image)
+                    price_by_image[image] = (
+                        candidate.price_cents,
+                        candidate.currency,
+                        candidate.seller_count,
+                    )
+            first = candidates[0]
             return ExtractedProduct(
-                image_urls=item.image_urls[:_MAX_IMAGES],
-                title=item.title[:300],
+                image_urls=images[:_MAX_IMAGES],
+                title=first.title[:300],
                 marketplace=marketplace,
-                canonical_url=item.permalink or url,
+                canonical_url=first.permalink or url,
                 kind="page",
-                market_price_cents=item.price_cents,
-                market_currency=item.currency,
-                market_seller_count=item.seller_count,
+                market_price_cents=first.price_cents,
+                market_currency=first.currency,
+                market_seller_count=first.seller_count,
+                approximate=first.resolved_by == "catalog",
+                price_by_image=price_by_image,
             )
 
     try:

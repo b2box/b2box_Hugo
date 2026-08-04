@@ -178,9 +178,12 @@ async def test_fetch_from_url_devuelve_fotos_y_titulo(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    item = await meli.fetch_from_url(
-        "https://www.mercadolibre.com.ar/x/up/MLAU391?pdp_filters=item_id:MLA1755665491"
-    )
+    item = (
+        await meli.fetch_from_url(
+            "https://www.mercadolibre.com.ar/x/up/MLAU391?pdp_filters=item_id:MLA1755665491"
+        )
+        or [None]
+    )[0]
     assert item is not None
     assert item.title.startswith("Masajeador Cervical")
     # https por sobre http cuando vienen las dos.
@@ -206,7 +209,12 @@ async def test_catalogo_que_falla_reintenta_como_publicacion(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    item = await meli.fetch_from_url("https://www.mercadolibre.com.ar/x/up/MLAU3916488174")
+    item = (
+        await meli.fetch_from_url(
+            "https://www.mercadolibre.com.ar/x/up/MLAU3916488174"
+        )
+        or [None]
+    )[0]
     assert item is not None
     assert any("/products/" in u for u in vistos)
     assert any("/items/" in u for u in vistos)
@@ -223,7 +231,7 @@ async def test_sin_fotos_devuelve_none(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    assert await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x") is None
+    assert await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x") == []
 
 
 @pytest.mark.asyncio
@@ -237,7 +245,7 @@ async def test_api_caida_no_rompe_el_lookup(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    assert await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x") is None
+    assert await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x") == []
 
 
 @pytest.mark.asyncio
@@ -251,7 +259,12 @@ async def test_usa_thumbnail_si_no_hay_pictures(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    item = await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x")
+    item = (
+        await meli.fetch_from_url(
+            "https://articulo.mercadolibre.com.ar/MLA-123456-x"
+        )
+        or [None]
+    )[0]
     assert item.image_urls == ["https://http2.mlstatic.com/t.jpg"]
 
 
@@ -310,7 +323,12 @@ async def test_si_falla_el_precio_el_lookup_sigue(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    item = await meli.fetch_from_url("https://www.mercadolibre.com.ar/x/p/MLA2062278024")
+    item = (
+        await meli.fetch_from_url(
+            "https://www.mercadolibre.com.ar/x/p/MLA2062278024"
+        )
+        or [None]
+    )[0]
 
     assert item is not None
     assert item.image_urls
@@ -329,7 +347,12 @@ async def test_una_publicacion_trae_su_propio_precio(monkeypatch):
     monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
     _patch_http(monkeypatch, handler)
 
-    item = await meli.fetch_from_url("https://articulo.mercadolibre.com.ar/MLA-123456-x")
+    item = (
+        await meli.fetch_from_url(
+            "https://articulo.mercadolibre.com.ar/MLA-123456-x"
+        )
+        or [None]
+    )[0]
 
     assert item.price_cents == 893712
     assert item.seller_count == 1

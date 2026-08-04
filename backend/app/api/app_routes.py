@@ -435,6 +435,10 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     market_price_cents: int | None = None
     market_currency: str | None = None
     market_seller_count = 0
+    price_by_image: dict[str, tuple[int | None, str | None, int]] = {}
+    # El link estaba bloqueado y el producto se resolvió buscando su nombre
+    # en el catálogo del marketplace: puede ser uno parecido.
+    approximate_source = False
     image_urls: list[str] = []
 
     if direct_image:
@@ -448,6 +452,8 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             market_price_cents = extracted.market_price_cents
             market_currency = extracted.market_currency
             market_seller_count = extracted.market_seller_count
+            price_by_image = extracted.price_by_image
+            approximate_source = extracted.approximate
             marketplace = extracted.marketplace if not direct_image else marketplace
             canonical = extracted.canonical_url
         except image_from_url.ExtractError as exc:
@@ -524,18 +530,32 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         # perfil) y la que se parece a la nuestra puede ser la tercera. Cada
         # imagen extra cuesta ~25 ms de inferencia — barato al lado de perder
         # un match que sí teníamos.
-        query_vecs = await image_embed.embed_urls(image_urls[:_MAX_QUERY_IMAGES])
-        if query_vecs:
-            best_hit: tuple[VendureProduct, float] | None = None
-            for vec in query_vecs:
+        query_urls = image_urls[:_MAX_QUERY_IMAGES]
+        # aligned: necesitamos saber DE QUÉ foto salió cada vector. Cuando las
+        # fotos vienen de varios candidatos del catálogo de ML, el precio de
+        # mercado que vale es el del candidato cuya foto ganó, no el del primero.
+        query_vecs = await image_embed.embed_urls_aligned(query_urls)
+        if any(v is not None for v in query_vecs):
+            best_hit: tuple[VendureProduct, float, str] | None = None
+            for url_used, vec in zip(query_urls, query_vecs):
+                if vec is None:
+                    continue
                 hits = catalog_index.search(vec, top_k=1)
                 if hits and (best_hit is None or hits[0][1] > best_hit[1]):
-                    best_hit = (hits[0][0], hits[0][1])
+                    best_hit = (hits[0][0], hits[0][1], url_used)
             if best_hit is not None:
-                product, hit_score = best_hit
+                product, hit_score, winning_image = best_hit
+                winner = price_by_image.get(winning_image)
+                if winner is not None:
+                    base.market_price_cents, base.market_currency, base.market_seller_count = (
+                        winner
+                    )
                 # Thresholds por runtime: se ajustan desde el dashboard sin redeploy.
                 threshold = float(runtime.get("embed_match_threshold"))
-                if hit_score >= threshold:
+                # Si el producto de origen se resolvió por búsqueda de nombre,
+                # no afirmamos aunque el score alcance: la foto que matcheó
+                # puede ser de un producto parecido al que miró el cliente.
+                if hit_score >= threshold and not approximate_source:
                     matched, score, matched_by = product, hit_score, ["image_embed"]
                 elif hit_score >= float(runtime.get("embed_suggest_threshold")):
                     candidate = LookupSuggestion(
