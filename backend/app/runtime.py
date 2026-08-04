@@ -108,6 +108,31 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="embed_suggest_threshold",
         min=0.3, max=1.0, step=0.01, group="app",
     ),
+    SettingMeta(
+        key="embed_name_confirm_threshold",
+        label="Threshold de nombre (confirma)",
+        description=(
+            "Similitud mínima entre el título de origen y el nombre del catálogo para "
+            "que el nombre CONFIRME el candidato: gana aunque su foto no sea la de mayor "
+            "score y rescata un match de imagen flojo. Sube para exigir más coincidencia "
+            "de nombre; baja si productos que sí tenemos no se reconocen."
+        ),
+        type="float", parser=float,
+        default_attr="embed_name_confirm_threshold",
+        min=0.3, max=1.0, step=0.01, group="app",
+    ),
+    SettingMeta(
+        key="embed_name_reject_threshold",
+        label="Threshold de nombre (veta)",
+        description=(
+            "Si el nombre del mejor candidato por imagen queda por debajo de esto, se "
+            "considera que no tiene nada que ver y se VETA el match: evita mostrar un "
+            "producto totalmente distinto. Sube para vetar más agresivo; 0 = sin veto."
+        ),
+        type="float", parser=float,
+        default_attr="embed_name_reject_threshold",
+        min=0.0, max=1.0, step=0.01, group="app",
+    ),
     # Pricing
     SettingMeta(
         key="price_drift_threshold",
