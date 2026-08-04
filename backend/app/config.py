@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     # Por debajo del threshold pero por encima de esto, el match viaja igual en el
     # formulario a Cloud como "mejor candidato" (no se muestra como encontrado).
     embed_suggest_threshold: float = 0.82
+    # Segunda señal: similitud de NOMBRE (título de origen vs nombre del catálogo).
+    # La imagen sola confunde productos genéricos; el nombre desempata.
+    #   >= confirm  → el nombre coincide: confirma el candidato y rescata una foto
+    #                 floja (evita el falso negativo del producto que sí tenemos).
+    #   <  reject   → el nombre no tiene nada que ver: veta el match de imagen
+    #                 (evita el falso positivo de mostrar algo totalmente distinto).
+    embed_name_confirm_threshold: float = 0.72
+    embed_name_reject_threshold: float = 0.30
     # Cuántas imágenes por producto se indexan (la featured primero).
     embed_images_per_product: int = 2
     embed_cache_max: int = 5000

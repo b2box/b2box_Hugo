@@ -106,6 +106,8 @@ def env(monkeypatch):
     monkeypatch.setattr(
         app_routes.runtime, "get",
         lambda k: {"embed_match_threshold": 0.88, "embed_suggest_threshold": 0.78,
+                   "embed_name_confirm_threshold": 0.72,
+                   "embed_name_reject_threshold": 0.30,
                    "dedup_image_threshold": 0.92}[k],
     )
     return {"recorded": recorded, "cloud_calls": cloud_calls}
@@ -258,6 +260,126 @@ async def test_solo_se_comparan_las_primeras_n_fotos(env, monkeypatch):
     assert len(vistas[0]) == app_routes._MAX_QUERY_IMAGES
 
 
+# ─── 1-bis. La imagen sola no alcanza: el nombre desempata ─────────
+#
+# Productos genéricos (dos masajeadores negros, dos hand grips) se parecen en la
+# foto pero no son el mismo. El nombre confirma o veta.
+
+
+def _otro_producto() -> VendureProduct:
+    """Un producto DISTINTO que casualmente puntúa alto por imagen."""
+    return VendureProduct(
+        id="99",
+        name="Reloj despertador digital",
+        slug="reloj-despertador",
+        description="Reloj con alarma",
+        enabled=True,
+        source_url="https://detail.1688.com/offer/555.html",
+        image_urls=["https://cdn.b2box.app/reloj-1.jpg"],
+        product_code="BX-9999",
+        featured_image_url="https://cdn.b2box.app/reloj-1.jpg",
+        first_variant_price_cents=99900,
+        variant_count=1,
+    )
+
+
+def _embeddings_con(monkeypatch, *, title: str, hits: list[tuple]):
+    """Índice CLIP listo que, para cualquier foto, devuelve `hits`.
+
+    `hits`: lista de (product, score). `title` es lo que Hugo leyó de la URL.
+    """
+
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=[PHOTO], title=title, marketplace="mercadolibre",
+            canonical_url=url, kind="page",
+        )
+
+    async def fake_embed_url(url):  # noqa: ARG001
+        return np.ones(4, dtype=np.float32)
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
+    monkeypatch.setattr(app_routes.image_embed, "embed_url", fake_embed_url)
+    monkeypatch.setattr(app_routes.catalog_index, "ensure_index", noop)
+    monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
+    monkeypatch.setattr(
+        app_routes.catalog_index, "search",
+        lambda v, top_k=1: [(p, s, "x") for p, s in hits],
+    )
+
+
+@pytest.mark.asyncio
+async def test_veta_falso_positivo_cuando_el_nombre_no_tiene_que_ver(env, monkeypatch):
+    """Foto clavada (0.94) pero el nombre no coincide → NO se muestra.
+
+    Es el caso que se veía como bug: 'lo tenemos' mostrando algo totalmente
+    distinto. El nombre lo veta antes de mostrarlo.
+    """
+    _embeddings_con(
+        monkeypatch,
+        title="Masajeador de cuello y hombro electrico",
+        hits=[(_product(), 0.94)],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is None
+    # No lo afirmamos: se abre el pedido en Cloud en vez de mentir un match.
+    assert env["cloud_calls"] != []
+
+
+@pytest.mark.asyncio
+async def test_rescata_por_nombre_cuando_la_imagen_no_alcanza(env, monkeypatch):
+    """Imagen floja (0.72 < suggest 0.78) pero el nombre coincide → sugerencia.
+
+    El producto que SÍ tenemos cuya foto en origen no es igual a la nuestra.
+    """
+    _embeddings_con(monkeypatch, title="Lámpara", hits=[(_product(), 0.72)])
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is not None
+    assert resp.suggestion.product_code == "BX-1001"
+
+
+@pytest.mark.asyncio
+async def test_reordena_por_nombre_entre_candidatos(env, monkeypatch):
+    """Top-1 por imagen es el equivocado; el correcto entra por nombre.
+
+    El equivocado puntúa MÁS alto de imagen (0.96) que el correcto (0.90), pero
+    su nombre no coincide y el del correcto sí: gana el correcto.
+    """
+    _embeddings_con(
+        monkeypatch,
+        title="Lámpara",
+        hits=[(_otro_producto(), 0.96), (_product(), 0.90)],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.found is True
+    assert resp.product.product_code == "BX-1001"
+    assert resp.confidence == pytest.approx(0.90)
+    assert "name" in resp.matched_by
+
+
+@pytest.mark.asyncio
+async def test_nombre_confirmado_suma_a_matched_by(env, monkeypatch):
+    """Imagen sobre umbral + nombre que coincide → matched_by incluye 'name'."""
+    _embeddings_con(monkeypatch, title="Lámpara", hits=[(_product(), 0.94)])
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.status == "found"
+    assert resp.matched_by == ["image_embed", "name"]
+
+
 # ─── 2. No lo tenemos ──────────────────────────────────────────────
 
 
@@ -332,6 +454,8 @@ async def test_debajo_del_piso_no_se_sugiere_nada(env, monkeypatch):
     monkeypatch.setattr(
         app_routes.runtime, "get",
         lambda k: {"embed_match_threshold": 0.88, "embed_suggest_threshold": 0.82,
+                   "embed_name_confirm_threshold": 0.72,
+                   "embed_name_reject_threshold": 0.30,
                    "dedup_image_threshold": 0.92}[k],
     )
 

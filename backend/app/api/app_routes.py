@@ -38,7 +38,7 @@ from app import runtime
 from app.config import get_settings
 from app.db.models import AuditLog
 from app.db.session import engine
-from app.dedup import catalog_index, image_embed
+from app.dedup import catalog_index, fuzzy_text, image_embed
 from app.dedup.image_hash import image_similarity
 from app.dedup.url_match import url_similarity
 from app.ingest import image_from_url
@@ -59,6 +59,17 @@ _PHASH_CONCURRENCY = 8
 # producto traen varias (galería) y la principal no siempre es la que mejor
 # matchea; nos quedamos con el mejor score entre todas.
 _MAX_QUERY_IMAGES = 4
+
+# Cuántos candidatos por foto trae el índice CLIP antes de desempatar por nombre.
+# La imagen sola confunde productos genéricos (dos masajeadores negros, dos hand
+# grips): el top-1 por foto puede ser el equivocado y el correcto caer en el #2.
+# Traemos varios y el nombre elige.
+_EMBED_TOPK = 5
+
+# Imagen mínima para rescatar un candidato cuyo NOMBRE sí coincide. Por debajo de
+# esto no lo damos ni con nombre idéntico: sería adivinar sobre una foto que no se
+# parece.
+_NAME_RESCUE_IMAGE_FLOOR = 0.68
 
 
 # ─── Modelos ───────────────────────────────────────────────────────
@@ -365,6 +376,48 @@ def _record(
         log.exception("No se pudo registrar el AuditLog de /app/lookup")
 
 
+def _best_embed_candidate(
+    candidates: list[tuple[VendureProduct, float, str]],
+    title: str,
+    name_confirm: float,
+    name_reject: float,
+) -> tuple[VendureProduct, float, str, float | None, bool, bool] | None:
+    """Elige el candidato del índice CLIP desempatando con el nombre.
+
+    `candidates`: el mejor (product, score_imagen, foto_query) por producto entre
+    todos los hits del índice. Devuelve
+    `(product, img_score, foto_query, name_sim, confirmado, vetado)` o None.
+
+    La imagen sola confunde productos genéricos que se parecen pero no son (por eso
+    a veces "lo tenemos" muestra algo totalmente distinto). El nombre desempata:
+      - si el nombre coincide fuerte (>= name_confirm) → confirmado: gana aunque su
+        foto no sea la de mayor score, y alcanza para rescatar un match flojo.
+      - si el mejor por imagen tiene un nombre que no tiene NADA que ver
+        (< name_reject) → vetado: es un falso positivo, no lo mostramos.
+
+    Sin `title` (subida directa de foto) no hay nombre para desempatar: se cae al
+    comportamiento de siempre, el mejor por imagen.
+    """
+    if not candidates:
+        return None
+    scored = [
+        (
+            product,
+            img_score,
+            query_image,
+            fuzzy_text.text_similarity(title, "", product.name, "") if title else None,
+        )
+        for product, img_score, query_image in candidates
+    ]
+    confirmed = [c for c in scored if c[3] is not None and c[3] >= name_confirm]
+    if confirmed:
+        product, img_score, query_image, name_sim = max(confirmed, key=lambda c: c[1])
+        return (product, img_score, query_image, name_sim, True, False)
+    product, img_score, query_image, name_sim = max(scored, key=lambda c: c[1])
+    vetoed = name_sim is not None and name_sim < name_reject
+    return (product, img_score, query_image, name_sim, False, vetoed)
+
+
 def _url_match(source_url: str, products: list[VendureProduct]) -> VendureProduct | None:
     """Match exacto por URL de proveedor. Es el más confiable y no cuesta red."""
     if not source_url:
@@ -536,28 +589,51 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         # mercado que vale es el del candidato cuya foto ganó, no el del primero.
         query_vecs = await image_embed.embed_urls_aligned(query_urls)
         if any(v is not None for v in query_vecs):
-            best_hit: tuple[VendureProduct, float, str] | None = None
+            # Mejor score de imagen por producto entre TODAS las fotos de la
+            # publicación, junto con la foto query que lo consiguió (para el precio).
+            best_by_pid: dict[str, tuple[VendureProduct, float, str]] = {}
             for url_used, vec in zip(query_urls, query_vecs):
                 if vec is None:
                     continue
-                hits = catalog_index.search(vec, top_k=1)
-                if hits and (best_hit is None or hits[0][1] > best_hit[1]):
-                    best_hit = (hits[0][0], hits[0][1], url_used)
-            if best_hit is not None:
-                product, hit_score, winning_image = best_hit
+                for hit in catalog_index.search(vec, top_k=_EMBED_TOPK):
+                    cand_product, cand_score = hit[0], hit[1]
+                    prev = best_by_pid.get(cand_product.id)
+                    if prev is None or cand_score > prev[1]:
+                        best_by_pid[cand_product.id] = (cand_product, cand_score, url_used)
+
+            # Thresholds por runtime: se ajustan desde el dashboard sin redeploy.
+            match_thr = float(runtime.get("embed_match_threshold"))
+            suggest_thr = float(runtime.get("embed_suggest_threshold"))
+            name_confirm = float(runtime.get("embed_name_confirm_threshold"))
+            name_reject = float(runtime.get("embed_name_reject_threshold"))
+
+            selected = _best_embed_candidate(
+                list(best_by_pid.values()), title, name_confirm, name_reject
+            )
+            if selected is not None:
+                product, hit_score, winning_image, name_sim, name_ok, name_vetoed = selected
                 winner = price_by_image.get(winning_image)
                 if winner is not None:
                     base.market_price_cents, base.market_currency, base.market_seller_count = (
                         winner
                     )
-                # Thresholds por runtime: se ajustan desde el dashboard sin redeploy.
-                threshold = float(runtime.get("embed_match_threshold"))
-                # Si el producto de origen se resolvió por búsqueda de nombre,
-                # no afirmamos aunque el score alcance: la foto que matcheó
-                # puede ser de un producto parecido al que miró el cliente.
-                if hit_score >= threshold and not approximate_source:
-                    matched, score, matched_by = product, hit_score, ["image_embed"]
-                elif hit_score >= float(runtime.get("embed_suggest_threshold")):
+
+                # Afirmar "lo tenemos" pide imagen sobre el umbral Y que el nombre
+                # no lo contradiga. Si el origen se resolvió por búsqueda de nombre
+                # (`approximate_source`), la foto que matcheó puede ser de un
+                # producto parecido: no afirmamos, a lo sumo sugerimos.
+                can_affirm = (
+                    hit_score >= match_thr and not approximate_source and not name_vetoed
+                )
+                # Rescate: la foto no llega al umbral de sugerencia, pero el nombre
+                # coincide fuerte y la imagen es al menos razonable. Es el caso del
+                # producto que SÍ tenemos cuya foto en origen no es igual a la nuestra.
+                name_rescue = name_ok and hit_score >= _NAME_RESCUE_IMAGE_FLOOR
+
+                if can_affirm:
+                    matched, score = product, hit_score
+                    matched_by = ["image_embed", "name"] if name_ok else ["image_embed"]
+                elif not name_vetoed and (hit_score >= suggest_thr or name_rescue):
                     candidate = LookupSuggestion(
                         product_id=product.id,
                         name=product.name,
@@ -575,6 +651,8 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                     else:
                         suggestion = candidate
                 else:
+                    # Vetado por nombre (falso positivo) o imagen insuficiente: no lo
+                    # mostramos. Guardamos el score para diagnóstico.
                     score = max(score, hit_score)
 
     # 2c. Fallback pHash (CLIP no disponible).
