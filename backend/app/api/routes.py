@@ -344,6 +344,10 @@ class VerifyRequest(BaseModel):
     # → default False. Es la única vía al índice REAL de 1688: la API que usa Paco es
     # un revendedor que ordena por VENTAS, así que un proveedor chico no aparece nunca.
     use_browser: bool = False
+    # Solo veredicto de dedup, SIN reenviar a Paco. Lo usan Paco PRO (desde su
+    # propio pipeline: el caller YA ES Paco) y Luis (manda a Paco por su cuenta,
+    # con un solo camino): en ambos el forward de Hugo sobra y se pagaría doble.
+    dedup_only: bool = False
 
 
 # Orígenes que van a Paco PRO (b2box_sourcing) en vez de Paco APP.
@@ -546,6 +550,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     Idempotencia: si el mismo source_url ya se mandó a Paco desde el mismo
     `source` y sigue vigente (no descartado), NO reenvía — devuelve
     paco_status="already_sent". Otro `source` con la misma URL sí se envía.
+
+    dedup_only=True (el caller ya es, o ya tiene, su propio camino a Paco):
+    devuelve el veredicto completo pero NUNCA reenvía a Paco ni chequea
+    idempotencia. En el caso no-dup, candidate_id/scores traen el match más
+    cercano (si lo hay) para mostrar "parecido al catálogo".
     """
     _reject_oversized_callback_ctx(payload)
 
@@ -611,6 +620,21 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
+    # Dedup-only: el caller pide solo el veredicto (Paco PRO desde su pipeline,
+    # Luis para chequear antes de mandar a Paco por su cuenta). NO reenviamos ni
+    # chequeamos idempotencia: el que llama decide qué hacer con el veredicto. El
+    # response igual trae candidate_id/scores del más parecido (aunque no sea
+    # dup) para mostrar "parecido al catálogo" como aviso.
+    if payload.dedup_only:
+        _record_verify(
+            payload, verdict, action="verify_no_match",
+            detail=(
+                f"'{short_name}' no está en el catálogo "
+                f"(dedup-only, consultado por {_event_source(payload)})"
+            ),
+        )
+        return response
+
     # Idempotencia: si este source_url ya se mandó a Paco DESDE ESTE CLIENTE y
     # sigue vigente, NO reenviamos (evita duplicar el job cuando el producto aún
     # no entró a Vendure). Otro cliente con la misma URL sí genera su búsqueda.
