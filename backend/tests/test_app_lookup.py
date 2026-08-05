@@ -108,6 +108,7 @@ def env(monkeypatch):
         lambda k: {"embed_match_threshold": 0.88, "embed_suggest_threshold": 0.78,
                    "embed_name_confirm_threshold": 0.72,
                    "embed_name_reject_threshold": 0.30,
+                   "embed_name_rescue_image_floor": 0.60,
                    "dedup_image_threshold": 0.92}[k],
     )
     return {"recorded": recorded, "cloud_calls": cloud_calls}
@@ -370,6 +371,55 @@ async def test_reordena_por_nombre_entre_candidatos(env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_el_nombre_trae_al_producto_que_la_foto_no_rankea(env, monkeypatch):
+    """El correcto NO entra al top-K por imagen; el canal de nombre lo trae igual.
+
+    Caso medido contra el catálogo real (comedero/bebedero BX06057): nuestra ficha
+    tiene una lámina de marketing (5 unidades, fondo azul, watermark) y contra la
+    foto blanca del marketplace da 0.71, mientras que productos que no tienen nada
+    que ver dan 0.80 solo por compartir el fondo. Con el ranking por imagen como
+    única entrada, el producto correcto nunca llegaba a la comparación de nombres y
+    el app respondía 'todavía no lo tenemos' sobre algo que sí tenemos.
+    """
+    ruido = _otro_producto()
+
+    async def fake_catalog(force=False):  # noqa: ARG001
+        return [_product(), ruido]
+
+    _embeddings_con(monkeypatch, title="Lámpara LED táctil", hits=[(ruido, 0.80)])
+    monkeypatch.setattr(app_routes.vendure_catalog, "get_catalog", fake_catalog)
+    # El índice sí sabe puntuar al correcto si se lo preguntan por id.
+    monkeypatch.setattr(
+        app_routes.catalog_index, "score_products",
+        lambda v, ids: [(_product(), 0.71, "x")] if "42" in list(ids) else [],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.suggestion is not None
+    assert resp.suggestion.product_code == "BX-1001"
+    assert resp.suggestion.score == pytest.approx(0.71)
+
+
+@pytest.mark.asyncio
+async def test_el_canal_de_nombre_no_propone_cualquier_cosa(env, monkeypatch):
+    """Si ningún nombre del catálogo coincide, el canal no aporta candidatos."""
+    pedidos: list[list[str]] = []
+
+    _embeddings_con(monkeypatch, title="Taladro percutor inalámbrico", hits=[])
+    monkeypatch.setattr(
+        app_routes.catalog_index, "score_products",
+        lambda v, ids: pedidos.append(list(ids)) or [],
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert pedidos == [[]]
+    assert resp.found is False
+    assert resp.suggestion is None
+
+
+@pytest.mark.asyncio
 async def test_nombre_confirmado_suma_a_matched_by(env, monkeypatch):
     """Imagen sobre umbral + nombre que coincide → matched_by incluye 'name'."""
     _embeddings_con(monkeypatch, title="Lámpara", hits=[(_product(), 0.94)])
@@ -456,6 +506,7 @@ async def test_debajo_del_piso_no_se_sugiere_nada(env, monkeypatch):
         lambda k: {"embed_match_threshold": 0.88, "embed_suggest_threshold": 0.82,
                    "embed_name_confirm_threshold": 0.72,
                    "embed_name_reject_threshold": 0.30,
+                   "embed_name_rescue_image_floor": 0.60,
                    "dedup_image_threshold": 0.92}[k],
     )
 
