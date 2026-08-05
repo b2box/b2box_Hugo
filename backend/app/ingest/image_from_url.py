@@ -331,16 +331,24 @@ async def extract(url: str) -> ExtractedProduct:
                         candidate.seller_count,
                     )
             first = candidates[0]
+            # Con la ficha del link, su título es el bueno. Cuando vino del
+            # catálogo, el título del candidato es el de OTRO producto: usarlo
+            # haría que la corroboración por nombre compare contra un nombre que
+            # ya está desviado, y le daría la razón al candidato equivocado. El
+            # único nombre que describe lo que pidió el cliente es el que viaja
+            # en su propia URL.
+            approximate = first.resolved_by == "catalog"
+            title = meli.name_from_url(url) if approximate else first.title
             return ExtractedProduct(
                 image_urls=images[:_MAX_IMAGES],
-                title=first.title[:300],
+                title=title[:300],
                 marketplace=marketplace,
                 canonical_url=first.permalink or url,
                 kind="page",
                 market_price_cents=first.price_cents,
                 market_currency=first.currency,
                 market_seller_count=first.seller_count,
-                approximate=first.resolved_by == "catalog",
+                approximate=approximate,
                 price_by_image=price_by_image,
             )
 

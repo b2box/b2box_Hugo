@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import httpx
 
 from app.config import get_settings
+from app.dedup import fuzzy_text
 
 log = logging.getLogger(__name__)
 
@@ -314,7 +315,12 @@ _SITE_BY_TLD = {
 _SLUG_NOISE = {"mercadolibre", "mercadolivre", "articulo", "produto", "www",
                "com", "ar", "mx", "br", "co", "up", "p", "jm",
                "mla", "mlb", "mlm", "mlc", "mco", "mlu", "mpe", "mec"}
-_MAX_SEARCH_RESULTS = 6
+# Cuántos resultados le pedimos a ML antes de elegir. Pedíamos 6 y nos quedábamos
+# con los primeros, pero ML ordena por relevancia comercial, no por parecido: para
+# "mini masajeador eléctrico usb 8 modos 19 niveles parche" los primeros eran
+# pistolas de masaje ("mini masajeador miofascial") y el parche de verdad estaba
+# más abajo. Pedimos 20 y elegimos nosotros.
+_MAX_SEARCH_RESULTS = 20
 # Candidatos que devolvemos para que los desempate el match de imagen.
 _MAX_CANDIDATES = 4
 
@@ -379,10 +385,17 @@ async def search_catalog(
         log.info("Búsqueda en catálogo de ML falló para %r: %s", query[:60], exc)
         return []
 
+    # ML ordena por su propia relevancia; nosotros queremos el que más se parece
+    # al nombre que venía en la URL. Ordenar acá es lo que hace que el match de
+    # imagen reciba la foto del producto correcto y no la de un primo lejano.
+    results = [r for r in (raw.get("results") or []) if isinstance(r, dict)]
+    results.sort(
+        key=lambda r: fuzzy_text.text_similarity(query, "", str(r.get("name") or ""), ""),
+        reverse=True,
+    )
+
     out: list[MeliItem] = []
-    for result in (raw.get("results") or []):
-        if not isinstance(result, dict):
-            continue
+    for result in results:
         pictures = _pictures_from(result)
         if not pictures:
             continue

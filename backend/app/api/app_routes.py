@@ -678,10 +678,23 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                 # producto que SÍ tenemos cuya foto en origen no es igual a la nuestra.
                 name_rescue = name_ok and hit_score >= rescue_floor
 
+                # Con origen aproximado la foto que comparamos NO es la del
+                # producto del cliente: ML bloqueó su publicación y la sacamos
+                # buscando el nombre en su catálogo, así que puede ser la de un
+                # primo lejano. Que matchee fuerte contra nuestro catálogo no
+                # prueba nada sobre lo que el cliente pidió — de hecho prueba que
+                # se parecen entre sí dos productos que no elegimos nosotros.
+                # Medido: para un parche EMS de $4.464 el app llegó a proponer una
+                # pistola de masaje de $110.688. Cuando la foto es prestada, que
+                # el nombre banque la sugerencia o no hay sugerencia.
+                can_suggest = (hit_score >= suggest_thr or name_rescue) and (
+                    name_ok or not approximate_source
+                )
+
                 if can_affirm:
                     matched, score = product, hit_score
                     matched_by = ["image_embed", "name"] if name_ok else ["image_embed"]
-                elif not name_vetoed and (hit_score >= suggest_thr or name_rescue):
+                elif not name_vetoed and can_suggest:
                     candidate = LookupSuggestion(
                         product_id=product.id,
                         name=product.name,

@@ -734,3 +734,57 @@ async def test_fallback_phash_cuando_no_hay_modelo(env, monkeypatch):
     assert resp.status == "found"
     assert resp.matched_by == ["image_phash"]
     assert resp.product.pa == "PA-1001-BL"
+
+
+@pytest.mark.asyncio
+async def test_con_foto_prestada_el_nombre_manda(env, monkeypatch):
+    """Origen aproximado + nombre que no corrobora → no se sugiere nada.
+
+    Caso real (2026-08-05): el cliente mandó un link /up/ de un parche EMS de
+    $4.464. ML bloquea esos links, así que la foto con la que comparamos no era
+    la suya sino la de un 'mini masajeador' que encontramos buscando su nombre
+    en el catálogo de ML. Esa foto prestada matcheó fuerte contra una pistola de
+    masaje nuestra de $110.688 y el app se la propuso al cliente.
+
+    Cuando la foto no es la del producto pedido, que matchee no prueba nada:
+    prueba que se parecen dos productos que no eligió nadie. Sin el nombre
+    corroborando, no hay sugerencia.
+    """
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=[PHOTO], title="Mini masajeador electrico usb parche",
+            marketplace="mercadolibre", canonical_url=url, kind="page",
+            approximate=True,
+        )
+
+    _embeddings_con(monkeypatch, title="", hits=[(_product(), 0.93)])
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is None
+
+
+@pytest.mark.asyncio
+async def test_con_foto_prestada_pero_nombre_que_corrobora_si_se_sugiere(env, monkeypatch):
+    """Mismo escenario, pero el nombre del link sí coincide → se sugiere.
+
+    El bloqueo es sobre la foto prestada sin respaldo, no sobre el origen
+    aproximado en sí: si el nombre que venía en la URL del cliente coincide con
+    el de nuestro producto, la sugerencia se sostiene sola.
+    """
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=[PHOTO], title="Lámpara LED táctil recargable",
+            marketplace="mercadolibre", canonical_url=url, kind="page",
+            approximate=True,
+        )
+
+    _embeddings_con(monkeypatch, title="", hits=[(_product(), 0.93)])
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.suggestion is not None
+    assert resp.suggestion.product_code == "BX-1001"
