@@ -352,7 +352,9 @@ def name_from_url(url: str) -> str:
     return best[:120]
 
 
-async def search_catalog(query: str, site: str) -> list[MeliItem]:
+async def search_catalog(
+    query: str, site: str, *, with_price: bool = True
+) -> list[MeliItem]:
     """Busca `query` en el catálogo de ML y devuelve las fichas con fotos.
 
     Es el plan B para los links que la API no deja leer (`/up/`, `articulo…`).
@@ -361,6 +363,10 @@ async def search_catalog(query: str, site: str) -> list[MeliItem]:
     productos distintos— y el que decide es el match de imagen contra nuestro
     catálogo. Todos salen marcados `resolved_by="catalog"`: es el mismo producto
     casi siempre, pero puede ser uno parecido.
+
+    `with_price=False` cuando el llamador ya consiguió el precio de la
+    publicación real: el de estos candidatos sería el de un producto parecido,
+    y además cuesta un request por candidato.
     """
     if not query:
         return []
@@ -387,9 +393,10 @@ async def search_catalog(query: str, site: str) -> list[MeliItem]:
             permalink=str(result.get("permalink") or ""),
             resolved_by="catalog",
         )
-        item.price_cents, item.currency, item.seller_count = (
-            await fetch_market_price(item.id)
-        )
+        if with_price:
+            item.price_cents, item.currency, item.seller_count = (
+                await fetch_market_price(item.id)
+            )
         out.append(item)
         if len(out) >= _MAX_CANDIDATES:
             break
@@ -435,5 +442,22 @@ async def fetch_from_url(url: str) -> list[MeliItem]:
     query = name_from_url(url)
     if not query:
         return []
+
+    # El PRECIO sí se puede saber aunque la ficha esté bloqueada: la política
+    # que tira 403 en `/products/{MLAU…}` no cubre `/products/{MLAU…}/items`,
+    # que lista a los vendedores de esa misma ficha con su precio. Es el precio
+    # de la publicación del link —la de verdad—, así que le gana al del
+    # candidato aproximado que devuelve la búsqueda por catálogo. Sin esto el
+    # app mostraba `None`, o peor, el precio de otro producto.
+    exact_price: tuple[int | None, str | None, int] = (None, None, 0)
+    if ref is not None and ref.kind == "product":
+        exact_price = await fetch_market_price(ref.id)
+
     log.info("Resolviendo %s por catálogo de ML: %r", url[:80], query[:60])
-    return await search_catalog(query, site_for(url))
+    candidates = await search_catalog(
+        query, site_for(url), with_price=exact_price[0] is None
+    )
+    if exact_price[0] is not None:
+        for candidate in candidates:
+            candidate.price_cents, candidate.currency, candidate.seller_count = exact_price
+    return candidates

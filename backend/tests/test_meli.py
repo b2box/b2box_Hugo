@@ -356,3 +356,77 @@ async def test_una_publicacion_trae_su_propio_precio(monkeypatch):
 
     assert item.price_cents == 893712
     assert item.seller_count == 1
+
+
+# ─── Precio de una ficha que la API no deja leer ───────────────────
+
+_CATALOGO = {
+    "results": [{
+        "id": "MLA9999",
+        "name": "Set Decantador De Whisky Con Globo Y 4 Vasos",
+        "pictures": [{"id": "9", "secure_url": "https://http2.mlstatic.com/c.jpg"}],
+        "permalink": "https://www.mercadolibre.com.ar/p/MLA9999",
+    }]
+}
+
+
+@pytest.mark.asyncio
+async def test_ficha_bloqueada_igual_da_el_precio_real(monkeypatch):
+    """403 en la ficha no significa 403 en su lista de vendedores.
+
+    Medido contra ML: `/products/MLAU…` cae en la política que bloquea las
+    publicaciones ajenas, pero `/products/MLAU…/items` —los vendedores de esa
+    misma ficha, con su precio— responde 200. El link llega igual al catálogo
+    por las fotos, pero el precio que mostramos es el de la publicación real,
+    no el del candidato parecido. Antes salía `None`.
+    """
+    pedidos: list[str] = []
+
+    def handler(method, url):
+        pedidos.append(url)
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        if "/products/search" in url:
+            return _resp(200, _CATALOGO)
+        if "/products/MLAU3227241523/items" in url:
+            return _resp(200, {"results": [{"price": 150000, "currency_id": "ARS"}]})
+        return _resp(403, {"message": "forbidden"})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    items = await meli.fetch_from_url(
+        "https://www.mercadolibre.com.ar/set-decantador-globo-2-vasos/up/MLAU3227241523"
+    )
+
+    assert len(items) == 1
+    assert items[0].price_cents == 15_000_000
+    assert items[0].currency == "ARS"
+    assert items[0].seller_count == 1
+    assert items[0].resolved_by == "catalog"
+    # Y no gastamos un request por candidato pidiendo un precio que ya sabemos.
+    assert not any("/products/MLA9999/items" in u for u in pedidos)
+
+
+@pytest.mark.asyncio
+async def test_sin_precio_de_la_ficha_cada_candidato_pone_el_suyo(monkeypatch):
+    """Si tampoco se puede leer la lista de vendedores, el candidato aporta lo
+    que tenga: es aproximado, pero es mejor que no mostrar precio."""
+    def handler(method, url):
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        if "/products/search" in url:
+            return _resp(200, _CATALOGO)
+        if "/products/MLA9999/items" in url:
+            return _resp(200, {"results": [{"price": 99000, "currency_id": "ARS"}]})
+        return _resp(403, {"message": "forbidden"})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    items = await meli.fetch_from_url(
+        "https://www.mercadolibre.com.ar/set-decantador-globo-2-vasos/up/MLAU3227241523"
+    )
+
+    assert items[0].price_cents == 9_900_000
+    assert items[0].seller_count == 1
