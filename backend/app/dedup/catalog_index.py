@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -184,3 +185,31 @@ def search(query: np.ndarray, top_k: int = 3) -> list[tuple[VendureProduct, floa
         if len(out) >= top_k:
             break
     return out
+
+
+def score_products(
+    query: np.ndarray, product_ids: Iterable[str]
+) -> list[tuple[VendureProduct, float, str]]:
+    """Score de `query` contra productos PUNTUALES, sin pasar por el ranking.
+
+    `search` solo devuelve el top-K global: un producto cuya foto de catálogo es
+    una lámina de marketing (varias unidades, fondo de color, watermark) puntúa
+    ~0.70 contra la foto blanca del marketplace y nunca entra al top-K, aunque sea
+    el producto correcto. Cuando otra señal (el nombre) ya lo propuso, necesitamos
+    su score igual: esto lo calcula para esos ids y nada más.
+    """
+    if not is_ready() or query is None:
+        return []
+    wanted = {pid for pid in product_ids if pid in _state.products}
+    if not wanted:
+        return []
+    scores = _state.matrix @ query
+    best: dict[str, tuple[float, str]] = {}
+    for i, pid in enumerate(_state.product_ids):
+        if pid not in wanted:
+            continue
+        score = float(scores[i])
+        prev = best.get(pid)
+        if prev is None or score > prev[0]:
+            best[pid] = (score, _state.image_urls[i])
+    return [(_state.products[pid], score, url) for pid, (score, url) in best.items()]

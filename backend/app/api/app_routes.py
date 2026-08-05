@@ -66,10 +66,14 @@ _MAX_QUERY_IMAGES = 4
 # Traemos varios y el nombre elige.
 _EMBED_TOPK = 5
 
-# Imagen mínima para rescatar un candidato cuyo NOMBRE sí coincide. Por debajo de
-# esto no lo damos ni con nombre idéntico: sería adivinar sobre una foto que no se
-# parece.
-_NAME_RESCUE_IMAGE_FLOOR = 0.68
+# Cuántos candidatos aporta la búsqueda por NOMBRE, además de los que trae la foto.
+# El top-K por imagen no alcanza: nuestras fotos de catálogo suelen ser láminas de
+# marketing (varias unidades, fondo de color, watermark) y contra la foto blanca
+# del marketplace puntúan ~0.70, por debajo de productos que no tienen nada que
+# ver pero comparten el fondo blanco (~0.80). El producto correcto ni entra al
+# top-K, así que el nombre nunca llega a desempatarlo. Buscándolo también por
+# nombre entra al set y ahí sí compite.
+_NAME_TOPK = 5
 
 
 # ─── Modelos ───────────────────────────────────────────────────────
@@ -376,6 +380,33 @@ def _record(
         log.exception("No se pudo registrar el AuditLog de /app/lookup")
 
 
+def _name_candidates(
+    title: str,
+    products: list[VendureProduct],
+    name_confirm: float,
+    top_k: int,
+) -> list[VendureProduct]:
+    """Productos del catálogo cuyo NOMBRE se parece al título de origen.
+
+    Es el segundo canal de búsqueda, en paralelo al del índice de imágenes. Existe
+    porque la foto sola no alcanza para *encontrar* el producto: nuestras fichas
+    suelen tener láminas de marketing (varias unidades, fondo de color, watermark)
+    y contra la foto blanca del marketplace puntúan por debajo de productos que no
+    tienen nada que ver. El correcto ni entra al ranking por imagen.
+
+    Solo devuelve los que superan `name_confirm`: por debajo de eso el nombre no
+    confirma nada y el candidato no serviría para rescatar un match flojo.
+    """
+    if not title:
+        return []
+    scored = [
+        (fuzzy_text.text_similarity(title, "", p.name, ""), p) for p in products if p.enabled
+    ]
+    scored = [s for s in scored if s[0] >= name_confirm]
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [p for _sim, p in scored[:top_k]]
+
+
 def _best_embed_candidate(
     candidates: list[tuple[VendureProduct, float, str]],
     title: str,
@@ -606,6 +637,23 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             suggest_thr = float(runtime.get("embed_suggest_threshold"))
             name_confirm = float(runtime.get("embed_name_confirm_threshold"))
             name_reject = float(runtime.get("embed_name_reject_threshold"))
+            rescue_floor = float(runtime.get("embed_name_rescue_image_floor"))
+
+            # Segundo canal: los que se parecen por NOMBRE. Entran al set aunque su
+            # foto no haya llegado al top-K (que es lo que pasa siempre que nuestra
+            # foto es una lámina de marketing y la del marketplace es a fondo blanco).
+            name_ids = [
+                p.id for p in _name_candidates(title, products, name_confirm, _NAME_TOPK)
+            ]
+            for url_used, vec in zip(query_urls, query_vecs):
+                if vec is None:
+                    continue
+                for cand_product, cand_score, _img in catalog_index.score_products(
+                    vec, name_ids
+                ):
+                    prev = best_by_pid.get(cand_product.id)
+                    if prev is None or cand_score > prev[1]:
+                        best_by_pid[cand_product.id] = (cand_product, cand_score, url_used)
 
             selected = _best_embed_candidate(
                 list(best_by_pid.values()), title, name_confirm, name_reject
@@ -628,7 +676,7 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                 # Rescate: la foto no llega al umbral de sugerencia, pero el nombre
                 # coincide fuerte y la imagen es al menos razonable. Es el caso del
                 # producto que SÍ tenemos cuya foto en origen no es igual a la nuestra.
-                name_rescue = name_ok and hit_score >= _NAME_RESCUE_IMAGE_FLOOR
+                name_rescue = name_ok and hit_score >= rescue_floor
 
                 if can_affirm:
                     matched, score = product, hit_score

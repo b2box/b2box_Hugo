@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     #                 (evita el falso positivo de mostrar algo totalmente distinto).
     embed_name_confirm_threshold: float = 0.72
     embed_name_reject_threshold: float = 0.30
+    # Piso de imagen para el candidato que el nombre confirma. Medido contra el
+    # catálogo real: nuestras fichas con lámina de marketing dan ~0.70 contra la
+    # foto blanca del marketplace, y productos que no tienen nada que ver dan
+    # ~0.80 solo por compartir el fondo. La foto acá es sanity check, no el filtro.
+    embed_name_rescue_image_floor: float = 0.60
     # Cuántas imágenes por producto se indexan (la featured primero).
     embed_images_per_product: int = 2
     embed_cache_max: int = 5000

@@ -133,6 +133,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="embed_name_reject_threshold",
         min=0.0, max=1.0, step=0.01, group="app",
     ),
+    SettingMeta(
+        key="embed_name_rescue_image_floor",
+        label="Piso de imagen para rescate por nombre",
+        description=(
+            "Coseno mínimo que igual se le exige a la foto de un candidato que el NOMBRE "
+            "confirma. Nuestras fichas suelen tener láminas de marketing (varias unidades, "
+            "fondo de color) y contra la foto blanca del marketplace dan ~0.70. Bajalo si "
+            "productos que sí tenemos siguen sin aparecer."
+        ),
+        type="float", parser=float,
+        default_attr="embed_name_rescue_image_floor",
+        min=0.0, max=1.0, step=0.01, group="app",
+    ),
     # Pricing
     SettingMeta(
         key="price_drift_threshold",
