@@ -54,17 +54,20 @@ services:
     deploy:
       resources:
         limits:
-          # 2G porque /app/lookup corre CLIP ViT-B/32 en ONNX Runtime dentro de
-          # este mismo proceso: el modelo ocupa ~350 MB de RSS más los buffers de
-          # inferencia. Con 512M el container muere por OOM al primer lookup.
+          # 3G, repartidos así:
+          #   ~350 MB  CLIP ViT-B/32 en ONNX Runtime, cargado en este mismo
+          #            proceso, más los buffers de inferencia.
+          #   ~400 MB  Firefox headless por cada render de browser_fetch, solo
+          #            mientras dura (5-10 s). Con 2G el container moría por OOM
+          #            en el primer lookup que cayera al browser.
+          #   el resto Python, el índice vectorial del catálogo y margen.
+          #
+          # Si BROWSER_FETCH_ENABLED queda en false, con 2G alcanza: el browser
+          # nunca se levanta. Bajarlo es seguro solo en ese caso.
           #
           # Este archivo ES la fuente de verdad del límite: en Coolify la app
           # b2box-hugo usa build_pack=dockercompose apuntando acá, y sus campos
           # de Resource Limits están en 0 (sin límite). Cambiar el número en el
           # panel no hace nada; hay que tocarlo acá y redeployar.
-          #
-          # Con INSTALL_BROWSER=true hay que subirlo a 3G: cada render levanta un
-          # Firefox headless (~400 MB) al lado del CLIP que ya está cargado. Con
-          # 2G el container muere por OOM en el primer lookup que caiga al browser.
-          memory: 2G
+          memory: 3G
           cpus: "1.0"
