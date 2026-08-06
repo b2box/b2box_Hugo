@@ -16,6 +16,18 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        # Camoufox, para leer las fichas que bloquean el fetch plano (ver
+        # backend/app/ingest/browser_fetch.py). Coolify buildea con este file,
+        # así que sin este arg el `--build-arg` del Dockerfile nunca llega y la
+        # feature no entra a la imagen por más que se prenda la env var.
+        #
+        # Activarlo pide las tres cosas juntas:
+        #   INSTALL_BROWSER=true         (acá, para que el binario entre)
+        #   BROWSER_FETCH_ENABLED=true   (runtime, para que se use)
+        #   memory: 3G                   (abajo — Firefox headless suma ~400 MB
+        #                                 sobre los ~350 MB de CLIP)
+        INSTALL_BROWSER: ${INSTALL_BROWSER:-false}
     image: b2box/hugo:latest
     container_name: b2box-hugo
     restart: unless-stopped
@@ -50,5 +62,9 @@ services:
           # b2box-hugo usa build_pack=dockercompose apuntando acá, y sus campos
           # de Resource Limits están en 0 (sin límite). Cambiar el número en el
           # panel no hace nada; hay que tocarlo acá y redeployar.
+          #
+          # Con INSTALL_BROWSER=true hay que subirlo a 3G: cada render levanta un
+          # Firefox headless (~400 MB) al lado del CLIP que ya está cargado. Con
+          # 2G el container muere por OOM en el primer lookup que caiga al browser.
           memory: 2G
           cpus: "1.0"
