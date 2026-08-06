@@ -31,7 +31,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from app.ingest import meli
+from app.ingest import browser_fetch, meli
 from app.net_guard import SsrfBlocked, safe_get
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,10 @@ _TIMEOUT = httpx.Timeout(15.0, connect=6.0)
 # Tope del HTML que parseamos. Una ficha de ML pesa ~1-2 MB; 5 es holgado y
 # evita quedarnos sin memoria con una página hostil.
 _MAX_HTML_BYTES = 5 * 1024 * 1024
-_MAX_IMAGES = 5
+# 10 fotos por ficha. La galería completa entra y el match se queda con el mejor
+# score entre todas: la foto principal suele ser la de marketing (packaging, con
+# modelo) y la que se parece a la nuestra puede ser la sexta.
+_MAX_IMAGES = 10
 
 # Sin User-Agent de browser, ML y Alibaba devuelven 403 o una página vacía.
 _BROWSER_HEADERS = {
@@ -294,6 +297,52 @@ def _drop_placeholders(urls: list[str]) -> list[str]:
     return [u for u in urls if not any(b in u.lower() for b in bad)]
 
 
+async def _via_browser(url: str, marketplace: str) -> ExtractedProduct | None:
+    """Segundo intento: renderizar la ficha en Camoufox y leer las fotos del DOM.
+
+    Devuelve None si el browser no está disponible o no sacó nada útil — el
+    llamador sigue con el error que ya tenía. Nunca propaga: este camino es un
+    extra, y que falle no puede empeorar la respuesta al app.
+    """
+    if not browser_fetch.available():
+        return None
+    try:
+        page = await browser_fetch.render(url, max_images=_MAX_IMAGES * 3)
+    except browser_fetch.SsrfBlocked:
+        raise  # esto sí importa: la URL apunta a una red interna
+    except Exception as exc:  # noqa: BLE001
+        log.info("browser_fetch no pudo con %s: %s", url[:120], exc)
+        return None
+
+    final_url = page.final_url or url
+    # El DOM renderizado también trae JSON-LD y og:image, y son más confiables
+    # que los <img> sueltos: los probamos primero, igual que en el camino plano.
+    images: list[str] = []
+    title = ""
+    if page.html:
+        soup = BeautifulSoup(page.html, "lxml")
+        ld_images, ld_title = _from_json_ld(soup, final_url)
+        meta_images, meta_title = _from_meta(soup, final_url)
+        images = ld_images + meta_images
+        title = ld_title or meta_title or ""
+
+    dom_images = [u for u in (_absolutize(i, final_url) or "" for i in page.image_urls) if u]
+    images = _dedupe(_drop_placeholders(images + dom_images))
+    if not images:
+        return None
+
+    log.info(
+        "browser_fetch rescató %d fotos de %s (%s)", len(images), url[:120], marketplace
+    )
+    return ExtractedProduct(
+        image_urls=images[:_MAX_IMAGES],
+        title=(title or page.title or "")[:300],
+        marketplace=marketplace,
+        canonical_url=final_url,
+        kind="page",
+    )
+
+
 # ─── API pública ───────────────────────────────────────────────────
 
 
@@ -357,10 +406,18 @@ async def extract(url: str) -> ExtractedProduct:
     except SsrfBlocked as exc:
         raise ExtractError(f"URL bloqueada: {exc}") from exc
     except httpx.HTTPError as exc:
+        # El sitio no le contesta a httpx: puede ser que sí le conteste a un
+        # browser de verdad (TLS fingerprint, JS challenge).
+        rendered = await _via_browser(url, marketplace)
+        if rendered is not None:
+            return rendered
         raise ExtractError(f"No se pudo abrir la URL: {type(exc).__name__}") from exc
 
     final_url = str(resp.url)
     if resp.status_code >= 400:
+        rendered = await _via_browser(url, marketplace)
+        if rendered is not None:
+            return rendered
         raise ExtractError(f"La URL respondió HTTP {resp.status_code}")
 
     content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -392,13 +449,25 @@ async def extract(url: str) -> ExtractedProduct:
         images = _dedupe(_drop_placeholders(_from_cdn_regex(html, final_url)))
 
     if not images:
+        # Los dos motivos por los que llegamos acá —página anti-bot y galería
+        # armada por JS— son exactamente los que un browser real resuelve.
+        rendered = await _via_browser(url, marketplace)
+        if rendered is not None:
+            return rendered
+
         if _looks_like_antibot(html):
-            extra = (
-                " Configurá MELI_CLIENT_ID / MELI_CLIENT_SECRET para leerlo por la API "
-                "oficial de MercadoLibre."
-                if marketplace == "mercadolibre" and not meli.enabled()
-                else " La foto tiene que mandarla el app en `image_url`."
-            )
+            if marketplace == "mercadolibre" and not meli.enabled():
+                extra = (
+                    " Configurá MELI_CLIENT_ID / MELI_CLIENT_SECRET para leerlo por la "
+                    "API oficial de MercadoLibre."
+                )
+            elif not browser_fetch.available():
+                extra = (
+                    " Activá BROWSER_FETCH_ENABLED para reintentar con un browser real, "
+                    "o que el app mande la foto en `image_url`."
+                )
+            else:
+                extra = " La foto tiene que mandarla el app en `image_url`."
             raise BlockedByCaptcha(
                 f"{marketplace} bloqueó el pedido desde el servidor (página anti-bot)."
                 + extra

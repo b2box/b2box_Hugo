@@ -49,6 +49,13 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
 ]
+# Render con browser real para las fichas que bloquean el fetch plano
+# (ver app/ingest/browser_fetch.py). Opcional: arrastra Playwright y necesita
+# `python -m camoufox fetch` en el build para bajar el Firefox (~150 MB).
+# Sin esto instalado, browser_fetch.available() es False y todo sigue igual.
+browser = [
+    "camoufox[geoip]>=0.4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

@@ -44,8 +44,18 @@ WORKDIR /build
 COPY backend/pyproject.toml ./
 COPY backend/app ./app
 
+# `browser` = Camoufox, para renderizar las fichas que bloquean el fetch plano
+# (ver app/ingest/browser_fetch.py). Off por defecto: suma Playwright acá y
+# ~150 MB de Firefox en el runtime. Build con:
+#     docker build --build-arg INSTALL_BROWSER=true ...
+ARG INSTALL_BROWSER=false
+
 # Instalamos en un prefix aislado que después copiamos al stage final
-RUN pip install --prefix=/install .
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+        pip install --prefix=/install ".[browser]"; \
+    else \
+        pip install --prefix=/install .; \
+    fi
 
 # ─── Stage 2b: modelo CLIP (torre visual, ONNX) ─────────────────
 # Lo bajamos en build y lo bakeamos en la imagen: sin volumen que montar y sin
@@ -83,6 +93,16 @@ RUN useradd --create-home --shell /bin/bash hugo
 # Copiamos las deps instaladas por el builder
 COPY --from=builder /install /usr/local
 
+# ─── Camoufox (opcional, ver INSTALL_BROWSER en el stage builder) ──
+# Firefox necesita libs gráficas aunque corra headless, y el binario se baja
+# como el usuario que después lo ejecuta (Camoufox lo cachea en su $HOME).
+ARG INSTALL_BROWSER=false
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libgtk-3-0 libx11-xcb1 libdbus-glib-1-2 libasound2 libxtst6 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Modelo CLIP (ver EMBED_MODEL_PATH en config.py). Si este COPY se saca, Hugo
 # sigue arrancando: /app/lookup cae a pHash y loguea un warning.
 COPY --from=model /opt/models /opt/models
@@ -98,6 +118,10 @@ COPY --from=frontend-builder --chown=hugo:hugo /fe/dist ./app/static
 # Si no está definida, en config.py default es sqlite:///./hugo.db.
 
 USER hugo
+
+# El binario de Firefox se baja como `hugo`: Camoufox lo busca en el cache del
+# usuario que corre el proceso, así que hacerlo como root no serviría.
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then python -m camoufox fetch; fi
 
 EXPOSE 8000
 

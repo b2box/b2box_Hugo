@@ -164,6 +164,25 @@ class Settings(BaseSettings):
     # Threads de ONNX Runtime. 1 = el límite de CPU del container.
     embed_onnx_threads: int = 1
 
+    # ── Render con browser real (Camoufox) ─────────────────────
+    # Cuando el fetch plano choca contra la página anti-bot (ML, Alibaba) o
+    # contra una galería armada por JS (1688, AliExpress), levantamos la ficha
+    # en un Firefox con fingerprint real y leemos las fotos del DOM.
+    # Off por defecto: pide el binario de Camoufox en la imagen (~150 MB) y un
+    # render cuesta ~5-10 s contra los ~300 ms del httpx.
+    browser_fetch_enabled: bool = Field(
+        default=False,
+        description="Reintentar con Camoufox cuando el fetch plano no saca fotos",
+    )
+    browser_fetch_timeout_ms: int = Field(
+        default=30000, description="Timeout del render, en ms"
+    )
+    # 10 fotos: la galería de una ficha entra entera y el match se queda con el
+    # mejor score entre todas, en vez de depender de cuál era la principal.
+    browser_fetch_max_images: int = Field(
+        default=10, description="Máximo de fotos que se leen del DOM renderizado"
+    )
+
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")
 

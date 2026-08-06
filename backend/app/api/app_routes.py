@@ -58,7 +58,11 @@ _PHASH_CONCURRENCY = 8
 # Cuántas fotos de la publicación se comparan contra el catálogo. Las páginas de
 # producto traen varias (galería) y la principal no siempre es la que mejor
 # matchea; nos quedamos con el mejor score entre todas.
-_MAX_QUERY_IMAGES = 4
+#
+# 10 = la galería completa de una ficha. Cada foto extra cuesta ~25 ms de
+# inferencia CLIP (~250 ms para las diez), barato al lado de perder un match que
+# sí teníamos porque la foto parecida a la nuestra era la séptima.
+_MAX_QUERY_IMAGES = 10
 
 # Cuántos candidatos por foto trae el índice CLIP antes de desempatar por nombre.
 # La imagen sola confunde productos genéricos (dos masajeadores negros, dos hand
