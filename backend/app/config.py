@@ -230,6 +230,16 @@ class Settings(BaseSettings):
     browser_fetch_max_images: int = Field(
         default=10, description="Máximo de fotos que se leen del DOM renderizado"
     )
+    # Proxy de salida para el browser. ML tira su interstitial de "tráfico
+    # sospechoso" a las IPs de datacenter (Coolify), así que camoufox desde el
+    # server saca 0 fotos aunque la misma URL lea perfecto desde una IP
+    # residencial. Un proxy residencial/móvil hace que el render salga con una
+    # IP que ML no marca. Vacío = sin proxy (salida directa del container).
+    # Formato: "http://user:pass@host:port" o "socks5://host:port".
+    browser_proxy: str = Field(
+        default="",
+        description="Proxy de salida para Camoufox (residencial, para saltear el anti-bot por IP)",
+    )
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

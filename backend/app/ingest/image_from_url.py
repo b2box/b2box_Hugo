@@ -329,6 +329,15 @@ async def _via_browser(url: str, marketplace: str) -> ExtractedProduct | None:
     dom_images = [u for u in (_absolutize(i, final_url) or "" for i in page.image_urls) if u]
     images = _dedupe(_drop_placeholders(images + dom_images))
     if not images:
+        # Camoufox renderizó pero no sacó ni una foto de producto. Casi siempre:
+        # ML le tiró el interstitial anti-bot (IP de datacenter) o la ficha está
+        # caída. Sin este log, _via_browser salía mudo y no se distinguía de
+        # "el browser ni corrió". Ver browser_proxy en config.py.
+        log.info(
+            "browser_fetch: renderizó %s pero 0 fotos usables "
+            "(anti-bot/IP de datacenter o ficha caída)",
+            url[:120],
+        )
         return None
 
     log.info(

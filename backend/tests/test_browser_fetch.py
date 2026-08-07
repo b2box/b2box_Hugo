@@ -260,3 +260,26 @@ async def test_browser_tambien_cubre_http_500(monkeypatch):
     result = await extract("https://spanish.alibaba.com/p/1.html")
 
     assert result.image_urls == ["https://cdn.example.com/producto.jpg"]
+
+
+def test_proxy_config_parsea_url_con_credenciales(monkeypatch):
+    """browser_proxy con user:pass se separa en server + username + password."""
+    from app.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "browser_proxy", "http://usr:pwd@res.proxy.io:8080", raising=False)
+    cfg = browser_fetch._proxy_config()
+    assert cfg == {
+        "server": "http://res.proxy.io:8080",
+        "username": "usr",
+        "password": "pwd",
+    }
+
+
+def test_proxy_config_vacio_devuelve_none(monkeypatch):
+    """Sin proxy configurado, no se le pasa nada a Camoufox."""
+    from app.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "browser_proxy", "", raising=False)
+    assert browser_fetch._proxy_config() is None

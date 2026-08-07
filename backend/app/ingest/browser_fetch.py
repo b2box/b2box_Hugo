@@ -81,6 +81,32 @@ def _camoufox():
     return AsyncCamoufox
 
 
+def _proxy_config() -> dict[str, str] | None:
+    """Traduce settings.browser_proxy al dict que espera Camoufox/Playwright.
+
+    Playwright quiere el server SIN credenciales embebidas y user/pass en campos
+    aparte: "http://u:p@host:port" embebido no siempre autentica. Devuelve None
+    si no hay proxy configurado.
+    """
+    raw = (get_settings().browser_proxy or "").strip()
+    if not raw:
+        return None
+    p = urlparse(raw)
+    if not p.hostname:
+        log.warning("browser_proxy mal formado, lo ignoro: %r", raw[:60])
+        return None
+    scheme = p.scheme or "http"
+    server = f"{scheme}://{p.hostname}"
+    if p.port:
+        server += f":{p.port}"
+    cfg: dict[str, str] = {"server": server}
+    if p.username:
+        cfg["username"] = p.username
+    if p.password:
+        cfg["password"] = p.password
+    return cfg
+
+
 def available() -> bool:
     """True si se puede renderizar con browser. Nunca tira."""
     s = get_settings()
@@ -217,8 +243,14 @@ async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
 
     # humanize: mueve el mouse con curvas realistas. geoip: alinea timezone,
     # locale y coordenadas con la IP de salida — un fingerprint que se contradice
-    # con la IP es justamente lo que detectan los anti-bot.
-    async with AsyncCamoufox(headless=True, humanize=True, geoip=True) as browser:
+    # con la IP es justamente lo que detectan los anti-bot. proxy: salida por una
+    # IP residencial cuando está configurado (ML bloquea las de datacenter).
+    proxy = _proxy_config()
+    launch_kwargs: dict = {"headless": True, "humanize": True, "geoip": True}
+    if proxy:
+        launch_kwargs["proxy"] = proxy
+        log.info("browser_fetch: usando proxy %s", proxy["server"])
+    async with AsyncCamoufox(**launch_kwargs) as browser:
         page = await browser.new_page()
         await page.route(
             "**/*", lambda route, request: _guard_route(route, request, blocked)
