@@ -140,9 +140,13 @@ def test_shortlist_filters_before_truncating():
 # ─── Parseo del veredicto ──────────────────────────────────────────
 
 
+def _opts(provider="anthropic", model="m", effort="high"):
+    return vision_rerank.Options(provider, model, effort)
+
+
 def _parse(data, n=3):
     return vision_rerank._parse_verdict(
-        data, [_product(str(i + 1)) for i in range(n)], "anthropic", "m", 10
+        data, [_product(str(i + 1)) for i in range(n)], _opts(), 10, (100, 20)
     )
 
 
@@ -247,7 +251,7 @@ class _OResponse:
 @pytest.mark.asyncio
 async def test_anthropic_returns_verdict(monkeypatch, enabled):
     _fake_anthropic(monkeypatch, _AResponse('{"match": 1, "confidence": 0.9, "reason": "ok"}'))
-    verdict = await vision_rerank._ask(vision_rerank.ANTHROPIC, _payload())
+    verdict = await vision_rerank._ask(_opts(vision_rerank.ANTHROPIC), _payload())
     assert verdict.product.id == "1"
     assert verdict.provider == "anthropic"
 
@@ -255,19 +259,19 @@ async def test_anthropic_returns_verdict(monkeypatch, enabled):
 @pytest.mark.asyncio
 async def test_anthropic_handles_refusal(monkeypatch, enabled):
     _fake_anthropic(monkeypatch, _AResponse("", stop_reason="refusal"))
-    assert await vision_rerank._ask(vision_rerank.ANTHROPIC, _payload()) is None
+    assert await vision_rerank._ask(_opts(vision_rerank.ANTHROPIC), _payload()) is None
 
 
 @pytest.mark.asyncio
 async def test_anthropic_survives_api_error(monkeypatch, enabled):
     _fake_anthropic(monkeypatch, RuntimeError("503"))
-    assert await vision_rerank._ask(vision_rerank.ANTHROPIC, _payload()) is None
+    assert await vision_rerank._ask(_opts(vision_rerank.ANTHROPIC), _payload()) is None
 
 
 @pytest.mark.asyncio
 async def test_openai_returns_verdict(monkeypatch, enabled):
     _fake_openai(monkeypatch, _OResponse('{"match": 2, "confidence": 0.7, "reason": "ok"}'))
-    verdict = await vision_rerank._ask(vision_rerank.OPENAI, _payload())
+    verdict = await vision_rerank._ask(_opts(vision_rerank.OPENAI), _payload())
     assert verdict.product.id == "2"
     assert verdict.provider == "openai"
 
@@ -276,7 +280,7 @@ async def test_openai_returns_verdict(monkeypatch, enabled):
 async def test_openai_sends_images_at_high_detail(monkeypatch, enabled):
     """En "low" redimensionan la lámina y se pierde el detalle que la justifica."""
     _fake_openai(monkeypatch, _OResponse('{"match": null, "confidence": 0.5, "reason": "-"}'))
-    await vision_rerank._ask(vision_rerank.OPENAI, _payload())
+    await vision_rerank._ask(_opts(vision_rerank.OPENAI), _payload())
     parts = _fake_openai.seen["messages"][1]["content"]
     images = [p for p in parts if p["type"] == "image_url"]
     assert images and all(p["image_url"]["detail"] == "high" for p in images)
@@ -285,18 +289,18 @@ async def test_openai_sends_images_at_high_detail(monkeypatch, enabled):
 @pytest.mark.asyncio
 async def test_openai_handles_refusal(monkeypatch, enabled):
     _fake_openai(monkeypatch, _OResponse(None, refusal="no puedo"))
-    assert await vision_rerank._ask(vision_rerank.OPENAI, _payload()) is None
+    assert await vision_rerank._ask(_opts(vision_rerank.OPENAI), _payload()) is None
 
 
 @pytest.mark.asyncio
 async def test_openai_survives_api_error(monkeypatch, enabled):
     _fake_openai(monkeypatch, RuntimeError("429"))
-    assert await vision_rerank._ask(vision_rerank.OPENAI, _payload()) is None
+    assert await vision_rerank._ask(_opts(vision_rerank.OPENAI), _payload()) is None
 
 
 @pytest.mark.asyncio
 async def test_unknown_provider_returns_none(enabled):
-    assert await vision_rerank._ask("gemini", _payload()) is None
+    assert await vision_rerank._ask(_opts("gemini"), _payload()) is None
 
 
 # ─── compare() ─────────────────────────────────────────────────────
@@ -311,11 +315,9 @@ async def test_compare_runs_both_on_the_same_payload(monkeypatch, enabled):
     async def fake_fetch(url):  # noqa: ARG001
         return _png()
 
-    async def fake_ask(provider, payload):
+    async def fake_ask(opts, payload):
         payloads.append(payload)
-        return vision_rerank.Verdict(
-            payload.candidates[0], 0.9, "ok", provider, "m", 1
-        )
+        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", opts.provider)
 
     monkeypatch.setattr(vision_rerank, "_fetch", fake_fetch)
     monkeypatch.setattr(vision_rerank, "_ask", fake_ask)
@@ -333,10 +335,10 @@ async def test_compare_isolates_a_provider_that_blows_up(monkeypatch, enabled):
     async def fake_fetch(url):  # noqa: ARG001
         return _png()
 
-    async def fake_ask(provider, payload):
-        if provider == vision_rerank.OPENAI:
+    async def fake_ask(opts, payload):
+        if opts.provider == vision_rerank.OPENAI:
             raise RuntimeError("boom")
-        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", provider, "m", 1)
+        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", opts.provider)
 
     monkeypatch.setattr(vision_rerank, "_fetch", fake_fetch)
     monkeypatch.setattr(vision_rerank, "_ask", fake_ask)
@@ -354,8 +356,8 @@ async def test_compare_skips_providers_without_key(monkeypatch, enabled):
     async def fake_fetch(url):  # noqa: ARG001
         return _png()
 
-    async def fake_ask(provider, payload):
-        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", provider, "m", 1)
+    async def fake_ask(opts, payload):
+        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", opts.provider)
 
     monkeypatch.setattr(vision_rerank, "_fetch", fake_fetch)
     monkeypatch.setattr(vision_rerank, "_ask", fake_ask)
@@ -374,9 +376,9 @@ async def test_verdict_is_cached_per_query_candidates_and_provider(monkeypatch, 
     async def fake_fetch(url):  # noqa: ARG001
         return _png()
 
-    async def fake_ask(provider, payload):
-        calls.append(provider)
-        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", provider, "m", 1)
+    async def fake_ask(opts, payload):
+        calls.append(opts.provider)
+        return vision_rerank.Verdict(payload.candidates[0], 0.9, "ok", opts.provider)
 
     monkeypatch.setattr(vision_rerank, "_fetch", fake_fetch)
     monkeypatch.setattr(vision_rerank, "_ask", fake_ask)
@@ -423,9 +425,9 @@ async def test_compare_endpoint_devuelve_los_dos_veredictos(monkeypatch):
     async def fake_compare(query_urls, candidates, *, title=""):  # noqa: ARG001
         return {
             "anthropic": vision_rerank.Verdict(
-                candidates[0], 0.91, "es el mismo", "anthropic", "claude", 8000
+                candidates[0], 0.91, "es el mismo", "anthropic", "claude", elapsed_ms=8000
             ),
-            "openai": vision_rerank.Verdict(None, 0.62, "ninguno", "openai", "gpt", 5000),
+            "openai": vision_rerank.Verdict(None, 0.62, "ninguno", "openai", "gpt", elapsed_ms=5000),
         }
 
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
@@ -524,7 +526,7 @@ async def test_compare_endpoint_expone_las_fotos_y_la_foto_prestada(monkeypatch)
         return None
 
     async def fake_compare(query_urls, candidates, *, title=""):  # noqa: ARG001
-        return {"anthropic": vision_rerank.Verdict(None, 0.8, "ninguno", "a", "m", 1)}
+        return {"anthropic": vision_rerank.Verdict(None, 0.8, "ninguno", "a", "m", elapsed_ms=1)}
 
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)

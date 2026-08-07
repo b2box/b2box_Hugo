@@ -108,6 +108,9 @@ decirle que no lo tenemos."""
 _CACHE: "OrderedDict[tuple, Verdict | None]" = OrderedDict()
 _CACHE_MAX = 512
 
+# (input_tokens, output_tokens) cuando la llamada no llegó a facturar nada.
+_NO_USAGE = (0, 0)
+
 
 @dataclass
 class Verdict:
@@ -118,7 +121,34 @@ class Verdict:
     reason: str
     provider: str = ""
     model: str = ""
+    effort: str = ""
     elapsed_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class Options:
+    """Qué modelo corre y con cuánto effort.
+
+    Antes esto salía siempre de la config, así que comparar dos modelos exigía
+    cambiar una env var y reiniciar. Pasarlo por parámetro deja barrer varias
+    combinaciones en una sola corrida — ver `app/dedup/calibrate_vision.py`.
+    """
+
+    provider: str
+    model: str
+    effort: str
+
+
+def options(
+    provider: str | None = None, model: str | None = None, effort: str | None = None
+) -> Options:
+    """Completa con la config lo que no se pidió explícitamente."""
+    s = get_settings()
+    provider = provider or s.vision_provider
+    default_model = s.vision_model_openai if provider == OPENAI else s.vision_model
+    return Options(provider, model or default_model, effort or s.vision_effort)
 
 
 @dataclass
@@ -306,6 +336,8 @@ async def pick_match(
     *,
     title: str = "",
     provider: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> Verdict | None:
     """Elige cuál de `candidates` es el producto de `query_urls`, o ninguno.
 
@@ -314,8 +346,8 @@ async def pick_match(
     llamador tiene que caer a los umbrales de CLIP. "Ninguno matchea" se devuelve
     como un Verdict con `product=None`.
     """
-    provider = provider or get_settings().vision_provider
-    if not available(provider) or not query_urls:
+    opts = options(provider, model, effort)
+    if not available(opts.provider) or not query_urls:
         return None
 
     candidates = _shortlist(candidates, get_settings().vision_topk)
@@ -323,7 +355,9 @@ async def pick_match(
         return None
 
     queries = list(query_urls)[: max(1, get_settings().vision_max_query_images)]
-    key = (provider, tuple(queries), tuple(p.id for p in candidates))
+    # El modelo y el effort van en la key: si no, barrer variantes devolvería
+    # el veredicto de la primera para todas.
+    key = (opts, tuple(queries), tuple(p.id for p in candidates))
     cached = _cache_get(key)
     if cached is not _MISS:
         return cached  # type: ignore[return-value]
@@ -332,7 +366,7 @@ async def pick_match(
     if payload is None:
         return None
 
-    verdict = await _ask(provider, payload)
+    verdict = await _ask(opts, payload)
     _cache_put(key, verdict)
     return verdict
 
@@ -362,7 +396,7 @@ async def compare(
         return {}
 
     results = await asyncio.gather(
-        *(_ask(p, payload) for p in usable), return_exceptions=True
+        *(_ask(options(p), payload) for p in usable), return_exceptions=True
     )
     out: dict[str, Verdict | None] = {}
     for provider, result in zip(usable, results):
@@ -377,27 +411,28 @@ async def compare(
 # ─── Proveedores ───────────────────────────────────────────────────
 
 
-async def _ask(provider: str, payload: _Payload) -> Verdict | None:
+async def _ask(opts: Options, payload: _Payload) -> Verdict | None:
     started = time.monotonic()
-    if provider == ANTHROPIC:
-        data, model = await _call_anthropic(payload)
-    elif provider == OPENAI:
-        data, model = await _call_openai(payload)
+    if opts.provider == ANTHROPIC:
+        data, usage = await _call_anthropic(opts, payload)
+    elif opts.provider == OPENAI:
+        data, usage = await _call_openai(opts, payload)
     else:
-        log.warning("Proveedor de visión desconocido: %r", provider)
+        log.warning("Proveedor de visión desconocido: %r", opts.provider)
         return None
     elapsed = int((time.monotonic() - started) * 1000)
-    return _parse_verdict(data, payload.candidates, provider, model, elapsed)
+    return _parse_verdict(data, payload.candidates, opts, elapsed, usage)
 
 
-async def _call_anthropic(payload: _Payload) -> tuple[dict | None, str]:
+async def _call_anthropic(
+    opts: Options, payload: _Payload
+) -> tuple[dict | None, tuple[int, int]]:
     s = get_settings()
-    model = s.vision_model
     try:
         from anthropic import AsyncAnthropic
     except ImportError:
         log.warning("El SDK de anthropic no está instalado")
-        return None, model
+        return None, _NO_USAGE
 
     content = [
         {"type": "text", "text": value}
@@ -416,7 +451,7 @@ async def _call_anthropic(payload: _Payload) -> tuple[dict | None, str]:
     client = AsyncAnthropic(api_key=s.anthropic_api_key, timeout=s.vision_timeout_seconds)
     try:
         response = await client.messages.create(
-            model=model,
+            model=opts.model,
             # El JSON de salida son cuatro líneas, pero el thinking sale del mismo
             # presupuesto: con poco margen la respuesta se corta antes del veredicto.
             # Se factura lo que se usa, así que sobrar no cuesta.
@@ -424,30 +459,36 @@ async def _call_anthropic(payload: _Payload) -> tuple[dict | None, str]:
             system=_SYSTEM,
             thinking={"type": "adaptive"},
             output_config={
-                "effort": s.vision_effort,
+                "effort": opts.effort,
                 "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
             },
             messages=[{"role": "user", "content": content}],
         )
     except Exception:  # noqa: BLE001  (red, rate limit, 5xx, …)
         log.warning("El rerank de Anthropic falló", exc_info=True)
-        return None, model
+        return None, _NO_USAGE
 
     if response.stop_reason == "refusal":
         log.warning("Anthropic rechazó el pedido del rerank")
-        return None, model
+        return None, _NO_USAGE
 
-    return _loads(next((b.text for b in response.content if b.type == "text"), "")), model
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    usage = getattr(response, "usage", None)
+    return _loads(text), (
+        int(getattr(usage, "input_tokens", 0) or 0),
+        int(getattr(usage, "output_tokens", 0) or 0),
+    )
 
 
-async def _call_openai(payload: _Payload) -> tuple[dict | None, str]:
+async def _call_openai(
+    opts: Options, payload: _Payload
+) -> tuple[dict | None, tuple[int, int]]:
     s = get_settings()
-    model = s.vision_model_openai
     try:
         from openai import AsyncOpenAI
     except ImportError:
         log.warning("El SDK de openai no está instalado")
-        return None, model
+        return None, _NO_USAGE
 
     content = [
         {"type": "text", "text": value}
@@ -468,7 +509,7 @@ async def _call_openai(payload: _Payload) -> tuple[dict | None, str]:
     client = AsyncOpenAI(api_key=s.openai_api_key, timeout=s.vision_timeout_seconds)
     try:
         response = await client.chat.completions.create(
-            model=model,
+            model=opts.model,
             messages=[
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": content},
@@ -484,14 +525,18 @@ async def _call_openai(payload: _Payload) -> tuple[dict | None, str]:
         )
     except Exception:  # noqa: BLE001
         log.warning("El rerank de OpenAI falló", exc_info=True)
-        return None, model
+        return None, _NO_USAGE
 
     choice = response.choices[0] if response.choices else None
     if choice is None or getattr(choice.message, "refusal", None):
         log.warning("OpenAI rechazó el pedido del rerank")
-        return None, model
+        return None, _NO_USAGE
 
-    return _loads(choice.message.content or ""), model
+    usage = getattr(response, "usage", None)
+    return _loads(choice.message.content or ""), (
+        int(getattr(usage, "prompt_tokens", 0) or 0),
+        int(getattr(usage, "completion_tokens", 0) or 0),
+    )
 
 
 def _loads(text: str) -> dict | None:
@@ -506,9 +551,9 @@ def _loads(text: str) -> dict | None:
 def _parse_verdict(
     data: dict | None,
     candidates: list[VendureProduct],
-    provider: str,
-    model: str,
+    opts: Options,
     elapsed_ms: int,
+    usage: tuple[int, int] = _NO_USAGE,
 ) -> Verdict | None:
     if data is None:
         return None
@@ -517,22 +562,28 @@ def _parse_verdict(
     confidence = float(data.get("confidence") or 0.0)
     reason = str(data.get("reason") or "")[:300]
 
+    def _verdict(product: VendureProduct | None) -> Verdict:
+        return Verdict(
+            product, confidence, reason,
+            opts.provider, opts.model, opts.effort, elapsed_ms, usage[0], usage[1],
+        )
+
     if index is None:
-        log.info("[%s] ningún candidato matchea (%s)", provider, reason)
-        return Verdict(None, confidence, reason, provider, model, elapsed_ms)
+        log.info("[%s] ningún candidato matchea (%s)", opts.model, reason)
+        return _verdict(None)
 
     # El modelo numera desde 1. Un índice fuera de rango es una alucinación:
     # tratarlo como "no sé" y caer a CLIP es más seguro que agarrar otro producto.
     if not isinstance(index, int) or isinstance(index, bool):
-        log.warning("[%s] devolvió un match que no es entero (%r)", provider, index)
+        log.warning("[%s] devolvió un match que no es entero (%r)", opts.model, index)
         return None
     if not 1 <= index <= len(candidates):
-        log.warning("[%s] devolvió un índice fuera de rango (%r)", provider, index)
+        log.warning("[%s] devolvió un índice fuera de rango (%r)", opts.model, index)
         return None
 
     product = candidates[index - 1]
     log.info(
         "[%s] eligió '%s' (conf %.2f, %d ms): %s",
-        provider, product.name[:60], confidence, elapsed_ms, reason,
+        opts.model, product.name[:60], confidence, elapsed_ms, reason,
     )
-    return Verdict(product, confidence, reason, provider, model, elapsed_ms)
+    return _verdict(product)
