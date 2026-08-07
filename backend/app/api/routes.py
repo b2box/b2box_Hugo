@@ -1285,7 +1285,32 @@ async def debug_config() -> dict[str, Any]:
             return {"set": False, "length": 0}
         return {"set": True, "length": len(v)}
 
+    # Estado del browser (Camoufox), separando los 3 modos de falla:
+    #   flag off      → BROWSER_FETCH_ENABLED no está en true (runtime)
+    #   package False → no se instaló .[browser] (INSTALL_BROWSER no era true al build)
+    #   binary None   → el paquete está pero falta `python -m camoufox fetch`
+    # Si los tres están OK y aun así cae a foto prestada, es ML bloqueando por IP.
+    from app.ingest import browser_fetch  # noqa: PLC0415
+
+    browser_pkg = True
+    browser_binary: str | None = None
+    try:
+        from camoufox import pkgman  # noqa: PLC0415
+
+        try:
+            browser_binary = pkgman.installed_verstr()
+        except Exception:  # noqa: BLE001
+            browser_binary = None
+    except Exception:  # noqa: BLE001
+        browser_pkg = False
+
     return {
+        "browser": {
+            "enabled_flag": s.browser_fetch_enabled,
+            "package_importable": browser_pkg,
+            "binary_installed": browser_binary,
+            "available": browser_fetch.available(),
+        },
         "vendure": {
             "api_url": s.vendure_api_url,
             "bearer": _mask(s.vendure_bearer),
