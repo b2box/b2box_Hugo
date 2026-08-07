@@ -971,12 +971,22 @@ async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
         raise HTTPException(422, "Mandá `url` (publicación o foto) o `image_url`.")
 
     title = ""
+    marketplace = "upload" if direct_image else "other"
+    canonical = raw_url or direct_image
+    # El link estaba bloqueado y el producto se resolvió buscando su nombre en el
+    # catálogo del marketplace: la foto puede ser la de un primo lejano, no la
+    # del producto que mandó el cliente.
+    approximate = False
+    title = ""
     image_urls: list[str] = [direct_image] if direct_image else []
     if raw_url:
         try:
             extracted = await image_from_url.extract(raw_url)
             image_urls += [u for u in extracted.image_urls if u not in image_urls]
             title = extracted.title
+            approximate = extracted.approximate
+            canonical = extracted.canonical_url
+            marketplace = extracted.marketplace if not direct_image else marketplace
         except image_from_url.ExtractError as exc:
             if not image_urls:
                 raise HTTPException(422, f"No se pudo sacar la foto: {exc}")
@@ -1006,7 +1016,15 @@ async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
 
     shortlist = sorted(best_by_pid.values(), key=lambda c: c[1], reverse=True)
     if not shortlist:
-        return {"status": "no_candidates", "query_images": query_urls, "title": title}
+        return {
+            "status": "no_candidates",
+            "title": title,
+            "marketplace": marketplace,
+            "canonical_url": canonical,
+            "approximate": approximate,
+            "all_images": image_urls,
+            "query_images": query_urls,
+        }
 
     verdicts = await vision_rerank.compare(
         query_urls, [p for p, _ in shortlist], title=title
@@ -1032,7 +1050,16 @@ async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
     return {
         "status": "ok",
         "title": title,
+        "marketplace": marketplace,
+        "canonical_url": canonical,
+        "approximate": approximate,
+        # Todas las que sacó del link vs las que realmente vieron los modelos.
+        # Si el veredicto no cierra, lo primero que hay que mirar es si la foto
+        # que compararon es la del producto: cuando el marketplace bloquea la
+        # ficha, la foto puede venir de otro producto parecido.
+        "all_images": image_urls,
         "query_images": query_urls,
+        "vision_images": query_urls[: get_settings().vision_max_query_images],
         "candidates": [
             {"id": p.id, "name": p.name, "product_code": p.product_code,
              "clip_score": round(s, 4), "image_url": p.featured_image_url}

@@ -493,3 +493,55 @@ async def test_compare_endpoint_marca_al_proveedor_que_no_contesto(monkeypatch):
     out = await app_routes.run_vision_compare(AppLookupRequest(url="https://x/y"))
 
     assert out["verdicts"]["openai"] == {"answered": False, "found": False}
+
+
+@pytest.mark.asyncio
+async def test_compare_endpoint_expone_las_fotos_y_la_foto_prestada(monkeypatch):
+    """Sin ver qué foto comparó, un veredicto raro es indiscutible.
+
+    Caso real: el link estaba bloqueado, Hugo resolvió el producto por nombre y
+    los dos modelos juzgaron la foto de OTRO producto. Contestaron bien para lo
+    que vieron — pero eso solo se nota si la pantalla muestra las fotos.
+    """
+    import numpy as np
+
+    from app.api import app_routes
+    from app.api.app_routes import AppLookupRequest
+    from app.ingest.image_from_url import ExtractedProduct
+
+    fotos = [f"https://cdn.ml/{i}.jpg" for i in range(6)]
+
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=fotos, title="Guante quita pelos", marketplace="mercadolibre",
+            canonical_url="https://ml/canonica", kind="page", approximate=True,
+        )
+
+    async def fake_embed(urls, concurrency=4):  # noqa: ARG001
+        return [np.ones(4, dtype=np.float32) for _ in urls]
+
+    async def noop():
+        return None
+
+    async def fake_compare(query_urls, candidates, *, title=""):  # noqa: ARG001
+        return {"anthropic": vision_rerank.Verdict(None, 0.8, "ninguno", "a", "m", 1)}
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
+    monkeypatch.setattr(app_routes.image_embed, "embed_urls_aligned", fake_embed)
+    monkeypatch.setattr(app_routes.catalog_index, "ensure_index", noop)
+    monkeypatch.setattr(app_routes.catalog_index, "is_ready", lambda: True)
+    monkeypatch.setattr(
+        app_routes.catalog_index, "search", lambda v, top_k=1: [(_product("1"), 0.5, "x")]
+    )
+    monkeypatch.setattr(app_routes.vision_rerank, "compare", fake_compare)
+
+    out = await app_routes.run_vision_compare(AppLookupRequest(url="https://ml/x"))
+
+    assert out["approximate"] is True
+    assert out["canonical_url"] == "https://ml/canonica"
+    assert out["all_images"] == fotos
+    # Los modelos ven un subconjunto: hay que poder distinguir cuáles.
+    n = app_routes.get_settings().vision_max_query_images
+    assert out["vision_images"] == fotos[:n]
+    assert len(out["vision_images"]) < len(out["all_images"])

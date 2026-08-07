@@ -147,7 +147,14 @@ export interface VisionCandidate {
 export interface VisionCompare {
   status: string;
   title?: string;
+  marketplace?: string;
+  canonical_url?: string;
+  // El link estaba bloqueado y el producto se resolvió por nombre: la foto
+  // puede ser la de otro producto parecido, no la que mandó el cliente.
+  approximate?: boolean;
+  all_images?: string[];
   query_images?: string[];
+  vision_images?: string[];
   candidates?: VisionCandidate[];
   verdicts?: Record<string, VisionVerdict>;
   index?: Record<string, unknown>;

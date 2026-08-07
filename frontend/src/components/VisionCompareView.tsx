@@ -135,6 +135,66 @@ export default function VisionCompareView() {
         </Card>
       ) : null}
 
+      {data && (data.status === "ok" || data.status === "no_candidates") ? (
+        <Card className="p-5 shadow-sm space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold uppercase tracking-wide">
+              Fotos que bajó del link
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Las de borde marcado son las que vieron los modelos. Si el veredicto
+              no cierra, mirá primero acá: si la foto no es la del producto, la
+              respuesta correcta era "ninguno".
+            </p>
+          </div>
+
+          {data.approximate ? (
+            <p className="text-sm rounded-md bg-warning/10 text-warning px-3 py-2">
+              <strong>Ojo: foto prestada.</strong> El marketplace bloqueó la
+              publicación y el producto se resolvió buscando el nombre en su
+              catálogo. Estas fotos pueden ser de otro producto parecido, no del
+              que mandó el cliente — por eso Hugo nunca afirma "lo tenemos" en
+              este caso.
+            </p>
+          ) : null}
+
+          <div className="flex flex-wrap gap-2">
+            {(data.all_images ?? []).map((src, i) => {
+              const seen = (data.vision_images ?? []).includes(src);
+              return (
+                <a key={src} href={src} target="_blank" rel="noreferrer" className="block">
+                  <img
+                    src={src}
+                    alt={`foto ${i + 1}`}
+                    className={`w-24 h-24 object-contain rounded bg-white ${
+                      seen ? "ring-2 ring-primary" : "opacity-50"
+                    }`}
+                  />
+                </a>
+              );
+            })}
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            {data.title ? <>Título: {data.title} · </> : null}
+            {data.marketplace}
+            {data.canonical_url ? (
+              <>
+                {" · "}
+                <a
+                  href={data.canonical_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  ficha de origen
+                </a>
+              </>
+            ) : null}
+          </p>
+        </Card>
+      ) : null}
+
       {data?.status === "ok" && data.verdicts ? (
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
