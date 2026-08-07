@@ -211,3 +211,83 @@ async def test_http_error_raises(monkeypatch):
 async def test_empty_url_raises():
     with pytest.raises(ExtractError):
         await extract("   ")
+
+
+# ─── ML bloqueado: el browser va antes que la foto prestada ────────
+#
+# `meli.fetch_from_url` nunca "falla" cuando ML bloquea la ficha: cae a buscar
+# el nombre en el catálogo y devuelve fotos de OTROS productos parecidos. Como
+# devolvía algo, la cadena cortaba ahí y Camoufox no llegaba a correr — justo
+# en el único caso donde hace falta. Medido con un guante quita pelos: los
+# modelos juzgaron la foto de un guante azul de otro producto.
+
+ML_URL = "https://articulo.mercadolibre.com.ar/MLA-1-guante-quita-pelos"
+
+
+def _meli_catalog_hit(monkeypatch, resolved_by: str):
+    from app.ingest.meli import MeliItem
+
+    async def fake_fetch(url):  # noqa: ARG001
+        return [
+            MeliItem(
+                id="MLA1", title="Guante azul de otro producto",
+                image_urls=["https://cdn.ml/prestada.jpg"], permalink=ML_URL,
+                price_cents=1000, currency="ARS", seller_count=1,
+                resolved_by=resolved_by,
+            )
+        ]
+
+    monkeypatch.setattr(image_from_url.meli, "enabled", lambda: True)
+    monkeypatch.setattr(image_from_url.meli, "fetch_from_url", fake_fetch)
+
+
+@pytest.mark.asyncio
+async def test_ficha_bloqueada_intenta_el_browser_antes_que_la_foto_prestada(monkeypatch):
+    _meli_catalog_hit(monkeypatch, resolved_by="catalog")
+
+    async def fake_browser(url, marketplace):  # noqa: ARG001
+        return image_from_url.ExtractedProduct(
+            image_urls=["https://cdn.ml/la-real.jpg"], title="Paño quita pelos",
+            marketplace="mercadolibre", canonical_url=url, kind="page",
+        )
+
+    monkeypatch.setattr(image_from_url, "_via_browser", fake_browser)
+
+    out = await extract(ML_URL)
+
+    assert out.image_urls == ["https://cdn.ml/la-real.jpg"]
+    assert out.approximate is False
+
+
+@pytest.mark.asyncio
+async def test_si_el_browser_tampoco_puede_usa_la_foto_prestada(monkeypatch):
+    """Degradar a la foto prestada sigue siendo mejor que no responder nada."""
+    _meli_catalog_hit(monkeypatch, resolved_by="catalog")
+
+    async def sin_browser(url, marketplace):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(image_from_url, "_via_browser", sin_browser)
+
+    out = await extract(ML_URL)
+
+    assert out.image_urls == ["https://cdn.ml/prestada.jpg"]
+    assert out.approximate is True
+
+
+@pytest.mark.asyncio
+async def test_ficha_directa_no_gasta_el_browser(monkeypatch):
+    """Si la API resolvió el link de verdad, no hay nada que rescatar."""
+    _meli_catalog_hit(monkeypatch, resolved_by="direct")
+    llamadas = []
+
+    async def fake_browser(url, marketplace):  # noqa: ARG001
+        llamadas.append(url)
+        return None
+
+    monkeypatch.setattr(image_from_url, "_via_browser", fake_browser)
+
+    out = await extract(ML_URL)
+
+    assert out.approximate is False
+    assert llamadas == []

@@ -362,6 +362,20 @@ async def extract(url: str) -> ExtractedProduct:
     # camino queda igual para no tratar a ML distinto sin necesidad.
     if marketplace == "mercadolibre" and meli.enabled():
         candidates = await meli.fetch_from_url(url)
+        if candidates and candidates[0].resolved_by == "catalog":
+            # ML bloqueó la ficha del link y esto son fotos de OTROS productos
+            # que se llaman parecido. Antes de conformarnos con una foto
+            # prestada, probamos el browser: leer la ficha real es exactamente
+            # para lo que está Camoufox. Si tampoco puede, seguimos abajo con
+            # las del catálogo (marcadas approximate).
+            #
+            # El orden importaba y estaba al revés: como la búsqueda por nombre
+            # "no falla" nunca, el return de más abajo cortaba la cadena y el
+            # browser no llegaba a correr justo en el único caso que lo necesita.
+            rendered = await _via_browser(url, marketplace)
+            if rendered is not None:
+                log.info("El browser rescató la ficha real de %s", url[:120])
+                return rendered
         if candidates:
             # Con un candidato es la ficha del link. Con varios, ML bloqueó el
             # link y los sacamos del catálogo por nombre: juntamos las fotos de
