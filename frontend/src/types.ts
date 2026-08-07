@@ -117,3 +117,38 @@ export type AuditTarget =
   | "pa_variants"
   | "bx_no_image"
   | "all";
+
+// ─── Comparador de proveedores de visión ───────────────────────────
+// CLIP arma la lista corta y cada proveedor decide sobre la MISMA lámina de
+// candidatos. `answered:false` es "el proveedor no pudo responder", que es
+// distinto de `found:false` ("miró y dijo que ninguno es").
+
+export interface VisionVerdict {
+  answered: boolean;
+  found: boolean;
+  product_id?: string | null;
+  product_name?: string | null;
+  product_code?: string | null;
+  image_url?: string | null;
+  confidence?: number;
+  reason?: string;
+  model?: string;
+  elapsed_ms?: number;
+}
+
+export interface VisionCandidate {
+  id: string;
+  name: string;
+  product_code: string | null;
+  clip_score: number;
+  image_url: string | null;
+}
+
+export interface VisionCompare {
+  status: string;
+  title?: string;
+  query_images?: string[];
+  candidates?: VisionCandidate[];
+  verdicts?: Record<string, VisionVerdict>;
+  index?: Record<string, unknown>;
+}

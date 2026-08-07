@@ -6,6 +6,7 @@ import MetricsRow from "../components/MetricsRow";
 import EventsView from "../components/EventsView";
 import SettingsView from "../components/SettingsView";
 import HealthView from "../components/HealthView";
+import VisionCompareView from "../components/VisionCompareView";
 import HistoryModal from "../components/HistoryModal";
 import { EventActions } from "../components/EventCard";
 import {
@@ -57,7 +58,8 @@ export default function DashboardPage() {
     queryFn: getSections,
     refetchInterval: POLL_MS,
   });
-  const isListSection = currentSection !== "settings" && currentSection !== "salud";
+  const NON_LIST = ["settings", "salud", "vision_lab"];
+  const isListSection = !NON_LIST.includes(currentSection);
   const eventsQ = useQuery({
     queryKey: ["events", currentSection, page, debouncedSearch],
     queryFn: () => getEvents(currentSection, page * PAGE_SIZE, PAGE_SIZE, debouncedSearch),
@@ -182,6 +184,8 @@ export default function DashboardPage() {
   const label =
     currentSection === "settings"
       ? "Configuración"
+      : currentSection === "vision_lab"
+      ? "Comparar visión"
       : sections[currentSection]?.label ?? currentSection;
 
   return (
@@ -203,6 +207,8 @@ export default function DashboardPage() {
             <SettingsView />
           ) : currentSection === "salud" ? (
             <HealthView />
+          ) : currentSection === "vision_lab" ? (
+            <VisionCompareView />
           ) : (
             <EventsView
               section={currentSection}

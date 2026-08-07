@@ -88,13 +88,15 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         key="embed_match_threshold",
         label="Threshold CLIP (match del app)",
         description=(
-            "Coseno mínimo para decirle al app 'lo tenemos'. Referencia: misma foto ≈ 1.0, "
-            "mismo producto en otra foto ≈ 0.85-0.95, productos distintos de la misma "
-            "categoría ≈ 0.70-0.80. Bajarlo trae más matches y más falsos positivos."
+            "Coseno mínimo para decirle al app 'lo tenemos'. El índice está CENTRADO: "
+            "la escala no es la del coseno crudo. Medido contra el catálogo real: "
+            "0.72 → 1% de falsos positivos y 18.5% de recall; 0.65 → 5% y 27%; "
+            "0.62 → 10% y 33%. Valores >0.80 son de la escala vieja (sin centrar) y "
+            "dejan al app sin encontrar nada."
         ),
         type="float", parser=float,
         default_attr="embed_match_threshold",
-        min=0.5, max=1.0, step=0.01, group="app",
+        min=0.2, max=1.0, step=0.01, group="app",
     ),
     SettingMeta(
         key="embed_suggest_threshold",
@@ -106,7 +108,7 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="float", parser=float,
         default_attr="embed_suggest_threshold",
-        min=0.3, max=1.0, step=0.01, group="app",
+        min=0.1, max=1.0, step=0.01, group="app",
     ),
     SettingMeta(
         key="embed_name_confirm_threshold",
@@ -139,12 +141,25 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         description=(
             "Coseno mínimo que igual se le exige a la foto de un candidato que el NOMBRE "
             "confirma. Nuestras fichas suelen tener láminas de marketing (varias unidades, "
-            "fondo de color) y contra la foto blanca del marketplace dan ~0.70. Bajalo si "
-            "productos que sí tenemos siguen sin aparecer."
+            "fondo de color) y contra la foto blanca del marketplace puntúan bajo aunque "
+            "sean el mismo producto. Escala centrada: el impostor mediano da ~0.38. Bajalo "
+            "si productos que sí tenemos siguen sin aparecer."
         ),
         type="float", parser=float,
         default_attr="embed_name_rescue_image_floor",
         min=0.0, max=1.0, step=0.01, group="app",
+    ),
+    SettingMeta(
+        key="vision_affirm_confidence",
+        label="Confianza del rerank para afirmar",
+        description=(
+            "Cuando el modelo con visión elige un candidato, esta es la confianza "
+            "mínima para decirle al app 'lo tenemos'. Por debajo el producto viaja "
+            "como sugerencia y el cliente decide. Subilo si aparecen falsos positivos."
+        ),
+        type="float", parser=float,
+        default_attr="vision_affirm_confidence",
+        min=0.0, max=1.0, step=0.05, group="app",
     ),
     # Pricing
     SettingMeta(

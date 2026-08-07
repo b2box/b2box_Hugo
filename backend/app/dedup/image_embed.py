@@ -7,12 +7,18 @@ luz → distancia de Hamming enorme aunque sea el mismo producto.
 
 Acá usamos la torre visual de CLIP ViT-B/32 exportada a ONNX. Devuelve un vector
 de 512 dims; el coseno entre dos vectores mide "mismo producto" y no "mismos
-píxeles". Referencias de score (vectores normalizados):
+píxeles". Referencias de score sobre el coseno CRUDO, medidas con 194 fotos de
+producto de e-commerce:
 
     misma imagen                     ≈ 1.00
-    mismo producto, otra foto        ≈ 0.85 – 0.95
-    productos distintos, misma cat.  ≈ 0.70 – 0.80
-    productos sin relación           ≈ 0.40 – 0.65
+    mismo producto, otra foto        ≈ 0.89  (mediana)
+    productos sin relación           ≈ 0.60  (mediana; p99 0.82, max 0.88)
+
+Ojo con ese piso: la mediana de "sin relación" es alta porque todas las fotos de
+producto comparten fondo blanco y encuadre de estudio. Comparando de a pares
+alcanza, pero buscar el máximo contra un catálogo entero rompe cualquier umbral
+absoluto — por eso `catalog_index` centra el índice antes de comparar. Los
+scores que ve /app/lookup salen de ahí y NO están en esta escala.
 
 Corremos ONNX Runtime en CPU (sin torch): el preprocesado es PIL + numpy, así
 que la dependencia pesada es solo el .onnx (~350 MB), bakeado en la imagen.

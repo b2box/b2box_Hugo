@@ -1483,3 +1483,18 @@ async def dashboard_status(
         "last_audit": (last_audit.isoformat() + "Z") if last_audit else None,
         "recent_events": events,
     }
+
+
+@router.post("/api/vision-compare")
+async def vision_compare_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
+    """Comparador de proveedores de visión, para el dashboard.
+
+    Mismo trabajo que `/app/vision-compare`, pero autenticado por la cookie de
+    sesión: `/app/` está exento del middleware de auth (el app entra con
+    X-API-Key), así que el dashboard no puede pegarle a esa ruta.
+    """
+    from app.api.app_routes import AppLookupRequest, run_vision_compare
+
+    url = (payload.get("url") or "").strip()
+    image_url = (payload.get("image_url") or "").strip()
+    return await run_vision_compare(AppLookupRequest(url=url or None, image_url=image_url or None))

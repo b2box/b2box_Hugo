@@ -13,6 +13,7 @@ import type {
   SectionsResponse,
   Setting,
   StatusResponse,
+  VisionCompare,
 } from "./types";
 
 export class ApiError extends Error {
@@ -174,4 +175,16 @@ export async function saveSetting(key: string, value: number): Promise<void> {
 
 export async function resetSetting(key: string): Promise<void> {
   await asJson(await apiFetch(`/api/settings/${key}`, { method: "DELETE" }));
+}
+
+// ─── Comparador de proveedores de visión ───────────────────────────
+
+export async function compareVision(url: string): Promise<VisionCompare> {
+  return asJson<VisionCompare>(
+    await apiFetch("/api/vision-compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    }),
+  );
 }

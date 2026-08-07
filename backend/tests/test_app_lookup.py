@@ -109,6 +109,7 @@ def env(monkeypatch):
                    "embed_name_confirm_threshold": 0.72,
                    "embed_name_reject_threshold": 0.30,
                    "embed_name_rescue_image_floor": 0.60,
+                   "vision_affirm_confidence": 0.75,
                    "dedup_image_threshold": 0.92}[k],
     )
     return {"recorded": recorded, "cloud_calls": cloud_calls}
@@ -507,6 +508,7 @@ async def test_debajo_del_piso_no_se_sugiere_nada(env, monkeypatch):
                    "embed_name_confirm_threshold": 0.72,
                    "embed_name_reject_threshold": 0.30,
                    "embed_name_rescue_image_floor": 0.60,
+                   "vision_affirm_confidence": 0.75,
                    "dedup_image_threshold": 0.92}[k],
     )
 
@@ -788,3 +790,101 @@ async def test_con_foto_prestada_pero_nombre_que_corrobora_si_se_sugiere(env, mo
 
     assert resp.suggestion is not None
     assert resp.suggestion.product_code == "BX-1001"
+
+
+# ─── 5. Rerank por visión ──────────────────────────────────────────
+#
+# CLIP arma la lista corta y un modelo con visión decide. Es la señal que manda:
+# cuando el modelo dice que ninguno es, no se muestra nada aunque CLIP puntúe
+# alto — que es justo el caso que hacía proponer cualquier producto.
+
+
+def _verdicto(monkeypatch, verdict):
+    async def fake_pick(query_urls, candidates, *, title=""):  # noqa: ARG001
+        return verdict
+
+    monkeypatch.setattr(app_routes.vision_rerank, "pick_match", fake_pick)
+
+
+@pytest.mark.asyncio
+async def test_rerank_manda_sobre_el_score_de_clip(env, monkeypatch):
+    """CLIP puntúa flojo, el modelo confirma → lo tenemos igual."""
+    _use_embeddings(monkeypatch, score=0.41)
+    _verdicto(
+        monkeypatch,
+        app_routes.vision_rerank.Verdict(product=_product(), confidence=0.93, reason="ok"),
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.status == "found"
+    assert resp.confidence == pytest.approx(0.93)
+
+
+@pytest.mark.asyncio
+async def test_rerank_descarta_y_no_se_muestra_nada(env, monkeypatch):
+    """CLIP puntúa altísimo, el modelo dice que ninguno es → se abre el pedido.
+
+    Este es el bug que motivó todo: con score alto contra un catálogo grande,
+    CLIP siempre encuentra algo. El modelo con visión es lo que corta eso.
+    """
+    _use_embeddings(monkeypatch, score=0.99)
+    _verdicto(
+        monkeypatch,
+        app_routes.vision_rerank.Verdict(product=None, confidence=0.9, reason="ninguno"),
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is None
+    assert resp.status == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_rerank_con_poca_confianza_solo_sugiere(env, monkeypatch):
+    _use_embeddings(monkeypatch, score=0.99)
+    _verdicto(
+        monkeypatch,
+        app_routes.vision_rerank.Verdict(product=_product(), confidence=0.55, reason="dudoso"),
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is not None
+    assert resp.suggestion.product_code == "BX-1001"
+
+
+@pytest.mark.asyncio
+async def test_sin_rerank_se_cae_a_los_umbrales_de_clip(env, monkeypatch):
+    """`None` es 'no pude correr el rerank', no 'ninguno matchea'."""
+    _use_embeddings(monkeypatch, score=0.94)
+    _verdicto(monkeypatch, None)
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert resp.status == "found"
+    assert resp.confidence == pytest.approx(0.94)
+
+
+@pytest.mark.asyncio
+async def test_rerank_con_foto_prestada_no_afirma(env, monkeypatch):
+    """Origen aproximado: la foto que vio el modelo no es la del cliente."""
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(
+            image_urls=[PHOTO], title="Lámpara", marketplace="mercadolibre",
+            canonical_url=url, kind="page", approximate=True,
+        )
+
+    _use_embeddings(monkeypatch, score=0.99)
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    _verdicto(
+        monkeypatch,
+        app_routes.vision_rerank.Verdict(product=_product(), confidence=0.98, reason="ok"),
+    )
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert resp.found is False
+    assert resp.suggestion is not None

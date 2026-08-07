@@ -38,7 +38,7 @@ from app import runtime
 from app.config import get_settings
 from app.db.models import AuditLog
 from app.db.session import engine
-from app.dedup import catalog_index, fuzzy_text, image_embed
+from app.dedup import catalog_index, fuzzy_text, image_embed, vision_rerank
 from app.dedup.image_hash import image_similarity
 from app.dedup.url_match import url_similarity
 from app.ingest import image_from_url
@@ -637,8 +637,15 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                         best_by_pid[cand_product.id] = (cand_product, cand_score, url_used)
 
             # Thresholds por runtime: se ajustan desde el dashboard sin redeploy.
-            match_thr = float(runtime.get("embed_match_threshold"))
-            suggest_thr = float(runtime.get("embed_suggest_threshold"))
+            # effective_threshold descarta los valores que quedaron guardados en
+            # la escala vieja (índice sin centrar): con esos, el app no encuentra
+            # nada y nadie se entera.
+            match_thr = catalog_index.effective_threshold(
+                "embed_match_threshold", float(runtime.get("embed_match_threshold"))
+            )
+            suggest_thr = catalog_index.effective_threshold(
+                "embed_suggest_threshold", float(runtime.get("embed_suggest_threshold"))
+            )
             name_confirm = float(runtime.get("embed_name_confirm_threshold"))
             name_reject = float(runtime.get("embed_name_reject_threshold"))
             rescue_floor = float(runtime.get("embed_name_rescue_image_floor"))
@@ -659,7 +666,61 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                     if prev is None or cand_score > prev[1]:
                         best_by_pid[cand_product.id] = (cand_product, cand_score, url_used)
 
-            selected = _best_embed_candidate(
+            # ── Rerank por visión ──────────────────────────────
+            # CLIP ya hizo lo que sabe hacer: acotar. El producto correcto está
+            # en esta lista corta el 80% de las veces, pero es el primero solo
+            # la mitad. Un modelo con visión mira las fotos y elige — o dice que
+            # ninguna, que es lo que evita proponer cualquier cosa.
+            shortlist = sorted(best_by_pid.values(), key=lambda c: c[1], reverse=True)
+            verdict = await vision_rerank.pick_match(
+                query_urls, [c[0] for c in shortlist], title=title
+            )
+
+            if verdict is not None:
+                # None sería "no pude correr el rerank" y cae al bloque de abajo;
+                # acá el modelo efectivamente decidió, aunque haya decidido que no.
+                if verdict.product is not None:
+                    product = verdict.product
+                    hit_score = next(
+                        (s for p, s, _ in shortlist if p.id == product.id), 0.0
+                    )
+                    winning_image = next(
+                        (img for p, _, img in shortlist if p.id == product.id), ""
+                    )
+                    winner = price_by_image.get(winning_image)
+                    if winner is not None:
+                        base.market_price_cents, base.market_currency, base.market_seller_count = (
+                            winner
+                        )
+                    # Con origen aproximado la foto que vio el modelo no es la del
+                    # producto del cliente (ML bloqueó su publicación y la sacamos
+                    # buscando el nombre): que matchee no prueba nada, así que a lo
+                    # sumo sugerimos.
+                    affirm_conf = float(runtime.get("vision_affirm_confidence"))
+                    if verdict.confidence >= affirm_conf and not approximate_source:
+                        matched, score = product, verdict.confidence
+                        matched_by = ["image_vision"]
+                    else:
+                        candidate = LookupSuggestion(
+                            product_id=product.id,
+                            name=product.name,
+                            product_code=product.product_code,
+                            image_url=product.featured_image_url,
+                            score=round(verdict.confidence, 4),
+                        )
+                        score = verdict.confidence
+                        if payload.reject_suggestion:
+                            rejected = candidate
+                        else:
+                            suggestion = candidate
+                else:
+                    # El modelo miró y dijo que ninguno es. Le creemos: no
+                    # mostramos nada y la consulta se abre en Cloud. Guardamos el
+                    # mejor score de CLIP para diagnóstico.
+                    score = max(score, shortlist[0][1] if shortlist else 0.0)
+                    log.info("Rerank descartó los %d candidatos", len(shortlist))
+
+            selected = None if verdict is not None else _best_embed_candidate(
                 list(best_by_pid.values()), title, name_confirm, name_reject
             )
             if selected is not None:
@@ -886,6 +947,99 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
 async def index_status() -> dict[str, Any]:
     """Estado del índice vectorial. Sirve para saber si /app/lookup ya puede responder."""
     return catalog_index.status()
+
+
+@router.post("/vision-compare", dependencies=[Depends(verify_api_key)])
+async def vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
+    """Igual que `run_vision_compare`, para scripts (autentica por X-API-Key).
+
+    El dashboard usa `/api/vision-compare`, que autentica por cookie de sesión.
+    """
+    return await run_vision_compare(payload)
+
+
+async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
+    """Corre TODOS los proveedores de visión sobre el mismo link y devuelve los dos.
+
+    Sirve para decidir con números en vez de con opiniones: misma foto, misma
+    lámina de candidatos, mismo prompt — la única variable es el modelo. No toca
+    el catálogo ni abre nada en Cloud, solo compara.
+    """
+    raw_url = (payload.url or "").strip()
+    direct_image = (payload.image_url or "").strip()
+    if not raw_url and not direct_image:
+        raise HTTPException(422, "Mandá `url` (publicación o foto) o `image_url`.")
+
+    title = ""
+    image_urls: list[str] = [direct_image] if direct_image else []
+    if raw_url:
+        try:
+            extracted = await image_from_url.extract(raw_url)
+            image_urls += [u for u in extracted.image_urls if u not in image_urls]
+            title = extracted.title
+        except image_from_url.ExtractError as exc:
+            if not image_urls:
+                raise HTTPException(422, f"No se pudo sacar la foto: {exc}")
+
+    if not image_urls:
+        raise HTTPException(422, "El link no dio ninguna foto.")
+
+    if not image_embed.available():
+        raise HTTPException(503, "CLIP no está disponible: no puedo armar la lista corta.")
+
+    await catalog_index.ensure_index()
+    if not catalog_index.is_ready():
+        return {"status": "indexing", "index": catalog_index.status()}
+
+    # Misma lista corta que usa /app/lookup: el mejor score por producto entre
+    # todas las fotos de la publicación.
+    query_urls = image_urls[:_MAX_QUERY_IMAGES]
+    query_vecs = await image_embed.embed_urls_aligned(query_urls)
+    best_by_pid: dict[str, tuple[Any, float]] = {}
+    for vec in query_vecs:
+        if vec is None:
+            continue
+        for hit in catalog_index.search(vec, top_k=_EMBED_TOPK):
+            prev = best_by_pid.get(hit[0].id)
+            if prev is None or hit[1] > prev[1]:
+                best_by_pid[hit[0].id] = (hit[0], hit[1])
+
+    shortlist = sorted(best_by_pid.values(), key=lambda c: c[1], reverse=True)
+    if not shortlist:
+        return {"status": "no_candidates", "query_images": query_urls, "title": title}
+
+    verdicts = await vision_rerank.compare(
+        query_urls, [p for p, _ in shortlist], title=title
+    )
+
+    def _render(v: vision_rerank.Verdict | None) -> dict[str, Any]:
+        if v is None:
+            # Distinto de "ninguno matchea": acá el proveedor no pudo responder.
+            return {"answered": False, "found": False}
+        return {
+            "answered": True,
+            "found": v.product is not None,
+            "product_id": v.product.id if v.product else None,
+            "product_name": v.product.name if v.product else None,
+            "product_code": v.product.product_code if v.product else None,
+            "image_url": v.product.featured_image_url if v.product else None,
+            "confidence": round(v.confidence, 3),
+            "reason": v.reason,
+            "model": v.model,
+            "elapsed_ms": v.elapsed_ms,
+        }
+
+    return {
+        "status": "ok",
+        "title": title,
+        "query_images": query_urls,
+        "candidates": [
+            {"id": p.id, "name": p.name, "product_code": p.product_code,
+             "clip_score": round(s, 4), "image_url": p.featured_image_url}
+            for p, s in shortlist[: get_settings().vision_topk]
+        ],
+        "verdicts": {provider: _render(v) for provider, v in verdicts.items()},
+    }
 
 
 @router.post("/index-rebuild", dependencies=[Depends(verify_api_key)])

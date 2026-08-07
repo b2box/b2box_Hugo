@@ -51,6 +51,9 @@ export const SECTION_META: Record<string, SectionMeta> = {
   all: {
     desc: "Todos los eventos de auditoría en orden cronológico.",
   },
+  vision_lab: {
+    desc: "Pegá un link y compará qué contesta cada proveedor de visión sobre la misma lista corta de CLIP. No toca el catálogo ni abre pedidos.",
+  },
   settings: {
     desc: "Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.",
   },

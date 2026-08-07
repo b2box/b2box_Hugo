@@ -27,6 +27,10 @@ dependencies = [
     # onnxruntime CPU pesa ~50 MB; el modelo (.onnx) se bakea en la imagen.
     "onnxruntime>=1.17",
     "numpy>=1.26",
+    # Rerank por visión: CLIP arma la lista corta, un modelo mira las fotos y
+    # elige. Los dos proveedores están para poder medir cuál acierta más.
+    "anthropic>=0.69",
+    "openai>=1.40",
     # DB
     "sqlmodel>=0.0.16",
     "psycopg[binary]>=3.1",   # driver Postgres (para Supabase)

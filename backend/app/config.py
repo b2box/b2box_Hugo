@@ -137,12 +137,30 @@ class Settings(BaseSettings):
         default="https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx",
         description="De dónde se baja el modelo en el build (no se usa en runtime)",
     )
-    # Cosine sobre vectores normalizados. Misma foto ≈ 1.0; mismo producto en
-    # otra foto ≈ 0.85-0.95; productos distintos de la misma categoría ≈ 0.70-0.80.
-    embed_match_threshold: float = 0.88
+    # Restarle a cada vector la media del índice antes de comparar. Sin esto todas
+    # las fotos de producto comparten una dirección común (fondo blanco, objeto
+    # centrado) y el coseno arranca alto entre cosas que no tienen nada que ver:
+    # tomando el MÁXIMO contra ~1500 fichas, el argmax siempre supera el umbral y
+    # /app/lookup propone cualquier producto. Ver catalog_index.py para los números.
+    # Apagarlo vuelve a la escala vieja (y exige subir los thresholds de abajo).
+    embed_center_index: bool = True
+    # Cosine sobre vectores centrados y normalizados (ver embed_center_index).
+    # Calibrado contra el catálogo real (1006 productos del canal 'ar', 173 queries
+    # con foto held-out). El catálogo es casi todo la misma categoría (organizadores,
+    # estantes, cocina), así que los impostores puntúan alto y el margen es angosto:
+    #
+    #   umbral 0.72 → 1%  de falsos positivos, recupera 18.5%
+    #   umbral 0.65 → 5%  de falsos positivos, recupera 27.2%
+    #   umbral 0.62 → 10% de falsos positivos, recupera 32.9%
+    #
+    # Con los valores viejos (0.88/0.82 sin centrar) el umbral de sugerencia daba
+    # 50% de falsos positivos: de ahí que el app propusiera cualquier producto.
+    # Recalibrar con `python -m app.dedup.calibrate_embed`.
+    embed_match_threshold: float = 0.72
     # Por debajo del threshold pero por encima de esto, el match viaja igual en el
     # formulario a Cloud como "mejor candidato" (no se muestra como encontrado).
-    embed_suggest_threshold: float = 0.82
+    # Sugerir es barato (el cliente puede rechazarlo), así que acepta 5% de ruido.
+    embed_suggest_threshold: float = 0.65
     # Segunda señal: similitud de NOMBRE (título de origen vs nombre del catálogo).
     # La imagen sola confunde productos genéricos; el nombre desempata.
     #   >= confirm  → el nombre coincide: confirma el candidato y rescata una foto
@@ -151,11 +169,12 @@ class Settings(BaseSettings):
     #                 (evita el falso positivo de mostrar algo totalmente distinto).
     embed_name_confirm_threshold: float = 0.72
     embed_name_reject_threshold: float = 0.30
-    # Piso de imagen para el candidato que el nombre confirma. Medido contra el
-    # catálogo real: nuestras fichas con lámina de marketing dan ~0.70 contra la
-    # foto blanca del marketplace, y productos que no tienen nada que ver dan
-    # ~0.80 solo por compartir el fondo. La foto acá es sanity check, no el filtro.
-    embed_name_rescue_image_floor: float = 0.60
+    # Piso de imagen para el candidato que el nombre confirma. Nuestras fichas con
+    # lámina de marketing puntúan bajo contra la foto blanca del marketplace aunque
+    # sean el mismo producto: acá la foto es sanity check, no el filtro. Medido en
+    # escala centrada, el impostor mediano da ~0.49, así que este piso solo descarta
+    # lo que ni siquiera llega al ruido.
+    embed_name_rescue_image_floor: float = 0.40
     # Cuántas imágenes por producto se indexan (la featured primero).
     embed_images_per_product: int = 2
     embed_cache_max: int = 5000
@@ -163,6 +182,35 @@ class Settings(BaseSettings):
     embed_index_ttl_seconds: int = 900
     # Threads de ONNX Runtime. 1 = el límite de CPU del container.
     embed_onnx_threads: int = 1
+
+    # ── Rerank por visión (Claude) para /app/lookup ────────────
+    # CLIP arma la lista corta; un modelo con visión decide cuál es. Medido: el
+    # producto correcto sale top-1 en CLIP solo el 52.6% de las veces, pero está
+    # en el top-20 el 80.3%. Ver app/dedup/vision_rerank.py.
+    vision_enabled: bool = Field(default=True, description="Rerank con visión en /app/lookup")
+    # Quién decide en producción: "anthropic" u "openai". Los dos están
+    # implementados para poder medir cuál anda mejor contra ESTE catálogo en vez
+    # de discutirlo — ver /app/vision-compare y app/dedup/calibrate_vision.py.
+    vision_provider: str = "anthropic"
+    anthropic_api_key: str = Field(default="", description="API key de Anthropic (sk-ant-…)")
+    openai_api_key: str = Field(default="", description="API key de OpenAI (sk-…)")
+    vision_model: str = "claude-opus-5"
+    # Confirmá el id exacto del modelo al que tenés acceso antes de usarlo.
+    vision_model_openai: str = "gpt-5"
+    # low | medium | high | xhigh | max. Alto = mejor criterio, más latencia.
+    vision_effort: str = "high"
+    # Cuántos candidatos entran en la lámina. 12 en grilla 4x3 cubre el grueso del
+    # top-20 de CLIP sin que cada foto quede tan chica que no se distingan detalles.
+    vision_topk: int = 12
+    # Fotos del link que se le muestran al modelo. Más de 3 casi no agrega señal
+    # y cada una cuesta ~1600 tokens.
+    vision_max_query_images: int = 3
+    # Lado de cada celda de la lámina, en píxeles. 4x3 celdas de 640 = 2560x1920,
+    # justo debajo del máximo de 2576 px de lado largo que acepta el modelo.
+    vision_cell_px: int = 640
+    # Confianza mínima del modelo para afirmar "lo tenemos". Por debajo, sugerir.
+    vision_affirm_confidence: float = 0.75
+    vision_timeout_seconds: float = 120.0
 
     # ── Render con browser real (Camoufox) ─────────────────────
     # Cuando el fetch plano choca contra la página anti-bot (ML, Alibaba) o
