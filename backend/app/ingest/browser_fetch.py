@@ -258,12 +258,22 @@ async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            # La galería suele cargar con el scroll. Con JS y no con mouse.wheel:
+            # La galería carga lazy con el scroll. Con JS y no con mouse.wheel:
             # la ruta de input nativo de Firefox es donde Camoufox segfaultea.
-            for _ in range(3):
-                await page.evaluate("window.scrollBy(0, 1600)")
-                await page.wait_for_timeout(600)
-            await page.wait_for_timeout(800)
+            #
+            # Esperas generosas a propósito: por un proxy (necesario para saltear
+            # el anti-bot de ML por IP) la latencia sube y con 3×600ms solo
+            # cargaba la foto principal — 1 de 10. Con 6×900ms + un networkidle
+            # best-effort entra la galería entera, con o sin proxy.
+            for _ in range(6):
+                await page.evaluate("window.scrollBy(0, 1400)")
+                await page.wait_for_timeout(900)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:  # noqa: BLE001
+                # Trackers/websockets colgados nunca dejan la red "idle"; la
+                # galería ya cargó con el scroll, así que no bloqueamos por eso.
+                pass
 
             page_data.final_url = page.url
             page_data.title = (await page.title()) or ""
