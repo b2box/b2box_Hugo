@@ -1310,6 +1310,8 @@ async def debug_config() -> dict[str, Any]:
             "package_importable": browser_pkg,
             "binary_installed": browser_binary,
             "available": browser_fetch.available(),
+            # Solo si hay proxy configurado, sin exponer credenciales.
+            "proxy_set": bool((s.browser_proxy or "").strip()),
         },
         "vendure": {
             "api_url": s.vendure_api_url,
