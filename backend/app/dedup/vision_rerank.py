@@ -438,6 +438,15 @@ def _supports_adaptive_effort(model: str) -> bool:
     return any(tag in model for tag in _ADAPTIVE_EFFORT_MODELS)
 
 
+# Último error del call a Anthropic, para diagnosticar por qué un modelo "no
+# contestó" sin tener que mirar los logs del container. Lo lee /api/debug-config.
+_last_anthropic_error: str = ""
+
+
+def last_anthropic_error() -> str:
+    return _last_anthropic_error
+
+
 async def _call_anthropic(
     opts: Options, payload: _Payload
 ) -> tuple[dict | None, tuple[int, int]]:
@@ -488,7 +497,9 @@ async def _call_anthropic(
     client = AsyncAnthropic(api_key=s.anthropic_api_key, timeout=s.vision_timeout_seconds)
     try:
         response = await client.messages.create(**create_kwargs)
-    except Exception:  # noqa: BLE001  (red, rate limit, 5xx, …)
+    except Exception as exc:  # noqa: BLE001  (red, rate limit, 5xx, …)
+        global _last_anthropic_error
+        _last_anthropic_error = f"{opts.model}: {type(exc).__name__}: {exc}"[:400]
         log.warning("El rerank de Anthropic falló", exc_info=True)
         return None, _NO_USAGE
 

@@ -1293,6 +1293,7 @@ async def debug_config() -> dict[str, Any]:
     from app.ingest import browser_fetch  # noqa: PLC0415
     from app.dedup.vision_rerank import (  # noqa: PLC0415
         _supports_adaptive_effort as _vision_supports_adaptive_effort,
+        last_anthropic_error as _vision_last_anthropic_error,
     )
 
     browser_pkg = True
@@ -1324,6 +1325,8 @@ async def debug_config() -> dict[str, Any]:
             "model": s.vision_model,
             "effort": s.vision_effort,
             "adaptive_effort": _vision_supports_adaptive_effort(s.vision_model),
+            # Último error del call a Anthropic (vacío si el último anduvo).
+            "last_anthropic_error": _vision_last_anthropic_error() or None,
         },
         "vendure": {
             "api_url": s.vendure_api_url,
