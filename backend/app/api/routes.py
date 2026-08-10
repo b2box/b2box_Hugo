@@ -1291,6 +1291,9 @@ async def debug_config() -> dict[str, Any]:
     #   binary None   → el paquete está pero falta `python -m camoufox fetch`
     # Si los tres están OK y aun así cae a foto prestada, es ML bloqueando por IP.
     from app.ingest import browser_fetch  # noqa: PLC0415
+    from app.dedup.vision_rerank import (  # noqa: PLC0415
+        _supports_adaptive_effort as _vision_supports_adaptive_effort,
+    )
 
     browser_pkg = True
     browser_binary: str | None = None
@@ -1312,6 +1315,15 @@ async def debug_config() -> dict[str, Any]:
             "available": browser_fetch.available(),
             # Solo si hay proxy configurado, sin exponer credenciales.
             "proxy_set": bool((s.browser_proxy or "").strip()),
+        },
+        # `adaptive_effort` existe solo en el código con el fix de Haiku: si este
+        # bloque aparece con ese campo, el build tiene commit 6b14802. Sirve de
+        # fingerprint para distinguir "restart sin rebuild" de "código nuevo vivo".
+        "vision": {
+            "provider": s.vision_provider,
+            "model": s.vision_model,
+            "effort": s.vision_effort,
+            "adaptive_effort": _vision_supports_adaptive_effort(s.vision_model),
         },
         "vendure": {
             "api_url": s.vendure_api_url,
