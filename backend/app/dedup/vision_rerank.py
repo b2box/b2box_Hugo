@@ -424,6 +424,20 @@ async def _ask(opts: Options, payload: _Payload) -> Verdict | None:
     return _parse_verdict(data, payload.candidates, opts, elapsed, usage)
 
 
+# Modelos que aceptan adaptive thinking + output_config.effort (familia 5 y
+# 4.6/4.7/4.8). Haiku 4.5, Sonnet 4.5 y anteriores rechazan ese combo con un 400
+# ("no contestó"): hay que pedirles la API vieja — sin thinking adaptive, sin
+# effort. Structured outputs (output_config.format) sí lo soportan.
+_ADAPTIVE_EFFORT_MODELS = (
+    "opus-5", "sonnet-5", "fable-5", "mythos-5",
+    "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6",
+)
+
+
+def _supports_adaptive_effort(model: str) -> bool:
+    return any(tag in model for tag in _ADAPTIVE_EFFORT_MODELS)
+
+
 async def _call_anthropic(
     opts: Options, payload: _Payload
 ) -> tuple[dict | None, tuple[int, int]]:
@@ -448,22 +462,32 @@ async def _call_anthropic(
         for kind, value in payload.parts
     ]
 
+    # El JSON de salida son cuatro líneas, pero el thinking sale del mismo
+    # presupuesto: con poco margen la respuesta se corta antes del veredicto.
+    # Se factura lo que se usa, así que sobrar no cuesta.
+    create_kwargs: dict = {
+        "model": opts.model,
+        "max_tokens": 8192,
+        "system": _SYSTEM,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if _supports_adaptive_effort(opts.model):
+        create_kwargs["thinking"] = {"type": "adaptive"}
+        create_kwargs["output_config"] = {
+            "effort": opts.effort,
+            "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
+        }
+    else:
+        # Haiku 4.5 / Sonnet 4.5 y anteriores: adaptive thinking y effort dan 400.
+        # Structured outputs sí anda. Sin thinking, el modelo responde igual — solo
+        # razona menos, que es justo lo que se está midiendo al probar Haiku.
+        create_kwargs["output_config"] = {
+            "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
+        }
+
     client = AsyncAnthropic(api_key=s.anthropic_api_key, timeout=s.vision_timeout_seconds)
     try:
-        response = await client.messages.create(
-            model=opts.model,
-            # El JSON de salida son cuatro líneas, pero el thinking sale del mismo
-            # presupuesto: con poco margen la respuesta se corta antes del veredicto.
-            # Se factura lo que se usa, así que sobrar no cuesta.
-            max_tokens=8192,
-            system=_SYSTEM,
-            thinking={"type": "adaptive"},
-            output_config={
-                "effort": opts.effort,
-                "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
-            },
-            messages=[{"role": "user", "content": content}],
-        )
+        response = await client.messages.create(**create_kwargs)
     except Exception:  # noqa: BLE001  (red, rate limit, 5xx, …)
         log.warning("El rerank de Anthropic falló", exc_info=True)
         return None, _NO_USAGE
