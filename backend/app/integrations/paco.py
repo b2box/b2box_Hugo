@@ -102,6 +102,7 @@ async def submit_pro(
     callback_ctx: dict[str, Any] | None = None,
     text_specs: str = "",
     use_browser: bool = False,
+    product_link: str | None = None,
 ) -> PacoSubmitResult:
     """Envía a Paco PRO (b2box_sourcing) POST /api/tech/start como multipart form.
 
@@ -127,6 +128,12 @@ async def submit_pro(
     form: dict[str, str] = {"text_specs": text_specs or "", "source": "hugo-pro"}
     if image_url:
         form["image_url"] = image_url
+    # Link de referencia del pedido (source_url del /verify) en su PROPIO campo.
+    # Si es una oferta de 1688, Paco PRO baja ESA ficha y no busca: sin esto el
+    # link moría acá (lo usábamos solo para el dedup) y Paco salía a adivinar el
+    # producto por foto teniendo la oferta exacta.
+    if product_link:
+        form["product_link"] = product_link
     if callback_ctx:
         form["callback_ctx"] = json.dumps(callback_ctx)
     # Solo se manda cuando está pedido: el default de Paco PRO ya es False y mandar

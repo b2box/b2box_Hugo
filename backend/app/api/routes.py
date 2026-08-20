@@ -506,6 +506,7 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
                 callback_ctx=payload.callback_ctx,
                 text_specs=payload.text_specs or "",
                 use_browser=payload.use_browser,
+                product_link=payload.source_url,
             )
         else:
             result = await paco_integration.submit(
