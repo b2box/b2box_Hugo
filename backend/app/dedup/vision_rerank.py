@@ -236,10 +236,36 @@ def _b64(raw: bytes) -> str:
     return base64.standard_b64encode(raw).decode("ascii")
 
 
+# Anthropic (y OpenAI) validan los magic bytes contra el media_type declarado: si
+# decís jpeg y mandás un PNG, es un 400 y el modelo "no contesta". Las fotos del
+# link vienen en lo que sea que sirva el vendedor, así que se sniffea el formato
+# real en vez de asumir jpeg.
+def _sniff(raw: bytes) -> str | None:
+    if raw[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _as_image_part(raw: bytes) -> tuple[str, bytes]:
+    """(subtipo, bytes) listos para mandar. Lo raro se reencoda a JPEG."""
+    kind = _sniff(raw)
+    if kind is not None:
+        return kind, raw
+    buf = BytesIO()
+    Image.open(BytesIO(raw)).convert("RGB").save(buf, format="JPEG", quality=90)
+    return "jpeg", buf.getvalue()
+
+
 def _prompt_parts(payload: _Payload) -> list[tuple[str, object]]:
     """El prompt como pares (tipo, contenido). Cada proveedor lo traduce al suyo.
 
-    Tipos: "text" → str, "jpeg"/"png" → bytes.
+    Tipos: "text" → str, "jpeg"/"png"/"gif"/"webp" → bytes.
     """
     title = payload.title
     n = len(payload.candidates)
@@ -249,7 +275,7 @@ def _prompt_parts(payload: _Payload) -> list[tuple[str, object]]:
             f"Producto del cliente{f': {title[:200]}' if title else ''}.\n"
             f"{'Estas son sus fotos' if len(payload.query_raws) > 1 else 'Esta es su foto'}:",
         ),
-        *(("jpeg", r) for r in payload.query_raws),
+        *(_as_image_part(r) for r in payload.query_raws),
         (
             "text",
             f"Y estos son los {n} candidatos del catálogo, numerados del 1 al {n}:",
@@ -291,7 +317,11 @@ async def _prepare(
         candidates=list(candidates),
         title=title,
     )
-    payload.parts = _prompt_parts(payload)
+    try:
+        payload.parts = _prompt_parts(payload)
+    except Exception:  # noqa: BLE001  (foto del link corrupta / formato raro)
+        log.debug("No pude preparar las fotos del link para el rerank", exc_info=True)
+        return None
     return payload
 
 
@@ -464,7 +494,7 @@ async def _call_anthropic(
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": f"image/{'png' if kind == 'png' else 'jpeg'}",
+                "media_type": f"image/{kind}",
                 "data": _b64(value),  # type: ignore[arg-type]
             },
         }
@@ -531,7 +561,7 @@ async def _call_openai(
         else {
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/{'png' if kind == 'png' else 'jpeg'};base64,"
+                "url": f"data:image/{kind};base64,"
                 f"{_b64(value)}",  # type: ignore[arg-type]
                 # La lámina es grande a propósito: en "low" la redimensionan y se
                 # pierde justo el detalle que distingue dos productos parecidos.
