@@ -110,6 +110,7 @@ def env(monkeypatch):
                    "embed_name_reject_threshold": 0.30,
                    "embed_name_rescue_image_floor": 0.60,
                    "vision_affirm_confidence": 0.75,
+                   "vision_affirm_confidence_approximate": 0.90,
                    "dedup_image_threshold": 0.92}[k],
     )
     return {"recorded": recorded, "cloud_calls": cloud_calls}
@@ -868,8 +869,7 @@ async def test_sin_rerank_se_cae_a_los_umbrales_de_clip(env, monkeypatch):
     assert resp.confidence == pytest.approx(0.94)
 
 
-@pytest.mark.asyncio
-async def test_rerank_con_foto_prestada_no_afirma(env, monkeypatch):
+async def _lookup_con_foto_prestada(monkeypatch, *, confianza: float):
     """Origen aproximado: la foto que vio el modelo no es la del cliente."""
     async def fake_extract(url):  # noqa: ARG001
         return ExtractedProduct(
@@ -881,10 +881,26 @@ async def test_rerank_con_foto_prestada_no_afirma(env, monkeypatch):
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     _verdicto(
         monkeypatch,
-        app_routes.vision_rerank.Verdict(product=_product(), confidence=0.98, reason="ok"),
+        app_routes.vision_rerank.Verdict(
+            product=_product(), confidence=confianza, reason="ok"
+        ),
     )
+    return await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
 
-    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+@pytest.mark.asyncio
+async def test_rerank_con_foto_prestada_afirma_si_esta_casi_seguro(env, monkeypatch):
+    """0.98 supera el umbral de foto prestada (0.90): afirma."""
+    resp = await _lookup_con_foto_prestada(monkeypatch, confianza=0.98)
+
+    assert resp.status == "found"
+    assert resp.suggestion is None
+
+
+@pytest.mark.asyncio
+async def test_rerank_con_foto_prestada_solo_sugiere_si_no_esta_seguro(env, monkeypatch):
+    """0.80 alcanza para el umbral normal (0.75) pero no para el de prestada."""
+    resp = await _lookup_con_foto_prestada(monkeypatch, confianza=0.80)
 
     assert resp.found is False
     assert resp.suggestion is not None
