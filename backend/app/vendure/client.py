@@ -84,6 +84,10 @@ _AUTH_ERROR_HINTS = (
 class VendureClient:
     """Wrapper async sobre la Admin API de Vendure con auto-renovación del bearer."""
 
+    # Último bearer renovado, compartido entre TODAS las instancias del proceso.
+    # Sin esto, cada VendureClient() nuevo pagaba un login completo.
+    _shared_bearer: str = ""
+
     DEFAULT_PAGE_SIZE = 25
 
     def __init__(self) -> None:
@@ -93,8 +97,11 @@ class VendureClient:
         self._user = s.vendure_user
         self._pass = s.vendure_pass
         self._source_field = s.vendure_source_url_field
-        # Bearer actual: arranca con el del .env, se reemplaza cuando se renueva
-        self._bearer: str = s.vendure_bearer or ""
+        # Bearer actual: arranca con el del .env o con el último renovado por
+        # CUALQUIER instancia. Antes cada VendureClient() nuevo (uno por refresh
+        # de catálogo) arrancaba sin bearer y pagaba un login entero — 8-25s
+        # contra el admin de prod, en cada refresh.
+        self._bearer: str = s.vendure_bearer or VendureClient._shared_bearer
         self._login_lock = asyncio.Lock()  # evita re-logins concurrentes
         if not self._bearer:
             log.info(
@@ -119,7 +126,15 @@ class VendureClient:
             headers=headers,
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
-        return Client(transport=transport, fetch_schema_from_transport=False)
+        # execute_timeout: el default de gql es 10s POR QUERY y una página del
+        # catálogo en prod puede tardar más que eso — moría con un
+        # asyncio.TimeoutError de mensaje vacío. El tope real lo pone httpx
+        # (60s por request); acá solo dejamos de serruchar por debajo.
+        return Client(
+            transport=transport,
+            fetch_schema_from_transport=False,
+            execute_timeout=90.0,
+        )
 
     async def _login(self) -> bool:
         """Hace login con VENDURE_USER/PASS y guarda el nuevo bearer.
@@ -177,6 +192,7 @@ class VendureClient:
                 return False
 
             self._bearer = new_bearer
+            VendureClient._shared_bearer = new_bearer
             # No hay client compartido que reconstruir: cada _execute_with_retry
             # arma el suyo con self._bearer, que acabamos de actualizar.
             log.info("Bearer de Vendure renovado OK")
