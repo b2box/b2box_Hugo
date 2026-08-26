@@ -693,11 +693,18 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                             winner
                         )
                     # Con origen aproximado la foto que vio el modelo no es la del
-                    # producto del cliente (ML bloqueó su publicación y la sacamos
-                    # buscando el nombre): que matchee no prueba nada, así que a lo
-                    # sumo sugerimos.
+                    # producto del cliente: ML bloqueó su publicación y la sacamos
+                    # buscando el nombre, así que puede ser la de un homónimo. Eso
+                    # no anula el veredicto, le sube el precio: acá miró un modelo
+                    # con visión y dio una razón, no es CLIP puntuando a ciegas
+                    # (ese camino sigue sin afirmar nunca con foto prestada).
                     affirm_conf = float(runtime.get("vision_affirm_confidence"))
-                    if verdict.confidence >= affirm_conf and not approximate_source:
+                    if approximate_source:
+                        affirm_conf = max(
+                            affirm_conf,
+                            float(runtime.get("vision_affirm_confidence_approximate")),
+                        )
+                    if verdict.confidence >= affirm_conf:
                         matched, score = product, verdict.confidence
                         matched_by = ["image_vision"]
                     else:

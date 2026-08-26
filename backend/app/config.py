@@ -210,6 +210,10 @@ class Settings(BaseSettings):
     vision_cell_px: int = 640
     # Confianza mínima del modelo para afirmar "lo tenemos". Por debajo, sugerir.
     vision_affirm_confidence: float = 0.75
+    # Idem, pero cuando la foto es prestada (ML bloqueó la publicación y el
+    # producto se resolvió por nombre). Se le exige más al modelo porque las
+    # fotos que comparó no son las que mandó el cliente.
+    vision_affirm_confidence_approximate: float = 0.90
     vision_timeout_seconds: float = 120.0
 
     # ── Render con browser real (Camoufox) ─────────────────────

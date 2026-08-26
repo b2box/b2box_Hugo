@@ -161,6 +161,22 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="vision_affirm_confidence",
         min=0.0, max=1.0, step=0.05, group="app",
     ),
+    SettingMeta(
+        key="vision_affirm_confidence_approximate",
+        label="Confianza para afirmar con foto prestada",
+        description=(
+            "Cuando ML bloquea la publicación, Hugo resuelve el producto buscando su "
+            "nombre en el catálogo del marketplace: las fotos que ve el modelo son de "
+            "un homónimo, no las que mandó el cliente. Esta es la confianza mínima para "
+            "afirmar 'lo tenemos' en ese caso. Se le pide más que al caso normal, pero "
+            "un veredicto casi seguro del modelo que sí miró las fotos alcanza. Ojo: "
+            "solo aplica al rerank de visión — el match por CLIP a secas nunca afirma "
+            "con foto prestada."
+        ),
+        type="float", parser=float,
+        default_attr="vision_affirm_confidence_approximate",
+        min=0.0, max=1.0, step=0.05, group="app",
+    ),
     # Pricing
     SettingMeta(
         key="price_drift_threshold",
