@@ -68,13 +68,26 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     # Precalentar el catálogo de Vendure en background: así el primer /verify tras
     # el deploy no espera un cold-fetch de todo el catálogo. No bloquea el arranque.
+    # Reintenta con backoff hasta lograrlo: un solo intento fallido dejaba a Hugo
+    # sin catálogo (y a /app/lookup muerto) hasta el primer request con suerte.
     async def _warm_catalog() -> None:
         from app.vendure import catalog as vendure_catalog
 
-        try:
-            await vendure_catalog.get_catalog()
-        except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).warning("warm catalog falló: %s", exc)
+        delay = 15.0
+        for attempt in range(1, 21):
+            try:
+                await vendure_catalog.get_catalog()
+                return
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "warm catalog falló (intento %d): %s — reintento en %ds",
+                    attempt, exc, int(delay),
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.7, 300.0)
+        logging.getLogger(__name__).error(
+            "warm catalog agotó los reintentos; /app/lookup va a fallar hasta que Vendure responda"
+        )
 
     asyncio.create_task(_warm_catalog())
 
