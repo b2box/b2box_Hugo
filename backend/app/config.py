@@ -263,6 +263,10 @@ class Settings(BaseSettings):
     # Segundos que Hugo cachea el catálogo Vendure entre llamadas de /verify,
     # para no re-descargar todo el catálogo (y sus imágenes) en cada 👍 de Luis.
     verify_catalog_ttl_seconds: int = 300
+    # Cada cuánto bajar TODO el catálogo (full refresh). Entre medio, el cache
+    # se mantiene con refrescos incrementales por `updatedAt`, que son ~1000x
+    # más baratos para el PG de Vendure. Ver app/vendure/catalog.py.
+    catalog_full_refresh_seconds: int = 43200
 
     # ── Pricing ────────────────────────────────────────────────
     price_drift_threshold: float = 0.05

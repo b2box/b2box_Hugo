@@ -204,6 +204,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=720, step=1, group="scheduler",
     ),
     SettingMeta(
+        key="catalog_full_refresh_seconds",
+        label="Full refresh del catálogo Vendure (segundos)",
+        description=(
+            "Cada cuánto Hugo baja TODO el catálogo de Vendure (caro para su base). "
+            "Entre medio solo trae productos modificados. 43200 = 12 h."
+        ),
+        type="int", parser=int,
+        default_attr="catalog_full_refresh_seconds",
+        min=600, max=86400, step=600, group="scheduler",
+    ),
+    SettingMeta(
         key="otapi_daily_budget",
         label="Budget diario OTAPI (calls)",
         description="Máximo de llamadas a RapidAPI/OTAPI por día (UTC). Al llegar, los siguientes fetch se saltean.",
