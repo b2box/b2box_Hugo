@@ -210,21 +210,22 @@ class VendureClient:
     # round-trips ~4x vs 25 (1494 productos: ~15 páginas en vez de ~60).
     BULK_PAGE_SIZE = 100
     # Cuántas páginas pedir a Vendure en paralelo al traer todo el catálogo.
-    FETCH_CONCURRENCY = 6
+    # Cada página de 100 productos dispara ~400 queries a PG del lado de
+    # Vendure (Product.variantList es un N+1 por producto). Con 6 páginas en
+    # paralelo el pool PG del admin-server (25 conexiones) quedaba encolado y
+    # Login / GetOrderDetails del admin esperaban turno. 2 mantiene el full
+    # refresh razonable sin ahogar al resto del admin.
+    FETCH_CONCURRENCY = 2
 
-    def _products_query(self, with_variants: bool):
-        """Query de listado. Con variantes trae id/name/sku de cada variante;
-        sin variantes trae solo la 1ra (para precio) — más liviano."""
+    def _product_fields(self, with_variants: bool) -> str:
+        """Campos de un producto en los listados. Con variantes trae id/name/sku
+        de cada variante; sin variantes trae solo la 1ra (para precio) — más liviano."""
         variant_block = (
             "variantList(options: { take: 100 }) { items { id name sku priceWithTax } totalItems }"
             if with_variants
             else "variantList(options: { take: 1 }) { items { priceWithTax } totalItems }"
         )
-        return gql(
-            f"""
-            query Products($skip: Int!, $take: Int!) {{
-              products(options: {{ skip: $skip, take: $take }}) {{
-                items {{
+        return f"""
                   id
                   name
                   slug
@@ -234,7 +235,34 @@ class VendureClient:
                   customFields {{ {self._source_field} b2boxProductCode }}
                   featuredAsset {{ source preview }}
                   {variant_block}
-                }}
+        """
+
+    def _products_query(self, with_variants: bool):
+        """Query de listado paginado completo."""
+        return gql(
+            f"""
+            query Products($skip: Int!, $take: Int!) {{
+              products(options: {{ skip: $skip, take: $take }}) {{
+                items {{ {self._product_fields(with_variants)} }}
+                totalItems
+              }}
+            }}
+            """
+        )
+
+    def _products_updated_since_query(self, with_variants: bool):
+        """Listado filtrado por `updatedAt > $since` (refresh incremental del
+        catálogo). Vendure resuelve el filtro en SQL, así que una corrida sin
+        cambios cuesta 2 queries a PG en vez de ~6.000."""
+        return gql(
+            f"""
+            query ProductsUpdatedSince($since: DateTime!, $skip: Int!, $take: Int!) {{
+              products(options: {{
+                skip: $skip, take: $take,
+                filter: {{ updatedAt: {{ after: $since }} }},
+                sort: {{ updatedAt: ASC }}
+              }}) {{
+                items {{ {self._product_fields(with_variants)} }}
                 totalItems
               }}
             }}
@@ -281,12 +309,52 @@ class VendureClient:
         items, _ = await self._fetch_page(skip, take, with_variants=True)
         return items
 
+    async def count_products(self) -> int:
+        """Cantidad total de productos (no borrados) en Vendure. Sin pedir
+        `items`, Vendure no resuelve variantList: son 2 queries baratas a PG."""
+        query = gql(
+            """
+            query ProductCount {
+              products(options: { take: 1 }) { totalItems }
+            }
+            """
+        )
+        data = await self._execute_with_retry(query, {}, what="count_products")
+        return int((data.get("products") or {}).get("totalItems") or 0)
+
+    async def fetch_products_updated_since(
+        self, since_iso: str, with_variants: bool = False, page_size: int | None = None,
+    ) -> list[VendureProduct]:
+        """Productos con `updatedAt` posterior a `since_iso` (ISO-8601 UTC).
+
+        Secuencial a propósito: en un catálogo estable devuelve 0-1 páginas y
+        lo que importa es no cargar a Vendure, no la velocidad."""
+        take = page_size or self.BULK_PAGE_SIZE
+        query = self._products_updated_since_query(with_variants)
+        out: list[VendureProduct] = []
+        skip = 0
+        while True:
+            data = await self._execute_with_retry(
+                query, {"since": since_iso, "skip": skip, "take": take},
+                what=f"products(updatedAt>{since_iso}, skip={skip})",
+            )
+            block = data.get("products", {}) or {}
+            items = self._map_page(block.get("items") or [], with_variants)
+            out.extend(items)
+            total = int(block.get("totalItems") or len(out))
+            if not items or len(items) < take or len(out) >= total:
+                return out
+            skip += take
+
     async def fetch_all_products(
-        self, with_variants: bool = False, page_size: int | None = None,
+        self,
+        with_variants: bool = False,
+        page_size: int | None = None,
+        concurrency: int | None = None,
     ) -> list[VendureProduct]:
         """Trae TODO el catálogo. La 1ra página da totalItems; el resto se piden
-        en paralelo (semáforo FETCH_CONCURRENCY). Mucho más rápido que iterar
-        secuencialmente página por página."""
+        en paralelo (semáforo `concurrency`, default FETCH_CONCURRENCY). Mucho más
+        rápido que iterar secuencialmente página por página."""
         take = page_size or self.BULK_PAGE_SIZE
         first, total = await self._fetch_page(0, take, with_variants)
         if len(first) >= total or len(first) < take:
@@ -294,7 +362,7 @@ class VendureClient:
 
         out: list[VendureProduct | None] = list(first)
         skips = list(range(take, total, take))
-        sem = asyncio.Semaphore(self.FETCH_CONCURRENCY)
+        sem = asyncio.Semaphore(max(1, concurrency or self.FETCH_CONCURRENCY))
 
         async def _one(skip: int) -> list[VendureProduct]:
             async with sem:

@@ -607,7 +607,10 @@ async def audit_bx_no_image() -> None:
 
 async def refresh_catalog() -> None:
     """Refresca el cache del catálogo Vendure para que /verify nunca lo baje en
-    frío (cold-start). Mantiene el cache caliente entre auditorías."""
+    frío (cold-start). Mantiene el cache caliente entre auditorías.
+
+    Es un refresh INCREMENTAL (solo productos con updatedAt nuevo); el full se
+    hace solo cada `catalog_full_refresh_seconds`. Ver app/vendure/catalog.py."""
     from app.vendure import catalog as vendure_catalog
 
     try:
@@ -702,7 +705,8 @@ def register_jobs() -> None:
         replace_existing=True, coalesce=True, max_instances=1,
     )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
-    # de /verify, para que Luis/admin nunca esperen un cold-fetch.
+    # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:
+    # el refresh es incremental (ver app/vendure/catalog.py).
     ttl = max(60, s.verify_catalog_ttl_seconds)
     scheduler.add_job(
         refresh_catalog,
