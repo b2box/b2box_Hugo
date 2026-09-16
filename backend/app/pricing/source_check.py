@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from typing import ClassVar
 
 import httpx
 from bs4 import BeautifulSoup
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
 from app import runtime as runtime_settings
@@ -36,10 +38,49 @@ from app.net_guard import safe_get
 log = logging.getLogger(__name__)
 
 
-def _otapi_calls_today() -> int:
-    """Cuántos snapshots 1688_otapi llevamos hoy (UTC).
+# ── Contador diario de llamadas a OTAPI ────────────────────────────────────
+# BUG 2026-09-16 (mails de "85% de la cuota" con el dashboard marcando 0/120):
+# esto contaba filas de PriceHistory, o sea REQUESTS QUE TERMINARON BIEN. Una
+# llamada que OTAPI contesta con ErrorCode != Ok, o que muere en la red, se paga
+# igual pero no deja snapshot — así que el contador no se movía y el budget
+# diario NUNCA cortaba. Con el item delistado (el caso normal en un catálogo
+# viejo) el guard quedaba desactivado justo cuando más falta hacía.
+#
+# Ahora se cuenta ANTES de cada request HTTP, salga bien o mal, que es lo que
+# RapidAPI factura. Vive en una sola fila de `settings` con formato
+# "YYYY-MM-DD:N": se resetea sola al cambiar el día UTC y no deja basura.
+_OTAPI_COUNTER_KEY = "_meta:otapi_calls_today"
+_otapi_counter_lock = threading.Lock()
 
-    Sirve para gatear el budget diario antes de cada call.
+
+def _otapi_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _parse_day_counter(raw: str | None, today: str) -> int:
+    """"YYYY-MM-DD:N" → N si la fila es de hoy; 0 si es de otro día o está rota.
+
+    Fail-safe hacia 0: un valor corrupto hace que se vuelva a contar desde cero,
+    nunca que el budget quede bloqueado para siempre.
+    """
+    if not raw:
+        return 0
+    day, _, count = str(raw).partition(":")
+    if day != today:
+        return 0
+    try:
+        return max(0, int(count))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _snapshots_today() -> int:
+    """Snapshots 1688_otapi de hoy. Piso histórico del contador.
+
+    Solo sirve el día que se despliega este fix: el contador nuevo arranca en 0
+    aunque ya se hayan gastado requests, y sin este piso el budget del día
+    quedaría corrido. Un snapshot SIEMPRE implica un request, así que tomar el
+    máximo entre los dos nunca subestima.
     """
     start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     try:
@@ -50,8 +91,103 @@ def _otapi_calls_today() -> int:
                        PriceHistory.captured_at >= start)
             ).one() or 0)
     except Exception as exc:  # noqa: BLE001
-        log.warning("No se pudo leer contador OTAPI: %s", exc)
+        log.warning("No se pudo leer el contador de snapshots OTAPI: %s", exc)
         return 0
+
+
+def _otapi_calls_today() -> int:
+    """Requests a OTAPI facturados hoy (UTC), exitosos o no."""
+    today = _otapi_day()
+    try:
+        from app.db.models import Setting
+
+        with Session(engine) as s:
+            row = s.get(Setting, _OTAPI_COUNTER_KEY)
+            counted = _parse_day_counter(row.value if row else None, today)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo leer contador OTAPI: %s", exc)
+        return _snapshots_today()
+    if counted:
+        # Contador vivo para hoy: es la fuente de verdad. Ya viene sembrado con
+        # el piso de snapshots (ver _reserve_otapi_call), así que no hace falta
+        # el COUNT(*) acá — con ~850 productos y 10 fetchers en paralelo, esa
+        # consulta por llamada sería carga de DB al pedo.
+        return counted
+    # Todavía no se contó nada hoy: el piso son los snapshots del día.
+    return _snapshots_today()
+
+
+def _reserve_otapi_call(budget: int) -> int | None:
+    """Reserva cupo para UN request contra el budget del día.
+
+    Devuelve el total del día (ya incluyendo este request) si había lugar, o
+    None si el budget está agotado o no se pudo reservar.
+
+    Reservar y chequear tienen que pasar JUNTOS. Antes esto eran dos pasos —
+    `_otapi_calls_today()` y después incrementar— con varios statements en el
+    medio: los 10 fetchers en paralelo de `audit_source_prices` leían todos el
+    mismo "todavía hay lugar" antes de que ninguno incrementara y se pasaban
+    juntos del tope.
+
+    Adentro es compare-and-swap sobre la fila: se lee el valor y se escribe
+    condicionado a que siga siendo el mismo. Si otro proceso lo movió en el
+    medio, se reintenta. El lock de threading ordena a los fetchers de ESTE
+    proceso; el CAS cubre el caso multi-worker, donde el lock no llega.
+
+    FAIL-CLOSED: si la DB no contesta, devuelve None y el request no se manda.
+    Un contador que no se puede leer significa presupuesto desconocido, y
+    desconocido no puede querer decir "gastá tranquilo" — con la DB degradada y
+    reintentos en loop era justo cuando más falta hacía el freno.
+    """
+    from sqlalchemy import update
+
+    from app.db.models import Setting
+
+    today = _otapi_day()
+    try:
+        with _otapi_counter_lock, Session(engine) as s:
+            for _ in range(5):  # reintentos del CAS ante carrera entre procesos
+                row = s.get(Setting, _OTAPI_COUNTER_KEY)
+                if row is not None:
+                    s.refresh(row)
+                previous = row.value if row is not None else None
+                base = _parse_day_counter(previous, today)
+                if base == 0:
+                    # Primer request del día: se siembra con los snapshots que
+                    # ya haya de hoy. Importa el día que se despliega esto sobre
+                    # una jornada ya empezada — sin el piso, el budget arrancaría
+                    # de cero y el día podría gastar el doble. Un solo COUNT(*)
+                    # por día; del segundo request en adelante manda el contador.
+                    base = _snapshots_today()
+                if base >= budget:
+                    return None  # sin cupo: no se reserva ni se incrementa
+                total = base + 1
+                value = f"{today}:{total}"
+                if row is None:
+                    s.add(Setting(key=_OTAPI_COUNTER_KEY, value=value))
+                    try:
+                        s.commit()
+                    except IntegrityError:
+                        # Otro worker creó la fila primero: se reintenta el CAS.
+                        s.rollback()
+                        continue
+                    return total
+                done = s.execute(
+                    update(Setting)
+                    .where(Setting.key == _OTAPI_COUNTER_KEY,
+                           Setting.value == previous)
+                    .values(value=value, updated_at=datetime.now(timezone.utc))
+                )
+                s.commit()
+                if done.rowcount == 1:
+                    return total
+                # rowcount 0 = alguien más escribió entre la lectura y el UPDATE.
+                s.expire_all()
+            log.warning("No se pudo reservar cupo OTAPI tras 5 intentos — no mando el request")
+            return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo reservar cupo OTAPI (%s) — no mando el request", exc)
+        return None
 
 
 def otapi_budget_status() -> dict:
@@ -208,12 +344,16 @@ class Detail1688Fetcher(SourceFetcher):
         # Budget guard: corta antes de hacer la HTTP call si ya pasamos el
         # límite diario de OTAPI. Esto previene billazos por loops o triggers
         # manuales repetidos.
+        #
+        # Reservar el cupo ES el chequeo: si vuelve None no hay lugar (o no se
+        # pudo confirmar que lo hubiera) y no se manda nada. Se reserva ANTES
+        # del request porque RapidAPI cobra el intento, salga bien o mal.
         budget = int(runtime_settings.get("otapi_daily_budget") or s.otapi_daily_budget)
-        used_today = _otapi_calls_today()
-        if used_today >= budget:
+        reserved = _reserve_otapi_call(budget)
+        if reserved is None:
             log.warning(
-                "OTAPI daily budget alcanzado (%d/%d) — skipping fetch para %s",
-                used_today, budget, item_id,
+                "Sin cupo OTAPI para hoy (budget %d) — skipping fetch para %s",
+                budget, item_id,
             )
             return None
 
