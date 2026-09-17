@@ -244,6 +244,21 @@ class Settings(BaseSettings):
         default="",
         description="Proxy de salida para Camoufox (residencial, para saltear el anti-bot por IP)",
     )
+    # Techo de reloj para TODO el render. browser_fetch_timeout_ms solo cubre el
+    # page.goto: el launch con geoip por proxy, el scroll, el networkidle y el
+    # teardown quedaban afuera, y entre todos llevaron un render a 53 s con el
+    # cliente esperando. Pasado esto se abandona y se sigue con lo que haya.
+    browser_fetch_deadline_ms: int = Field(
+        default=20000, description="Techo de reloj del render completo, en ms"
+    )
+    # Cuántos renders seguidos con 0 fotos hacen falta para dejar de intentar con
+    # un host, y cuánto dura ese descanso.
+    browser_fetch_zero_streak: int = Field(
+        default=3, description="Renders seguidos con 0 fotos antes de saltear el host"
+    )
+    browser_fetch_cooldown_seconds: int = Field(
+        default=900, description="Cuánto se saltea un host que viene dando 0 fotos"
+    )
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

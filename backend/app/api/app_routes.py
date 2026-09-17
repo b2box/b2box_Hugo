@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -63,6 +64,12 @@ _PHASH_CONCURRENCY = 8
 # inferencia CLIP (~250 ms para las diez), barato al lado de perder un match que
 # sí teníamos porque la foto parecida a la nuestra era la séptima.
 _MAX_QUERY_IMAGES = 10
+
+# Techo de tiempo para embeber las fotos del link. Es lo único del lookup que
+# depende de un CDN ajeno con ganas de estrangularnos, así que se acota: lo que
+# no llegó a tiempo no entra en la comparación. 8 s alcanza para la galería
+# entera cuando el CDN responde normal (la inferencia son ~17 ms por foto).
+_QUERY_EMBED_BUDGET_SECONDS = 8.0
 
 # Cuántos candidatos por foto trae el índice CLIP antes de desempatar por nombre.
 # La imagen sola confunde productos genéricos (dos masajeadores negros, dos hand
@@ -259,8 +266,8 @@ def _decide_action(resp: AppLookupResponse) -> AppLookupResponse:
     if resp.cloud_request is not None and resp.cloud_request.missing_fields:
         resp.action = "ask_client_data"
         resp.message = (
-            "Todavía no lo tenemos. Dejanos tu nombre, email y teléfono y lo "
-            "buscamos para vos."
+            "Todavía no lo tenemos. Dejanos tu mail y te avisamos apenas lo "
+            "consigamos."
         )
         return resp
 
@@ -622,7 +629,23 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         # aligned: necesitamos saber DE QUÉ foto salió cada vector. Cuando las
         # fotos vienen de varios candidatos del catálogo de ML, el precio de
         # mercado que vale es el del candidato cuya foto ganó, no el del primero.
-        query_vecs = await image_embed.embed_urls_aligned(query_urls)
+        # Deadline duro: con el cliente esperando, es mejor comparar con las
+        # fotos que llegaron que esperar a las que el CDN está estrangulando.
+        # Sin esto el tramo se comía 65 s en timeouts silenciosos (medido).
+        _embed_started = time.monotonic()
+        try:
+            query_vecs = await asyncio.wait_for(
+                image_embed.embed_urls_aligned(query_urls, interactive=True),
+                timeout=_QUERY_EMBED_BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "embed de las fotos del link se pasó de %.0fs — sigo sin ellas (%s)",
+                _QUERY_EMBED_BUDGET_SECONDS, canonical[:120],
+            )
+            query_vecs = [None] * len(query_urls)
+        log.info("lookup: embed de %d fotos del link en %.1fs",
+                 len(query_urls), time.monotonic() - _embed_started)
         if any(v is not None for v in query_vecs):
             # Mejor score de imagen por producto entre TODAS las fotos de la
             # publicación, junto con la foto query que lo consiguió (para el precio).

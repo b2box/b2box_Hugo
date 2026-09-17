@@ -103,15 +103,42 @@ def test_notas_llevan_el_contexto_de_hugo():
 @pytest.mark.parametrize(
     "over,expected",
     [
-        ({"name": ""}, ["client.name"]),
+        # El único imprescindible es el mail: la calculadora del home es anónima
+        # y pedir nombre+teléfono ahí dejaba 0 consultas abiertas de 40 intentos.
+        ({"name": ""}, []),
+        ({"phone": ""}, []),
+        ({"name": "", "phone": ""}, []),
         ({"email": ""}, ["client.email"]),
         ({"email": "sin-arroba"}, ["client.email"]),
-        ({"phone": ""}, ["client.phone"]),
         ({}, []),
     ],
 )
 def test_missing_client_fields(over, expected):
     assert cloud.missing_client_fields(_client(**over)) == expected
+
+
+def test_solo_email_arma_payload_con_placeholders():
+    """Cloud tiene client_name y phone NOT NULL: el hueco viaja como placeholder."""
+    body = cloud.build_payload(
+        client=_client(name="", phone=""),
+        input_url="https://articulo.mercadolibre.com.ar/MLA-1",
+        image_urls=["https://cdn.test/1.jpg"],
+    )
+
+    assert body["email"] == "juan@ejemplo.com"
+    assert body["client_name"] == cloud.PLACEHOLDER_NAME
+    assert body["phone"] == cloud.PLACEHOLDER_PHONE
+
+
+def test_el_nombre_real_le_gana_al_placeholder():
+    body = cloud.build_payload(
+        client=_client(phone=""),
+        input_url="https://articulo.mercadolibre.com.ar/MLA-1",
+        image_urls=[],
+    )
+
+    assert body["client_name"] == "Juan Pérez"
+    assert body["phone"] == cloud.PLACEHOLDER_PHONE
 
 
 # ─── Respuestas de la edge function ────────────────────────────────

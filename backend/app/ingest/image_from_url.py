@@ -21,16 +21,19 @@ usuario final, no se puede confiar.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
+from app.config import get_settings
 from app.ingest import browser_fetch, meli
 from app.net_guard import SsrfBlocked, safe_get
 
@@ -306,12 +309,27 @@ async def _via_browser(url: str, marketplace: str) -> ExtractedProduct | None:
     """
     if not browser_fetch.available():
         return None
+    if browser_fetch.circuit_open_for(url):
+        log.info("browser_fetch: salteo %s, el host viene dando 0 fotos", url[:120])
+        return None
+    deadline = get_settings().browser_fetch_deadline_ms / 1000
+    started = time.monotonic()
     try:
-        page = await browser_fetch.render(url, max_images=_MAX_IMAGES * 3)
+        page = await asyncio.wait_for(
+            browser_fetch.render(url, max_images=_MAX_IMAGES * 3), timeout=deadline
+        )
     except browser_fetch.SsrfBlocked:
         raise  # esto sí importa: la URL apunta a una red interna
+    except asyncio.TimeoutError:
+        # El render entero tiene techo de reloj: browser_fetch_timeout_ms cubre
+        # solo el goto, y el launch + scroll + teardown llevaron esto a 53 s con
+        # el cliente esperando.
+        browser_fetch.note_render_result(url, images_found=0)
+        log.info("browser_fetch: %s se pasó de %.0fs, lo abandono", url[:120], deadline)
+        return None
     except Exception as exc:  # noqa: BLE001
-        log.info("browser_fetch no pudo con %s: %s", url[:120], exc)
+        log.info("browser_fetch no pudo con %s (%.1fs): %s",
+                 url[:120], time.monotonic() - started, exc)
         return None
 
     final_url = page.final_url or url
@@ -328,15 +346,17 @@ async def _via_browser(url: str, marketplace: str) -> ExtractedProduct | None:
 
     dom_images = [u for u in (_absolutize(i, final_url) or "" for i in page.image_urls) if u]
     images = _dedupe(_drop_placeholders(images + dom_images))
+    browser_fetch.note_render_result(url, images_found=len(images))
     if not images:
         # Camoufox renderizó pero no sacó ni una foto de producto. Casi siempre:
         # ML le tiró el interstitial anti-bot (IP de datacenter) o la ficha está
         # caída. Sin este log, _via_browser salía mudo y no se distinguía de
         # "el browser ni corrió". Ver browser_proxy en config.py.
         log.info(
-            "browser_fetch: renderizó %s pero 0 fotos usables "
-            "(anti-bot/IP de datacenter o ficha caída)",
-            url[:120],
+            "browser_fetch: renderizó %s pero 0 fotos usables en %.1fs "
+            "(interstitial anti-bot o ficha caída). proxy=%s",
+            url[:120], time.monotonic() - started,
+            "sí" if get_settings().browser_proxy else "no",
         )
         return None
 

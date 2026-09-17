@@ -241,10 +241,13 @@ def _cache_put(url: str, vec: np.ndarray) -> None:
 # ─── API pública ───────────────────────────────────────────────────
 
 
-async def embed_url(url: str) -> np.ndarray | None:
+async def embed_url(url: str, *, interactive: bool = False) -> np.ndarray | None:
     """Embedding normalizado de la imagen en `url`, o None si no se pudo.
 
     Orden: L1 (memoria) → L2 (DB) → descarga + inferencia.
+
+    `interactive=True` cuando hay un cliente esperando la respuesta: la descarga
+    usa el presupuesto corto (ver image_hash._INTERACTIVE_*).
     """
     if not url or not available():
         return None
@@ -259,8 +262,9 @@ async def embed_url(url: str) -> np.ndarray | None:
         return from_db
 
     try:
-        raw = await _fetch(url)
+        raw = await _fetch(url, interactive=interactive)
     except Exception:  # noqa: BLE001  (SsrfBlocked, HTTP, tamaño, …)
+        # El motivo ya quedó logueado en image_hash._fetch (INFO).
         return None
 
     vec = await asyncio.to_thread(_infer, raw)
@@ -272,7 +276,7 @@ async def embed_url(url: str) -> np.ndarray | None:
 
 
 async def embed_urls_aligned(
-    urls: Sequence[str], *, concurrency: int = 4
+    urls: Sequence[str], *, concurrency: int = 4, interactive: bool = False
 ) -> list[np.ndarray | None]:
     """Embebe varias URLs conservando el orden y la posición de las que fallan.
 
@@ -287,7 +291,7 @@ async def embed_urls_aligned(
 
     async def _one(u: str) -> np.ndarray | None:
         async with sem:
-            return await embed_url(u)
+            return await embed_url(u, interactive=interactive)
 
     return list(await asyncio.gather(*(_one(u) for u in urls)))
 

@@ -399,20 +399,29 @@ async def search_catalog(
         pictures = _pictures_from(result)
         if not pictures:
             continue
-        item = MeliItem(
+        out.append(MeliItem(
             id=str(result.get("id") or ""),
             title=str(result.get("name") or ""),
             image_urls=pictures,
             permalink=str(result.get("permalink") or ""),
             resolved_by="catalog",
-        )
-        if with_price:
-            item.price_cents, item.currency, item.seller_count = (
-                await fetch_market_price(item.id)
-            )
-        out.append(item)
+        ))
         if len(out) >= _MAX_CANDIDATES:
             break
+
+    if with_price and out:
+        # En paralelo: son hasta 4 llamadas independientes a la API de ML y en
+        # serie costaban ~1 s cada una con el cliente esperando. Es la misma
+        # cantidad de requests que antes — no cambia lo que se factura, solo
+        # deja de esperarlas de a una.
+        precios = await asyncio.gather(
+            *(fetch_market_price(item.id) for item in out), return_exceptions=True,
+        )
+        for item, precio in zip(out, precios):
+            if isinstance(precio, BaseException):
+                log.info("Sin precio de mercado para %s: %s", item.id, precio)
+                continue
+            item.price_cents, item.currency, item.seller_count = precio
     return out
 
 
