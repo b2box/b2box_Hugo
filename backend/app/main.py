@@ -105,6 +105,24 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             logging.getLogger(__name__).warning("warm image index falló: %s", exc)
 
     asyncio.create_task(_warm_image_index())
+
+    # Import de camoufox al arranque. Es perezoso porque el paquete es opcional
+    # (Firefox + fingerprints), pero eso hacía que el PRIMER lookup después de
+    # cada deploy pagara ~9 s de import antes de siquiera abrir la página. El
+    # que espera es un cliente; el arranque no espera a nadie.
+    async def _warm_browser() -> None:
+        from app.ingest import browser_fetch
+
+        if not browser_fetch.available():
+            return
+        try:
+            await asyncio.to_thread(browser_fetch._camoufox)
+        except Exception as exc:  # noqa: BLE001
+            # available() vuelve a intentar el import y devuelve False si no
+            # está: que esto falle no puede tumbar el arranque.
+            logging.getLogger(__name__).warning("warm browser falló: %s", exc)
+
+    asyncio.create_task(_warm_browser())
     # Solo el líder corre el scheduler (evita jobs y gasto OTAPI duplicados si
     # hay más de una réplica).
     from app.leader import try_become_leader

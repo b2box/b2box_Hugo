@@ -38,6 +38,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -220,6 +221,70 @@ _COLLECT_JS = """
   return out;
 }
 """
+
+
+# ─── Corta-circuitos por host ──────────────────────────────────────
+#
+# Un render cuesta ~50 s de reloj (launch con geoip por proxy, scroll, teardown).
+# Cuando un sitio nos viene tirando el interstitial anti-bot, ese medio minuto se
+# paga entero para terminar con 0 fotos, y encima con el cliente esperando. Si un
+# host falla N veces seguidas, lo salteamos por un rato: el llamador se cae al
+# camino que ya tenía (fotos del catálogo, marcadas approximate) sin pagar la
+# espera. Un solo éxito lo reabre.
+#
+# En memoria a propósito: se reinicia con el deploy, que es justo cuando cambia
+# la configuración de proxy que podría hacerlo andar de nuevo.
+_zero_streak: dict[str, int] = {}
+_skip_until: dict[str, float] = {}
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def circuit_open_for(url: str) -> bool:
+    """True si a este host le toca descanso: no vale la pena ni lanzar el browser."""
+    host = _host_of(url)
+    if not host:
+        return False
+    until = _skip_until.get(host)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        # Se cumplió el descanso: le damos otra oportunidad desde cero.
+        _skip_until.pop(host, None)
+        _zero_streak.pop(host, None)
+        return False
+    return True
+
+
+def note_render_result(url: str, *, images_found: int) -> None:
+    """Le avisa al corta-circuitos cómo le fue al render de este host."""
+    host = _host_of(url)
+    if not host:
+        return
+    if images_found > 0:
+        _zero_streak.pop(host, None)
+        _skip_until.pop(host, None)
+        return
+    s = get_settings()
+    streak = _zero_streak.get(host, 0) + 1
+    _zero_streak[host] = streak
+    if streak >= s.browser_fetch_zero_streak:
+        _skip_until[host] = time.monotonic() + s.browser_fetch_cooldown_seconds
+        log.warning(
+            "browser_fetch: %s viene de %d renders con 0 fotos — lo salteo por %d s",
+            host, streak, s.browser_fetch_cooldown_seconds,
+        )
+
+
+def reset_circuit() -> None:
+    """Para los tests y para poder reabrirlo a mano desde el dashboard."""
+    _zero_streak.clear()
+    _skip_until.clear()
 
 
 async def render(url: str, *, max_images: int | None = None) -> RenderedPage:

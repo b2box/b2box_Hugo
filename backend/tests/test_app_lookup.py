@@ -13,6 +13,7 @@ import pytest
 from app.api import app_routes
 from app.api.app_routes import AppLookupClient, AppLookupRequest, app_lookup
 from app.ingest.image_from_url import ExtractedProduct
+from app.integrations import cloud as cloud_integration
 from app.vendure.client import VendureProduct
 
 PRODUCT_URL = "https://articulo.mercadolibre.com.ar/MLA-123-lampara-led"
@@ -120,7 +121,7 @@ def _use_embeddings(monkeypatch, *, score: float, ready: bool = True):
     """Simula el índice CLIP devolviendo un match con el score pedido."""
     monkeypatch.setattr(app_routes.image_embed, "available", lambda: True)
 
-    async def fake_embed_url(url):  # noqa: ARG001
+    async def fake_embed_url(url, **_kw):  # noqa: ARG001
         return np.ones(4, dtype=np.float32)
 
     async def fake_ensure_index():
@@ -168,7 +169,7 @@ async def test_match_exacto_por_source_url_sin_bajar_imagenes(env, monkeypatch):
     """Si la URL del proveedor ya está en el catálogo, no hace falta comparar fotos."""
     called = {"embed": False}
 
-    async def fake_embed_url(url):  # noqa: ARG001
+    async def fake_embed_url(url, **_kw):  # noqa: ARG001
         called["embed"] = True
         return np.ones(4, dtype=np.float32)
 
@@ -203,7 +204,7 @@ async def test_matchea_con_la_mejor_foto_no_con_la_primera(env, monkeypatch):
             canonical_url=url, kind="page",
         )
 
-    async def fake_embed_urls(urls, concurrency=4):  # noqa: ARG001
+    async def fake_embed_urls(urls, concurrency=4, **_kw):  # noqa: ARG001
         # El vector codifica de qué foto vino, así search() sabe qué devolver.
         return [np.full(4, float(u.split("/")[-1][0]), dtype=np.float32) for u in urls]
 
@@ -240,7 +241,7 @@ async def test_solo_se_comparan_las_primeras_n_fotos(env, monkeypatch):
             title="x", marketplace="mercadolibre", canonical_url=url, kind="page",
         )
 
-    async def fake_embed_urls(urls, concurrency=4):  # noqa: ARG001
+    async def fake_embed_urls(urls, concurrency=4, **_kw):  # noqa: ARG001
         vistas.append(list(urls))
         return [np.ones(4, dtype=np.float32) for _ in urls]
 
@@ -298,7 +299,7 @@ def _embeddings_con(monkeypatch, *, title: str, hits: list[tuple]):
             canonical_url=url, kind="page",
         )
 
-    async def fake_embed_url(url):  # noqa: ARG001
+    async def fake_embed_url(url, **_kw):  # noqa: ARG001
         return np.ones(4, dtype=np.float32)
 
     async def noop():
@@ -556,17 +557,36 @@ async def test_cloud_caido_no_rompe_la_respuesta(env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sin_datos_del_cliente_no_llama_a_cloud(env, monkeypatch):
-    """El form exige nombre+email+teléfono. Sin ellos sería un 400 seguro, y
-    encima gastaría una de las 5 submissions por ventana de rate limit."""
+    """Sin mail sería un 400 seguro, y encima gastaría una de las 5 submissions
+    por ventana de rate limit. Nombre y teléfono no se piden: van placeholder."""
     _use_embeddings(monkeypatch, score=0.10)
 
     resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
 
     assert resp.status == "not_found"
     assert resp.cloud_request.sent is False
-    assert resp.cloud_request.missing_fields == ["client.name", "client.email", "client.phone"]
+    assert resp.cloud_request.missing_fields == ["client.email"]
     assert env["cloud_calls"] == []
     assert env["recorded"][0]["action"] == "app_lookup_request_failed"
+
+
+@pytest.mark.asyncio
+async def test_con_solo_el_mail_se_abre_la_consulta(env, monkeypatch):
+    """La calculadora del home es anónima: lo único que puede pedir es el mail.
+    Antes esto no abría nada (40 intentos, 0 consultas)."""
+    _use_embeddings(monkeypatch, score=0.10)
+
+    resp = await app_lookup(AppLookupRequest(
+        url=PRODUCT_URL, client=AppLookupClient(email="ana@ejemplo.com"),
+    ))
+
+    assert resp.status == "not_found"
+    assert resp.cloud_request.sent is True
+    enviado = env["cloud_calls"][0]
+    assert enviado["email"] == "ana@ejemplo.com"
+    assert enviado["client_name"] == cloud_integration.PLACEHOLDER_NAME
+    assert enviado["phone"] == cloud_integration.PLACEHOLDER_PHONE
+    assert env["recorded"][0]["action"] == "app_lookup_request_sent"
 
 
 @pytest.mark.asyncio

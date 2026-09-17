@@ -12,9 +12,11 @@ Contrato real (supabase/functions/form-app-submit/index.ts en b2b-flow-pro):
     POST {cloud_url}/functions/v1/form-app-submit      # verify_jwt = false
 
     Body: {
-      "client_name": "...",          // obligatorio
-      "email":       "...",          // obligatorio, se valida el formato
-      "phone":       "...",          // obligatorio
+      "client_name": "...",          // obligatorio para Cloud; si el cliente no
+                                     //   lo dio, Hugo manda PLACEHOLDER_NAME
+      "email":       "...",          // obligatorio de verdad, se valida el formato
+      "phone":       "...",          // obligatorio para Cloud; idem, va
+                                     //   PLACEHOLDER_PHONE si no lo dio
       "country":     "..." | null,
       "products": [{                 // obligatorio, al menos 1 (máx 30)
         "name":           "...",     // máx 200
@@ -101,20 +103,30 @@ def _clip(value: str | None, limit: int) -> str:
     return (value or "").strip()[:limit]
 
 
+# Nombre y teléfono cuando el cliente no los dio. La tabla de Cloud los tiene
+# NOT NULL, así que un hueco no se puede mandar vacío: va este texto, que en el
+# tablero comercial se lee como lo que es — un dato que nunca se pidió — y no
+# como un nombre real.
+PLACEHOLDER_NAME = "(sin nombre)"
+PLACEHOLDER_PHONE = "(sin teléfono)"
+
+
 def missing_client_fields(client: Any) -> list[str]:
     """Campos obligatorios del formulario que faltan.
 
     Los chequeamos ANTES de llamar: la edge function responde 400 sin ellos, y
     un 400 evitable gasta una de las 5 submissions de la ventana de rate limit.
+
+    El único imprescindible es el email. La calculadora del home es anónima —
+    no hay sesión ni formulario largo — y exigir nombre + teléfono ahí hacía que
+    NINGUNA consulta llegara a abrirse: 40 intentos, 0 consultas. Con el mail
+    alcanza para responderle al cliente, que es de lo que se trata; el nombre y
+    el teléfono viajan con placeholder (ver build_payload).
     """
     missing: list[str] = []
-    if not _clip(getattr(client, "name", ""), _MAX_NAME):
-        missing.append("client.name")
     email = _clip(getattr(client, "email", ""), 320)
     if not email or not _EMAIL_RE.match(email):
         missing.append("client.email")
-    if not _clip(getattr(client, "phone", ""), 50):
-        missing.append("client.phone")
     return missing
 
 
@@ -155,9 +167,9 @@ def build_payload(
     """Arma el body de form-app-submit. Separado para poder testearlo sin red."""
     product_name = _clip(title, _MAX_NAME) or f"Producto de {marketplace}"
     return {
-        "client_name": _clip(getattr(client, "name", ""), _MAX_NAME),
+        "client_name": _clip(getattr(client, "name", ""), _MAX_NAME) or PLACEHOLDER_NAME,
         "email": _clip(getattr(client, "email", ""), 320),
-        "phone": _clip(getattr(client, "phone", ""), 50),
+        "phone": _clip(getattr(client, "phone", ""), 50) or PLACEHOLDER_PHONE,
         "country": _clip(getattr(client, "country", None), 100) or None,
         "products": [
             {

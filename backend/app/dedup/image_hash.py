@@ -10,6 +10,7 @@ Las imágenes se descargan via httpx con un cache simple en memoria por URL.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from io import BytesIO
 from typing import Iterable
@@ -94,6 +95,14 @@ _IMAGE_HEADERS = {
 # reintento, cada uno es un producto que queda fuera del índice para siempre.
 _FETCH_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (0.5, 1.5)
+# Presupuesto recortado para las fotos que mira un cliente esperando en pantalla
+# (el query de /app/lookup). Ahí reintentar tres veces con 20 s de read es peor
+# que perder la foto: medido en prod, mlstatic estrangula las ráfagas desde IP de
+# datacenter y el lookup se comía 65 s en timeouts silenciosos. El índice del
+# catálogo sigue con el presupuesto largo: ahí nadie espera y cada descarga
+# perdida es un producto que queda fuera del índice.
+_INTERACTIVE_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+_INTERACTIVE_ATTEMPTS = 2
 # Códigos que vale la pena reintentar (throttling y errores de servidor).
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
@@ -106,16 +115,22 @@ def _cache_put(url: str, h: imagehash.ImageHash) -> None:
         _HASH_CACHE.popitem(last=False)
 
 
-async def _fetch(url: str) -> bytes:
+async def _fetch(url: str, *, interactive: bool = False) -> bytes:
     """Descarga una imagen, reintentando los fallos transitorios.
 
     safe_get valida scheme + IP pública y cada redirect (anti-SSRF); el guard
     sigue corriendo en cada intento.
+
+    `interactive=True` para las descargas que pasan con un cliente esperando:
+    menos intentos y menos timeout (ver _INTERACTIVE_*).
     """
+    attempts = _INTERACTIVE_ATTEMPTS if interactive else _FETCH_ATTEMPTS
+    timeout = _INTERACTIVE_TIMEOUT if interactive else _HTTP_TIMEOUT
+    started = time.monotonic()
     last_error: Exception | None = None
-    for attempt in range(_FETCH_ATTEMPTS):
+    for attempt in range(attempts):
         try:
-            r = await safe_get(url, timeout=_HTTP_TIMEOUT, headers=_IMAGE_HEADERS)
+            r = await safe_get(url, timeout=timeout, headers=_IMAGE_HEADERS)
             if r.status_code in _RETRYABLE_STATUS:
                 raise httpx.HTTPStatusError(
                     f"HTTP {r.status_code}", request=r.request, response=r
@@ -132,11 +147,13 @@ async def _fetch(url: str) -> bytes:
                 if status not in _RETRYABLE_STATUS:
                     raise
             last_error = exc
-            if attempt + 1 >= _FETCH_ATTEMPTS:
+            if attempt + 1 >= attempts:
                 break
             await asyncio.sleep(_RETRY_BACKOFF_SECONDS[attempt])
-    log.debug("No se pudo descargar %s tras %d intentos: %s",
-              url, _FETCH_ATTEMPTS, last_error)
+    # INFO y no debug: este fallo se tragaba entero en image_embed y era la causa
+    # invisible de los 65 s del lookup. Si vuelve a pasar, tiene que verse.
+    log.info("No se pudo descargar %s tras %d intentos en %.1fs: %s",
+             url[:160], attempts, time.monotonic() - started, last_error)
     raise last_error if last_error else RuntimeError(f"fetch falló: {url}")
 
 
