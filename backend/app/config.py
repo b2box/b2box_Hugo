@@ -5,7 +5,7 @@ Usa los nombres de variables del ecosistema B2Box (compartidas con Paco/Luis).
 
 from functools import lru_cache
 
-from pydantic import EmailStr, Field
+from pydantic import EmailStr, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     # HUGO_ENV tiene que caer, no quedar abierto a internet. Para correr local
     # hay que pedir development explícitamente (está en .env.example).
     hugo_env: str = Field(default="production", description="development | production")
+
+    @field_validator("hugo_env", mode="after")
+    @classmethod
+    def _normalize_env(cls, v: str) -> str:
+        """Todo lo que no sea exactamente "development" es production.
+
+        Fail-closed ante typos: el panel quedó abierto a internet porque el valor
+        en el server era "production." (con punto) y el chequeo era
+        `!= "production"` → se saltaba el guardarraíl entero sin avisar. Con un
+        allowlist en vez de un denylist, un typo endurece la config en vez de
+        aflojarla. Un "prod", "Production " o "" ahora caen en production.
+        """
+        return "development" if v.strip().lower() == "development" else "production"
 
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")
