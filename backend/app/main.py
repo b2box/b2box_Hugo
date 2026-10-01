@@ -9,6 +9,7 @@ Uso:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -107,11 +108,24 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             scheduler.shutdown(wait=False)
 
 
+# En producción no publicamos Swagger: el mapa completo de rutas es
+# reconocimiento gratis para un atacante y acá no le sirve a nadie. En
+# development sigue disponible en /docs.
+#
+# Leemos el env directo en vez de get_settings(): esto corre al importar el
+# módulo, y Settings() exige campos obligatorios (VENDURE_API_URL) que no tienen
+# por qué estar presentes solo para importar app.main. Mismo default que
+# Settings.hugo_env: si no está seteado, asumimos production.
+_DEV = os.getenv("HUGO_ENV", "production").strip().lower() != "production"
+
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
     version="0.1.0",
     description="Anti-duplicados + sincronización de precios para Vendure",
     lifespan=lifespan,
+    docs_url="/docs" if _DEV else None,
+    redoc_url="/redoc" if _DEV else None,
+    openapi_url="/openapi.json" if _DEV else None,
 )
 
 # ─── Login del dashboard (cookie de sesión) ────────────────────────
