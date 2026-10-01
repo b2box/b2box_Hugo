@@ -36,6 +36,33 @@ def test_default_env_is_production():
     assert _settings().hugo_env == "production"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["production.", "production ", "Production", "prod", "", "produccion", "PRODUCTION"],
+)
+def test_valores_raros_caen_en_production(raw):
+    """Un typo en HUGO_ENV tiene que endurecer, no abrir.
+
+    Regresión del incidente: el server tenía "production." (con punto) y el
+    chequeo `!= "production"` se salteaba el guardarraíl entero.
+    """
+    assert _settings(hugo_env=raw).hugo_env == "production"
+
+
+@pytest.mark.parametrize("raw", ["development", "  development  ", "DEVELOPMENT"])
+def test_development_sigue_siendo_development(raw):
+    assert _settings(hugo_env=raw).hugo_env == "development"
+
+
+def test_production_con_punto_aborta_el_arranque(monkeypatch):
+    """El valor exacto que tenía el server no debe dejar arrancar sin login."""
+    from app import main
+
+    monkeypatch.setattr(main, "get_settings", lambda: _settings(hugo_env="production."))
+    with pytest.raises(RuntimeError):
+        main._enforce_prod_secrets()
+
+
 def test_production_sin_login_aborta_el_arranque(monkeypatch):
     from app import main
 
