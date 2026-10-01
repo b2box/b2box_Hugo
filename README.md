@@ -214,6 +214,15 @@ No vas a tener que borrar la DB cada vez que crezca el modelo.
 3. **Build pack**: Docker Compose (Coolify detecta el `docker-compose.yml` solo).
 4. **Variables de entorno**: copiar el contenido de tu `.env` local en
    Coolify → Environment Variables. Las críticas:
+   - `HUGO_ENV=production` — **no** copiar el `development` del `.env` local.
+     Con `development` el middleware de login se apaga y el panel entero
+     (auditoría, config, `/docs`) queda abierto a internet.
+   - `SUPABASE_URL` + `SUPABASE_ANON_KEY` — login del dashboard vía el Supabase
+     Auth de Cloud_B2BOX (mismos usuarios que Paco). Sin esto (o sin
+     `DASHBOARD_PASSWORD`) no hay login y con `HUGO_ENV=production` Hugo no
+     arranca, a propósito. Opcional: `SUPABASE_ALLOWED_EMAILS`.
+   - `HUGO_API_KEY` — auth de `/verify` y `/app/*`; también obligatoria en
+     production.
    - `DATABASE_URL` (Supabase Session Pooler, ver más abajo)
    - `VENDURE_API_URL`, `VENDURE_BEARER`, `VENDURE_CHANNEL_TOKEN`
    - `RAPIDAPI_KEY`

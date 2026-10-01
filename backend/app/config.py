@@ -18,8 +18,12 @@ class Settings(BaseSettings):
 
     # ── Entorno ────────────────────────────────────────────────
     # "production" hace que el arranque FALLE si faltan credenciales
-    # (DASHBOARD_PASSWORD / HUGO_API_KEY). En "development" solo warnea.
-    hugo_env: str = Field(default="development", description="development | production")
+    # (login del dashboard / HUGO_API_KEY). En "development" solo warnea.
+    #
+    # El default es "production" a propósito: un deploy que se olvide de setear
+    # HUGO_ENV tiene que caer, no quedar abierto a internet. Para correr local
+    # hay que pedir development explícitamente (está en .env.example).
+    hugo_env: str = Field(default="production", description="development | production")
 
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")

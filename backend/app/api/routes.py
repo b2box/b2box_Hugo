@@ -1269,12 +1269,17 @@ async def product_history(
     }
 
 
-@router.get("/api/debug-config")
+@router.get("/api/debug-config", dependencies=[Depends(verify_api_key)])
 async def debug_config() -> dict[str, Any]:
     """Diagnóstico: dice qué env vars están seteadas (sin exponer los valores).
 
     Útil para verificar desde fuera del container que la config está completa
     sin necesidad de entrar a Coolify ni mirar logs.
+
+    Doble llave a propósito: el login del dashboard (cookie) MÁS la X-API-Key.
+    Aunque los valores van enmascarados, el mapa de qué credenciales existen es
+    reconocimiento útil para un atacante, y esta ruta no puede quedar expuesta
+    por una sola variable de entorno mal seteada.
     """
     from app.config import get_settings
     s = get_settings()
