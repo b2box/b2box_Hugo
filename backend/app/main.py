@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 # módulo, y Settings() exige campos obligatorios (VENDURE_API_URL) que no tienen
 # por qué estar presentes solo para importar app.main. Mismo default que
 # Settings.hugo_env: si no está seteado, asumimos production.
-_DEV = os.getenv("HUGO_ENV", "production").strip().lower() != "production"
+_DEV = os.getenv("HUGO_ENV", "").strip().lower() == "development"
 
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
