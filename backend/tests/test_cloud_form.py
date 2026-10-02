@@ -158,9 +158,9 @@ def _patch_post(monkeypatch, response: httpx.Response):
     monkeypatch.setattr(cloud.httpx, "AsyncClient", lambda **kw: FakeClient())
 
     class FakeSettings:
-        cloud_url = "https://ref.supabase.co"
+        supabase_url = "https://ref.supabase.co"
         cloud_request_path = "/functions/v1/form-app-submit"
-        cloud_anon_key = "anon-key"
+        supabase_anon_key = "anon-key"
         cloud_api_key = ""
         cloud_bearer = ""
         cloud_timeout_seconds = 30.0
@@ -214,20 +214,20 @@ async def test_200_con_error_en_el_body_es_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sin_cloud_url_falla_con_mensaje_util(monkeypatch):
+async def test_sin_supabase_url_falla_con_mensaje_util(monkeypatch):
     class FakeSettings:
-        cloud_url = ""
+        supabase_url = ""
 
     monkeypatch.setattr(cloud, "get_settings", lambda: FakeSettings())
 
     with pytest.raises(cloud.CloudError) as exc:
         await cloud.submit_request(_payload())
-    assert "CLOUD_URL" in str(exc.value)
+    assert "SUPABASE_URL" in str(exc.value)
 
 
 def test_headers_mandan_la_anon_key(monkeypatch):
     class FakeSettings:
-        cloud_anon_key = "eyJanon-key"
+        supabase_anon_key = "eyJanon-key"
         cloud_api_key = ""
         cloud_bearer = ""
 
@@ -239,7 +239,7 @@ def test_headers_mandan_la_anon_key(monkeypatch):
 
 def test_headers_publishable_solo_en_apikey(monkeypatch):
     class FakeSettings:
-        cloud_anon_key = "sb_publishable_xyz"
+        supabase_anon_key = "sb_publishable_xyz"
         cloud_api_key = ""
         cloud_bearer = ""
 

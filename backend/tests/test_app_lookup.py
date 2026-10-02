@@ -609,7 +609,7 @@ async def test_sin_cloud_configurado_no_falla(env, monkeypatch):
 
     assert resp.status == "not_found"
     assert resp.cloud_request.sent is False
-    assert "CLOUD_URL" in resp.cloud_request.error
+    assert "SUPABASE_URL" in resp.cloud_request.error
     assert env["cloud_calls"] == []
 
 

@@ -887,11 +887,11 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     base.suggestion = suggestion
 
     if not cloud_integration.enabled():
-        base.cloud_request = CloudRequestInfo(sent=False, error="CLOUD_URL no configurado")
+        base.cloud_request = CloudRequestInfo(sent=False, error="SUPABASE_URL no configurado")
         _record(
             action="app_lookup_request_failed",
             detail=f"'{(title or canonical)[:120]}' no está en el catálogo, "
-                   "pero CLOUD_URL no está configurado y el pedido no se pudo abrir",
+                   "pero SUPABASE_URL no está configurado y el pedido no se pudo abrir",
             source=payload.source,
             product_id="(nuevo)",
             confidence=score,
