@@ -91,7 +91,11 @@ def _headers() -> dict[str, str]:
     # en algunos setups y no molesta en ninguno.
     if s.cloud_anon_key:
         h["apikey"] = s.cloud_anon_key
-        h["Authorization"] = f"Bearer {s.cloud_anon_key}"
+        # Solo la anon legacy (JWT eyJ...) viaja también como Bearer. La
+        # publishable (sb_publishable_...) no es JWT: en Authorization el
+        # gateway la rechaza con "Invalid JWT", va únicamente en apikey.
+        if s.cloud_anon_key.startswith("eyJ"):
+            h["Authorization"] = f"Bearer {s.cloud_anon_key}"
     if s.cloud_api_key:
         h["X-API-Key"] = s.cloud_api_key
     if s.cloud_bearer:

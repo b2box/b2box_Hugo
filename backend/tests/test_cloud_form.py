@@ -227,11 +227,23 @@ async def test_sin_cloud_url_falla_con_mensaje_util(monkeypatch):
 
 def test_headers_mandan_la_anon_key(monkeypatch):
     class FakeSettings:
-        cloud_anon_key = "anon-key"
+        cloud_anon_key = "eyJanon-key"
         cloud_api_key = ""
         cloud_bearer = ""
 
     monkeypatch.setattr(cloud, "get_settings", lambda: FakeSettings())
     headers = cloud._headers()
-    assert headers["apikey"] == "anon-key"
-    assert headers["Authorization"] == "Bearer anon-key"
+    assert headers["apikey"] == "eyJanon-key"
+    assert headers["Authorization"] == "Bearer eyJanon-key"
+
+
+def test_headers_publishable_solo_en_apikey(monkeypatch):
+    class FakeSettings:
+        cloud_anon_key = "sb_publishable_xyz"
+        cloud_api_key = ""
+        cloud_bearer = ""
+
+    monkeypatch.setattr(cloud, "get_settings", lambda: FakeSettings())
+    headers = cloud._headers()
+    assert headers["apikey"] == "sb_publishable_xyz"
+    assert "Authorization" not in headers
