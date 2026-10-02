@@ -9,7 +9,7 @@ salimos a buscar el producto (es el mismo tablero de la sección Forms).
 
 Contrato real (supabase/functions/form-app-submit/index.ts en b2b-flow-pro):
 
-    POST {cloud_url}/functions/v1/form-app-submit      # verify_jwt = false
+    POST {supabase_url}/functions/v1/form-app-submit      # verify_jwt = false
 
     Body: {
       "client_name": "...",          // obligatorio para Cloud; si el cliente no
@@ -80,7 +80,7 @@ class CloudRequestResult:
 
 
 def enabled() -> bool:
-    return bool(get_settings().cloud_url)
+    return bool(get_settings().supabase_url)
 
 
 def _headers() -> dict[str, str]:
@@ -89,13 +89,13 @@ def _headers() -> dict[str, str]:
     # form-app-submit tiene verify_jwt = false, así que la anon key no es
     # obligatoria. La mandamos igual si está: el gateway de Supabase la espera
     # en algunos setups y no molesta en ninguno.
-    if s.cloud_anon_key:
-        h["apikey"] = s.cloud_anon_key
+    if s.supabase_anon_key:
+        h["apikey"] = s.supabase_anon_key
         # Solo la anon legacy (JWT eyJ...) viaja también como Bearer. La
         # publishable (sb_publishable_...) no es JWT: en Authorization el
         # gateway la rechaza con "Invalid JWT", va únicamente en apikey.
-        if s.cloud_anon_key.startswith("eyJ"):
-            h["Authorization"] = f"Bearer {s.cloud_anon_key}"
+        if s.supabase_anon_key.startswith("eyJ"):
+            h["Authorization"] = f"Bearer {s.supabase_anon_key}"
     if s.cloud_api_key:
         h["X-API-Key"] = s.cloud_api_key
     if s.cloud_bearer:
@@ -206,13 +206,13 @@ def _extract_id(data: dict[str, Any]) -> str | None:
 async def submit_request(payload: dict[str, Any]) -> CloudRequestResult:
     """Manda el formulario a Cloud. Lanza CloudError si no se pudo."""
     s = get_settings()
-    if not s.cloud_url:
+    if not s.supabase_url:
         raise CloudError(
-            "CLOUD_URL no configurado — el pedido de producto no tiene a dónde ir. "
-            "Seteá CLOUD_URL a la URL de Supabase de Cloud_B2BOX "
+            "SUPABASE_URL no configurado — el pedido de producto no tiene a dónde ir. "
+            "Seteá SUPABASE_URL a la URL de Supabase de Cloud_B2BOX "
             "(https://<ref>.supabase.co)."
         )
-    url = f"{s.cloud_url.rstrip('/')}{s.cloud_request_path}"
+    url = f"{s.supabase_url.rstrip('/')}{s.cloud_request_path}"
 
     try:
         async with httpx.AsyncClient(timeout=s.cloud_timeout_seconds) as client:

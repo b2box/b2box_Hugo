@@ -92,13 +92,12 @@ class Settings(BaseSettings):
     # Cuando el app manda una URL y el producto NO está en el catálogo, Hugo abre
     # el MISMO formulario del app que ya vive en Cloud_B2BOX (b2b-flow-pro): la
     # edge function form-app-submit → form_app_consultations.
-    cloud_url: str = Field(default="", description="https://<ref>.supabase.co de Cloud_B2BOX")
+    # Mismo proyecto Supabase que el login del dashboard: usa supabase_url y
+    # supabase_anon_key de arriba, no tiene URL ni key propias.
     cloud_request_path: str = Field(
         default="/functions/v1/form-app-submit",
         description="Edge function que recibe el formulario del app",
     )
-    # form-app-submit tiene verify_jwt=false, así que la anon key es opcional.
-    cloud_anon_key: str = Field(default="", description="anon key de Supabase (header apikey)")
     cloud_api_key: str = Field(
         default="", description="X-API-Key, si Cloud agrega un bypass server-to-server"
     )
