@@ -164,12 +164,15 @@ def test_startup_check_warns_but_does_not_raise(monkeypatch, caplog):
     from app import main as main_mod
 
     _patch(monkeypatch, {"hugo_env": "production", "supabase_allowed_emails": ""}, _FakeResp(200, {}))
+    from app import security
     from app.config import Settings
-    monkeypatch.setattr(main_mod, "get_settings", lambda: Settings(
+    s = Settings(
         vendure_api_url="https://x/admin-api", hugo_env="production",
         supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
         hugo_api_keys="luis:xxx",
-    ))
+    )
+    monkeypatch.setattr(main_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(security, "get_settings", lambda: s)
     with caplog.at_level(logging.ERROR, logger="app.main"):
         main_mod._enforce_prod_secrets()  # no levanta
     assert any("SUPABASE_ALLOWED_EMAILS" in r.getMessage() for r in caplog.records)

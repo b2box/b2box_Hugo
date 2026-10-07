@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import auth
+from app import auth, security
 from app.api.app_routes import router as app_router
 from app.api.routes import router
 from app.config import get_settings
@@ -38,8 +38,12 @@ def _configure_logging() -> None:
 def _enforce_prod_secrets() -> None:
     """En producción, faltar credenciales NO puede ser solo un warning.
 
-    Si HUGO_ENV=production y falta DASHBOARD_PASSWORD o HUGO_API_KEY, abortamos
-    el arranque: mejor caer que quedar expuestos a internet sin auth.
+    Si HUGO_ENV=production y falta el login del dashboard o ninguna API key
+    PARSEA, abortamos el arranque: mejor caer que quedar expuestos a internet
+    sin auth. "Parsea" es la palabra clave: antes alcanzaba con que la variable
+    no estuviera vacía, y un HUGO_API_KEYS pegado sin "nombre:" (o "luis:", o
+    HUGO_API_KEY="   ") pasaba el chequeo mientras security.parse_api_keys lo
+    descartaba → /verify y /app/* abiertos con solo un warning.
     """
     s = get_settings()
     if s.hugo_env.strip().lower() != "production":
@@ -49,8 +53,8 @@ def _enforce_prod_secrets() -> None:
     has_supabase = bool(s.supabase_url and s.supabase_anon_key)
     if not has_supabase and not s.dashboard_password:
         missing.append("SUPABASE_URL+SUPABASE_ANON_KEY (o DASHBOARD_PASSWORD)")
-    if not (s.hugo_api_key or s.hugo_api_keys.strip()):
-        missing.append("HUGO_API_KEYS (o HUGO_API_KEY)")
+    if not security.api_keys_configured():
+        missing.append("HUGO_API_KEYS (o HUGO_API_KEY) con al menos una key válida nombre:key")
     if missing:
         raise RuntimeError(
             "HUGO_ENV=production pero faltan credenciales obligatorias: "

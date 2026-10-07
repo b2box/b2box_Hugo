@@ -86,6 +86,11 @@ def verify_rate_limit(request: Request) -> None:
 LEGACY_CLIENT = "legacy"
 
 
+def _is_production() -> bool:
+    env = getattr(get_settings(), "hugo_env", "") or ""
+    return env.strip().lower() == "production"
+
+
 def parse_api_keys(raw: str) -> dict[str, str]:
     """"luis:xxx,cloud:yyy" → {"luis": "xxx", "cloud": "yyy"}.
 
@@ -143,11 +148,23 @@ def match_api_key(presented: str | None) -> str | None:
 def verify_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> str | None:
     """FastAPI dependency: valida X-API-Key contra las keys configuradas.
 
-    - Sin keys configuradas, deja pasar (modo dev) y loguea un warning.
+    - Sin keys configuradas: en development deja pasar con un warning; en
+      producción responde 503 (fail-closed). El arranque ya rechaza ese estado
+      (main._enforce_prod_secrets), esto es la segunda traba por si algo lo
+      saltea: un endpoint cerrado es mejor que /verify abierto a internet.
     - Con keys, exige el header y compara en tiempo constante. Devuelve el
       nombre del cliente, lo loguea y lo deja en request.state.api_client.
     """
     if not api_keys_configured():
+        if _is_production():
+            log.error(
+                "Producción sin API keys válidas (HUGO_API_KEYS/HUGO_API_KEY): %s cerrado con 503",
+                request.url.path,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Autenticación por API key no configurada en el servidor",
+            )
         log.warning("Sin HUGO_API_KEYS ni HUGO_API_KEY — %s queda abierto, no usar en producción",
                     request.url.path)
         return None

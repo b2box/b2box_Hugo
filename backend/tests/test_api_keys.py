@@ -130,27 +130,31 @@ def test_authenticated_client_is_logged(monkeypatch, caplog):
     assert not any("xxx" in r.getMessage() for r in caplog.records), "la key nunca se loguea"
 
 
-def test_production_requires_some_key():
-    from app.main import _enforce_prod_secrets
+def _prod_settings(**kw):
+    from app.config import Settings
+
+    base = dict(
+        vendure_api_url="https://x/admin-api", hugo_env="production",
+        supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
+        supabase_allowed_emails="tech@b2box.pro",
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+def test_production_requires_some_key(monkeypatch):
     from app import main as main_mod
 
-    class S:
-        hugo_env = "production"
-        supabase_url = "https://x"
-        supabase_anon_key = "k"
-        dashboard_password = ""
-        hugo_api_key = ""
-        hugo_api_keys = "luis:xxx"
+    ok = _prod_settings(hugo_api_keys="luis:xxx")
+    monkeypatch.setattr(main_mod, "get_settings", lambda: ok)
+    monkeypatch.setattr(security, "get_settings", lambda: ok)
+    main_mod._enforce_prod_secrets()  # HUGO_API_KEYS alcanza
 
-    orig = main_mod.get_settings
-    main_mod.get_settings = lambda: S()
-    try:
-        _enforce_prod_secrets()  # HUGO_API_KEYS alcanza
-        S.hugo_api_keys = ""
-        with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
-            _enforce_prod_secrets()
-    finally:
-        main_mod.get_settings = orig
+    none = _prod_settings(hugo_api_keys="", hugo_api_key="")
+    monkeypatch.setattr(main_mod, "get_settings", lambda: none)
+    monkeypatch.setattr(security, "get_settings", lambda: none)
+    with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
+        main_mod._enforce_prod_secrets()
 
 
 # ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
@@ -200,33 +204,14 @@ def test_whitespace_only_env_values_mean_nothing_configured(monkeypatch):
     assert security.api_keys_configured() is False
 
 
-def _prod_settings(**kw):
-    from app.config import Settings
-
-    base = dict(
-        vendure_api_url="https://x/admin-api", hugo_env="production",
-        supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
-        supabase_allowed_emails="tech@b2box.pro",
-    )
-    base.update(kw)
-    return Settings(**base)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (QA F1): _enforce_prod_secrets acepta cualquier HUGO_API_KEYS no vacío "
-        "(p.ej. una key pegada sin 'nombre:') pero security.parse_api_keys la descarta → "
-        "Hugo arranca en producción con /verify y /app/* ABIERTOS. El chequeo de "
-        "arranque tiene que usar security.api_keys_configured()."
-    ),
-)
 @pytest.mark.parametrize("kw", [
     {"hugo_api_keys": "una-key-pegada-sin-nombre"},
     {"hugo_api_keys": "luis:"},
     {"hugo_api_key": "   "},
 ])
 def test_production_startup_refuses_keys_that_the_parser_discards(monkeypatch, kw):
+    """Regresión (QA F1): el chequeo de arranque miraba la truthiness del string
+    y el parser descartaba la entrada → Hugo arrancaba en producción abierto."""
     from app import main as main_mod
 
     s = _prod_settings(**kw)
@@ -235,3 +220,32 @@ def test_production_startup_refuses_keys_that_the_parser_discards(monkeypatch, k
     assert security.api_keys_configured() is False, "precondición: el parser no ve ninguna key"
     with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
         main_mod._enforce_prod_secrets()
+
+
+def test_production_rejects_when_all_keys_are_malformed(monkeypatch):
+    """La segunda traba: aunque el arranque se saltee, verify_api_key cierra con
+    503 en producción si ninguna key parsea. Nunca `return None` (abierto)."""
+    from app import main as main_mod
+
+    s = _prod_settings(hugo_api_keys="luis-pegada-sin-dos-puntos, cloud:", hugo_api_key=" ")
+    monkeypatch.setattr(main_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+
+    with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
+        main_mod._enforce_prod_secrets()
+    for presented in (None, "luis-pegada-sin-dos-puntos", "cloud", ""):
+        with pytest.raises(HTTPException) as exc:
+            security.verify_api_key(_request(), x_api_key=presented)
+        assert exc.value.status_code == 503, "fail-closed: ni abierto ni 401 engañoso"
+
+
+def test_development_without_keys_stays_open_but_production_does_not(monkeypatch):
+    dev = _prod_settings(hugo_env="development")
+    monkeypatch.setattr(security, "get_settings", lambda: dev)
+    assert security.verify_api_key(_request(), x_api_key=None) is None
+
+    prod = _prod_settings()
+    monkeypatch.setattr(security, "get_settings", lambda: prod)
+    with pytest.raises(HTTPException) as exc:
+        security.verify_api_key(_request(), x_api_key=None)
+    assert exc.value.status_code == 503
