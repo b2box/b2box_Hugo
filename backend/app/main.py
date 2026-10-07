@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
     version="0.1.0",
-    description="Anti-duplicados + sincronización de precios para Vendure",
+    description="Anti-duplicados + vigilancia de precios de proveedor para Vendure (no modifica precios)",
     lifespan=lifespan,
 )
 
