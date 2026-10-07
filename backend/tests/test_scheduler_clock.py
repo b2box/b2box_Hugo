@@ -146,3 +146,56 @@ def test_register_jobs_schedules_an_overdue_audit_soon(monkeypatch):
     job = jobs.scheduler.get_job("audit_pa_variants")
     delay = (job.next_run_time - datetime.now(timezone.utc)).total_seconds()
     assert 0 < delay <= jobs._STARTUP_GRACE.total_seconds() + 5
+
+
+# ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
+
+
+def test_marker_with_z_suffix_and_naive_marker_are_read_as_utc():
+    jobs._set_meta("_meta:last_run:audit_duplicates", "2026-10-01T12:00:00Z")
+    assert jobs._last_job_run("audit_duplicates") == datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    jobs._set_meta("_meta:last_run:audit_duplicates", "2026-10-01T12:00:00")
+    assert jobs._last_job_run("audit_duplicates") == datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "2026-13-45T99:00:00", "1759838400", "null"])
+def test_register_jobs_with_a_corrupt_marker_waits_a_full_interval(monkeypatch, raw):
+    jobs._set_meta("_meta:last_run:audit_bx_no_image", raw)
+    monkeypatch.setattr(jobs, "get_settings", lambda: type("S", (), {
+        "audit_interval_hours": 336, "verify_catalog_ttl_seconds": 300,
+    })())
+    jobs.register_jobs()
+    job = jobs.scheduler.get_job("audit_bx_no_image")
+    expected = datetime.now(timezone.utc) + TWO_WEEKS
+    assert abs((job.next_run_time - expected).total_seconds()) < 5
+
+
+def test_a_shorter_interval_after_redeploy_is_honoured():
+    """Bajaron AUDIT_INTERVAL_HOURS de 336 a 48 con una corrida de hace 3 días: ya venció."""
+    last = NOW - timedelta(days=3)
+    assert jobs._interval_next_run(last, timedelta(hours=48), NOW) == NOW + jobs._STARTUP_GRACE
+
+
+def test_marker_is_overwritten_not_duplicated():
+    jobs._mark_job_run("audit_duplicates")
+    jobs._mark_job_run("audit_duplicates")
+    with Session(engine) as s:
+        rows = [r for r in s.exec(select(Setting)).all() if r.key == "_meta:last_run:audit_duplicates"]
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_find_duplicate_pairs_failure_inside_audit_does_not_advance_the_clock(monkeypatch):
+    """audit_duplicates atrapa la excepción de find_duplicate_pairs y hace `return`:
+    ese camino tampoco puede marcar la corrida como hecha."""
+    async def fake_flatten(client):  # noqa: ARG001
+        return []
+
+    async def boom(products, changed_ids=None):  # noqa: ARG001
+        raise RuntimeError("CLIP se cayó")
+
+    monkeypatch.setattr(jobs, "VendureClient", lambda: object())
+    monkeypatch.setattr(jobs, "_flatten_products", fake_flatten)
+    monkeypatch.setattr(jobs, "find_duplicate_pairs", boom)
+    await jobs.audit_duplicates()  # no levanta: el job traga el error
+    assert jobs._last_job_run("audit_duplicates") is None

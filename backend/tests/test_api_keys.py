@@ -151,3 +151,87 @@ def test_production_requires_some_key():
             _enforce_prod_secrets()
     finally:
         main_mod.get_settings = orig
+
+
+# ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
+
+
+def test_duplicate_client_name_keeps_the_last_key_and_warns_without_leaking(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.security"):
+        assert security.parse_api_keys("luis:primera,luis:segunda") == {"luis": "segunda"}
+    assert any("repetido" in r.getMessage() for r in caplog.records)
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "primera" not in joined and "segunda" not in joined, "ni la key vieja ni la nueva se loguean"
+
+
+def test_two_clients_sharing_one_key_resolve_to_the_first_declared(monkeypatch):
+    _settings(monkeypatch, keys="luis:same,cloud:same")
+    assert security.match_api_key("same") == "luis"
+
+
+def test_legacy_key_equal_to_a_named_key_is_attributed_to_the_named_client(monkeypatch):
+    _settings(monkeypatch, keys="luis:xxx", legacy="xxx")
+    assert security.configured_api_keys() == {"luis": "xxx", "legacy": "xxx"}
+    assert security.match_api_key("xxx") == "luis"
+
+
+def test_presented_key_with_surrounding_whitespace_is_rejected(monkeypatch):
+    _settings(monkeypatch, keys="luis:xxx")
+    assert security.match_api_key(" xxx") is None
+    assert security.match_api_key("xxx\n") is None
+
+
+def test_rejection_log_contains_neither_presented_nor_configured_key(monkeypatch, caplog):
+    import logging
+
+    _settings(monkeypatch, keys="luis:secreta-real")
+    with caplog.at_level(logging.INFO, logger="app.security"), pytest.raises(HTTPException):
+        security.verify_api_key(_request(), x_api_key="intento-malo")
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "secreta-real" not in joined
+    assert "intento-malo" not in joined
+
+
+def test_whitespace_only_env_values_mean_nothing_configured(monkeypatch):
+    _settings(monkeypatch, keys="  , ,  ", legacy="   ")
+    assert security.configured_api_keys() == {}
+    assert security.api_keys_configured() is False
+
+
+def _prod_settings(**kw):
+    from app.config import Settings
+
+    base = dict(
+        vendure_api_url="https://x/admin-api", hugo_env="production",
+        supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
+        supabase_allowed_emails="tech@b2box.pro",
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG (QA F1): _enforce_prod_secrets acepta cualquier HUGO_API_KEYS no vacío "
+        "(p.ej. una key pegada sin 'nombre:') pero security.parse_api_keys la descarta → "
+        "Hugo arranca en producción con /verify y /app/* ABIERTOS. El chequeo de "
+        "arranque tiene que usar security.api_keys_configured()."
+    ),
+)
+@pytest.mark.parametrize("kw", [
+    {"hugo_api_keys": "una-key-pegada-sin-nombre"},
+    {"hugo_api_keys": "luis:"},
+    {"hugo_api_key": "   "},
+])
+def test_production_startup_refuses_keys_that_the_parser_discards(monkeypatch, kw):
+    from app import main as main_mod
+
+    s = _prod_settings(**kw)
+    monkeypatch.setattr(main_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    assert security.api_keys_configured() is False, "precondición: el parser no ve ninguna key"
+    with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
+        main_mod._enforce_prod_secrets()

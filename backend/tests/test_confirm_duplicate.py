@@ -328,3 +328,105 @@ def test_humanize_exposes_the_semantics_to_the_dashboard():
         "disable_target_id": NEWER, "canonical_product_id": OLDER, "vendure_action": "disable",
     }
     assert routes._humanize(_verify_flag(action="price_flagged"))["duplicate"] is None
+
+
+# ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bulk_confirm_vendure_failure_on_an_audit_event_does_not_block_verify_confirmations(monkeypatch):
+    """Vendure caído: los de /verify (que no lo necesitan) igual se confirman y
+    archivan; el de la auditoría queda pendiente, sin apagar nada."""
+    class FlakyVendure(FakeVendure):
+        async def get_enabled_status(self, product_id):
+            raise RuntimeError("Vendure 502")
+
+    monkeypatch.setattr(routes, "VendureClient", FlakyVendure)
+    verify_id, audit_id = _save(_verify_flag(), _audit_flag())
+
+    with Session(engine) as s:
+        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+
+    assert out == {**out, "disabled": 0, "confirmed_only": 1, "failed": 1}
+    assert out["failed_details"][0]["product_id"] == NEWER
+    assert FakeVendure.disabled == []
+    with Session(engine) as s:
+        assert s.get(AuditLog, verify_id).dismissed is True
+        assert s.get(AuditLog, audit_id).dismissed is not True, "queda pendiente para reintentar"
+    assert len(_rows("duplicate_confirmed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_client_sending_source_audit_through_verify_cannot_get_the_original_disabled():
+    """`source` lo elige el cliente. Si alguien manda source="audit" por /verify, la
+    fila nueva igual trae canonical sin target y confirmar no apaga nada."""
+    payload = routes.VerifyRequest(
+        name="Lámpara LED", source_url="https://detail.1688.com/offer/777.html",
+        image_urls=["https://img/1.jpg"], source="audit",
+    )
+    verdict = DedupVerdict(is_duplicate=True, confidence=1.0, matched_by=["url"],
+                           per_strategy_scores={"url": 1.0, "image": 0.0, "text": 0.0},
+                           candidate_id=ORIGINAL)
+    routes._record_verify(payload, verdict, action="duplicate_flagged", detail="dup")
+    (row,) = _rows("duplicate_flagged")
+    assert row.source == "audit" and row.related_product_id is None
+    assert disable_target_for(row) is None
+
+    with Session(engine) as s:
+        out = await routes.confirm_duplicate(row.id, s)
+    assert out["vendure_action"] == "none"
+    assert FakeVendure.disabled == []
+
+
+def test_old_audit_row_with_product_equal_to_related_has_nothing_to_disable():
+    e = _audit_flag(product_id=OLDER, related_product_id=OLDER)
+    assert disable_target_for(e) is None
+
+
+def test_old_audit_row_without_related_is_not_a_catalog_pair():
+    e = _audit_flag(related_product_id=None)
+    assert disable_target_for(e) is None
+
+
+def test_placeholder_target_is_never_disabled():
+    from app.dedup.confirm_target import PLACEHOLDER_NEW
+
+    e = _audit_flag(product_id=PLACEHOLDER_NEW)
+    assert disable_target_for(e) is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_confirm_with_both_kinds_touches_vendure_exactly_once_for_the_newest():
+    """Dry-run y confirm cuentan lo mismo; Vendure solo ve lecturas/escrituras del más nuevo."""
+    _save(_verify_flag(), _verify_flag(product_id="43"), _audit_flag())
+    with Session(engine) as s:
+        dry = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=False, session=s)
+        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+    assert (dry["would_disable"], dry["would_confirm_only"]) == (out["disabled"], out["confirmed_only"]) == (1, 2)
+    assert FakeVendure.status_reads == [NEWER]
+    assert FakeVendure.disabled == [NEWER]
+
+
+@pytest.mark.asyncio
+async def test_restore_re_enables_the_newest_that_was_disabled_not_the_canonical(monkeypatch):
+    class RestoringVendure(FakeVendure):
+        enabled: list[str] = []
+
+        async def get_enabled_status(self, product_id):
+            FakeVendure.status_reads.append(product_id)
+            return product_id not in FakeVendure.disabled
+
+        async def enable_product(self, product_id):
+            RestoringVendure.enabled.append(product_id)
+
+    RestoringVendure.enabled = []
+    monkeypatch.setattr(routes, "VendureClient", RestoringVendure)
+    (event_id,) = _save(_audit_flag())
+    with Session(engine) as s:
+        await routes.confirm_duplicate(event_id, s)
+    assert FakeVendure.disabled == [NEWER]
+
+    with Session(engine) as s:
+        await routes.restore_duplicates(confirm=True, safe=True, session=s)
+    assert RestoringVendure.enabled == [NEWER]
+    assert OLDER not in RestoringVendure.enabled

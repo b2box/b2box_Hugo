@@ -242,3 +242,60 @@ async def test_retry_failure_is_logged_with_the_destination(monkeypatch):
     with Session(engine) as s:
         rows = list(s.exec(select(AuditLog).where(AuditLog.action == "paco_failed")))
     assert len(rows) == 2 and rows[-1].source == "orders-pro"
+
+
+# ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_omitted_source_shares_idempotency_with_an_explicit_luis(monkeypatch):
+    """El default del modelo y el default de la fila tienen que coincidir."""
+    _catalog(monkeypatch, [])
+    await routes.verify(routes.VerifyRequest(
+        name="Organizador de cocina", source_url=SOURCE_URL, image_urls=["https://img/1.jpg"],
+    ))
+    out = await routes.verify(_payload(source="luis"))
+    assert out.paco_status == "already_sent"
+    assert len(FakePaco.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_with_corrupt_verify_ctx_still_routes_by_the_row_source():
+    event_id = _failed_event(source="orders-pro", verify_ctx="{esto no es json")
+    with Session(engine) as s:
+        out = await routes.retry_paco(event_id, s)
+    assert out["paco"] == "PRO"
+    assert FakePaco.submitted[0]["pro"] is True
+    assert FakePaco.submitted[0]["callback_ctx"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_ignores_a_callback_ctx_that_is_not_an_object():
+    import json
+
+    event_id = _failed_event(
+        source="orders-pro",
+        verify_ctx=json.dumps({"source": "orders-pro", "callback_ctx": "q-9"}),
+    )
+    with Session(engine) as s:
+        await routes.retry_paco(event_id, s)
+    assert FakePaco.submitted[0]["pro"] is True
+    assert FakePaco.submitted[0]["callback_ctx"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_flag_written_by_verify_has_no_disable_target_and_keeps_its_ctx(monkeypatch):
+    import json
+
+    class FakeVendure:
+        async def get_product_full(self, pid):
+            return {"id": pid}
+
+    monkeypatch.setattr(routes, "VendureClient", FakeVendure)
+    _catalog(monkeypatch, [_prod("8", enabled=True)])
+    await routes.verify(_payload(source="orders-pro", callback_ctx={"quotation_item_id": "q-9"}))
+    with Session(engine) as s:
+        row = s.exec(select(AuditLog).where(AuditLog.action == "duplicate_flagged")).one()
+    assert (row.product_id, row.canonical_product_id, row.disable_target_id) == ("8", "8", None)
+    assert json.loads(row.verify_ctx)["callback_ctx"] == {"quotation_item_id": "q-9"}
+    assert json.loads(row.after)["matched_by"] == ["url"]

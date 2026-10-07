@@ -83,3 +83,50 @@ def test_rate_limit_keys_by_the_trusted_ip(monkeypatch):
         security.verify_rate_limit(_request("3.3.3.3, 203.0.113.9"))
     assert exc.value.status_code == 429
     security._verify_hits.clear()
+
+
+# ─── Casos borde (QA, auditoría oct-2026) ────────────────────────────────────
+
+
+def test_empty_forwarded_for_header_falls_back_to_real_ip_then_socket():
+    assert security.client_ip(_request(xff="", real_ip="203.0.113.9"), hops=1) == "203.0.113.9"
+    assert security.client_ip(_request(xff="  ,  "), hops=1) == PEER
+
+
+def test_trailing_commas_and_spaces_do_not_break_the_chain():
+    assert security.client_ip(_request(" 1.2.3.4 , 203.0.113.9 , "), hops=1) == "203.0.113.9"
+
+
+def test_negative_hops_behave_like_zero():
+    assert security.client_ip(_request("1.2.3.4", real_ip="9.9.9.9"), hops=-3) == PEER
+
+
+def test_hops_setting_is_coerced_from_env_string():
+    from app.config import Settings
+
+    s = Settings(vendure_api_url="https://x/admin-api", trusted_proxy_hops="2")
+    assert s.trusted_proxy_hops == 2
+
+
+def test_spoofed_prefix_does_not_create_a_separate_rate_limit_bucket(monkeypatch):
+    """Rotar el prefijo falsificado no da cuota nueva: todos caen en la IP confiable."""
+    monkeypatch.setattr(security, "get_settings", lambda: type("S", (), {"trusted_proxy_hops": 1})())
+    monkeypatch.setattr(security, "_VERIFY_MAX_PER_WINDOW", 3)
+    security._verify_hits.clear()
+    for i in range(3):
+        security.verify_rate_limit(_request(f"10.0.0.{i}, 203.0.113.9"))
+    assert set(security._verify_hits) == {"203.0.113.9"}
+    security._verify_hits.clear()
+
+
+def test_login_lockout_keys_by_the_trusted_ip(monkeypatch):
+    """El lockout del login usa la misma IP: cambiar el prefijo de XFF no lo esquiva."""
+    monkeypatch.setattr(security, "get_settings", lambda: type("S", (), {"trusted_proxy_hops": 1})())
+    auth._fail_log.clear()
+    auth._locked_until.clear()
+    for i in range(auth._MAX_FAILS):
+        auth.record_failed_login(auth.client_ip(_request(f"10.0.0.{i}, 203.0.113.9")))
+    assert auth.is_locked("203.0.113.9") is True
+    assert auth.is_locked("10.0.0.1") is False
+    auth._fail_log.clear()
+    auth._locked_until.clear()
