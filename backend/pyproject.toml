@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hugo"
 version = "0.1.0"
-description = "B2Box Hugo — catalog QC agent (anti-duplicates + price sync)"
+description = "B2Box Hugo — catalog QC agent (anti-duplicates + supplier price watch)"
 requires-python = ">=3.10"
 authors = [{ name = "B2Box", email = "tech@b2box.pro" }]
 dependencies = [

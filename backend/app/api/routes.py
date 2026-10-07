@@ -22,10 +22,11 @@ from app import runtime
 from app.clock import utcnow
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine, get_session
+from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_target_for
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
-from app.security import verify_api_key, verify_rate_limit
+from app.security import configured_api_keys, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient
 
@@ -46,6 +47,11 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "icon": "duplicate",
         "title": "Ya existe en el catálogo (no se reenvió a Paco)",
         "tone": "warning",
+    },
+    "duplicate_confirmed": {
+        "icon": "check",
+        "title": "Duplicado confirmado · el original sigue activo en Vendure",
+        "tone": "muted",
     },
     "verify_passed_to_paco": {
         "icon": "send",
@@ -131,6 +137,25 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
 }
 
 
+_DUPLICATE_ACTIONS = ("duplicate_flagged", "duplicate_disabled", "duplicate_confirmed")
+
+
+def _duplicate_semantics(entry: AuditLog) -> dict[str, Any] | None:
+    """Qué haría (o hizo) "Confirmar duplicado" con este evento, para que el
+    dashboard no prometa "deshabilitar en Vendure" cuando no hay nada que apagar."""
+    if entry.action not in _DUPLICATE_ACTIONS:
+        return None
+    if entry.action == "duplicate_flagged":
+        target = disable_target_for(entry)
+    else:
+        target = (entry.disable_target_id or "").strip() or None
+    return {
+        "disable_target_id": target,
+        "canonical_product_id": canonical_for(entry),
+        "vendure_action": "disable" if target else "none",
+    }
+
+
 def _humanize(entry: AuditLog) -> dict[str, Any]:
     meta = _ACTION_LABELS.get(entry.action, {"icon": "info", "title": entry.action, "tone": "muted"})
     before = json.loads(entry.before) if entry.before else None
@@ -164,6 +189,7 @@ def _humanize(entry: AuditLog) -> dict[str, Any]:
         "before": before,
         "after": after,
         "confidence": entry.confidence,
+        "duplicate": _duplicate_semantics(entry),
         # ISO con "Z" para que el frontend lo interprete inequívocamente como UTC
         "created_at": (entry.created_at.isoformat() + "Z") if entry.created_at else None,
     }
@@ -189,7 +215,7 @@ SECTIONS: dict[str, dict[str, Any]] = {
     "duplicates": {
         "label": "Duplicados",
         "source": None,
-        "actions": ["duplicate_disabled", "duplicate_flagged"],
+        "actions": ["duplicate_disabled", "duplicate_flagged", "duplicate_confirmed"],
     },
     "price_changes": {
         "label": "Cambios de precio",
@@ -277,6 +303,7 @@ def _apply_section_filter(stmt, section_key: str | None):
 
 
 MAX_IMAGE_URLS = 5
+MAX_SOURCE_LEN = 32
 
 
 class VerifyRequest(BaseModel):
@@ -297,6 +324,16 @@ class VerifyRequest(BaseModel):
     # rutear a la Paco correcta: "b2box-pro"/"admin" → Paco PRO; el resto → Paco APP.
     # Valores típicos: "luis" (default), "orders", "manual", "b2box-pro".
     source: str = "luis"
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source(cls, v: Any) -> str:
+        # Normalizado al entrar: el ruteo a Paco ya era case-insensitive, pero el
+        # valor se guardaba tal cual → "B2BOX-PRO" iba a PRO y a la vez quedaba
+        # fuera de su tab y de la idempotencia por (source_url, source). Cap
+        # defensivo: `source` es texto libre de un cliente y termina indexado.
+        text = str(v or "").strip().lower()[:MAX_SOURCE_LEN]
+        return text or "luis"
     # Solo para el flujo PRO: lo reenviamos a Paco PRO para que escriba de vuelta
     # al quotation_item correcto (paco-ingest) cuando NO es duplicado.
     callback_ctx: dict[str, Any] | None = None
@@ -342,13 +379,25 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "agent": "hugo"}
 
 
-def _source_already_sent_to_paco(source_url: str | None) -> str | None:
-    """¿Ya mandamos este producto (por source_url) a Paco y sigue vigente?
+def _event_source(payload: "VerifyRequest") -> str:
+    """`source` tal como se guarda en AuditLog. Ya viene normalizado por el
+    validador de VerifyRequest (lower, sin espacios, ≤ MAX_SOURCE_LEN, default "luis")."""
+    return payload.source or "luis"
+
+
+def _source_already_sent_to_paco(source_url: str | None, source: str) -> str | None:
+    """¿Ya mandamos este producto (source_url) a Paco DESDE ESTE MISMO CLIENTE?
 
     El dedup de /verify compara contra el catálogo de Vendure. Un producto que
     todavía NO entró a Vendure (lo está enriqueciendo Paco) da "nuevo" en cada
     verify → se re-enviaba a Paco N veces. Este chequeo corta eso: si ya hay un
-    `verify_passed_to_paco` NO descartado con el mismo source_url, no reenviamos.
+    `verify_passed_to_paco` NO descartado con el mismo source_url y el mismo
+    `source`, no reenviamos.
+
+    Es por (source_url, source) y no por URL sola: Luis y un pedido de Orders
+    van a Pacos distintas (APP vs PRO) con callbacks distintos, así que el job
+    de uno no le sirve al otro — con la URL sola, el segundo cliente se quedaba
+    sin búsqueda.
 
     Devuelve el product_id de la fila existente (o None si no hay).
     """
@@ -360,6 +409,7 @@ def _source_already_sent_to_paco(source_url: str | None) -> str | None:
                 select(AuditLog)
                 .where(
                     AuditLog.product_source_url == source_url,
+                    AuditLog.source == source,
                     AuditLog.action == "verify_passed_to_paco",
                     AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
                 )
@@ -372,6 +422,67 @@ def _source_already_sent_to_paco(source_url: str | None) -> str | None:
         return None
 
 
+# Topes de lo que /verify acepta y de lo que se persiste en AuditLog.verify_ctx.
+# Sin tope, un callback_ctx o un text_specs enorme se guardaba entero en cada
+# fila (y viajaba en cada listado del dashboard).
+MAX_CALLBACK_CTX_BYTES = 4096   # un quotation_item_id y poco más; más que eso es otra cosa
+MAX_TEXT_SPECS_STORED = 2000    # a Paco va completo; acá se guarda recortado
+MAX_VERIFY_CTX_BYTES = 8192
+
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _reject_oversized_callback_ctx(payload: "VerifyRequest") -> None:
+    """413 si callback_ctx supera el tope. Se corta antes de tocar Vendure/Paco."""
+    if payload.callback_ctx is None:
+        return
+    size = _json_bytes(payload.callback_ctx)
+    if size > MAX_CALLBACK_CTX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"callback_ctx ocupa {size} bytes; el máximo es {MAX_CALLBACK_CTX_BYTES}",
+        )
+
+
+def _verify_ctx_json(payload: "VerifyRequest") -> str:
+    """Contexto del /verify que un reintento a Paco necesita reproducir.
+
+    Un pedido PRO sin su callback_ctx llega a Paco pero Paco no puede escribir
+    de vuelta al quotation_item; y sin el `source` no se sabe a qué Paco iba.
+
+    Acotado a MAX_VERIFY_CTX_BYTES: text_specs se guarda recortado (marcado) y,
+    si aun así no entra, callback_ctx se descarta con marca en vez de guardar
+    algo truncado que después no parsee.
+    """
+    text = payload.text_specs or ""
+    ctx: dict[str, Any] = {
+        "source": _event_source(payload),
+        "callback_ctx": payload.callback_ctx,
+        "text_specs": text[:MAX_TEXT_SPECS_STORED],
+        "use_browser": bool(payload.use_browser),
+    }
+    if len(text) > MAX_TEXT_SPECS_STORED:
+        ctx["text_specs_truncated"] = True
+    raw = json.dumps(ctx)
+    if len(raw.encode("utf-8")) > MAX_VERIFY_CTX_BYTES:
+        ctx["callback_ctx"] = None
+        ctx["callback_ctx_dropped"] = True
+        raw = json.dumps(ctx)
+    return raw
+
+
+def _load_verify_ctx(entry: AuditLog) -> dict[str, Any]:
+    if not entry.verify_ctx:
+        return {}
+    try:
+        data = json.loads(entry.verify_ctx)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _record_verify(
     payload: "VerifyRequest",
     verdict,
@@ -382,11 +493,22 @@ def _record_verify(
     """Escribe la fila de AuditLog de un verify. Sync (corre en background task)."""
     try:
         valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
+        is_dup = bool(verdict.is_duplicate and verdict.candidate_id)
         with Session(engine) as session:
             session.add(AuditLog(
                 action=action,
-                source=payload.source or "luis",
-                product_id=verdict.candidate_id or "(nuevo)",
+                source=_event_source(payload),
+                product_id=verdict.candidate_id or PLACEHOLDER_NEW,
+                verify_ctx=_verify_ctx_json(payload),
+                # El candidato NO está en Vendure (viene de Luis/Cloud): el único id
+                # que tenemos es el del producto ORIGINAL que matcheó. Confirmar
+                # este evento no debe apagar nada — queda explícito en la fila.
+                canonical_product_id=verdict.candidate_id if is_dup else None,
+                disable_target_id=None,
+                after=json.dumps({
+                    "per_strategy_scores": dict(verdict.per_strategy_scores),
+                    "matched_by": list(verdict.matched_by),
+                }) if is_dup else None,
                 detail=detail[:500],
                 confidence=verdict.confidence,
                 product_name=payload.name[:200] if payload.name else None,
@@ -421,12 +543,16 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     (send-to-hugo, convert-pro-to-paco) leen `paco_search_id` de esta respuesta
     para guardarlo y evitar reenviar. No lo pases a background sin actualizarlas.
 
-    Idempotencia: si el mismo source_url ya se mandó a Paco y sigue vigente
-    (no descartado), NO reenvía — devuelve paco_status="already_sent".
+    Idempotencia: si el mismo source_url ya se mandó a Paco desde el mismo
+    `source` y sigue vigente (no descartado), NO reenvía — devuelve
+    paco_status="already_sent". Otro `source` con la misma URL sí se envía.
     """
+    _reject_oversized_callback_ctx(payload)
+
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
+    # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos".
     try:
-        existing = await vendure_catalog.get_catalog()
+        existing = vendure_catalog.enabled_only(await vendure_catalog.get_catalog())
     except Exception as exc:  # noqa: BLE001
         log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
         raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
@@ -485,9 +611,10 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
-    # Idempotencia: si este source_url ya se mandó a Paco y sigue vigente, NO
-    # reenviamos (evita duplicar el job cuando el producto aún no entró a Vendure).
-    if _source_already_sent_to_paco(payload.source_url) is not None:
+    # Idempotencia: si este source_url ya se mandó a Paco DESDE ESTE CLIENTE y
+    # sigue vigente, NO reenviamos (evita duplicar el job cuando el producto aún
+    # no entró a Vendure). Otro cliente con la misma URL sí genera su búsqueda.
+    if _source_already_sent_to_paco(payload.source_url, _event_source(payload)) is not None:
         response.paco_status = "already_sent"
         return response
 
@@ -792,7 +919,14 @@ async def retry_paco(
 ) -> dict[str, Any]:
     """Reintenta enviar un evento a Paco (solo si tiene image_url guardada).
 
-    Crea un nuevo AuditLog con el resultado y descarta el original.
+    Rutea igual que el /verify original: el `source` del evento decide Paco APP
+    o Paco PRO (ver _PRO_SOURCES), y a PRO se le reenvía el callback_ctx /
+    text_specs / use_browser guardados en `verify_ctx`. Antes todo reintento
+    iba a Paco APP y sin callback: un pedido de Orders terminaba en la Paco
+    equivocada y Paco no podía escribir de vuelta al quotation_item.
+
+    Crea un nuevo AuditLog con el resultado (mismo `source`, para que caiga en
+    la misma tab y cuente para la idempotencia) y descarta el original.
     """
     entry = session.get(AuditLog, event_id)
     if not entry:
@@ -800,47 +934,71 @@ async def retry_paco(
     if not entry.product_image_url:
         raise HTTPException(400, "Este evento no tiene image_url para reintentar")
 
-    # Llamar a Paco
-    try:
-        result = await paco_integration.submit(
-            entry.product_image_url, product_url=entry.product_source_url,
+    ctx = _load_verify_ctx(entry)
+    source = entry.source or ctx.get("source") or "manual"
+    is_pro = _is_pro_source(source)
+    callback_ctx = ctx.get("callback_ctx") if isinstance(ctx.get("callback_ctx"), dict) else None
+    destination = "PRO" if is_pro else "APP"
+    if is_pro and callback_ctx is None:
+        log.warning(
+            "retry-paco #%s: evento PRO sin callback_ctx guardado; Paco PRO no va a "
+            "poder escribir de vuelta al quotation_item", event_id,
         )
-        new_action = "verify_passed_to_paco"
+
+    try:
+        if is_pro:
+            result = await paco_integration.submit_pro(
+                entry.product_image_url,
+                callback_ctx=callback_ctx,
+                text_specs=str(ctx.get("text_specs") or ""),
+                use_browser=bool(ctx.get("use_browser")),
+                product_link=entry.product_source_url,
+            )
+        else:
+            result = await paco_integration.submit(
+                entry.product_image_url, product_url=entry.product_source_url,
+            )
         new_detail = (
             f"Reintento manual exitoso. '{(entry.product_name or '?')[:60]}' "
-            f"enviado a Paco (search_id={result.search_id})"
+            f"enviado a Paco {destination} (search_id={result.search_id})"
         )
         new_after = json.dumps({"paco_search_id": result.search_id, "retry_of": event_id})
         session.add(AuditLog(
-            action=new_action,
-            source="manual",
+            action="verify_passed_to_paco",
+            source=source,
             product_id=entry.product_id,
             detail=new_detail,
             after=new_after,
+            verify_ctx=entry.verify_ctx,
             product_name=entry.product_name,
             product_code=entry.product_code,
             product_image_url=entry.product_image_url,
             product_source_url=entry.product_source_url,
         ))
         # Marcar el evento original como dismissed (ya se resolvió)
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
         session.commit()
-        return {"ok": True, "paco_search_id": result.search_id, "paco_status": result.status}
+        return {
+            "ok": True,
+            "paco": destination,
+            "paco_search_id": result.search_id,
+            "paco_status": result.status,
+        }
     except paco_integration.PacoError as exc:
         session.add(AuditLog(
             action="paco_failed",
-            source="manual",
+            source=source,
             product_id=entry.product_id,
-            detail=f"Reintento manual falló: {str(exc)[:200]}",
+            detail=f"Reintento manual a Paco {destination} falló: {str(exc)[:200]}",
+            verify_ctx=entry.verify_ctx,
             product_name=entry.product_name,
             product_code=entry.product_code,
             product_image_url=entry.product_image_url,
             product_source_url=entry.product_source_url,
         ))
         session.commit()
-        raise HTTPException(502, f"Paco rechazó el reintento: {exc}")
+        raise HTTPException(502, f"Paco {destination} rechazó el reintento: {exc}")
 
 
 @router.get("/api/duplicates-stats")
@@ -936,7 +1094,7 @@ async def restore_duplicates(
     # Construir mapa product_id → before_enabled (si está registrado)
     before_state: dict[str, bool | None] = {}
     for r in rows:
-        if not r.product_id or r.product_id == "(nuevo)":
+        if not r.product_id or r.product_id == PLACEHOLDER_NEW:
             continue
         before_state.setdefault(r.product_id, None)
         if r.before:
@@ -1022,6 +1180,70 @@ async def restore_duplicates(
     }
 
 
+def _dismiss(entry: AuditLog) -> None:
+    entry.dismissed = True
+    entry.dismissed_at = utcnow()
+
+
+def _duplicate_disabled_row(entry: AuditLog, target: str, canonical: str | None, detail: str) -> AuditLog:
+    """Fila `duplicate_disabled` para el producto `target` que se apagó en Vendure."""
+    return AuditLog(
+        action="duplicate_disabled",
+        source="manual",
+        product_id=target,
+        related_product_id=canonical,
+        disable_target_id=target,
+        canonical_product_id=canonical,
+        confidence=entry.confidence,
+        detail=detail,
+        before=json.dumps({"enabled": True}),
+        after=json.dumps({"enabled": False}),
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+        related_product_name=entry.related_product_name,
+        related_product_code=entry.related_product_code,
+    )
+
+
+def _duplicate_confirmed_row(entry: AuditLog, canonical: str | None, detail: str) -> AuditLog:
+    """Fila `duplicate_confirmed`: el usuario confirmó, pero no había nada que apagar."""
+    return AuditLog(
+        action="duplicate_confirmed",
+        source="manual",
+        product_id=entry.product_id,
+        related_product_id=entry.related_product_id,
+        disable_target_id=None,
+        canonical_product_id=canonical,
+        confidence=entry.confidence,
+        detail=detail,
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+        related_product_name=entry.related_product_name,
+        related_product_code=entry.related_product_code,
+    )
+
+
+def _confirm_without_vendure(session: Session, entry: AuditLog, *, how: str) -> str | None:
+    """Confirma un flag de /verify: el candidato nunca entró a Vendure, así que
+    solo se registra y se archiva. Devuelve el id del original (informativo)."""
+    canonical = canonical_for(entry)
+    session.add(_duplicate_confirmed_row(
+        entry, canonical,
+        detail=(
+            f"{how}: '{(entry.product_name or '?')[:60]}' era duplicado de "
+            f"#{canonical or '?'}. El candidato nunca entró a Vendure; el original "
+            f"sigue activo. No se tocó nada en Vendure."
+        ),
+    ))
+    _dismiss(entry)
+    session.add(entry)
+    return canonical
+
+
 @router.post("/api/duplicates/bulk-confirm")
 async def bulk_confirm_duplicates(
     min_confidence: float = 0.99,
@@ -1030,78 +1252,91 @@ async def bulk_confirm_duplicates(
 ) -> dict[str, Any]:
     """Confirma en bloque los duplicados flagged con confianza >= min_confidence.
 
-    Sin `confirm=true` es un dry-run (solo dice cuántos tocaría). Con confirm=true,
-    deshabilita cada uno en Vendure (guardando estado previo para revertir) y los
-    archiva. Sirve para limpiar el backlog de duplicados de alta confianza rápido.
+    Sin `confirm=true` es un dry-run (solo dice cuántos tocaría). Con confirm=true:
+      · eventos de la auditoría de catálogo → deshabilita en Vendure el producto
+        MÁS NUEVO (`disable_target_id`), guardando estado previo para revertir, y
+        archiva el evento. El canónico no se toca nunca.
+      · eventos de /verify (el candidato nunca entró a Vendure) → solo registra la
+        confirmación y archiva. El único id que traen es el del producto ORIGINAL,
+        y apagarlo era justo el bug.
+    Sirve para limpiar el backlog de duplicados de alta confianza rápido.
     """
     stmt = select(AuditLog).where(
         AuditLog.action == "duplicate_flagged",
         AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
         AuditLog.confidence >= min_confidence,  # type: ignore[operator]
     )
-    rows = [r for r in session.exec(stmt) if r.product_id and r.product_id != "(nuevo)"]
+    rows = [r for r in session.exec(stmt) if r.product_id and r.product_id != PLACEHOLDER_NEW]
+    to_disable: list[tuple[AuditLog, str]] = []
+    confirm_only: list[AuditLog] = []
+    for r in rows:
+        target = disable_target_for(r)
+        if target is None:
+            confirm_only.append(r)
+        else:
+            to_disable.append((r, target))
 
     if not confirm:
         return {
-            "would_disable": len(rows),
+            "would_disable": len(to_disable),
+            "would_confirm_only": len(confirm_only),
             "min_confidence": min_confidence,
-            "preview_ids": [r.product_id for r in rows[:20]],
-            "hint": "Pasá ?confirm=true&min_confidence=0.99 para deshabilitarlos en Vendure.",
+            "preview_ids": [t for _, t in to_disable[:20]],
+            "hint": (
+                "Pasá ?confirm=true&min_confidence=0.99 para confirmarlos. Solo los de la "
+                "auditoría de catálogo deshabilitan algo en Vendure (el producto más nuevo); "
+                "los de /verify se archivan sin tocar Vendure."
+            ),
         }
 
     client = VendureClient()
     disabled: list[str] = []
+    confirmed_only: list[str] = []
     skipped_already_disabled: list[str] = []
     failed: list[dict[str, str]] = []
+    how = f"Confirmado en bloque (confianza >= {min_confidence:.0%})"
 
-    for entry in rows:
+    for entry in confirm_only:
+        _confirm_without_vendure(session, entry, how=how)
+        confirmed_only.append(entry.product_id)
+
+    for entry, target in to_disable:
+        canonical = canonical_for(entry)
         try:
-            previous = await client.get_enabled_status(entry.product_id)
+            previous = await client.get_enabled_status(target)
         except Exception as exc:  # noqa: BLE001
-            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            failed.append({"product_id": target, "error": f"{type(exc).__name__}: {exc}"[:150]})
             continue
         if previous is None:
-            failed.append({"product_id": entry.product_id, "error": "No existe en Vendure"})
+            failed.append({"product_id": target, "error": "No existe en Vendure"})
             continue
         if previous is False:
-            entry.dismissed = True
-            entry.dismissed_at = utcnow()
+            _dismiss(entry)
             session.add(entry)
-            skipped_already_disabled.append(entry.product_id)
+            skipped_already_disabled.append(target)
             continue
         try:
-            await client.disable_product(entry.product_id)
+            await client.disable_product(target)
         except Exception as exc:  # noqa: BLE001
-            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            failed.append({"product_id": target, "error": f"{type(exc).__name__}: {exc}"[:150]})
             continue
-        session.add(AuditLog(
-            action="duplicate_disabled",
-            source="manual",
-            product_id=entry.product_id,
-            related_product_id=entry.related_product_id,
-            confidence=entry.confidence,
+        session.add(_duplicate_disabled_row(
+            entry, target, canonical,
             detail=(
-                f"Confirmado en bloque (confianza >= {min_confidence:.0%}) como duplicado de "
-                f"#{entry.related_product_id}. Deshabilitado en Vendure."
+                f"{how} como duplicado de #{canonical}. "
+                f"Deshabilitado #{target} en Vendure; #{canonical} se conserva."
             ),
-            before=json.dumps({"enabled": True}),
-            after=json.dumps({"enabled": False}),
-            product_name=entry.product_name,
-            product_code=entry.product_code,
-            product_image_url=entry.product_image_url,
-            product_source_url=entry.product_source_url,
-            related_product_name=entry.related_product_name,
-            related_product_code=entry.related_product_code,
         ))
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
-        disabled.append(entry.product_id)
+        disabled.append(target)
 
     session.commit()
-    vendure_catalog.invalidate()
+    if disabled:
+        vendure_catalog.invalidate()
     return {
         "disabled": len(disabled),
+        "confirmed_only": len(confirmed_only),
         "skipped_already_disabled": len(skipped_already_disabled),
         "failed": len(failed),
         "failed_details": failed[:10],
@@ -1113,22 +1348,40 @@ async def confirm_duplicate(
     event_id: int,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Confirma un duplicado flagged: deshabilita el producto en Vendure.
+    """Confirma un duplicado flagged.
 
-    Antes de tocar, lee el `enabled` actual y lo guarda en `before` para poder
-    restaurarlo después si te equivocás.
+    Qué pasa depende de dónde nació el flag (ver app/dedup/confirm_target.py):
+      · auditoría de catálogo → deshabilita en Vendure el producto MÁS NUEVO
+        (`disable_target_id`), nunca el canónico. Antes de tocar, lee el `enabled`
+        actual y lo guarda en `before` para poder restaurarlo.
+      · /verify → el candidato nunca entró a Vendure; el único id de la fila es el
+        del producto ORIGINAL. Se registra la confirmación y se archiva el evento,
+        sin tocar Vendure.
     """
     entry = session.get(AuditLog, event_id)
     if not entry:
         raise HTTPException(404, "Evento no encontrado")
     if entry.action != "duplicate_flagged":
         raise HTTPException(400, "Solo se puede confirmar eventos de tipo duplicate_flagged")
-    if not entry.product_id or entry.product_id == "(nuevo)":
+    if not entry.product_id or entry.product_id == PLACEHOLDER_NEW:
         raise HTTPException(400, "El evento no tiene product_id válido")
 
+    target = disable_target_for(entry)
+    if target is None:
+        canonical = _confirm_without_vendure(session, entry, how="Confirmado manualmente")
+        session.commit()
+        return {
+            "ok": True,
+            "action": "confirmed",
+            "vendure_action": "none",
+            "canonical_product_id": canonical,
+            "reason": "El candidato nunca entró a Vendure; el original sigue activo",
+        }
+
+    canonical = canonical_for(entry)
     client = VendureClient()
     try:
-        previous_enabled = await client.get_enabled_status(entry.product_id)
+        previous_enabled = await client.get_enabled_status(target)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"No pude leer estado actual de Vendure: {exc}")
 
@@ -1136,45 +1389,37 @@ async def confirm_duplicate(
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
         # Ya estaba disabled, no hacemos nada (pero descartamos el flag)
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
         session.commit()
         return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
 
     try:
-        await client.disable_product(entry.product_id)
+        await client.disable_product(target)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"No pude deshabilitar en Vendure: {exc}")
 
-    # Crear nuevo evento de tipo duplicate_disabled con tracking del estado previo
-    session.add(AuditLog(
-        action="duplicate_disabled",
-        source="manual",
-        product_id=entry.product_id,
-        related_product_id=entry.related_product_id,
-        confidence=entry.confidence,
+    # Nuevo evento duplicate_disabled con tracking del estado previo
+    session.add(_duplicate_disabled_row(
+        entry, target, canonical,
         detail=(
-            f"Confirmado manualmente como duplicado de #{entry.related_product_id}. "
-            f"Deshabilitado en Vendure."
+            f"Confirmado manualmente como duplicado de #{canonical}. "
+            f"Deshabilitado #{target} en Vendure; #{canonical} se conserva."
         ),
-        before=json.dumps({"enabled": True}),
-        after=json.dumps({"enabled": False}),
-        product_name=entry.product_name,
-        product_code=entry.product_code,
-        product_image_url=entry.product_image_url,
-        product_source_url=entry.product_source_url,
-        related_product_name=entry.related_product_name,
-        related_product_code=entry.related_product_code,
     ))
     # El evento original se descarta (ya se actuó sobre él)
-    entry.dismissed = True
-    entry.dismissed_at = utcnow()
+    _dismiss(entry)
     session.add(entry)
     session.commit()
 
     vendure_catalog.invalidate()  # el catálogo cacheado ya no refleja este disable
-    return {"ok": True, "action": "disabled", "product_id": entry.product_id}
+    return {
+        "ok": True,
+        "action": "disabled",
+        "vendure_action": "disable",
+        "product_id": target,
+        "canonical_product_id": canonical,
+    }
 
 
 @router.post("/api/audit-log/{event_id}/confirm-disable-bx")
@@ -1343,6 +1588,8 @@ async def debug_config() -> dict[str, Any]:
         },
         "hugo_auth": {
             "api_key": _mask(s.hugo_api_key),
+            # Solo los NOMBRES de los clientes con key (HUGO_API_KEYS), nunca las keys.
+            "clients": sorted(configured_api_keys().keys()),
         },
         "paco": {
             "url": s.paco_url,

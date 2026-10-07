@@ -37,6 +37,15 @@ services:
     env_file:
       - .env
 
+    # HUGO_ENV es el interruptor de TODO el fail-closed (secretos obligatorios
+    # al arranque, allowlist del dashboard, 503 sin API keys, keys placeholder
+    # ignoradas). El default del código es "development", así que si nadie la
+    # define, producción corre abierta. Este compose es el que deploya Coolify:
+    # acá el default es production. En local, el .env (HUGO_ENV=development) lo
+    # pisa vía la interpolación de abajo; `environment` gana sobre `env_file`.
+    environment:
+      HUGO_ENV: ${HUGO_ENV:-production}
+
     # `expose` (no `ports`) → el container NO bindea al host.
     # Coolify (Traefik) enruta el dominio al puerto 8000 interno.
     # Para development local, usá: docker compose run -p 8000:8000 hugo

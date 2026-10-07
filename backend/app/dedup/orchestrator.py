@@ -37,7 +37,13 @@ class DedupVerdict:
     confidence: float
     matched_by: list[Strategy] = field(default_factory=list)
     per_strategy_scores: dict[Strategy, float] = field(default_factory=dict)
-    candidate_id: str | None = None  # id del producto contra el que matcheó
+    # Id del producto contra el que matcheó. Solo se setea cuando is_duplicate
+    # es True: un candidate_id sin duplicado hacía que /verify tratara al
+    # "más parecido" como si fuera el match.
+    candidate_id: str | None = None
+    # El producto más parecido cuando NADIE pasó su umbral (informativo; la
+    # confianza reportada es la de este). Nunca se usa como duplicado.
+    closest_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -109,21 +115,49 @@ async def find_duplicate_in(
     candidate: CandidateInput,
     existing: list[VendureProduct],
 ) -> DedupVerdict:
-    """Compara `candidate` contra una lista de productos existentes en Vendure
-    y devuelve el match de más alta confianza (o no-duplicado si nadie pasa)."""
+    """Compara `candidate` contra los productos existentes en Vendure.
+
+    Devuelve duplicado SOLO si algún veredicto pasó su umbral: de esos, el de
+    mayor confianza, con `candidate_id`. Si ninguno pasó, `is_duplicate=False`
+    y `candidate_id=None`; la confianza y `closest_id` describen al más
+    parecido, a título informativo.
+
+    Antes se quedaba con la confianza más alta sin mirar `is_duplicate`: un
+    producto con imagen 0.91 (bajo el umbral) le ganaba a otro que SÍ matcheaba
+    por texto 0.89, y /verify respondía "no es duplicado" con un candidate_id
+    puesto.
+    """
     if not existing:
         return DedupVerdict(is_duplicate=False, confidence=0.0)
 
-    best = DedupVerdict(is_duplicate=False, confidence=0.0)
+    best_dup: DedupVerdict | None = None
+    closest: DedupVerdict | None = None
+    closest_id: str | None = None
     for product in existing:
         verdict = await compare(candidate, _from_vendure(product))
-        if verdict.confidence > best.confidence:
-            best = verdict
-            best.candidate_id = product.id
-            if verdict.is_duplicate and "url" in verdict.matched_by:
-                # match seguro, no seguimos buscando
-                return best
-    return best
+        if verdict.is_duplicate:
+            if best_dup is None or verdict.confidence > best_dup.confidence:
+                best_dup = verdict
+                best_dup.candidate_id = product.id
+                if "url" in verdict.matched_by:
+                    # match seguro, no seguimos buscando
+                    return best_dup
+        elif closest is None or verdict.confidence > closest.confidence:
+            closest = verdict
+            closest_id = product.id
+
+    if best_dup is not None:
+        return best_dup
+    if closest is None:
+        return DedupVerdict(is_duplicate=False, confidence=0.0)
+    return DedupVerdict(
+        is_duplicate=False,
+        confidence=closest.confidence,
+        matched_by=[],
+        per_strategy_scores=dict(closest.per_strategy_scores),
+        candidate_id=None,
+        closest_id=closest_id,
+    )
 
 
 # ─── Batch dedup para el scheduler (audit_duplicates) ──────────────
@@ -149,9 +183,21 @@ _MAX_TOKENS_PER_PRODUCT = 12
 
 @dataclass(slots=True)
 class DuplicatePair:
-    drop: VendureProduct   # producto a marcar como duplicado
-    keep: VendureProduct   # producto "canónico" que se conserva
+    drop: VendureProduct   # producto a marcar como duplicado (el más nuevo)
+    keep: VendureProduct   # producto "canónico" que se conserva (el más viejo)
     verdict: DedupVerdict
+
+
+def _id_order(pid: str) -> tuple[int, int, str]:
+    """Clave de orden "más viejo primero" para ids de Vendure.
+
+    Los ids son numéricos autoincrementales, así que el menor es el más viejo.
+    Compararlos como strings rompía justo en el cambio de cifras ('1000' < '999')
+    y el canónico podía salir el producto NUEVO. Si el id no es numérico, cae al
+    orden lexicográfico de siempre.
+    """
+    s = (pid or "").strip()
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
 
 
 def _tokenize(name: str) -> list[str]:
@@ -219,10 +265,10 @@ async def find_duplicate_pairs(
     if len(enabled) < 2:
         return []
 
-    # Mantenemos la convención previa: de un par, el id "menor" (orden
-    # lexicográfico de strings) es el que se conserva; el "mayor" se marca.
+    # De un par, el id menor (numérico: el más viejo) es el canónico que se
+    # conserva; el mayor (el más nuevo) es el que se marca para apagar.
     def _keep_drop(a: VendureProduct, b: VendureProduct) -> tuple[VendureProduct, VendureProduct]:
-        return (a, b) if a.id <= b.id else (b, a)
+        return (a, b) if _id_order(a.id) <= _id_order(b.id) else (b, a)
 
     best_by_drop: dict[str, DuplicatePair] = {}
 
@@ -242,7 +288,7 @@ async def find_duplicate_pairs(
     for group in by_url.values():
         if len(group) < 2:
             continue
-        canonical = min(group, key=lambda p: p.id)
+        canonical = min(group, key=lambda p: _id_order(p.id))
         for p in group:
             if p.id == canonical.id:
                 continue

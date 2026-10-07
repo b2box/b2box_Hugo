@@ -1,7 +1,8 @@
 # Hugo — Agente de control de calidad de catálogo (B2Box)
 
 Hugo es el tercer agente del ecosistema B2Box. Su responsabilidad es **mantener la
-base de datos de productos limpia, sin duplicados y con precios actualizados**.
+base de datos de productos limpia y sin duplicados, y avisar cuando el precio del
+proveedor cambia**. Hugo no modifica precios de venta en Vendure.
 
 ## El ecosistema
 
@@ -21,7 +22,7 @@ base de datos de productos limpia, sin duplicados y con precios actualizados**.
 
 - **Luis** → busca productos virales (Alibaba/AliExpress/etc).
 - **Paco** → enriquece datos y sube el producto a Vendure.
-- **Hugo** → verifica que no se duplique y mantiene precios alineados con la fuente y los competidores.
+- **Hugo** → verifica que no se duplique y vigila el precio del proveedor (1688) para avisar cuando cambia.
 
 ## Qué hace Hugo
 
@@ -33,16 +34,28 @@ base de datos de productos limpia, sin duplicados y con precios actualizados**.
 
 El módulo `dedup/orchestrator.py` combina las tres y devuelve un score de confianza (0-1).
 
-### 2. Comparación de precios
+### 2. Vigilancia de precios fuente
 
-- **Fuente original**: re-fetch del precio en Alibaba/AliExpress vía `pricing/source_check.py`.
-- **Competidores**: scraping configurable de tiendas competidoras (`pricing/competitor_check.py`).
-- **Diff**: si la desviación supera el umbral configurado, dispara update + log.
+- **Fuente original**: re-fetch del precio del proveedor (1688 vía OTAPI;
+  Alibaba/AliExpress por JSON-LD) en `pricing/source_check.py`, con un budget
+  diario de llamadas a OTAPI.
+- **Diff**: cada precio se guarda como snapshot (`PriceHistory`); si la variación
+  contra el snapshot anterior supera `PRICE_DRIFT_THRESHOLD`, se crea un evento
+  `price_flagged` y se manda la alerta.
+
+Hugo **no toca el precio de venta** en Vendure: solo avisa. Tampoco compara
+contra competidores: `pricing/competitor_check.py` existe pero no tiene ningún
+llamador (ni job, ni endpoint); es código muerto que quedó de la idea original.
 
 ### 3. Cuándo actúa
 
 - **Tiempo real (webhook)**: Paco/Luis le pegan a `POST /verify` antes de subir/descubrir.
-- **Programado (scheduler)**: APScheduler corre auditorías periódicas (configurable).
+- **Programado (scheduler)**: APScheduler corre auditorías cada
+  `AUDIT_INTERVAL_HOURS` (default 336 h = 14 días). La última corrida de cada
+  auditoría se guarda en la DB (`settings`, clave `_meta:last_run:<job>`), así
+  un redeploy **no reinicia el reloj**: al arrancar, la próxima corrida se
+  calcula como última + intervalo (si ya venció, corre 5 min después de
+  levantar). La primera vez, sin marcador, espera un intervalo completo.
 - **On-demand**: `POST /audit` para correr una auditoría completa manualmente.
 
 ### 4. Búsqueda por imagen del b2box app (`POST /app/lookup`)
@@ -106,6 +119,11 @@ imagen Docker; corre en CPU sin torch (~24 ms/imagen). Los embeddings del
 catálogo se precalculan en un índice en memoria y se persisten en
 `image_embed_cache`, así un reinicio no vuelve a descargar ni inferir nada.
 
+El Dockerfile baja una **revisión fija** del repo de Hugging Face
+(`Qdrant/clip-ViT-B-32-vision @ e0c24ed0`) y verifica el **sha256** del archivo:
+si no coincide, el build falla. Subir de versión implica cambiar los dos `ARG`
+juntos, recalibrar los thresholds y vaciar `image_embed_cache`.
+
 Medido en producción (ago 2026): el primer build del índice tardó **~19 min**
 para 2052 imágenes (~1026 productos × 2), a ~1.8 img/s — el cuello es la
 descarga, no la inferencia. Los rebuilds posteriores salen del cache. Mientras
@@ -117,9 +135,16 @@ construye, `/app/lookup` devuelve `status:"indexing"`; seguilo con
 
 ### 5. Acción
 
-- Auto-actualiza precios cuando la desviación es razonable.
-- Marca duplicados de alta confianza como `disabled` en Vendure.
-- Loguea TODO en SQLite (`AuditLog`).
+- **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
+  apriete "Confirmar duplicado" en el dashboard (o `bulk-confirm`). Y confirmar
+  solo apaga algo cuando el flag vino de la **auditoría de catálogo** (los dos
+  productos están en Vendure: se apaga el más nuevo y se conserva el canónico).
+  Un flag de `/verify` no tiene nada que apagar — el candidato de Luis/Cloud
+  nunca entró a Vendure y el único id de la fila es el del producto **original**
+  — así que confirmar solo registra y archiva. Cada fila dice explícitamente qué
+  se apagaría (`disable_target_id`) y cuál es el original (`canonical_product_id`).
+- Precios: snapshot + alerta. No modifica Vendure.
+- Loguea TODO en `AuditLog` (Postgres en Supabase; SQLite en local).
 - Manda email a `tech@b2box.pro` con resumen diario y alertas críticas.
 
 ## Estructura
@@ -141,8 +166,8 @@ backend/
 │   ├── ingest/
 │   │   └── image_from_url.py # saca la foto de una URL de marketplace
 │   ├── pricing/
-│   │   ├── source_check.py
-│   │   ├── competitor_check.py
+│   │   ├── source_check.py   # precio del proveedor (OTAPI) + budget diario
+│   │   ├── competitor_check.py  # SIN USO: no tiene llamador
 │   │   └── diff.py
 │   ├── scheduler/
 │   │   └── jobs.py          # APScheduler
@@ -169,6 +194,11 @@ cp ../.env.example ../.env
 # editar .env con credenciales reales
 uvicorn app.main:app --reload
 ```
+
+Tests: `pytest` desde `backend/` o desde la raíz del repo (hay un `pytest.ini`
+que apunta a `backend/tests` con `asyncio_mode=auto`). Solo necesitan
+`VENDURE_API_URL` en el entorno (alcanza `https://example.invalid/admin-api`) o
+un `backend/.env`; no tocan red ni Vendure.
 
 ## Run con Docker (recomendado para producción)
 
@@ -214,10 +244,20 @@ No vas a tener que borrar la DB cada vez que crezca el modelo.
 3. **Build pack**: Docker Compose (Coolify detecta el `docker-compose.yml` solo).
 4. **Variables de entorno**: copiar el contenido de tu `.env` local en
    Coolify → Environment Variables. Las críticas:
+   - `HUGO_ENV=production` (activa los chequeos estrictos de seguridad)
    - `DATABASE_URL` (Supabase Session Pooler, ver más abajo)
    - `VENDURE_API_URL`, `VENDURE_BEARER`, `VENDURE_CHANNEL_TOKEN`
+   - `HUGO_API_KEYS` y `SUPABASE_ALLOWED_EMAILS` (ver *Seguridad*)
    - `RAPIDAPI_KEY`
    - `ALERT_SMTP_*` y `ALERT_EMAIL_TO`
+
+   **Usuario de Vendure.** Lo único que Hugo escribe en Vendure es el flag
+   `enabled` de un producto (`updateProduct`); el resto es lectura del catálogo.
+   `VENDURE_BEARER` / `VENDURE_USER` deberían ser de un administrador con un
+   **rol acotado al catálogo** (permisos `ReadCatalog` + `UpdateCatalog` del
+   canal), no un SuperAdmin: si la credencial se filtra, el daño queda en
+   productos y no llega a pedidos, clientes ni configuración. Esto es
+   configuración en el admin de Vendure (Settings → Roles), no código de Hugo.
 5. **Domain**: asignar un dominio (ej. `hugo.b2box.app`) en Coolify.
 6. **Deploy**.
 
@@ -250,7 +290,11 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `GET  /app/index-status` — si el índice de imágenes ya está listo
 - `POST /app/index-rebuild` — fuerza la reconstrucción del índice
 
-Los tres `/app/*` se autentican con `X-API-Key: $HUGO_API_KEY` (igual que `/verify`).
+Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
+key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
+loguea el nombre del cliente en cada request autenticado y cada key se rota por
+separado. `HUGO_API_KEY` (una sola key compartida) sigue valiendo como cliente
+`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys).
 
 ### `POST /app/lookup`
 
@@ -342,6 +386,36 @@ Otros `status`: `"indexing"` (el índice se está construyendo — reintentar, *
 se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
 (el sitio bloquea a los servidores).
 
+## Seguridad
+
+- **`HUGO_ENV=production` es el interruptor.** Activa todo lo que sigue:
+  secretos obligatorios al arranque (login del dashboard + al menos una API key
+  que parsee), allowlist fail-closed, `503` en `/verify` y `/app/*` si ninguna
+  key es válida, y descarte de keys placeholder o de menos de 24 caracteres.
+  Con `development` (el default del código) todo eso es solo un warning. Por
+  eso `docker-compose.yml` —lo que deploya Coolify— lo define con default
+  `production`; en local el `.env` lo pisa con `development`.
+- **Login del dashboard**: Supabase Auth de Cloud_B2BOX (mismos usuarios que
+  Paco). `SUPABASE_ALLOWED_EMAILS` es la allowlist de quién entra y es
+  **fail-closed en producción**: con `HUGO_ENV=production` y la variable vacía,
+  todo login responde `403` con un texto genérico ("login deshabilitado por
+  configuración"); el motivo exacto queda en el log del servidor. Hugo
+  arranca igual (no es un restart loop) y `/verify` y `/app/*` siguen andando
+  con su API key. Para abrir a todos los usuarios de Cloud_B2BOX hay que
+  decirlo a propósito: `SUPABASE_ALLOWED_EMAILS=*`. En development, vacía =
+  abierta, con warning.
+- **Clientes máquina** (`/verify`, `/app/*`): una API key por cliente en
+  `HUGO_API_KEYS` (ver arriba). Comparación en tiempo constante; el nombre del
+  cliente queda en el log de cada request.
+- **IP del cliente** (rate limit de `/verify`, lockout del login): se toma del
+  último hop confiable de `X-Forwarded-For` según `TRUSTED_PROXY_HOPS`
+  (1 = Traefik de Coolify, 0 = sin proxy). El primer valor del header lo
+  escribe el cliente y no se le cree; si la cadena viene más corta que lo
+  configurado se usa la IP del socket. `2` (Cloudflare delante de Traefik)
+  **solo** si Traefik acepta tráfico únicamente desde los rangos de Cloudflare;
+  si no, quien le pegue directo con un header armado elige su propia IP. No
+  subirlo "por las dudas".
+
 ## Variables de entorno
 
 Ver `.env.example`. Las críticas:
@@ -350,6 +424,10 @@ Ver `.env.example`. Las críticas:
 - `RAPIDAPI_KEY` — proxy a 1688 vía OTAPI (sin esto Hugo no puede consultar precios fuente).
 - `ALERT_SMTP_*`, `ALERT_EMAIL_TO` — notificaciones por email.
 - `ALERT_WEBHOOK_URL` — opcional, Slack/Discord/n8n/CallMeBot.
+- `HUGO_ENV=production` — activa los chequeos estrictos (secretos obligatorios, allowlist fail-closed).
+- `HUGO_API_KEYS` — una API key por cliente (`luis:…,cloud:…,b2box-app:…`).
+- `SUPABASE_ALLOWED_EMAILS` — quién entra al dashboard; `*` para todos. Vacía en producción = nadie.
+- `TRUSTED_PROXY_HOPS` — proxies confiables delante de Hugo (default 1).
 - `DEDUP_*_THRESHOLD` — umbrales de confianza de cada estrategia (0-1).
 - `PRICE_DRIFT_THRESHOLD` — % mínimo de variación que dispara alerta.
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.

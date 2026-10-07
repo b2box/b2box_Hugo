@@ -176,6 +176,16 @@ async def _refresh(client: VendureClient) -> None:
         await _do_full(client)
 
 
+def enabled_only(products: list[VendureProduct]) -> list[VendureProduct]:
+    """Solo los productos habilitados: la lista contra la que se deduplica.
+
+    El cache trae también los deshabilitados (duplicados ya apagados, productos
+    retirados). Compararlos en /verify hacía que un candidato legítimo matcheara
+    contra algo que la tienda ya no vende, y no llegaba a Paco.
+    """
+    return [p for p in products if p.enabled]
+
+
 def invalidate() -> None:
     """Fuerza el próximo get_catalog() a re-consultar Vendure.
 

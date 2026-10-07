@@ -63,13 +63,25 @@ RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
 # quede cacheada y no se rebaje en cada cambio de código.
 FROM debian:bookworm-slim AS model
 
-ARG CLIP_ONNX_URL=https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx
+# Revisión (commit del repo de Hugging Face) y sha256 del archivo, FIJADOS.
+# `resolve/main` puede cambiar debajo nuestro: un rebuild traería otro modelo
+# con otros embeddings, el índice cacheado en image_embed_cache quedaría
+# mezclado y los thresholds calibrados (config.embed_*_threshold) dejarían de
+# valer. Para subir de versión: cambiar REVISION y SHA256 juntos, recalibrar
+# con `python -m app.dedup.calibrate_embed` y vaciar image_embed_cache.
+ARG CLIP_ONNX_REPO=https://huggingface.co/Qdrant/clip-ViT-B-32-vision
+ARG CLIP_ONNX_REVISION=e0c24ed0fa57fa3e4f97f30de74c51d944036ace
+ARG CLIP_ONNX_SHA256=c68d3d9a200ddd2a8c8a5510b576d4c94d1ae383bf8b36dd8c084f94e1fb4d63
+ARG CLIP_ONNX_URL=${CLIP_ONNX_REPO}/resolve/${CLIP_ONNX_REVISION}/model.onnx
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
+# El build FALLA si el hash no coincide: mejor no tener imagen que tener una
+# con un modelo que no es el que se calibró.
 RUN mkdir -p /opt/models \
     && curl -fsSL --retry 3 -o /opt/models/clip-vit-b32-vision.onnx "${CLIP_ONNX_URL}" \
+    && echo "${CLIP_ONNX_SHA256}  /opt/models/clip-vit-b32-vision.onnx" | sha256sum -c - \
     && test -s /opt/models/clip-vit-b32-vision.onnx
 
 # ─── Stage 3: runtime ───────────────────────────────────────────

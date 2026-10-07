@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import auth
+from app import auth, security
 from app.api.app_routes import router as app_router
 from app.api.routes import router
 from app.config import get_settings
@@ -38,8 +38,12 @@ def _configure_logging() -> None:
 def _enforce_prod_secrets() -> None:
     """En producción, faltar credenciales NO puede ser solo un warning.
 
-    Si HUGO_ENV=production y falta DASHBOARD_PASSWORD o HUGO_API_KEY, abortamos
-    el arranque: mejor caer que quedar expuestos a internet sin auth.
+    Si HUGO_ENV=production y falta el login del dashboard o ninguna API key
+    PARSEA, abortamos el arranque: mejor caer que quedar expuestos a internet
+    sin auth. "Parsea" es la palabra clave: antes alcanzaba con que la variable
+    no estuviera vacía, y un HUGO_API_KEYS pegado sin "nombre:" (o "luis:", o
+    HUGO_API_KEY="   ") pasaba el chequeo mientras security.parse_api_keys lo
+    descartaba → /verify y /app/* abiertos con solo un warning.
     """
     s = get_settings()
     if s.hugo_env.strip().lower() != "production":
@@ -49,12 +53,19 @@ def _enforce_prod_secrets() -> None:
     has_supabase = bool(s.supabase_url and s.supabase_anon_key)
     if not has_supabase and not s.dashboard_password:
         missing.append("SUPABASE_URL+SUPABASE_ANON_KEY (o DASHBOARD_PASSWORD)")
-    if not s.hugo_api_key:
-        missing.append("HUGO_API_KEY")
+    if not security.api_keys_configured():
+        missing.append("HUGO_API_KEYS (o HUGO_API_KEY) con al menos una key válida nombre:key")
     if missing:
         raise RuntimeError(
             "HUGO_ENV=production pero faltan credenciales obligatorias: "
             f"{', '.join(missing)}. Seteálas o poné HUGO_ENV=development."
+        )
+    # La allowlist vacía NO tira el arranque (sería un restart loop por una
+    # variable): los logins por Supabase reciben 403 con el motivo, y los
+    # clientes por API key siguen funcionando. Pero se avisa fuerte.
+    if auth.allowlist_misconfigured():
+        logging.getLogger(__name__).error(
+            "Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL
         )
 
 
@@ -141,7 +152,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
     version="0.1.0",
-    description="Anti-duplicados + sincronización de precios para Vendure",
+    description="Anti-duplicados + vigilancia de precios de proveedor para Vendure (no modifica precios)",
     lifespan=lifespan,
 )
 
@@ -182,6 +193,15 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     # Método preferido: Supabase Auth de Cloud_B2BOX (mismo login que Paco).
     # Fallback: user/pass local (solo si Supabase no está configurado).
     if auth.supabase_enabled():
+        if auth.allowlist_misconfigured():
+            # Nadie puede entrar: no se manda la contraseña a Supabase para
+            # nada. El motivo exacto va al log; al cliente, un texto genérico.
+            logging.getLogger(__name__).error(
+                "Login rechazado desde %s: %s", ip, auth.ALLOWLIST_MISSING_DETAIL
+            )
+            return JSONResponse(
+                {"ok": False, "detail": auth.LOGIN_DISABLED_DETAIL}, status_code=403
+            )
         ok, identity = await auth.supabase_login(payload.username, payload.password)
     else:
         ok = auth.check_credentials(payload.username, payload.password)

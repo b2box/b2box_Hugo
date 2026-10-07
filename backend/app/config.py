@@ -42,8 +42,23 @@ class Settings(BaseSettings):
     rapidapi_key: str = Field(default="", description="X-RapidAPI-Key compartida")
     otapi_1688_host: str = Field(default="otapi-1688.p.rapidapi.com")
 
-    # ── Auth: API key para que Luis se autentique al pegarle a /verify ──
-    hugo_api_key: str = Field(default="", description="Si vacío, /verify queda abierto (no recomendado)")
+    # ── Auth: API keys de los clientes de /verify y /app/* ──────
+    # Una key POR CLIENTE, formato "nombre:key,nombre:key". El nombre se loguea
+    # en cada request autenticado, así se sabe quién pegó qué y se puede rotar
+    # la key de uno sin tocar a los demás. Ej: "luis:xxx,cloud:yyy,b2box-app:zzz".
+    hugo_api_keys: str = Field(default="", description='Keys por cliente: "luis:xxx,cloud:yyy"')
+    # Legacy: una sola key compartida. Sigue valiendo (cliente "legacy") para no
+    # romper a quien ya la tenga; conviene migrar a HUGO_API_KEYS.
+    hugo_api_key: str = Field(default="", description="Key única compartida (legacy)")
+
+    # ── Proxy de confianza (Traefik de Coolify) ────────────────
+    # Cuántos proxies confiables hay delante de Hugo. Con N, la IP real del
+    # cliente es la N-ésima desde la DERECHA de X-Forwarded-For: cada proxy
+    # agrega la IP de quien le habló, así que las últimas N entradas las
+    # escribieron proxies nuestros y el resto lo puede inventar el cliente.
+    # 1 = Traefik/Coolify directo (default). 2 = Cloudflare → Traefik.
+    # 0 = sin proxy: se ignoran los headers y vale la IP del socket.
+    trusted_proxy_hops: int = Field(default=1, description="Proxies confiables delante de Hugo")
 
     # ── Auth: login del dashboard vía Supabase (mismo pool que Paco) ──
     # Si supabase_url + supabase_anon_key están seteados, el login del dashboard
@@ -52,9 +67,12 @@ class Settings(BaseSettings):
     # queda solo como fallback de desarrollo.
     supabase_url: str = Field(default="", description="https://<ref>.supabase.co (Cloud_B2BOX)")
     supabase_anon_key: str = Field(default="", description="anon/publishable key de Cloud_B2BOX")
-    # Allowlist opcional de emails con acceso a Hugo (coma-separada). Vacío = todo
-    # usuario válido de Cloud_B2BOX puede entrar (igual que Paco).
-    supabase_allowed_emails: str = Field(default="", description="emails permitidos, coma-separados")
+    # Allowlist de emails con acceso a Hugo (coma-separada). FAIL-CLOSED en
+    # producción: vacía → todo login por Supabase se rechaza con 403 y mensaje
+    # claro (la app arranca igual; los clientes por API key no se ven afectados).
+    # "*" explícito = cualquier usuario válido de Cloud_B2BOX (como Paco).
+    # En development, vacía = abierta, con warning.
+    supabase_allowed_emails: str = Field(default="", description='emails permitidos, coma-separados, o "*"')
 
     # ── Auth: login local (FALLBACK de desarrollo) ─────────────
     # Usuario/contraseña que protegen el dashboard y sus endpoints /api/*.
@@ -132,8 +150,13 @@ class Settings(BaseSettings):
         default="/opt/models/clip-vit-b32-vision.onnx",
         description="Path local al modelo ONNX (se bakea en la imagen Docker)",
     )
+    # Revisión fijada (misma que backend/Dockerfile, stage `model`); el build
+    # además verifica el sha256. Cambiarla implica recalibrar los thresholds.
     embed_model_url: str = Field(
-        default="https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx",
+        default=(
+            "https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/"
+            "e0c24ed0fa57fa3e4f97f30de74c51d944036ace/model.onnx"
+        ),
         description="De dónde se baja el modelo en el build (no se usa en runtime)",
     )
     # Restarle a cada vector la media del índice antes de comparar. Sin esto todas

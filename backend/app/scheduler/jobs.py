@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -132,6 +132,70 @@ def _set_meta(key: str, value: str) -> None:
 
 _DEDUP_MARKER_KEY = "_meta:last_dedup_updated_at"
 
+# ── Reloj persistente de las auditorías ───────────────────────────
+# IntervalTrigger arranca a contar desde que se registra el job, o sea desde
+# cada arranque del proceso. Con AUDIT_INTERVAL_HOURS=336 (14 días) y un
+# redeploy cada tanto, las auditorías NO corrían nunca: el reloj se reiniciaba
+# antes de llegar. Por eso cada job deja en `settings` cuándo terminó su última
+# corrida y register_jobs() calcula la próxima a partir de eso.
+_LAST_RUN_PREFIX = "_meta:last_run:"
+# Si al arrancar la próxima corrida ya venció, no se dispara en el mismo
+# segundo en que levanta el proceso (warm del catálogo, índice CLIP, etc.):
+# se le da este margen.
+_STARTUP_GRACE = timedelta(minutes=5)
+
+
+def _mark_job_run(job_id: str) -> None:
+    """Guarda que `job_id` acaba de terminar una corrida (UTC, ISO-8601).
+
+    Se llama al final del camino feliz del job. Si el job revienta no se marca:
+    la próxima vez que arranque el proceso la corrida pendiente vuelve a
+    quedar programada (con _STARTUP_GRACE) en vez de perderse 14 días.
+    """
+    try:
+        _set_meta(f"{_LAST_RUN_PREFIX}{job_id}", datetime.now(timezone.utc).isoformat())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo guardar la última corrida de %s: %s", job_id, exc)
+
+
+def _last_job_run(job_id: str) -> datetime | None:
+    """Cuándo terminó la última corrida de `job_id`, o None si nunca / no se puede leer."""
+    try:
+        raw = _get_meta(f"{_LAST_RUN_PREFIX}{job_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudo leer la última corrida de %s: %s", job_id, exc)
+        return None
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _interval_next_run(last_run: datetime | None, interval: timedelta, now: datetime) -> datetime:
+    """Próxima corrida de un job de intervalo respetando el reloj persistido.
+
+    - Sin marcador (primera vez): now + interval, igual que IntervalTrigger.
+    - Con marcador: last_run + interval, pero nunca antes de now + grace (si
+      ya venció, corre apenas el proceso termine de levantar).
+    - Marcador en el FUTURO (skew de reloj, edición manual de la fila): se toma
+      como "ahora". Si no, una fecha mal escrita postergaba la auditoría más
+      allá de un intervalo entero, sin que nadie lo notara.
+    """
+    if last_run is None:
+        return now + interval
+    if last_run > now:
+        log.warning(
+            "Última corrida registrada en el futuro (%s > %s); la tomo como ahora",
+            last_run.isoformat(timespec="minutes"), now.isoformat(timespec="minutes"),
+        )
+        last_run = now
+    return max(last_run + interval, now + _STARTUP_GRACE)
+
 
 def _auto_archive_sent_to_paco(products: list[VendureProduct]) -> int:
     """Archiva los eventos 'verify_passed_to_paco' cuyo producto YA entró a Vendure.
@@ -217,6 +281,11 @@ async def audit_duplicates() -> None:
                     source="audit",
                     product_id=drop.id,
                     related_product_id=keep.id,
+                    # Acá SÍ están los dos en Vendure: confirmar apaga al más
+                    # nuevo (drop) y conserva al canónico (keep). Explícito para
+                    # que el confirm nunca tenga que adivinar.
+                    disable_target_id=drop.id,
+                    canonical_product_id=keep.id,
                     confidence=verdict.confidence,
                     detail=(
                         f"Posible duplicado de #{keep.id} por {','.join(verdict.matched_by)} "
@@ -242,6 +311,7 @@ async def audit_duplicates() -> None:
 
         log.info("audit_duplicates terminado: %d pares flagueados de %d candidatos",
                  flagged, len(pairs))
+        _mark_job_run("audit_duplicates")
 
 
 # ─── Job 2: precios fuente (streaming + paralelo) ─────────────────
@@ -375,6 +445,7 @@ async def audit_source_prices() -> None:
             "audit_source_prices terminado: %d procesados, %d sin fuente, %d errores, %d alertas",
             processed, skipped, failed, len(alerts),
         )
+        _mark_job_run("audit_source_prices")
 
 
 # ─── Job 3: calidad del catálogo (precio 0, sin imagen, etc.) ─────
@@ -453,6 +524,7 @@ async def audit_catalog_quality() -> None:
             "audit_catalog_quality terminado: %d productos revisados, %d flagged",
             len(products), flagged,
         )
+        _mark_job_run("audit_catalog_quality")
 
 
 # ─── Job 4: variantes con nombre "PA…" ───────────────────────────
@@ -538,6 +610,7 @@ async def audit_pa_variants() -> None:
             "audit_pa_variants terminado: %d productos revisados, %d flagged",
             total_products, flagged,
         )
+        _mark_job_run("audit_pa_variants")
 
 
 # ─── Job 5: productos con nombre 'BX…' y sin imagen ───────────────
@@ -600,6 +673,7 @@ async def audit_bx_no_image() -> None:
             "audit_bx_no_image terminado: %d productos revisados, %d flagged",
             total_products, flagged,
         )
+        _mark_job_run("audit_bx_no_image")
 
 
 # ─── Job 6: digest diario ─────────────────────────────────────────
@@ -660,38 +734,34 @@ async def daily_digest() -> None:
 # ─── Registro ─────────────────────────────────────────────────────
 
 
+_AUDIT_JOBS = (
+    ("audit_duplicates", audit_duplicates),
+    ("audit_source_prices", audit_source_prices),
+    ("audit_catalog_quality", audit_catalog_quality),
+    ("audit_pa_variants", audit_pa_variants),
+    ("audit_bx_no_image", audit_bx_no_image),
+)
+
+
 def register_jobs() -> None:
     s = get_settings()
-    scheduler.add_job(
-        audit_duplicates,
-        IntervalTrigger(hours=s.audit_interval_hours),
-        id="audit_duplicates",
-        replace_existing=True, coalesce=True, max_instances=1,
-    )
-    scheduler.add_job(
-        audit_source_prices,
-        IntervalTrigger(hours=s.audit_interval_hours),
-        id="audit_source_prices",
-        replace_existing=True, coalesce=True, max_instances=1,
-    )
-    scheduler.add_job(
-        audit_catalog_quality,
-        IntervalTrigger(hours=s.audit_interval_hours),
-        id="audit_catalog_quality",
-        replace_existing=True, coalesce=True, max_instances=1,
-    )
-    scheduler.add_job(
-        audit_pa_variants,
-        IntervalTrigger(hours=s.audit_interval_hours),
-        id="audit_pa_variants",
-        replace_existing=True, coalesce=True, max_instances=1,
-    )
-    scheduler.add_job(
-        audit_bx_no_image,
-        IntervalTrigger(hours=s.audit_interval_hours),
-        id="audit_bx_no_image",
-        replace_existing=True, coalesce=True, max_instances=1,
-    )
+    interval = timedelta(hours=s.audit_interval_hours)
+    now = datetime.now(timezone.utc)
+    for job_id, fn in _AUDIT_JOBS:
+        last = _last_job_run(job_id)
+        next_run = _interval_next_run(last, interval, now)
+        log.info(
+            "%s: última corrida %s → próxima %s",
+            job_id, last.isoformat(timespec="minutes") if last else "nunca",
+            next_run.isoformat(timespec="minutes"),
+        )
+        scheduler.add_job(
+            fn,
+            IntervalTrigger(hours=s.audit_interval_hours),
+            id=job_id,
+            next_run_time=next_run,
+            replace_existing=True, coalesce=True, max_instances=1,
+        )
     scheduler.add_job(
         daily_digest,
         CronTrigger(hour=9, minute=0),
