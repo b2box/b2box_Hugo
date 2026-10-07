@@ -58,7 +58,9 @@ dev = [
 # `python -m camoufox fetch` en el build para bajar el Firefox (~150 MB).
 # Sin esto instalado, browser_fetch.available() es False y todo sigue igual.
 browser = [
-    "camoufox[geoip]>=0.4",
+    # Pineado a la serie que buildeó el 02-oct-2026. 0.5.7/0.5.8 salieron el
+    # 04-06 de octubre; subir a propósito, no por arrastre de "latest".
+    "camoufox[geoip]>=0.5.4,<0.5.7",
 ]
 
 [tool.hatch.build.targets.wheel]

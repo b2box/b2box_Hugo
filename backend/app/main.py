@@ -128,6 +128,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             return
         try:
             await asyncio.to_thread(browser_fetch._camoufox)
+            # Si el build no pudo bajar Firefox (GitHub limita por IP), se
+            # baja acá, en background. Fail-soft: si falla, render() dirá
+            # BrowserUnavailable y el fetch plano sigue como siempre.
+            await asyncio.to_thread(browser_fetch.ensure_browser_installed)
         except Exception as exc:  # noqa: BLE001
             # available() vuelve a intentar el import y devuelve False si no
             # está: que esto falle no puede tumbar el arranque.

@@ -133,7 +133,19 @@ USER hugo
 
 # El binario de Firefox se baja como `hugo`: Camoufox lo busca en el cache del
 # usuario que corre el proceso, así que hacerlo como root no serviría.
-RUN if [ "$INSTALL_BROWSER" = "true" ]; then python -m camoufox fetch; fi
+# La descarga pasa por la API de GitHub, que limita por IP: el deploy del
+# 07-oct-2026 murió acá con exit 1. Se reintenta y, si igual falla, el build
+# SIGUE: app/main.py completa la descarga al arrancar (fail-soft). Con
+# GITHUB_TOKEN en el entorno de build, camoufox autentica y el límite sube.
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+        ok=0; \
+        for i in 1 2 3; do \
+            if python -m camoufox fetch; then ok=1; break; fi; \
+            echo "camoufox fetch: intento $i falló, reintento en 20 s"; sleep 20; \
+        done; \
+        if [ "$ok" = "1" ]; then echo "camoufox fetch OK"; \
+        else echo "WARN: camoufox fetch falló 3 veces; Firefox se baja al arrancar"; fi; \
+    fi
 
 EXPOSE 8000
 
