@@ -313,7 +313,7 @@ def test_env_example_ships_no_usable_key():
     from pathlib import Path
 
     text = Path(__file__).resolve().parents[2].joinpath(".env.example").read_text()
-    line = next(l for l in text.splitlines() if l.startswith("HUGO_API_KEYS="))
+    line = next(ln for ln in text.splitlines() if ln.startswith("HUGO_API_KEYS="))
     assert line == "HUGO_API_KEYS=", "el ejemplo no puede traer keys que parseen"
 
 
