@@ -393,7 +393,8 @@ se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
 - **Login del dashboard**: Supabase Auth de Cloud_B2BOX (mismos usuarios que
   Paco). `SUPABASE_ALLOWED_EMAILS` es la allowlist de quién entra y es
   **fail-closed en producción**: con `HUGO_ENV=production` y la variable vacía,
-  todo login responde `403 "SUPABASE_ALLOWED_EMAILS no configurado"`. Hugo
+  todo login responde `403` con un texto genérico ("login deshabilitado por
+  configuración"); el motivo exacto queda en el log del servidor. Hugo
   arranca igual (no es un restart loop) y `/verify` y `/app/*` siguen andando
   con su API key. Para abrir a todos los usuarios de Cloud_B2BOX hay que
   decirlo a propósito: `SUPABASE_ALLOWED_EMAILS=*`. En development, vacía =

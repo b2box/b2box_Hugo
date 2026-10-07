@@ -125,8 +125,11 @@ def test_misconfigured_only_when_supabase_is_the_login_method(monkeypatch):
     assert auth.allowlist_misconfigured() is False
 
 
-def test_login_endpoint_returns_403_with_a_clear_message(monkeypatch):
-    """La app no se cae: responde 403 y dice qué variable falta. No llama a Supabase."""
+def test_login_endpoint_returns_403_generic_to_the_client_and_detailed_in_the_log(monkeypatch, caplog):
+    """La app no se cae: responde 403. El nombre de la variable va al log del
+    servidor, no a quien está probando el login. No llama a Supabase."""
+    import logging
+
     from fastapi.testclient import TestClient
 
     from app import main as main_mod
@@ -149,9 +152,13 @@ def test_login_endpoint_returns_403_with_a_clear_message(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Boom())
 
     client = TestClient(main_mod.app)  # sin lifespan: no arranca scheduler ni warm-ups
-    resp = client.post("/api/login", json={"username": "tech@b2box.pro", "password": "x"})
+    with caplog.at_level(logging.ERROR, logger="app.main"):
+        resp = client.post("/api/login", json={"username": "tech@b2box.pro", "password": "x"})
     assert resp.status_code == 403
-    assert "SUPABASE_ALLOWED_EMAILS no configurado" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "SUPABASE_ALLOWED_EMAILS" not in detail, "el nombre de la env var no sale al cliente"
+    assert "deshabilitado por configuración" in detail
+    assert any("SUPABASE_ALLOWED_EMAILS no configurado" in r.getMessage() for r in caplog.records)
     assert called["n"] == 0, "la contraseña no viaja a Supabase si nadie puede entrar"
 
     # Otros caminos siguen vivos: la app no entró en restart loop.

@@ -232,7 +232,8 @@ def test_production_without_allowlist_blocks_login_but_not_api_key_clients(monke
 
     login = client.post("/api/login", json={"username": "tech@b2box.pro", "password": "x"})
     assert login.status_code == 403
-    assert "SUPABASE_ALLOWED_EMAILS" in login.json()["detail"]
+    assert "SUPABASE_ALLOWED_EMAILS" not in login.json()["detail"], "la env var no se revela al cliente"
+    assert "deshabilitado" in login.json()["detail"]
 
     assert client.get("/health").status_code == 200
     assert client.post("/verify", json={"name": "x", "source_url": SOURCE_URL}).status_code == 401

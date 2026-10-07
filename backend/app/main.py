@@ -194,10 +194,13 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     # Fallback: user/pass local (solo si Supabase no está configurado).
     if auth.supabase_enabled():
         if auth.allowlist_misconfigured():
-            # Nadie puede entrar: se dice claro y no se manda la contraseña a
-            # Supabase para nada.
+            # Nadie puede entrar: no se manda la contraseña a Supabase para
+            # nada. El motivo exacto va al log; al cliente, un texto genérico.
+            logging.getLogger(__name__).error(
+                "Login rechazado desde %s: %s", ip, auth.ALLOWLIST_MISSING_DETAIL
+            )
             return JSONResponse(
-                {"ok": False, "detail": auth.ALLOWLIST_MISSING_DETAIL}, status_code=403
+                {"ok": False, "detail": auth.LOGIN_DISABLED_DETAIL}, status_code=403
             )
         ok, identity = await auth.supabase_login(payload.username, payload.password)
     else:

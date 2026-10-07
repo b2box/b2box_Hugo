@@ -124,10 +124,16 @@ def login_enabled() -> bool:
 
 
 ALLOWLIST_OPEN = "*"
+# Para el LOG del servidor: dice qué variable falta y cómo arreglarlo.
 ALLOWLIST_MISSING_DETAIL = (
     "SUPABASE_ALLOWED_EMAILS no configurado: en producción el login por Supabase "
     "queda cerrado. Cargá los emails permitidos (coma-separados) o \"*\" para abrir "
     "a todos los usuarios de Cloud_B2BOX."
+)
+# Para la RESPUESTA HTTP: a quien está del otro lado no le damos el nombre de
+# nuestras variables de entorno; con saber que es configuración alcanza.
+LOGIN_DISABLED_DETAIL = (
+    "Login deshabilitado por configuración del servidor. Avisale al administrador."
 )
 
 
