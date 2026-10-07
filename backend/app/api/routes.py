@@ -410,18 +410,55 @@ def _source_already_sent_to_paco(source_url: str | None, source: str) -> str | N
         return None
 
 
+# Topes de lo que /verify acepta y de lo que se persiste en AuditLog.verify_ctx.
+# Sin tope, un callback_ctx o un text_specs enorme se guardaba entero en cada
+# fila (y viajaba en cada listado del dashboard).
+MAX_CALLBACK_CTX_BYTES = 4096   # un quotation_item_id y poco más; más que eso es otra cosa
+MAX_TEXT_SPECS_STORED = 2000    # a Paco va completo; acá se guarda recortado
+MAX_VERIFY_CTX_BYTES = 8192
+
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _reject_oversized_callback_ctx(payload: "VerifyRequest") -> None:
+    """413 si callback_ctx supera el tope. Se corta antes de tocar Vendure/Paco."""
+    if payload.callback_ctx is None:
+        return
+    size = _json_bytes(payload.callback_ctx)
+    if size > MAX_CALLBACK_CTX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"callback_ctx ocupa {size} bytes; el máximo es {MAX_CALLBACK_CTX_BYTES}",
+        )
+
+
 def _verify_ctx_json(payload: "VerifyRequest") -> str:
     """Contexto del /verify que un reintento a Paco necesita reproducir.
 
     Un pedido PRO sin su callback_ctx llega a Paco pero Paco no puede escribir
     de vuelta al quotation_item; y sin el `source` no se sabe a qué Paco iba.
+
+    Acotado a MAX_VERIFY_CTX_BYTES: text_specs se guarda recortado (marcado) y,
+    si aun así no entra, callback_ctx se descarta con marca en vez de guardar
+    algo truncado que después no parsee.
     """
-    return json.dumps({
+    text = payload.text_specs or ""
+    ctx: dict[str, Any] = {
         "source": _event_source(payload),
         "callback_ctx": payload.callback_ctx,
-        "text_specs": payload.text_specs or "",
+        "text_specs": text[:MAX_TEXT_SPECS_STORED],
         "use_browser": bool(payload.use_browser),
-    })
+    }
+    if len(text) > MAX_TEXT_SPECS_STORED:
+        ctx["text_specs_truncated"] = True
+    raw = json.dumps(ctx)
+    if len(raw.encode("utf-8")) > MAX_VERIFY_CTX_BYTES:
+        ctx["callback_ctx"] = None
+        ctx["callback_ctx_dropped"] = True
+        raw = json.dumps(ctx)
+    return raw
 
 
 def _load_verify_ctx(entry: AuditLog) -> dict[str, Any]:
@@ -498,6 +535,8 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     `source` y sigue vigente (no descartado), NO reenvía — devuelve
     paco_status="already_sent". Otro `source` con la misma URL sí se envía.
     """
+    _reject_oversized_callback_ctx(payload)
+
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
     # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos".
     try:

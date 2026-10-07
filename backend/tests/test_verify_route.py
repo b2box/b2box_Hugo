@@ -299,3 +299,64 @@ async def test_the_flag_written_by_verify_has_no_disable_target_and_keeps_its_ct
     assert (row.product_id, row.canonical_product_id, row.disable_target_id) == ("8", "8", None)
     assert json.loads(row.verify_ctx)["callback_ctx"] == {"quotation_item_id": "q-9"}
     assert json.loads(row.after)["matched_by"] == ["url"]
+
+
+# ─── verify_ctx acotado ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_oversized_callback_ctx_is_rejected_with_413(monkeypatch):
+    from fastapi import HTTPException
+
+    _catalog(monkeypatch, [])
+    huge = {"blob": "x" * (routes.MAX_CALLBACK_CTX_BYTES + 1)}
+    with pytest.raises(HTTPException) as exc:
+        await routes.verify(_payload(source="orders-pro", callback_ctx=huge))
+    assert exc.value.status_code == 413
+    assert FakePaco.submitted == [], "se corta antes de hablar con Paco"
+    with Session(engine) as s:
+        assert list(s.exec(select(AuditLog))) == []
+
+
+@pytest.mark.asyncio
+async def test_long_text_specs_go_to_paco_whole_but_are_stored_truncated(monkeypatch):
+    import json
+
+    _catalog(monkeypatch, [])
+    long_specs = "rojo " * 1000  # 5000 chars
+    await routes.verify(_payload(source="orders-pro", text_specs=long_specs))
+    assert FakePaco.submitted[0]["text_specs"] == long_specs, "Paco recibe todo"
+    with Session(engine) as s:
+        row = s.exec(select(AuditLog).where(AuditLog.action == "verify_passed_to_paco")).one()
+    ctx = json.loads(row.verify_ctx)
+    assert len(ctx["text_specs"]) == routes.MAX_TEXT_SPECS_STORED
+    assert ctx["text_specs_truncated"] is True
+    assert len(row.verify_ctx.encode("utf-8")) <= routes.MAX_VERIFY_CTX_BYTES
+
+
+def test_verify_ctx_never_exceeds_the_cap_and_marks_what_it_dropped():
+    import json
+
+    # Pasa el tope total aunque cada parte esté dentro del suyo: se construye
+    # directo (sin pasar por el 413) para ejercitar la última defensa.
+    payload = routes.VerifyRequest(
+        source="orders-pro",
+        callback_ctx={"blob": "y" * (routes.MAX_VERIFY_CTX_BYTES)},
+        text_specs="z" * 100,
+    )
+    raw = routes._verify_ctx_json(payload)
+    assert len(raw.encode("utf-8")) <= routes.MAX_VERIFY_CTX_BYTES
+    ctx = json.loads(raw)
+    assert ctx["callback_ctx"] is None
+    assert ctx["callback_ctx_dropped"] is True
+    assert ctx["source"] == "orders-pro" and ctx["text_specs"] == "z" * 100
+
+
+def test_normal_sized_ctx_is_stored_whole():
+    import json
+
+    payload = routes.VerifyRequest(source="orders-pro", callback_ctx={"quotation_item_id": "q-9"},
+                                   text_specs="rojo")
+    ctx = json.loads(routes._verify_ctx_json(payload))
+    assert ctx["callback_ctx"] == {"quotation_item_id": "q-9"}
+    assert "text_specs_truncated" not in ctx and "callback_ctx_dropped" not in ctx
