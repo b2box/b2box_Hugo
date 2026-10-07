@@ -182,9 +182,18 @@ def _interval_next_run(last_run: datetime | None, interval: timedelta, now: date
     - Sin marcador (primera vez): now + interval, igual que IntervalTrigger.
     - Con marcador: last_run + interval, pero nunca antes de now + grace (si
       ya venció, corre apenas el proceso termine de levantar).
+    - Marcador en el FUTURO (skew de reloj, edición manual de la fila): se toma
+      como "ahora". Si no, una fecha mal escrita postergaba la auditoría más
+      allá de un intervalo entero, sin que nadie lo notara.
     """
     if last_run is None:
         return now + interval
+    if last_run > now:
+        log.warning(
+            "Última corrida registrada en el futuro (%s > %s); la tomo como ahora",
+            last_run.isoformat(timespec="minutes"), now.isoformat(timespec="minutes"),
+        )
+        last_run = now
     return max(last_run + interval, now + _STARTUP_GRACE)
 
 

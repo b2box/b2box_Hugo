@@ -59,6 +59,28 @@ def test_run_due_in_less_than_the_grace_is_pushed_to_the_grace():
     assert jobs._interval_next_run(last, TWO_WEEKS, NOW) == NOW + jobs._STARTUP_GRACE
 
 
+def test_marker_in_the_future_is_clamped_to_now(caplog):
+    """Skew de reloj o edición manual: nunca más de un intervalo desde ahora."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.scheduler.jobs"):
+        assert jobs._interval_next_run(NOW + timedelta(days=10), TWO_WEEKS, NOW) == NOW + TWO_WEEKS
+        assert jobs._interval_next_run(NOW + timedelta(seconds=1), TWO_WEEKS, NOW) == NOW + TWO_WEEKS
+    assert any("futuro" in r.getMessage() for r in caplog.records)
+
+
+def test_register_jobs_with_a_future_marker_does_not_postpone_past_one_interval(monkeypatch):
+    jobs._set_meta("_meta:last_run:audit_bx_no_image",
+                   (datetime.now(timezone.utc) + timedelta(days=365)).isoformat())
+    monkeypatch.setattr(jobs, "get_settings", lambda: type("S", (), {
+        "audit_interval_hours": 336, "verify_catalog_ttl_seconds": 300,
+    })())
+    jobs.register_jobs()
+    job = jobs.scheduler.get_job("audit_bx_no_image")
+    delay = (job.next_run_time - datetime.now(timezone.utc)).total_seconds()
+    assert delay <= TWO_WEEKS.total_seconds() + 5
+
+
 # ─── persistencia ─────────────────────────────────────────────────────────────
 
 
