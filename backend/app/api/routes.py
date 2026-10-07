@@ -22,6 +22,7 @@ from app import runtime
 from app.clock import utcnow
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine, get_session
+from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_target_for
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
@@ -46,6 +47,11 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "icon": "duplicate",
         "title": "Ya existe en el catálogo (no se reenvió a Paco)",
         "tone": "warning",
+    },
+    "duplicate_confirmed": {
+        "icon": "check",
+        "title": "Duplicado confirmado · el original sigue activo en Vendure",
+        "tone": "muted",
     },
     "verify_passed_to_paco": {
         "icon": "send",
@@ -131,6 +137,25 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
 }
 
 
+_DUPLICATE_ACTIONS = ("duplicate_flagged", "duplicate_disabled", "duplicate_confirmed")
+
+
+def _duplicate_semantics(entry: AuditLog) -> dict[str, Any] | None:
+    """Qué haría (o hizo) "Confirmar duplicado" con este evento, para que el
+    dashboard no prometa "deshabilitar en Vendure" cuando no hay nada que apagar."""
+    if entry.action not in _DUPLICATE_ACTIONS:
+        return None
+    if entry.action == "duplicate_flagged":
+        target = disable_target_for(entry)
+    else:
+        target = (entry.disable_target_id or "").strip() or None
+    return {
+        "disable_target_id": target,
+        "canonical_product_id": canonical_for(entry),
+        "vendure_action": "disable" if target else "none",
+    }
+
+
 def _humanize(entry: AuditLog) -> dict[str, Any]:
     meta = _ACTION_LABELS.get(entry.action, {"icon": "info", "title": entry.action, "tone": "muted"})
     before = json.loads(entry.before) if entry.before else None
@@ -164,6 +189,7 @@ def _humanize(entry: AuditLog) -> dict[str, Any]:
         "before": before,
         "after": after,
         "confidence": entry.confidence,
+        "duplicate": _duplicate_semantics(entry),
         # ISO con "Z" para que el frontend lo interprete inequívocamente como UTC
         "created_at": (entry.created_at.isoformat() + "Z") if entry.created_at else None,
     }
@@ -189,7 +215,7 @@ SECTIONS: dict[str, dict[str, Any]] = {
     "duplicates": {
         "label": "Duplicados",
         "source": None,
-        "actions": ["duplicate_disabled", "duplicate_flagged"],
+        "actions": ["duplicate_disabled", "duplicate_flagged", "duplicate_confirmed"],
     },
     "price_changes": {
         "label": "Cambios de precio",
@@ -382,11 +408,21 @@ def _record_verify(
     """Escribe la fila de AuditLog de un verify. Sync (corre en background task)."""
     try:
         valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
+        is_dup = bool(verdict.is_duplicate and verdict.candidate_id)
         with Session(engine) as session:
             session.add(AuditLog(
                 action=action,
                 source=payload.source or "luis",
-                product_id=verdict.candidate_id or "(nuevo)",
+                product_id=verdict.candidate_id or PLACEHOLDER_NEW,
+                # El candidato NO está en Vendure (viene de Luis/Cloud): el único id
+                # que tenemos es el del producto ORIGINAL que matcheó. Confirmar
+                # este evento no debe apagar nada — queda explícito en la fila.
+                canonical_product_id=verdict.candidate_id if is_dup else None,
+                disable_target_id=None,
+                after=json.dumps({
+                    "per_strategy_scores": dict(verdict.per_strategy_scores),
+                    "matched_by": list(verdict.matched_by),
+                }) if is_dup else None,
                 detail=detail[:500],
                 confidence=verdict.confidence,
                 product_name=payload.name[:200] if payload.name else None,
@@ -936,7 +972,7 @@ async def restore_duplicates(
     # Construir mapa product_id → before_enabled (si está registrado)
     before_state: dict[str, bool | None] = {}
     for r in rows:
-        if not r.product_id or r.product_id == "(nuevo)":
+        if not r.product_id or r.product_id == PLACEHOLDER_NEW:
             continue
         before_state.setdefault(r.product_id, None)
         if r.before:
@@ -1022,6 +1058,70 @@ async def restore_duplicates(
     }
 
 
+def _dismiss(entry: AuditLog) -> None:
+    entry.dismissed = True
+    entry.dismissed_at = utcnow()
+
+
+def _duplicate_disabled_row(entry: AuditLog, target: str, canonical: str | None, detail: str) -> AuditLog:
+    """Fila `duplicate_disabled` para el producto `target` que se apagó en Vendure."""
+    return AuditLog(
+        action="duplicate_disabled",
+        source="manual",
+        product_id=target,
+        related_product_id=canonical,
+        disable_target_id=target,
+        canonical_product_id=canonical,
+        confidence=entry.confidence,
+        detail=detail,
+        before=json.dumps({"enabled": True}),
+        after=json.dumps({"enabled": False}),
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+        related_product_name=entry.related_product_name,
+        related_product_code=entry.related_product_code,
+    )
+
+
+def _duplicate_confirmed_row(entry: AuditLog, canonical: str | None, detail: str) -> AuditLog:
+    """Fila `duplicate_confirmed`: el usuario confirmó, pero no había nada que apagar."""
+    return AuditLog(
+        action="duplicate_confirmed",
+        source="manual",
+        product_id=entry.product_id,
+        related_product_id=entry.related_product_id,
+        disable_target_id=None,
+        canonical_product_id=canonical,
+        confidence=entry.confidence,
+        detail=detail,
+        product_name=entry.product_name,
+        product_code=entry.product_code,
+        product_image_url=entry.product_image_url,
+        product_source_url=entry.product_source_url,
+        related_product_name=entry.related_product_name,
+        related_product_code=entry.related_product_code,
+    )
+
+
+def _confirm_without_vendure(session: Session, entry: AuditLog, *, how: str) -> str | None:
+    """Confirma un flag de /verify: el candidato nunca entró a Vendure, así que
+    solo se registra y se archiva. Devuelve el id del original (informativo)."""
+    canonical = canonical_for(entry)
+    session.add(_duplicate_confirmed_row(
+        entry, canonical,
+        detail=(
+            f"{how}: '{(entry.product_name or '?')[:60]}' era duplicado de "
+            f"#{canonical or '?'}. El candidato nunca entró a Vendure; el original "
+            f"sigue activo. No se tocó nada en Vendure."
+        ),
+    ))
+    _dismiss(entry)
+    session.add(entry)
+    return canonical
+
+
 @router.post("/api/duplicates/bulk-confirm")
 async def bulk_confirm_duplicates(
     min_confidence: float = 0.99,
@@ -1030,78 +1130,91 @@ async def bulk_confirm_duplicates(
 ) -> dict[str, Any]:
     """Confirma en bloque los duplicados flagged con confianza >= min_confidence.
 
-    Sin `confirm=true` es un dry-run (solo dice cuántos tocaría). Con confirm=true,
-    deshabilita cada uno en Vendure (guardando estado previo para revertir) y los
-    archiva. Sirve para limpiar el backlog de duplicados de alta confianza rápido.
+    Sin `confirm=true` es un dry-run (solo dice cuántos tocaría). Con confirm=true:
+      · eventos de la auditoría de catálogo → deshabilita en Vendure el producto
+        MÁS NUEVO (`disable_target_id`), guardando estado previo para revertir, y
+        archiva el evento. El canónico no se toca nunca.
+      · eventos de /verify (el candidato nunca entró a Vendure) → solo registra la
+        confirmación y archiva. El único id que traen es el del producto ORIGINAL,
+        y apagarlo era justo el bug.
+    Sirve para limpiar el backlog de duplicados de alta confianza rápido.
     """
     stmt = select(AuditLog).where(
         AuditLog.action == "duplicate_flagged",
         AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
         AuditLog.confidence >= min_confidence,  # type: ignore[operator]
     )
-    rows = [r for r in session.exec(stmt) if r.product_id and r.product_id != "(nuevo)"]
+    rows = [r for r in session.exec(stmt) if r.product_id and r.product_id != PLACEHOLDER_NEW]
+    to_disable: list[tuple[AuditLog, str]] = []
+    confirm_only: list[AuditLog] = []
+    for r in rows:
+        target = disable_target_for(r)
+        if target is None:
+            confirm_only.append(r)
+        else:
+            to_disable.append((r, target))
 
     if not confirm:
         return {
-            "would_disable": len(rows),
+            "would_disable": len(to_disable),
+            "would_confirm_only": len(confirm_only),
             "min_confidence": min_confidence,
-            "preview_ids": [r.product_id for r in rows[:20]],
-            "hint": "Pasá ?confirm=true&min_confidence=0.99 para deshabilitarlos en Vendure.",
+            "preview_ids": [t for _, t in to_disable[:20]],
+            "hint": (
+                "Pasá ?confirm=true&min_confidence=0.99 para confirmarlos. Solo los de la "
+                "auditoría de catálogo deshabilitan algo en Vendure (el producto más nuevo); "
+                "los de /verify se archivan sin tocar Vendure."
+            ),
         }
 
     client = VendureClient()
     disabled: list[str] = []
+    confirmed_only: list[str] = []
     skipped_already_disabled: list[str] = []
     failed: list[dict[str, str]] = []
+    how = f"Confirmado en bloque (confianza >= {min_confidence:.0%})"
 
-    for entry in rows:
+    for entry in confirm_only:
+        _confirm_without_vendure(session, entry, how=how)
+        confirmed_only.append(entry.product_id)
+
+    for entry, target in to_disable:
+        canonical = canonical_for(entry)
         try:
-            previous = await client.get_enabled_status(entry.product_id)
+            previous = await client.get_enabled_status(target)
         except Exception as exc:  # noqa: BLE001
-            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            failed.append({"product_id": target, "error": f"{type(exc).__name__}: {exc}"[:150]})
             continue
         if previous is None:
-            failed.append({"product_id": entry.product_id, "error": "No existe en Vendure"})
+            failed.append({"product_id": target, "error": "No existe en Vendure"})
             continue
         if previous is False:
-            entry.dismissed = True
-            entry.dismissed_at = utcnow()
+            _dismiss(entry)
             session.add(entry)
-            skipped_already_disabled.append(entry.product_id)
+            skipped_already_disabled.append(target)
             continue
         try:
-            await client.disable_product(entry.product_id)
+            await client.disable_product(target)
         except Exception as exc:  # noqa: BLE001
-            failed.append({"product_id": entry.product_id, "error": f"{type(exc).__name__}: {exc}"[:150]})
+            failed.append({"product_id": target, "error": f"{type(exc).__name__}: {exc}"[:150]})
             continue
-        session.add(AuditLog(
-            action="duplicate_disabled",
-            source="manual",
-            product_id=entry.product_id,
-            related_product_id=entry.related_product_id,
-            confidence=entry.confidence,
+        session.add(_duplicate_disabled_row(
+            entry, target, canonical,
             detail=(
-                f"Confirmado en bloque (confianza >= {min_confidence:.0%}) como duplicado de "
-                f"#{entry.related_product_id}. Deshabilitado en Vendure."
+                f"{how} como duplicado de #{canonical}. "
+                f"Deshabilitado #{target} en Vendure; #{canonical} se conserva."
             ),
-            before=json.dumps({"enabled": True}),
-            after=json.dumps({"enabled": False}),
-            product_name=entry.product_name,
-            product_code=entry.product_code,
-            product_image_url=entry.product_image_url,
-            product_source_url=entry.product_source_url,
-            related_product_name=entry.related_product_name,
-            related_product_code=entry.related_product_code,
         ))
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
-        disabled.append(entry.product_id)
+        disabled.append(target)
 
     session.commit()
-    vendure_catalog.invalidate()
+    if disabled:
+        vendure_catalog.invalidate()
     return {
         "disabled": len(disabled),
+        "confirmed_only": len(confirmed_only),
         "skipped_already_disabled": len(skipped_already_disabled),
         "failed": len(failed),
         "failed_details": failed[:10],
@@ -1113,22 +1226,40 @@ async def confirm_duplicate(
     event_id: int,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Confirma un duplicado flagged: deshabilita el producto en Vendure.
+    """Confirma un duplicado flagged.
 
-    Antes de tocar, lee el `enabled` actual y lo guarda en `before` para poder
-    restaurarlo después si te equivocás.
+    Qué pasa depende de dónde nació el flag (ver app/dedup/confirm_target.py):
+      · auditoría de catálogo → deshabilita en Vendure el producto MÁS NUEVO
+        (`disable_target_id`), nunca el canónico. Antes de tocar, lee el `enabled`
+        actual y lo guarda en `before` para poder restaurarlo.
+      · /verify → el candidato nunca entró a Vendure; el único id de la fila es el
+        del producto ORIGINAL. Se registra la confirmación y se archiva el evento,
+        sin tocar Vendure.
     """
     entry = session.get(AuditLog, event_id)
     if not entry:
         raise HTTPException(404, "Evento no encontrado")
     if entry.action != "duplicate_flagged":
         raise HTTPException(400, "Solo se puede confirmar eventos de tipo duplicate_flagged")
-    if not entry.product_id or entry.product_id == "(nuevo)":
+    if not entry.product_id or entry.product_id == PLACEHOLDER_NEW:
         raise HTTPException(400, "El evento no tiene product_id válido")
 
+    target = disable_target_for(entry)
+    if target is None:
+        canonical = _confirm_without_vendure(session, entry, how="Confirmado manualmente")
+        session.commit()
+        return {
+            "ok": True,
+            "action": "confirmed",
+            "vendure_action": "none",
+            "canonical_product_id": canonical,
+            "reason": "El candidato nunca entró a Vendure; el original sigue activo",
+        }
+
+    canonical = canonical_for(entry)
     client = VendureClient()
     try:
-        previous_enabled = await client.get_enabled_status(entry.product_id)
+        previous_enabled = await client.get_enabled_status(target)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"No pude leer estado actual de Vendure: {exc}")
 
@@ -1136,45 +1267,37 @@ async def confirm_duplicate(
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
         # Ya estaba disabled, no hacemos nada (pero descartamos el flag)
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
         session.commit()
         return {"ok": True, "action": "no-op", "reason": "Producto ya estaba disabled en Vendure"}
 
     try:
-        await client.disable_product(entry.product_id)
+        await client.disable_product(target)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"No pude deshabilitar en Vendure: {exc}")
 
-    # Crear nuevo evento de tipo duplicate_disabled con tracking del estado previo
-    session.add(AuditLog(
-        action="duplicate_disabled",
-        source="manual",
-        product_id=entry.product_id,
-        related_product_id=entry.related_product_id,
-        confidence=entry.confidence,
+    # Nuevo evento duplicate_disabled con tracking del estado previo
+    session.add(_duplicate_disabled_row(
+        entry, target, canonical,
         detail=(
-            f"Confirmado manualmente como duplicado de #{entry.related_product_id}. "
-            f"Deshabilitado en Vendure."
+            f"Confirmado manualmente como duplicado de #{canonical}. "
+            f"Deshabilitado #{target} en Vendure; #{canonical} se conserva."
         ),
-        before=json.dumps({"enabled": True}),
-        after=json.dumps({"enabled": False}),
-        product_name=entry.product_name,
-        product_code=entry.product_code,
-        product_image_url=entry.product_image_url,
-        product_source_url=entry.product_source_url,
-        related_product_name=entry.related_product_name,
-        related_product_code=entry.related_product_code,
     ))
     # El evento original se descarta (ya se actuó sobre él)
-    entry.dismissed = True
-    entry.dismissed_at = utcnow()
+    _dismiss(entry)
     session.add(entry)
     session.commit()
 
     vendure_catalog.invalidate()  # el catálogo cacheado ya no refleja este disable
-    return {"ok": True, "action": "disabled", "product_id": entry.product_id}
+    return {
+        "ok": True,
+        "action": "disabled",
+        "vendure_action": "disable",
+        "product_id": target,
+        "canonical_product_id": canonical,
+    }
 
 
 @router.post("/api/audit-log/{event_id}/confirm-disable-bx")

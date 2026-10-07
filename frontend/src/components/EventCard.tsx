@@ -53,6 +53,16 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
   const hasId = !!p.id && p.id !== "(nuevo)";
   const canRetry = (e.action === "paco_failed" || e.action === "verify_no_match") && !!p.image_url;
   const canConfirmDuplicate = e.action === "duplicate_flagged" && hasId;
+  // Un flag que vino de /verify no tiene nada que apagar: el candidato nunca
+  // entró a Vendure y el único id de la fila es el del producto ORIGINAL.
+  const dupDisables = e.duplicate?.vendure_action === "disable";
+  const dupTarget = e.duplicate?.disable_target_id ?? p.id;
+  const dupCanonical = e.duplicate?.canonical_product_id ?? r?.id ?? null;
+  const confirmDupMsg = dupDisables
+    ? `¿Confirmar este duplicado y deshabilitar el producto #${dupTarget} en Vendure?` +
+      (dupCanonical ? ` El original #${dupCanonical} se conserva.` : "") +
+      " Se puede revertir desde el historial."
+    : "¿Confirmar que este candidato es un duplicado? No se toca nada en Vendure: el producto original sigue activo y el evento se archiva.";
   const canConfirmDisableBx = e.action === "bx_no_image_flagged" && hasId;
   // Todos los eventos se pueden archivar (incluye los ya enviados a Paco, para
   // que "Enviados a Paco" / "Llegan de Orders" no se acumulen).
@@ -180,18 +190,18 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
               <Button
                 variant="destructive"
                 size="sm"
-                onClick={() =>
-                  run(
-                    "dup",
-                    "¿Confirmar este duplicado y deshabilitarlo en Vendure? Se puede revertir desde el historial.",
-                    () => actions.onConfirmDuplicate(e.id),
-                  )
-                }
+                onClick={() => run("dup", confirmDupMsg, () => actions.onConfirmDuplicate(e.id))}
                 disabled={busy === "dup"}
-                title="Deshabilita el producto en Vendure (se puede revertir desde history)"
+                title={
+                  dupDisables
+                    ? `Deshabilita #${dupTarget} en Vendure y conserva el original (se puede revertir desde history)`
+                    : "Registra la confirmación y archiva el evento. No toca Vendure: el original sigue activo"
+                }
               >
                 <IconCheckCircle className="w-3 h-3" />
-                {busy === "dup" ? "Deshabilitando…" : "Confirmar duplicado"}
+                {busy === "dup"
+                  ? dupDisables ? "Deshabilitando…" : "Confirmando…"
+                  : "Confirmar duplicado"}
               </Button>
             )}
             {canConfirmDisableBx && (

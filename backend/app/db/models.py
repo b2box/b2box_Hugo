@@ -22,6 +22,8 @@ ActionType = Literal[
     "price_updated",
     "duplicate_disabled",
     "duplicate_flagged",
+    # Confirmado por el usuario sin tocar Vendure (el candidato nunca entró al catálogo)
+    "duplicate_confirmed",
     "price_flagged",
     "no_change",
     "error",
@@ -135,3 +137,28 @@ class AuditLog(SQLModel, table=True):
     dismissed_at: datetime | None = Field(default=None)
     # Comentario libre del usuario (ej: "el link no anda", motivo real del flag).
     note: str | None = Field(default=None)
+
+    # ── Semántica explícita de "Confirmar duplicado" ───────────────
+    # Un `duplicate_flagged` nace en dos lugares con significados distintos:
+    #   · /verify: el candidato (Luis/Cloud) NO está en Vendure. `product_id` es
+    #     el producto que YA existe y matcheó. Confirmar NO apaga nada: solo se
+    #     registra y se archiva.
+    #   · auditoría de catálogo: los dos están en Vendure. `product_id` es el más
+    #     nuevo (drop) y `related_product_id` el canónico (keep).
+    # Antes el confirm hacía disable_product(product_id) sin distinguir, y en el
+    # primer caso apagaba al ORIGINAL. Por eso ahora el id a apagar y el original
+    # viajan explícitos en la fila:
+    #   disable_target_id=None + canonical_product_id seteado → "no toca Vendure".
+    #   Ambos None → fila anterior a estos campos (ver app/dedup/confirm_target.py).
+    disable_target_id: str | None = Field(
+        default=None,
+        description="Producto que 'Confirmar duplicado' deshabilita en Vendure. None = ninguno",
+    )
+    canonical_product_id: str | None = Field(
+        default=None,
+        description="Producto original que se conserva. Nunca se deshabilita",
+    )
+    # JSON con el contexto del /verify original (source, callback_ctx, text_specs,
+    # use_browser). retry-paco lo usa para reenviar al MISMO Paco (APP o PRO) con
+    # el mismo callback; sin esto un reintento de un pedido PRO caía en Paco APP.
+    verify_ctx: str | None = Field(default=None, description="JSON del contexto del /verify")

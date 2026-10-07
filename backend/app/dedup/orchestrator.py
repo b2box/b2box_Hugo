@@ -149,9 +149,21 @@ _MAX_TOKENS_PER_PRODUCT = 12
 
 @dataclass(slots=True)
 class DuplicatePair:
-    drop: VendureProduct   # producto a marcar como duplicado
-    keep: VendureProduct   # producto "canónico" que se conserva
+    drop: VendureProduct   # producto a marcar como duplicado (el más nuevo)
+    keep: VendureProduct   # producto "canónico" que se conserva (el más viejo)
     verdict: DedupVerdict
+
+
+def _id_order(pid: str) -> tuple[int, int, str]:
+    """Clave de orden "más viejo primero" para ids de Vendure.
+
+    Los ids son numéricos autoincrementales, así que el menor es el más viejo.
+    Compararlos como strings rompía justo en el cambio de cifras ('1000' < '999')
+    y el canónico podía salir el producto NUEVO. Si el id no es numérico, cae al
+    orden lexicográfico de siempre.
+    """
+    s = (pid or "").strip()
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
 
 
 def _tokenize(name: str) -> list[str]:
@@ -219,10 +231,10 @@ async def find_duplicate_pairs(
     if len(enabled) < 2:
         return []
 
-    # Mantenemos la convención previa: de un par, el id "menor" (orden
-    # lexicográfico de strings) es el que se conserva; el "mayor" se marca.
+    # De un par, el id menor (numérico: el más viejo) es el canónico que se
+    # conserva; el mayor (el más nuevo) es el que se marca para apagar.
     def _keep_drop(a: VendureProduct, b: VendureProduct) -> tuple[VendureProduct, VendureProduct]:
-        return (a, b) if a.id <= b.id else (b, a)
+        return (a, b) if _id_order(a.id) <= _id_order(b.id) else (b, a)
 
     best_by_drop: dict[str, DuplicatePair] = {}
 
@@ -242,7 +254,7 @@ async def find_duplicate_pairs(
     for group in by_url.values():
         if len(group) < 2:
             continue
-        canonical = min(group, key=lambda p: p.id)
+        canonical = min(group, key=lambda p: _id_order(p.id))
         for p in group:
             if p.id == canonical.id:
                 continue

@@ -16,6 +16,15 @@ export interface PriceSnapshot {
   currency?: string | null;
 }
 
+// Qué hace "Confirmar duplicado" con este evento. Un flag de /verify no tiene
+// nada que apagar (el candidato nunca entró a Vendure); uno de la auditoría de
+// catálogo apaga el producto más nuevo y conserva el canónico.
+export interface DuplicateSemantics {
+  disable_target_id: string | null;
+  canonical_product_id: string | null;
+  vendure_action: "disable" | "none";
+}
+
 export interface AuditEvent {
   id: number;
   action: string;
@@ -32,6 +41,7 @@ export interface AuditEvent {
   after: PriceSnapshot | null;
   confidence: number | null;
   created_at: string | null;
+  duplicate?: DuplicateSemantics | null;
 }
 
 export interface AuditLogResponse {
@@ -104,8 +114,10 @@ export interface HealthMetrics {
 
 export interface BulkConfirmResult {
   would_disable?: number;
+  would_confirm_only?: number;
   preview_ids?: string[];
   disabled?: number;
+  confirmed_only?: number;
   skipped_already_disabled?: number;
   failed?: number;
 }

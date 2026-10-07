@@ -217,6 +217,11 @@ async def audit_duplicates() -> None:
                     source="audit",
                     product_id=drop.id,
                     related_product_id=keep.id,
+                    # Acá SÍ están los dos en Vendure: confirmar apaga al más
+                    # nuevo (drop) y conserva al canónico (keep). Explícito para
+                    # que el confirm nunca tenga que adivinar.
+                    disable_target_id=drop.id,
+                    canonical_product_id=keep.id,
                     confidence=verdict.confidence,
                     detail=(
                         f"Posible duplicado de #{keep.id} por {','.join(verdict.matched_by)} "
