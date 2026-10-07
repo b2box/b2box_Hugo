@@ -31,16 +31,37 @@ _VERIFY_WINDOW_SECONDS = 60.0
 _verify_hits: dict[str, deque[float]] = defaultdict(deque)
 
 
-def _client_ip(request: Request) -> str:
+def client_ip(request: Request, hops: int | None = None) -> str:
+    """IP del cliente, confiando solo en los proxies configurados.
+
+    Hugo corre detrás del Traefik de Coolify. Cada proxy AGREGA al final de
+    X-Forwarded-For la IP de quien le habló, así que las últimas
+    `trusted_proxy_hops` entradas las escribieron proxies nuestros y todo lo
+    anterior lo pudo inventar el cliente. Tomar el PRIMER valor (lo que hacía
+    antes) dejaba falsificar la IP con un header y saltear el rate limit y el
+    lockout del login.
+
+    Con N hops, la IP real es la N-ésima desde la derecha. Si la cadena viene
+    más corta que N (un proxy no agregó nada), se usa la primera que haya. Sin
+    X-Forwarded-For se mira X-Real-IP (lo setea Traefik) y, si no, el socket.
+    Con hops=0 se ignoran los headers: solo vale el socket.
+    """
+    if hops is None:
+        hops = int(get_settings().trusted_proxy_hops)
+    peer = request.client.host if request.client else "unknown"
+    if hops <= 0:
+        return peer
     fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    chain = [part.strip() for part in fwd.split(",") if part.strip()]
+    if chain:
+        return chain[-hops] if len(chain) >= hops else chain[0]
+    real = (request.headers.get("x-real-ip") or "").strip()
+    return real or peer
 
 
 def verify_rate_limit(request: Request) -> None:
     """FastAPI dependency: limita /verify a N requests por IP por ventana."""
-    ip = _client_ip(request)
+    ip = client_ip(request)
     now = time.time()
     hits = _verify_hits[ip]
     cutoff = now - _VERIFY_WINDOW_SECONDS

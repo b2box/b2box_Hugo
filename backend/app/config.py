@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     # ── Auth: API key para que Luis se autentique al pegarle a /verify ──
     hugo_api_key: str = Field(default="", description="Si vacío, /verify queda abierto (no recomendado)")
 
+    # ── Proxy de confianza (Traefik de Coolify) ────────────────
+    # Cuántos proxies confiables hay delante de Hugo. Con N, la IP real del
+    # cliente es la N-ésima desde la DERECHA de X-Forwarded-For: cada proxy
+    # agrega la IP de quien le habló, así que las últimas N entradas las
+    # escribieron proxies nuestros y el resto lo puede inventar el cliente.
+    # 1 = Traefik/Coolify directo (default). 2 = Cloudflare → Traefik.
+    # 0 = sin proxy: se ignoran los headers y vale la IP del socket.
+    trusted_proxy_hops: int = Field(default=1, description="Proxies confiables delante de Hugo")
+
     # ── Auth: login del dashboard vía Supabase (mismo pool que Paco) ──
     # Si supabase_url + supabase_anon_key están seteados, el login del dashboard
     # valida email+contraseña contra el Supabase Auth de Cloud_B2BOX (mismos

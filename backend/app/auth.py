@@ -34,6 +34,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import get_settings
+from app.security import client_ip  # noqa: F401  (misma función que el rate limit de /verify)
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +49,6 @@ _WINDOW = 300.0
 _LOCKOUT = 300.0
 _fail_log: dict[str, list[float]] = {}
 _locked_until: dict[str, float] = {}
-
-
-def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def is_locked(ip: str) -> bool:
