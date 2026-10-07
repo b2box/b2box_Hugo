@@ -47,8 +47,11 @@ def test_two_trusted_hops_cloudflare_then_traefik():
     assert security.client_ip(_request("203.0.113.9, 172.64.1.1"), hops=2) == "203.0.113.9"
 
 
-def test_chain_shorter_than_hops_falls_back_to_the_first_entry():
-    assert security.client_ip(_request("203.0.113.9"), hops=2) == "203.0.113.9"
+def test_chain_shorter_than_hops_falls_back_to_the_socket():
+    """Cadena más corta que lo configurado = algo no vino por los proxies
+    esperados. chain[0] la pudo escribir el cliente; el socket no."""
+    assert security.client_ip(_request("203.0.113.9"), hops=2) == PEER
+    assert security.client_ip(_request("1.2.3.4, 5.6.7.8"), hops=3) == PEER
 
 
 def test_zero_hops_ignores_headers_entirely():

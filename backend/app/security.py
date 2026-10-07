@@ -49,9 +49,15 @@ def client_ip(request: Request, hops: int | None = None) -> str:
     lockout del login.
 
     Con N hops, la IP real es la N-ésima desde la derecha. Si la cadena viene
-    más corta que N (un proxy no agregó nada), se usa la primera que haya. Sin
+    más corta que N, algo no es como se configuró (un proxy que no agregó nada,
+    o tráfico que llegó salteándose un hop): la única IP que no pudo inventar
+    nadie es la del socket, así que se usa esa y no la primera del header. Sin
     X-Forwarded-For se mira X-Real-IP (lo setea Traefik) y, si no, el socket.
     Con hops=0 se ignoran los headers: solo vale el socket.
+
+    hops=2 solo tiene sentido si Traefik acepta tráfico ÚNICAMENTE desde los
+    rangos de Cloudflare: si alguien le pega directo a Traefik con un
+    X-Forwarded-For armado, el "segundo hop" lo escribió el atacante.
     """
     if hops is None:
         hops = int(get_settings().trusted_proxy_hops)
@@ -61,7 +67,7 @@ def client_ip(request: Request, hops: int | None = None) -> str:
     fwd = request.headers.get("x-forwarded-for", "")
     chain = [part.strip() for part in fwd.split(",") if part.strip()]
     if chain:
-        return chain[-hops] if len(chain) >= hops else chain[0]
+        return chain[-hops] if len(chain) >= hops else peer
     real = (request.headers.get("x-real-ip") or "").strip()
     return real or peer
 

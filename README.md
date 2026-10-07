@@ -403,8 +403,12 @@ se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
   cliente queda en el log de cada request.
 - **IP del cliente** (rate limit de `/verify`, lockout del login): se toma del
   último hop confiable de `X-Forwarded-For` según `TRUSTED_PROXY_HOPS`
-  (1 = Traefik de Coolify, 2 = Cloudflare delante de Traefik, 0 = sin proxy).
-  El primer valor del header lo escribe el cliente y no se le cree.
+  (1 = Traefik de Coolify, 0 = sin proxy). El primer valor del header lo
+  escribe el cliente y no se le cree; si la cadena viene más corta que lo
+  configurado se usa la IP del socket. `2` (Cloudflare delante de Traefik)
+  **solo** si Traefik acepta tráfico únicamente desde los rangos de Cloudflare;
+  si no, quien le pegue directo con un header armado elige su propia IP. No
+  subirlo "por las dudas".
 
 ## Variables de entorno
 
