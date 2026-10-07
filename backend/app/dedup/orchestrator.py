@@ -37,7 +37,13 @@ class DedupVerdict:
     confidence: float
     matched_by: list[Strategy] = field(default_factory=list)
     per_strategy_scores: dict[Strategy, float] = field(default_factory=dict)
-    candidate_id: str | None = None  # id del producto contra el que matcheó
+    # Id del producto contra el que matcheó. Solo se setea cuando is_duplicate
+    # es True: un candidate_id sin duplicado hacía que /verify tratara al
+    # "más parecido" como si fuera el match.
+    candidate_id: str | None = None
+    # El producto más parecido cuando NADIE pasó su umbral (informativo; la
+    # confianza reportada es la de este). Nunca se usa como duplicado.
+    closest_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -109,21 +115,49 @@ async def find_duplicate_in(
     candidate: CandidateInput,
     existing: list[VendureProduct],
 ) -> DedupVerdict:
-    """Compara `candidate` contra una lista de productos existentes en Vendure
-    y devuelve el match de más alta confianza (o no-duplicado si nadie pasa)."""
+    """Compara `candidate` contra los productos existentes en Vendure.
+
+    Devuelve duplicado SOLO si algún veredicto pasó su umbral: de esos, el de
+    mayor confianza, con `candidate_id`. Si ninguno pasó, `is_duplicate=False`
+    y `candidate_id=None`; la confianza y `closest_id` describen al más
+    parecido, a título informativo.
+
+    Antes se quedaba con la confianza más alta sin mirar `is_duplicate`: un
+    producto con imagen 0.91 (bajo el umbral) le ganaba a otro que SÍ matcheaba
+    por texto 0.89, y /verify respondía "no es duplicado" con un candidate_id
+    puesto.
+    """
     if not existing:
         return DedupVerdict(is_duplicate=False, confidence=0.0)
 
-    best = DedupVerdict(is_duplicate=False, confidence=0.0)
+    best_dup: DedupVerdict | None = None
+    closest: DedupVerdict | None = None
+    closest_id: str | None = None
     for product in existing:
         verdict = await compare(candidate, _from_vendure(product))
-        if verdict.confidence > best.confidence:
-            best = verdict
-            best.candidate_id = product.id
-            if verdict.is_duplicate and "url" in verdict.matched_by:
-                # match seguro, no seguimos buscando
-                return best
-    return best
+        if verdict.is_duplicate:
+            if best_dup is None or verdict.confidence > best_dup.confidence:
+                best_dup = verdict
+                best_dup.candidate_id = product.id
+                if "url" in verdict.matched_by:
+                    # match seguro, no seguimos buscando
+                    return best_dup
+        elif closest is None or verdict.confidence > closest.confidence:
+            closest = verdict
+            closest_id = product.id
+
+    if best_dup is not None:
+        return best_dup
+    if closest is None:
+        return DedupVerdict(is_duplicate=False, confidence=0.0)
+    return DedupVerdict(
+        is_duplicate=False,
+        confidence=closest.confidence,
+        matched_by=[],
+        per_strategy_scores=dict(closest.per_strategy_scores),
+        candidate_id=None,
+        closest_id=closest_id,
+    )
 
 
 # ─── Batch dedup para el scheduler (audit_duplicates) ──────────────
