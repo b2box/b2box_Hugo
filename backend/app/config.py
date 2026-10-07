@@ -150,8 +150,13 @@ class Settings(BaseSettings):
         default="/opt/models/clip-vit-b32-vision.onnx",
         description="Path local al modelo ONNX (se bakea en la imagen Docker)",
     )
+    # Revisión fijada (misma que backend/Dockerfile, stage `model`); el build
+    # además verifica el sha256. Cambiarla implica recalibrar los thresholds.
     embed_model_url: str = Field(
-        default="https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/main/model.onnx",
+        default=(
+            "https://huggingface.co/Qdrant/clip-ViT-B-32-vision/resolve/"
+            "e0c24ed0fa57fa3e4f97f30de74c51d944036ace/model.onnx"
+        ),
         description="De dónde se baja el modelo en el build (no se usa en runtime)",
     )
     # Restarle a cada vector la media del índice antes de comparar. Sin esto todas
