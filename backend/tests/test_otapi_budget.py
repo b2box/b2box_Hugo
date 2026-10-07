@@ -258,3 +258,38 @@ async def test_failed_fetch_still_consumes_budget_and_trips_the_cap(monkeypatch)
     # Cuarto intento: el budget (3) ya está agotado y ni sale a la red.
     assert await fetcher.fetch_price(url) is None
     assert len(hits) == 3, "el budget cortó ANTES del request"
+
+
+@pytest.mark.anyio
+async def test_parallel_fetchers_in_one_event_loop_never_exceed_the_budget(monkeypatch):
+    """Los 10 fetchers de audit_source_prices son corrutinas, no threads: con
+    budget 5 y 12 fetch_price lanzados con gather, salen exactamente 5 requests.
+
+    El chequeo y el incremento pasan JUNTOS dentro de _reserve_otapi_call (sync,
+    sin await en el medio), así que ninguna corrutina puede leer "hay lugar"
+    después de que otra lo haya ocupado.
+    """
+    import asyncio
+
+    import httpx
+
+    hits: list = []
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *a, **kw: _FakeClient({"ErrorCode": "ItemNotFound"}, hits),
+    )
+    monkeypatch.setattr(
+        source_check, "get_settings",
+        lambda: type("S", (), {
+            "rapidapi_key": "k", "otapi_1688_host": "h", "otapi_daily_budget": 5,
+        })(),
+    )
+    monkeypatch.setattr(source_check.runtime_settings, "get", lambda *_a, **_k: None)
+
+    fetcher = source_check.Detail1688Fetcher()
+    urls = [f"https://detail.1688.com/offer/{n}.html" for n in range(12)]
+    results = await asyncio.gather(*(fetcher.fetch_price(u) for u in urls))
+
+    assert all(r is None for r in results)
+    assert len(hits) == 5, "exactamente el budget, ni uno más"
+    assert source_check._otapi_calls_today() == 5
