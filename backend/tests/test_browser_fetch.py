@@ -283,3 +283,68 @@ def test_proxy_config_vacio_devuelve_none(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "browser_proxy", "", raising=False)
     assert browser_fetch._proxy_config() is None
+
+
+# ── ensure_browser_installed(): el build ya no falla si GitHub limita la
+# descarga de Firefox; el arranque la completa en background, fail-soft. ──
+
+import sys
+import types
+
+
+def _fake_pkgman(monkeypatch, *, installed: bool, download_ok: bool = True) -> list:
+    """Reemplaza camoufox.pkgman por un doble que registra las llamadas."""
+    calls: list = []
+    fake = types.ModuleType("camoufox.pkgman")
+    state = {"installed": installed}
+
+    class NotInstalled(Exception):
+        pass
+
+    def camoufox_path(download_if_missing: bool = True):
+        calls.append(("camoufox_path", download_if_missing))
+        if state["installed"]:
+            return "/fake/camoufox"
+        if not download_if_missing:
+            raise NotInstalled("no está instalado")
+        if not download_ok:
+            raise RuntimeError("GitHub: API rate limit exceeded")
+        state["installed"] = True
+        return "/fake/camoufox"
+
+    def launch_path(browser_path=None):
+        calls.append(("launch_path", browser_path))
+        if state["installed"]:
+            return "/fake/camoufox/camoufox-bin"
+        raise NotInstalled("sin binario")
+
+    fake.camoufox_path = camoufox_path
+    fake.launch_path = launch_path
+    pkg = types.ModuleType("camoufox")
+    pkg.pkgman = fake
+    monkeypatch.setitem(sys.modules, "camoufox", pkg)
+    monkeypatch.setitem(sys.modules, "camoufox.pkgman", fake)
+    return calls
+
+
+def test_ensure_browser_sin_camoufox_devuelve_false(monkeypatch):
+    monkeypatch.setitem(sys.modules, "camoufox", None)  # import → ImportError
+    assert browser_fetch.ensure_browser_installed() is False
+
+
+def test_ensure_browser_ya_instalado_no_descarga(monkeypatch):
+    calls = _fake_pkgman(monkeypatch, installed=True)
+    assert browser_fetch.ensure_browser_installed() is True
+    assert ("camoufox_path", True) not in calls  # nunca pidió descargar
+
+
+def test_ensure_browser_falta_y_lo_descarga(monkeypatch):
+    calls = _fake_pkgman(monkeypatch, installed=False, download_ok=True)
+    assert browser_fetch.ensure_browser_installed() is True
+    assert ("camoufox_path", False) in calls  # primero miró sin descargar
+    assert ("camoufox_path", True) in calls  # después descargó
+
+
+def test_ensure_browser_descarga_falla_no_tira(monkeypatch):
+    _fake_pkgman(monkeypatch, installed=False, download_ok=False)
+    assert browser_fetch.ensure_browser_installed() is False

@@ -82,6 +82,35 @@ def _camoufox():
     return AsyncCamoufox
 
 
+def ensure_browser_installed() -> bool:
+    """Si el Firefox de Camoufox no está en la imagen, lo baja acá (fail-soft).
+
+    El Dockerfile lo intenta con `camoufox fetch`, pero la descarga pasa por la
+    API de GitHub, que limita por IP, y el deploy del 07-oct-2026 se cayó por
+    eso. El build ya no falla: si faltó el binario, se completa al arrancar.
+    Nunca tira. Devuelve True si el binario quedó disponible.
+    """
+    try:
+        from camoufox import pkgman  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        log.debug("camoufox no importable, no hay nada que instalar: %s", exc)
+        return False
+    try:
+        pkgman.launch_path(pkgman.camoufox_path(download_if_missing=False))
+        return True
+    except Exception:  # noqa: BLE001
+        pass
+    log.warning("Camoufox no está instalado en la imagen: descargando al arrancar")
+    try:
+        pkgman.camoufox_path(download_if_missing=True)
+        pkgman.launch_path()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("no pude descargar Camoufox (el render por browser queda apagado): %s", exc)
+        return False
+    log.info("Camoufox descargado y listo")
+    return True
+
+
 def _proxy_config() -> dict[str, str] | None:
     """Traduce settings.browser_proxy al dict que espera Camoufox/Playwright.
 
