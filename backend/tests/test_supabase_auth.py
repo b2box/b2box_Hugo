@@ -169,7 +169,7 @@ def test_startup_check_warns_but_does_not_raise(monkeypatch, caplog):
     s = Settings(
         vendure_api_url="https://x/admin-api", hugo_env="production",
         supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
-        hugo_api_keys="luis:xxx",
+        hugo_api_keys="luis:k-a1b2c3d4e5f6g7h8i9j0a1b2c3d4e5f6g7h8i9j0",
     )
     monkeypatch.setattr(main_mod, "get_settings", lambda: s)
     monkeypatch.setattr(security, "get_settings", lambda: s)

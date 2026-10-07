@@ -130,6 +130,9 @@ def test_authenticated_client_is_logged(monkeypatch, caplog):
     assert not any("xxx" in r.getMessage() for r in caplog.records), "la key nunca se loguea"
 
 
+STRONG = "k-" + "a1b2c3d4e5f6g7h8i9j0" * 2  # 42 chars, como token_urlsafe(32)
+
+
 def _prod_settings(**kw):
     from app.config import Settings
 
@@ -145,7 +148,7 @@ def _prod_settings(**kw):
 def test_production_requires_some_key(monkeypatch):
     from app import main as main_mod
 
-    ok = _prod_settings(hugo_api_keys="luis:xxx")
+    ok = _prod_settings(hugo_api_keys=f"luis:{STRONG}")
     monkeypatch.setattr(main_mod, "get_settings", lambda: ok)
     monkeypatch.setattr(security, "get_settings", lambda: ok)
     main_mod._enforce_prod_secrets()  # HUGO_API_KEYS alcanza
@@ -249,3 +252,59 @@ def test_development_without_keys_stays_open_but_production_does_not(monkeypatch
     with pytest.raises(HTTPException) as exc:
         security.verify_api_key(_request(), x_api_key=None)
     assert exc.value.status_code == 503
+
+
+# ─── Keys débiles: valen en development, no en production ───────────────────
+
+
+@pytest.mark.parametrize("weak", ["replace-me", "REPLACE-ME", "changeme", "change-me", "example", "xxx", "a" * 23])
+def test_weak_keys_are_ignored_in_production(monkeypatch, weak):
+    """Copiar el .env.example tal cual no puede dejar un cliente autenticable."""
+    s = _prod_settings(hugo_api_keys=f"luis:{weak}")
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    assert security.configured_api_keys() == {}
+    with pytest.raises(HTTPException) as exc:
+        security.verify_api_key(_request(), x_api_key=weak)
+    assert exc.value.status_code == 503
+
+
+def test_weak_legacy_key_is_ignored_in_production_too(monkeypatch):
+    s = _prod_settings(hugo_api_key="changeme")
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    assert security.configured_api_keys() == {}
+
+
+def test_strong_keys_survive_and_weak_ones_do_not_drag_them_down(monkeypatch, caplog):
+    import logging
+
+    s = _prod_settings(hugo_api_keys=f"luis:{STRONG},cloud:replace-me")
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    with caplog.at_level(logging.WARNING, logger="app.security"):
+        assert security.configured_api_keys() == {"luis": STRONG}
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "'cloud'" in joined and "placeholder" in joined
+    assert STRONG not in joined and "replace-me" not in joined.replace("placeholder", "")
+
+
+def test_short_keys_are_fine_in_development(monkeypatch):
+    s = _prod_settings(hugo_env="development", hugo_api_keys="luis:xxx")
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    assert security.configured_api_keys() == {"luis": "xxx"}
+
+
+def test_production_startup_fails_when_the_only_key_is_a_placeholder(monkeypatch):
+    from app import main as main_mod
+
+    s = _prod_settings(hugo_api_keys="luis:replace-me,cloud:replace-me")
+    monkeypatch.setattr(main_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(security, "get_settings", lambda: s)
+    with pytest.raises(RuntimeError, match="HUGO_API_KEYS"):
+        main_mod._enforce_prod_secrets()
+
+
+def test_env_example_ships_no_usable_key():
+    from pathlib import Path
+
+    text = Path(__file__).resolve().parents[2].joinpath(".env.example").read_text()
+    line = next(l for l in text.splitlines() if l.startswith("HUGO_API_KEYS="))
+    assert line == "HUGO_API_KEYS=", "el ejemplo no puede traer keys que parseen"

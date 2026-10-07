@@ -114,13 +114,48 @@ def parse_api_keys(raw: str) -> dict[str, str]:
     return keys
 
 
+# Una key de producción sale de secrets.token_urlsafe(32) (43 chars). Menos de
+# esto es algo tipeado a mano o un placeholder que quedó del .env.example.
+MIN_KEY_LEN = 24
+_PLACEHOLDER_KEYS = frozenset({"replace-me", "replaceme", "change-me", "changeme", "example"})
+
+
+def weak_key_reason(key: str) -> str | None:
+    """Por qué una key NO sirve en producción, o None si sirve."""
+    if key.strip().lower() in _PLACEHOLDER_KEYS:
+        return "es un placeholder del .env.example"
+    if len(key) < MIN_KEY_LEN:
+        return f"tiene menos de {MIN_KEY_LEN} caracteres"
+    return None
+
+
+def _drop_weak_keys(keys: dict[str, str]) -> dict[str, str]:
+    """En producción una key débil cuenta como NO configurada (con warning).
+
+    Copiar el .env.example tal cual no puede dejar un cliente autenticable con
+    "replace-me". Se avisa con el nombre del cliente, nunca con la key.
+    """
+    strong: dict[str, str] = {}
+    for name, key in keys.items():
+        reason = weak_key_reason(key)
+        if reason:
+            log.warning("HUGO_API_KEYS: la key del cliente %r %s; en producción se ignora", name, reason)
+            continue
+        strong[name] = key
+    return strong
+
+
 def configured_api_keys() -> dict[str, str]:
-    """Keys vigentes por nombre de cliente, incluida la legacy si está seteada."""
+    """Keys vigentes por nombre de cliente, incluida la legacy si está seteada.
+
+    En production las keys débiles (placeholder / cortas) se descartan."""
     s = get_settings()
     keys = parse_api_keys(s.hugo_api_keys)
     legacy = (s.hugo_api_key or "").strip()
     if legacy:
         keys.setdefault(LEGACY_CLIENT, legacy)
+    if _is_production():
+        keys = _drop_weak_keys(keys)
     return keys
 
 

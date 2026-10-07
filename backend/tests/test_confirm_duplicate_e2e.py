@@ -215,7 +215,9 @@ def test_rows_written_before_the_new_columns_fall_back_by_source(client):
 def test_production_without_allowlist_blocks_login_but_not_api_key_clients(monkeypatch, client):
     _use_settings(monkeypatch, _settings(
         hugo_env="production", supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
-        supabase_allowed_emails="", hugo_api_keys="luis:k-luis,cloud:k-cloud",
+        supabase_allowed_emails="",
+        # En producción una key < 24 chars se ignora: acá van keys "de verdad".
+        hugo_api_keys="luis:k-luis-a1b2c3d4e5f6g7h8i9j0,cloud:k-cloud-a1b2c3d4e5f6g7h8i9j0",
     ))
     import httpx
 
@@ -235,7 +237,7 @@ def test_production_without_allowlist_blocks_login_but_not_api_key_clients(monke
     assert client.get("/health").status_code == 200
     assert client.post("/verify", json={"name": "x", "source_url": SOURCE_URL}).status_code == 401
     ok = client.post("/verify", json={"name": "Lámpara LED", "source_url": SOURCE_URL},
-                     headers={"X-API-Key": "k-cloud"})
+                     headers={"X-API-Key": "k-cloud-a1b2c3d4e5f6g7h8i9j0"})
     assert ok.status_code == 200, ok.text
     assert ok.json()["is_duplicate"] is True
     # El dashboard (cookie) sigue cerrado para quien no tiene sesión.
