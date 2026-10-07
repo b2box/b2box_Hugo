@@ -383,6 +383,13 @@ se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
 
 ## Seguridad
 
+- **`HUGO_ENV=production` es el interruptor.** Activa todo lo que sigue:
+  secretos obligatorios al arranque (login del dashboard + al menos una API key
+  que parsee), allowlist fail-closed, `503` en `/verify` y `/app/*` si ninguna
+  key es válida, y descarte de keys placeholder o de menos de 24 caracteres.
+  Con `development` (el default del código) todo eso es solo un warning. Por
+  eso `docker-compose.yml` —lo que deploya Coolify— lo define con default
+  `production`; en local el `.env` lo pisa con `development`.
 - **Login del dashboard**: Supabase Auth de Cloud_B2BOX (mismos usuarios que
   Paco). `SUPABASE_ALLOWED_EMAILS` es la allowlist de quién entra y es
   **fail-closed en producción**: con `HUGO_ENV=production` y la variable vacía,
