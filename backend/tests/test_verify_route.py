@@ -360,3 +360,42 @@ def test_normal_sized_ctx_is_stored_whole():
     ctx = json.loads(routes._verify_ctx_json(payload))
     assert ctx["callback_ctx"] == {"quotation_item_id": "q-9"}
     assert "text_specs_truncated" not in ctx and "callback_ctx_dropped" not in ctx
+
+
+# ─── source normalizado ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("  B2BOX-PRO ", "b2box-pro"),
+    ("LUIS", "luis"),
+    ("", "luis"),
+    (None, "luis"),
+    ("   ", "luis"),
+    ("x" * 100, "x" * routes.MAX_SOURCE_LEN),
+])
+def test_source_is_normalized_on_input(raw, expected):
+    assert routes.VerifyRequest(source=raw).source == expected
+
+
+def test_source_omitted_defaults_to_luis():
+    assert routes.VerifyRequest().source == "luis"
+
+
+@pytest.mark.asyncio
+async def test_uppercase_pro_source_routes_to_pro_and_is_stored_normalized(monkeypatch):
+    _catalog(monkeypatch, [])
+    await routes.verify(_payload(source="B2BOX-PRO", callback_ctx={"quotation_item_id": "q-1"}))
+    assert FakePaco.submitted[0]["pro"] is True
+    with Session(engine) as s:
+        row = s.exec(select(AuditLog).where(AuditLog.action == "verify_passed_to_paco")).one()
+    assert row.source == "b2box-pro", "misma tab y misma idempotencia que el valor canónico"
+
+
+@pytest.mark.asyncio
+async def test_case_variants_share_idempotency(monkeypatch):
+    """Antes "LUIS" y "luis" eran clientes distintos: dos búsquedas en Paco."""
+    _catalog(monkeypatch, [])
+    await routes.verify(_payload(source="luis"))
+    out = await routes.verify(_payload(source=" LUIS "))
+    assert out.paco_status == "already_sent"
+    assert len(FakePaco.submitted) == 1

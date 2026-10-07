@@ -303,6 +303,7 @@ def _apply_section_filter(stmt, section_key: str | None):
 
 
 MAX_IMAGE_URLS = 5
+MAX_SOURCE_LEN = 32
 
 
 class VerifyRequest(BaseModel):
@@ -323,6 +324,16 @@ class VerifyRequest(BaseModel):
     # rutear a la Paco correcta: "b2box-pro"/"admin" → Paco PRO; el resto → Paco APP.
     # Valores típicos: "luis" (default), "orders", "manual", "b2box-pro".
     source: str = "luis"
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _normalize_source(cls, v: Any) -> str:
+        # Normalizado al entrar: el ruteo a Paco ya era case-insensitive, pero el
+        # valor se guardaba tal cual → "B2BOX-PRO" iba a PRO y a la vez quedaba
+        # fuera de su tab y de la idempotencia por (source_url, source). Cap
+        # defensivo: `source` es texto libre de un cliente y termina indexado.
+        text = str(v or "").strip().lower()[:MAX_SOURCE_LEN]
+        return text or "luis"
     # Solo para el flujo PRO: lo reenviamos a Paco PRO para que escriba de vuelta
     # al quotation_item correcto (paco-ingest) cuando NO es duplicado.
     callback_ctx: dict[str, Any] | None = None
@@ -369,7 +380,8 @@ async def health() -> dict[str, str]:
 
 
 def _event_source(payload: "VerifyRequest") -> str:
-    """`source` tal como se guarda en AuditLog (default "luis")."""
+    """`source` tal como se guarda en AuditLog. Ya viene normalizado por el
+    validador de VerifyRequest (lower, sin espacios, ≤ MAX_SOURCE_LEN, default "luis")."""
     return payload.source or "luis"
 
 
