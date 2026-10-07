@@ -461,8 +461,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     (no descartado), NO reenvía — devuelve paco_status="already_sent".
     """
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
+    # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos".
     try:
-        existing = await vendure_catalog.get_catalog()
+        existing = vendure_catalog.enabled_only(await vendure_catalog.get_catalog())
     except Exception as exc:  # noqa: BLE001
         log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
         raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
