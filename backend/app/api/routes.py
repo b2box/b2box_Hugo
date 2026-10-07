@@ -368,13 +368,24 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "agent": "hugo"}
 
 
-def _source_already_sent_to_paco(source_url: str | None) -> str | None:
-    """¿Ya mandamos este producto (por source_url) a Paco y sigue vigente?
+def _event_source(payload: "VerifyRequest") -> str:
+    """`source` tal como se guarda en AuditLog (default "luis")."""
+    return payload.source or "luis"
+
+
+def _source_already_sent_to_paco(source_url: str | None, source: str) -> str | None:
+    """¿Ya mandamos este producto (source_url) a Paco DESDE ESTE MISMO CLIENTE?
 
     El dedup de /verify compara contra el catálogo de Vendure. Un producto que
     todavía NO entró a Vendure (lo está enriqueciendo Paco) da "nuevo" en cada
     verify → se re-enviaba a Paco N veces. Este chequeo corta eso: si ya hay un
-    `verify_passed_to_paco` NO descartado con el mismo source_url, no reenviamos.
+    `verify_passed_to_paco` NO descartado con el mismo source_url y el mismo
+    `source`, no reenviamos.
+
+    Es por (source_url, source) y no por URL sola: Luis y un pedido de Orders
+    van a Pacos distintas (APP vs PRO) con callbacks distintos, así que el job
+    de uno no le sirve al otro — con la URL sola, el segundo cliente se quedaba
+    sin búsqueda.
 
     Devuelve el product_id de la fila existente (o None si no hay).
     """
@@ -386,6 +397,7 @@ def _source_already_sent_to_paco(source_url: str | None) -> str | None:
                 select(AuditLog)
                 .where(
                     AuditLog.product_source_url == source_url,
+                    AuditLog.source == source,
                     AuditLog.action == "verify_passed_to_paco",
                     AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
                 )
@@ -412,7 +424,7 @@ def _record_verify(
         with Session(engine) as session:
             session.add(AuditLog(
                 action=action,
-                source=payload.source or "luis",
+                source=_event_source(payload),
                 product_id=verdict.candidate_id or PLACEHOLDER_NEW,
                 # El candidato NO está en Vendure (viene de Luis/Cloud): el único id
                 # que tenemos es el del producto ORIGINAL que matcheó. Confirmar
@@ -457,8 +469,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     (send-to-hugo, convert-pro-to-paco) leen `paco_search_id` de esta respuesta
     para guardarlo y evitar reenviar. No lo pases a background sin actualizarlas.
 
-    Idempotencia: si el mismo source_url ya se mandó a Paco y sigue vigente
-    (no descartado), NO reenvía — devuelve paco_status="already_sent".
+    Idempotencia: si el mismo source_url ya se mandó a Paco desde el mismo
+    `source` y sigue vigente (no descartado), NO reenvía — devuelve
+    paco_status="already_sent". Otro `source` con la misma URL sí se envía.
     """
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
     # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos".
@@ -522,9 +535,10 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
-    # Idempotencia: si este source_url ya se mandó a Paco y sigue vigente, NO
-    # reenviamos (evita duplicar el job cuando el producto aún no entró a Vendure).
-    if _source_already_sent_to_paco(payload.source_url) is not None:
+    # Idempotencia: si este source_url ya se mandó a Paco DESDE ESTE CLIENTE y
+    # sigue vigente, NO reenviamos (evita duplicar el job cuando el producto aún
+    # no entró a Vendure). Otro cliente con la misma URL sí genera su búsqueda.
+    if _source_already_sent_to_paco(payload.source_url, _event_source(payload)) is not None:
         response.paco_status = "already_sent"
         return response
 

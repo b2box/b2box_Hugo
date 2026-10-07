@@ -98,3 +98,44 @@ async def test_enabled_match_is_still_a_duplicate(monkeypatch):
     assert out.is_duplicate is True
     assert out.candidate_id == "8"
     assert FakePaco.submitted == []
+
+
+# ─── Idempotencia hacia Paco: por (source_url, source), no por URL sola ──────
+
+
+@pytest.mark.asyncio
+async def test_same_client_same_url_is_not_resent(monkeypatch):
+    _catalog(monkeypatch, [])
+    first = await routes.verify(_payload(source="luis"))
+    second = await routes.verify(_payload(source="luis"))
+    assert first.paco_search_id == "s-1"
+    assert second.paco_status == "already_sent"
+    assert second.paco_search_id is None
+    assert len(FakePaco.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_another_client_with_the_same_url_gets_its_own_search(monkeypatch):
+    """Luis ya lo mandó a Paco APP; un pedido de Orders (Paco PRO, con callback)
+    tiene que generar SU búsqueda. Antes el chequeo era global por URL y el
+    segundo cliente se quedaba con already_sent."""
+    _catalog(monkeypatch, [])
+    await routes.verify(_payload(source="luis"))
+    out = await routes.verify(_payload(source="orders-pro", callback_ctx={"quotation_item_id": "q-9"}))
+    assert out.paco_status != "already_sent"
+    assert out.paco_search_id == "s-pro"
+    assert [c["pro"] for c in FakePaco.submitted] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_dismissed_rows_do_not_block_a_resend(monkeypatch):
+    _catalog(monkeypatch, [])
+    await routes.verify(_payload(source="luis"))
+    with Session(engine) as s:
+        for row in s.exec(select(AuditLog)).all():
+            row.dismissed = True
+            s.add(row)
+        s.commit()
+    out = await routes.verify(_payload(source="luis"))
+    assert out.paco_search_id == "s-1"
+    assert len(FakePaco.submitted) == 2
