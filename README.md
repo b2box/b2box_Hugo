@@ -195,6 +195,11 @@ cp ../.env.example ../.env
 uvicorn app.main:app --reload
 ```
 
+Tests: `pytest` desde `backend/` o desde la raíz del repo (hay un `pytest.ini`
+que apunta a `backend/tests` con `asyncio_mode=auto`). Solo necesitan
+`VENDURE_API_URL` en el entorno (alcanza `https://example.invalid/admin-api`) o
+un `backend/.env`; no tocan red ni Vendure.
+
 ## Run con Docker (recomendado para producción)
 
 Requisitos: Docker + Docker Compose v2.
