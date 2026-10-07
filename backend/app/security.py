@@ -20,6 +20,7 @@ import hmac
 import logging
 import time
 from collections import defaultdict, deque
+from functools import lru_cache
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -145,18 +146,46 @@ def _drop_weak_keys(keys: dict[str, str]) -> dict[str, str]:
     return strong
 
 
+@lru_cache(maxsize=32)
+def _resolve_keys(raw: str, legacy: str, production: bool) -> tuple[tuple[str, str], ...]:
+    """Parsea y valida las keys UNA vez por combinación de valores.
+
+    Esto corre en cada request autenticado; sin cache se re-parseaba el string
+    y se repetía el warning de cada entrada rota en cada /verify. Cacheado por
+    el valor crudo: si la env cambia (otro proceso), se vuelve a parsear. Las
+    advertencias de configuración (entrada rota, cliente "legacy", dos clientes
+    con la misma key) salen una sola vez por valor, con nombres y nunca keys.
+    """
+    keys = parse_api_keys(raw)
+    legacy = legacy.strip()
+    if legacy:
+        if LEGACY_CLIENT in keys:
+            log.warning(
+                "HUGO_API_KEYS define un cliente %r: pisa a HUGO_API_KEY, que queda sin efecto. "
+                "Renombrá el cliente o vaciá HUGO_API_KEY.", LEGACY_CLIENT,
+            )
+        else:
+            keys[LEGACY_CLIENT] = legacy
+    if production:
+        keys = _drop_weak_keys(keys)
+    owners: dict[str, list[str]] = defaultdict(list)
+    for name, key in keys.items():
+        owners[key].append(name)
+    for names in owners.values():
+        if len(names) > 1:
+            log.warning(
+                "HUGO_API_KEYS: los clientes %s comparten la misma key; los requests se van a "
+                "atribuir todos a %r y no se puede rotar uno sin el otro", names, names[0],
+            )
+    return tuple(keys.items())
+
+
 def configured_api_keys() -> dict[str, str]:
     """Keys vigentes por nombre de cliente, incluida la legacy si está seteada.
 
     En production las keys débiles (placeholder / cortas) se descartan."""
     s = get_settings()
-    keys = parse_api_keys(s.hugo_api_keys)
-    legacy = (s.hugo_api_key or "").strip()
-    if legacy:
-        keys.setdefault(LEGACY_CLIENT, legacy)
-    if _is_production():
-        keys = _drop_weak_keys(keys)
-    return keys
+    return dict(_resolve_keys(s.hugo_api_keys or "", s.hugo_api_key or "", _is_production()))
 
 
 def api_keys_configured() -> bool:
