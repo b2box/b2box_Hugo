@@ -42,8 +42,14 @@ class Settings(BaseSettings):
     rapidapi_key: str = Field(default="", description="X-RapidAPI-Key compartida")
     otapi_1688_host: str = Field(default="otapi-1688.p.rapidapi.com")
 
-    # ── Auth: API key para que Luis se autentique al pegarle a /verify ──
-    hugo_api_key: str = Field(default="", description="Si vacío, /verify queda abierto (no recomendado)")
+    # ── Auth: API keys de los clientes de /verify y /app/* ──────
+    # Una key POR CLIENTE, formato "nombre:key,nombre:key". El nombre se loguea
+    # en cada request autenticado, así se sabe quién pegó qué y se puede rotar
+    # la key de uno sin tocar a los demás. Ej: "luis:xxx,cloud:yyy,b2box-app:zzz".
+    hugo_api_keys: str = Field(default="", description='Keys por cliente: "luis:xxx,cloud:yyy"')
+    # Legacy: una sola key compartida. Sigue valiendo (cliente "legacy") para no
+    # romper a quien ya la tenga; conviene migrar a HUGO_API_KEYS.
+    hugo_api_key: str = Field(default="", description="Key única compartida (legacy)")
 
     # ── Proxy de confianza (Traefik de Coolify) ────────────────
     # Cuántos proxies confiables hay delante de Hugo. Con N, la IP real del

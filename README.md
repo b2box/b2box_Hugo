@@ -250,7 +250,11 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `GET  /app/index-status` — si el índice de imágenes ya está listo
 - `POST /app/index-rebuild` — fuerza la reconstrucción del índice
 
-Los tres `/app/*` se autentican con `X-API-Key: $HUGO_API_KEY` (igual que `/verify`).
+Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
+key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
+loguea el nombre del cliente en cada request autenticado y cada key se rota por
+separado. `HUGO_API_KEY` (una sola key compartida) sigue valiendo como cliente
+`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys).
 
 ### `POST /app/lookup`
 

@@ -26,7 +26,7 @@ from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_tar
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
-from app.security import verify_api_key, verify_rate_limit
+from app.security import configured_api_keys, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient
 
@@ -1537,6 +1537,8 @@ async def debug_config() -> dict[str, Any]:
         },
         "hugo_auth": {
             "api_key": _mask(s.hugo_api_key),
+            # Solo los NOMBRES de los clientes con key (HUGO_API_KEYS), nunca las keys.
+            "clients": sorted(configured_api_keys().keys()),
         },
         "paco": {
             "url": s.paco_url,

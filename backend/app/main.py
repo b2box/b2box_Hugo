@@ -49,8 +49,8 @@ def _enforce_prod_secrets() -> None:
     has_supabase = bool(s.supabase_url and s.supabase_anon_key)
     if not has_supabase and not s.dashboard_password:
         missing.append("SUPABASE_URL+SUPABASE_ANON_KEY (o DASHBOARD_PASSWORD)")
-    if not s.hugo_api_key:
-        missing.append("HUGO_API_KEY")
+    if not (s.hugo_api_key or s.hugo_api_keys.strip()):
+        missing.append("HUGO_API_KEYS (o HUGO_API_KEY)")
     if missing:
         raise RuntimeError(
             "HUGO_ENV=production pero faltan credenciales obligatorias: "

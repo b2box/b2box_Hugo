@@ -1,17 +1,23 @@
 """Auth simple por API key.
 
 Endpoints sensibles (los que Luis/Paco u otros agentes externos consumen)
-deben requerir el header `X-API-Key` con el valor de HUGO_API_KEY.
+requieren el header `X-API-Key`. Hay una key POR CLIENTE:
 
-Si HUGO_API_KEY no está seteado en .env, el endpoint queda abierto y
-loguea un warning prominente al startup. Esto facilita testing local pero
-NO debe usarse en producción.
+    HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"
+
+El nombre del cliente se loguea en cada request autenticado y queda en
+`request.state.api_client`. HUGO_API_KEY (una sola key compartida) sigue
+valiendo como cliente "legacy" para no romper a quien ya la tenga.
+
+Si no hay ninguna key configurada, el endpoint queda abierto y loguea un
+warning. Esto facilita testing local pero NO debe usarse en producción (con
+HUGO_ENV=production el arranque falla, ver main._enforce_prod_secrets).
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
-import secrets
 import time
 from collections import defaultdict, deque
 
@@ -77,19 +83,83 @@ def verify_rate_limit(request: Request) -> None:
     hits.append(now)
 
 
-def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """FastAPI dependency: valida X-API-Key contra HUGO_API_KEY.
+LEGACY_CLIENT = "legacy"
 
-    - Si HUGO_API_KEY no está configurado, deja pasar (modo dev).
-    - Si está configurado, exige el header y compara en tiempo constante.
+
+def parse_api_keys(raw: str) -> dict[str, str]:
+    """"luis:xxx,cloud:yyy" → {"luis": "xxx", "cloud": "yyy"}.
+
+    Tolerante: entradas vacías, sin ':' o sin key se ignoran con warning (una
+    key mal escrita no debe tirar abajo a los demás clientes). Si un nombre se
+    repite, gana la última.
     """
-    expected = get_settings().hugo_api_key
-    if not expected:
-        log.warning("HUGO_API_KEY vacío — /verify queda abierto, no usar en producción")
-        return
-    if not x_api_key or not secrets.compare_digest(x_api_key, expected):
+    keys: dict[str, str] = {}
+    for chunk in (raw or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        name, sep, key = chunk.partition(":")
+        name, key = name.strip(), key.strip()
+        if not sep or not name or not key:
+            log.warning("HUGO_API_KEYS: entrada ignorada (formato esperado nombre:key)")
+            continue
+        if name in keys:
+            log.warning("HUGO_API_KEYS: cliente %r repetido, gana la última key", name)
+        keys[name] = key
+    return keys
+
+
+def configured_api_keys() -> dict[str, str]:
+    """Keys vigentes por nombre de cliente, incluida la legacy si está seteada."""
+    s = get_settings()
+    keys = parse_api_keys(s.hugo_api_keys)
+    legacy = (s.hugo_api_key or "").strip()
+    if legacy:
+        keys.setdefault(LEGACY_CLIENT, legacy)
+    return keys
+
+
+def api_keys_configured() -> bool:
+    return bool(configured_api_keys())
+
+
+def match_api_key(presented: str | None) -> str | None:
+    """Nombre del cliente cuya key coincide con la presentada, o None.
+
+    Compara contra TODAS las keys con hmac.compare_digest y sin cortar en la
+    primera coincidencia, para que el tiempo de respuesta no dependa de cuál
+    (ni de si alguna) matcheó.
+    """
+    if not presented:
+        return None
+    given = presented.encode("utf-8")
+    matched: str | None = None
+    for name, key in configured_api_keys().items():
+        if hmac.compare_digest(given, key.encode("utf-8")) and matched is None:
+            matched = name
+    return matched
+
+
+def verify_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> str | None:
+    """FastAPI dependency: valida X-API-Key contra las keys configuradas.
+
+    - Sin keys configuradas, deja pasar (modo dev) y loguea un warning.
+    - Con keys, exige el header y compara en tiempo constante. Devuelve el
+      nombre del cliente, lo loguea y lo deja en request.state.api_client.
+    """
+    if not api_keys_configured():
+        log.warning("Sin HUGO_API_KEYS ni HUGO_API_KEY — %s queda abierto, no usar en producción",
+                    request.url.path)
+        return None
+    client = match_api_key(x_api_key)
+    if client is None:
+        log.info("X-API-Key rechazada en %s %s desde %s",
+                 request.method, request.url.path, client_ip(request))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="X-API-Key inválida o ausente",
             headers={"WWW-Authenticate": "ApiKey"},
         )
+    request.state.api_client = client
+    log.info("API key OK: cliente=%s %s %s", client, request.method, request.url.path)
+    return client
