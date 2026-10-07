@@ -83,3 +83,93 @@ async def test_allowlist_allows_listed(monkeypatch):
     ok, email = await auth.supabase_login("tech@b2box.pro", "validpass")
     assert ok is True
     assert email == "tech@b2box.pro"
+
+
+# ─── Allowlist fail-closed en producción ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_empty_allowlist_in_production_rejects_everyone(monkeypatch):
+    """Antes allowlist vacía = entraban todos. Ahora en producción no entra nadie."""
+    resp = _FakeResp(200, {"user": {"email": "tech@b2box.pro"}})
+    _patch(monkeypatch, {"hugo_env": "production", "supabase_allowed_emails": ""}, resp)
+    assert auth.allowlist_misconfigured() is True
+    ok, email = await auth.supabase_login("tech@b2box.pro", "validpass")
+    assert ok is False
+    assert email is None
+
+
+@pytest.mark.asyncio
+async def test_star_opens_to_every_cloud_user(monkeypatch):
+    resp = _FakeResp(200, {"user": {"email": "cualquiera@b2box.pro"}})
+    _patch(monkeypatch, {"hugo_env": "production", "supabase_allowed_emails": "*"}, resp)
+    assert auth.allowlist_misconfigured() is False
+    ok, email = await auth.supabase_login("cualquiera@b2box.pro", "validpass")
+    assert ok is True
+    assert email == "cualquiera@b2box.pro"
+
+
+@pytest.mark.asyncio
+async def test_empty_allowlist_in_development_stays_open(monkeypatch):
+    resp = _FakeResp(200, {"user": {"email": "dev@b2box.pro"}})
+    _patch(monkeypatch, {"hugo_env": "development", "supabase_allowed_emails": ""}, resp)
+    assert auth.allowlist_misconfigured() is False
+    ok, _ = await auth.supabase_login("dev@b2box.pro", "validpass")
+    assert ok is True
+
+
+def test_misconfigured_only_when_supabase_is_the_login_method(monkeypatch):
+    _patch(monkeypatch, {"hugo_env": "production", "supabase_url": "", "supabase_anon_key": "",
+                         "dashboard_password": "local", "supabase_allowed_emails": ""},
+           _FakeResp(200, {}))
+    assert auth.allowlist_misconfigured() is False
+
+
+def test_login_endpoint_returns_403_with_a_clear_message(monkeypatch):
+    """La app no se cae: responde 403 y dice qué variable falta. No llama a Supabase."""
+    from fastapi.testclient import TestClient
+
+    from app import main as main_mod
+
+    called = {"n": 0}
+
+    class _Boom:
+        async def __aenter__(self):
+            called["n"] += 1
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _FakeResp(200, {"user": {"email": "tech@b2box.pro"}})
+
+    _patch(monkeypatch, {"hugo_env": "production", "supabase_allowed_emails": ""}, None)
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Boom())
+
+    client = TestClient(main_mod.app)  # sin lifespan: no arranca scheduler ni warm-ups
+    resp = client.post("/api/login", json={"username": "tech@b2box.pro", "password": "x"})
+    assert resp.status_code == 403
+    assert "SUPABASE_ALLOWED_EMAILS no configurado" in resp.json()["detail"]
+    assert called["n"] == 0, "la contraseña no viaja a Supabase si nadie puede entrar"
+
+    # Otros caminos siguen vivos: la app no entró en restart loop.
+    assert client.get("/health").status_code == 200
+
+
+def test_startup_check_warns_but_does_not_raise(monkeypatch, caplog):
+    import logging
+
+    from app import main as main_mod
+
+    _patch(monkeypatch, {"hugo_env": "production", "supabase_allowed_emails": ""}, _FakeResp(200, {}))
+    from app.config import Settings
+    monkeypatch.setattr(main_mod, "get_settings", lambda: Settings(
+        vendure_api_url="https://x/admin-api", hugo_env="production",
+        supabase_url="https://ref.supabase.co", supabase_anon_key="anon",
+        hugo_api_keys="luis:xxx",
+    ))
+    with caplog.at_level(logging.ERROR, logger="app.main"):
+        main_mod._enforce_prod_secrets()  # no levanta
+    assert any("SUPABASE_ALLOWED_EMAILS" in r.getMessage() for r in caplog.records)

@@ -67,9 +67,12 @@ class Settings(BaseSettings):
     # queda solo como fallback de desarrollo.
     supabase_url: str = Field(default="", description="https://<ref>.supabase.co (Cloud_B2BOX)")
     supabase_anon_key: str = Field(default="", description="anon/publishable key de Cloud_B2BOX")
-    # Allowlist opcional de emails con acceso a Hugo (coma-separada). Vacío = todo
-    # usuario válido de Cloud_B2BOX puede entrar (igual que Paco).
-    supabase_allowed_emails: str = Field(default="", description="emails permitidos, coma-separados")
+    # Allowlist de emails con acceso a Hugo (coma-separada). FAIL-CLOSED en
+    # producción: vacía → todo login por Supabase se rechaza con 403 y mensaje
+    # claro (la app arranca igual; los clientes por API key no se ven afectados).
+    # "*" explícito = cualquier usuario válido de Cloud_B2BOX (como Paco).
+    # En development, vacía = abierta, con warning.
+    supabase_allowed_emails: str = Field(default="", description='emails permitidos, coma-separados, o "*"')
 
     # ── Auth: login local (FALLBACK de desarrollo) ─────────────
     # Usuario/contraseña que protegen el dashboard y sus endpoints /api/*.

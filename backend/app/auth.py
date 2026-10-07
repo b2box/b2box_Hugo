@@ -123,11 +123,55 @@ def login_enabled() -> bool:
     return supabase_enabled() or bool(s.dashboard_password)
 
 
-def _email_allowed(email: str) -> bool:
-    """Aplica la allowlist opcional de emails. Vacía = todos permitidos."""
+ALLOWLIST_OPEN = "*"
+ALLOWLIST_MISSING_DETAIL = (
+    "SUPABASE_ALLOWED_EMAILS no configurado: en producción el login por Supabase "
+    "queda cerrado. Cargá los emails permitidos (coma-separados) o \"*\" para abrir "
+    "a todos los usuarios de Cloud_B2BOX."
+)
+
+
+def _is_production() -> bool:
+    return get_settings().hugo_env.strip().lower() == "production"
+
+
+def allowlist_state() -> str:
+    """'open' ("*"), 'list' (hay emails) o 'unset' (vacía)."""
     raw = get_settings().supabase_allowed_emails.strip()
     if not raw:
+        return "unset"
+    if raw == ALLOWLIST_OPEN:
+        return "open"
+    return "list"
+
+
+def allowlist_misconfigured() -> bool:
+    """True si NINGÚN login por Supabase puede pasar: producción + allowlist vacía.
+
+    Antes, allowlist vacía = entraban todos los usuarios de Cloud_B2BOX. Eso es
+    fail-open: olvidarse una variable abría el dashboard a todo el pool. Ahora
+    hay que decir "*" a propósito. La app no se cae por esto (no es un
+    RuntimeError al arranque): se avisa en logs y cada login recibe un 403 con
+    el motivo. Los clientes por API key (/verify, /app/*) no se ven afectados.
+    """
+    return supabase_enabled() and allowlist_state() == "unset" and _is_production()
+
+
+def _email_allowed(email: str) -> bool:
+    """Aplica la allowlist de emails. Fail-closed en producción si está vacía."""
+    state = allowlist_state()
+    if state == "open":
         return True
+    if state == "unset":
+        if _is_production():
+            log.error("Login de %s rechazado: %s", email, ALLOWLIST_MISSING_DETAIL)
+            return False
+        log.warning(
+            "SUPABASE_ALLOWED_EMAILS vacío — en development entra cualquier usuario "
+            "válido de Cloud_B2BOX; en producción se rechaza"
+        )
+        return True
+    raw = get_settings().supabase_allowed_emails
     allow = {e.strip().lower() for e in raw.split(",") if e.strip()}
     return email.strip().lower() in allow
 

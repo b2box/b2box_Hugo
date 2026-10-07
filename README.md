@@ -346,6 +346,24 @@ Otros `status`: `"indexing"` (el índice se está construyendo — reintentar, *
 se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
 (el sitio bloquea a los servidores).
 
+## Seguridad
+
+- **Login del dashboard**: Supabase Auth de Cloud_B2BOX (mismos usuarios que
+  Paco). `SUPABASE_ALLOWED_EMAILS` es la allowlist de quién entra y es
+  **fail-closed en producción**: con `HUGO_ENV=production` y la variable vacía,
+  todo login responde `403 "SUPABASE_ALLOWED_EMAILS no configurado"`. Hugo
+  arranca igual (no es un restart loop) y `/verify` y `/app/*` siguen andando
+  con su API key. Para abrir a todos los usuarios de Cloud_B2BOX hay que
+  decirlo a propósito: `SUPABASE_ALLOWED_EMAILS=*`. En development, vacía =
+  abierta, con warning.
+- **Clientes máquina** (`/verify`, `/app/*`): una API key por cliente en
+  `HUGO_API_KEYS` (ver arriba). Comparación en tiempo constante; el nombre del
+  cliente queda en el log de cada request.
+- **IP del cliente** (rate limit de `/verify`, lockout del login): se toma del
+  último hop confiable de `X-Forwarded-For` según `TRUSTED_PROXY_HOPS`
+  (1 = Traefik de Coolify, 2 = Cloudflare delante de Traefik, 0 = sin proxy).
+  El primer valor del header lo escribe el cliente y no se le cree.
+
 ## Variables de entorno
 
 Ver `.env.example`. Las críticas:
@@ -354,6 +372,10 @@ Ver `.env.example`. Las críticas:
 - `RAPIDAPI_KEY` — proxy a 1688 vía OTAPI (sin esto Hugo no puede consultar precios fuente).
 - `ALERT_SMTP_*`, `ALERT_EMAIL_TO` — notificaciones por email.
 - `ALERT_WEBHOOK_URL` — opcional, Slack/Discord/n8n/CallMeBot.
+- `HUGO_ENV=production` — activa los chequeos estrictos (secretos obligatorios, allowlist fail-closed).
+- `HUGO_API_KEYS` — una API key por cliente (`luis:…,cloud:…,b2box-app:…`).
+- `SUPABASE_ALLOWED_EMAILS` — quién entra al dashboard; `*` para todos. Vacía en producción = nadie.
+- `TRUSTED_PROXY_HOPS` — proxies confiables delante de Hugo (default 1).
 - `DEDUP_*_THRESHOLD` — umbrales de confianza de cada estrategia (0-1).
 - `PRICE_DRIFT_THRESHOLD` — % mínimo de variación que dispara alerta.
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.

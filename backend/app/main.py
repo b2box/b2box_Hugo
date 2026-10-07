@@ -56,6 +56,13 @@ def _enforce_prod_secrets() -> None:
             "HUGO_ENV=production pero faltan credenciales obligatorias: "
             f"{', '.join(missing)}. Seteálas o poné HUGO_ENV=development."
         )
+    # La allowlist vacía NO tira el arranque (sería un restart loop por una
+    # variable): los logins por Supabase reciben 403 con el motivo, y los
+    # clientes por API key siguen funcionando. Pero se avisa fuerte.
+    if auth.allowlist_misconfigured():
+        logging.getLogger(__name__).error(
+            "Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL
+        )
 
 
 @asynccontextmanager
@@ -182,6 +189,12 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
     # Método preferido: Supabase Auth de Cloud_B2BOX (mismo login que Paco).
     # Fallback: user/pass local (solo si Supabase no está configurado).
     if auth.supabase_enabled():
+        if auth.allowlist_misconfigured():
+            # Nadie puede entrar: se dice claro y no se manda la contraseña a
+            # Supabase para nada.
+            return JSONResponse(
+                {"ok": False, "detail": auth.ALLOWLIST_MISSING_DETAIL}, status_code=403
+            )
         ok, identity = await auth.supabase_login(payload.username, payload.password)
     else:
         ok = auth.check_credentials(payload.username, payload.password)
