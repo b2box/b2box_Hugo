@@ -139,3 +139,106 @@ async def test_dismissed_rows_do_not_block_a_resend(monkeypatch):
     out = await routes.verify(_payload(source="luis"))
     assert out.paco_search_id == "s-1"
     assert len(FakePaco.submitted) == 2
+
+
+# ─── retry-paco: misma Paco y mismo callback que el /verify original ─────────
+
+
+def _failed_event(**over) -> int:
+    data = dict(
+        action="paco_failed", source="luis", product_id="(nuevo)",
+        product_name="Organizador", product_image_url="https://img/1.jpg",
+        product_source_url=SOURCE_URL,
+    )
+    data.update(over)
+    with Session(engine) as s:
+        row = AuditLog(**data)
+        s.add(row)
+        s.commit()
+        return row.id
+
+
+@pytest.mark.asyncio
+async def test_verify_persists_the_context_a_retry_needs(monkeypatch):
+    import json
+
+    _catalog(monkeypatch, [])
+    await routes.verify(_payload(
+        source="orders-pro", callback_ctx={"quotation_item_id": "q-9"},
+        text_specs="rojo, 20cm", use_browser=True,
+    ))
+    with Session(engine) as s:
+        row = s.exec(select(AuditLog).where(AuditLog.action == "verify_passed_to_paco")).one()
+    ctx = json.loads(row.verify_ctx)
+    assert ctx == {
+        "source": "orders-pro", "callback_ctx": {"quotation_item_id": "q-9"},
+        "text_specs": "rojo, 20cm", "use_browser": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_pro_event_goes_to_paco_pro_with_its_callback():
+    """Antes TODO reintento iba a Paco APP y sin callback_ctx."""
+    import json
+
+    event_id = _failed_event(
+        source="orders-pro",
+        verify_ctx=json.dumps({
+            "source": "orders-pro", "callback_ctx": {"quotation_item_id": "q-9"},
+            "text_specs": "rojo", "use_browser": False,
+        }),
+    )
+    with Session(engine) as s:
+        out = await routes.retry_paco(event_id, s)
+
+    assert out["paco"] == "PRO"
+    assert out["paco_search_id"] == "s-pro"
+    assert len(FakePaco.submitted) == 1
+    sent = FakePaco.submitted[0]
+    assert sent["pro"] is True
+    assert sent["callback_ctx"] == {"quotation_item_id": "q-9"}
+    assert sent["text_specs"] == "rojo"
+    assert sent["product_link"] == SOURCE_URL
+
+    with Session(engine) as s:
+        new = s.exec(select(AuditLog).where(AuditLog.action == "verify_passed_to_paco")).one()
+        assert new.source == "orders-pro", "misma tab e idempotencia que el original"
+        assert json.loads(new.verify_ctx)["callback_ctx"] == {"quotation_item_id": "q-9"}
+        assert s.get(AuditLog, event_id).dismissed is True
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_luis_event_goes_to_paco_app():
+    event_id = _failed_event(source="luis")
+    with Session(engine) as s:
+        out = await routes.retry_paco(event_id, s)
+    assert out["paco"] == "APP"
+    assert FakePaco.submitted == [{"image_url": "https://img/1.jpg", "product_url": SOURCE_URL, "pro": False}]
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_pro_event_without_saved_ctx_still_goes_to_pro():
+    """Fila vieja (sin verify_ctx): por lo menos va a la Paco correcta."""
+    event_id = _failed_event(source="b2box-pro")
+    with Session(engine) as s:
+        await routes.retry_paco(event_id, s)
+    assert FakePaco.submitted[0]["pro"] is True
+    assert FakePaco.submitted[0]["callback_ctx"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_failure_is_logged_with_the_destination(monkeypatch):
+    from fastapi import HTTPException
+
+    async def boom(*a, **k):  # noqa: ARG001
+        raise routes.paco_integration.PacoError("HTTP 500")
+
+    monkeypatch.setattr(routes.paco_integration, "submit_pro", boom)
+    event_id = _failed_event(source="orders-pro")
+    with Session(engine) as s, pytest.raises(HTTPException) as exc:
+        await routes.retry_paco(event_id, s)
+    assert exc.value.status_code == 502
+    assert "PRO" in exc.value.detail
+    with Session(engine) as s:
+        rows = list(s.exec(select(AuditLog).where(AuditLog.action == "paco_failed")))
+    assert len(rows) == 2 and rows[-1].source == "orders-pro"

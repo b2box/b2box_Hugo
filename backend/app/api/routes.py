@@ -410,6 +410,30 @@ def _source_already_sent_to_paco(source_url: str | None, source: str) -> str | N
         return None
 
 
+def _verify_ctx_json(payload: "VerifyRequest") -> str:
+    """Contexto del /verify que un reintento a Paco necesita reproducir.
+
+    Un pedido PRO sin su callback_ctx llega a Paco pero Paco no puede escribir
+    de vuelta al quotation_item; y sin el `source` no se sabe a qué Paco iba.
+    """
+    return json.dumps({
+        "source": _event_source(payload),
+        "callback_ctx": payload.callback_ctx,
+        "text_specs": payload.text_specs or "",
+        "use_browser": bool(payload.use_browser),
+    })
+
+
+def _load_verify_ctx(entry: AuditLog) -> dict[str, Any]:
+    if not entry.verify_ctx:
+        return {}
+    try:
+        data = json.loads(entry.verify_ctx)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _record_verify(
     payload: "VerifyRequest",
     verdict,
@@ -426,6 +450,7 @@ def _record_verify(
                 action=action,
                 source=_event_source(payload),
                 product_id=verdict.candidate_id or PLACEHOLDER_NEW,
+                verify_ctx=_verify_ctx_json(payload),
                 # El candidato NO está en Vendure (viene de Luis/Cloud): el único id
                 # que tenemos es el del producto ORIGINAL que matcheó. Confirmar
                 # este evento no debe apagar nada — queda explícito en la fila.
@@ -843,7 +868,14 @@ async def retry_paco(
 ) -> dict[str, Any]:
     """Reintenta enviar un evento a Paco (solo si tiene image_url guardada).
 
-    Crea un nuevo AuditLog con el resultado y descarta el original.
+    Rutea igual que el /verify original: el `source` del evento decide Paco APP
+    o Paco PRO (ver _PRO_SOURCES), y a PRO se le reenvía el callback_ctx /
+    text_specs / use_browser guardados en `verify_ctx`. Antes todo reintento
+    iba a Paco APP y sin callback: un pedido de Orders terminaba en la Paco
+    equivocada y Paco no podía escribir de vuelta al quotation_item.
+
+    Crea un nuevo AuditLog con el resultado (mismo `source`, para que caiga en
+    la misma tab y cuente para la idempotencia) y descarta el original.
     """
     entry = session.get(AuditLog, event_id)
     if not entry:
@@ -851,47 +883,71 @@ async def retry_paco(
     if not entry.product_image_url:
         raise HTTPException(400, "Este evento no tiene image_url para reintentar")
 
-    # Llamar a Paco
-    try:
-        result = await paco_integration.submit(
-            entry.product_image_url, product_url=entry.product_source_url,
+    ctx = _load_verify_ctx(entry)
+    source = entry.source or ctx.get("source") or "manual"
+    is_pro = _is_pro_source(source)
+    callback_ctx = ctx.get("callback_ctx") if isinstance(ctx.get("callback_ctx"), dict) else None
+    destination = "PRO" if is_pro else "APP"
+    if is_pro and callback_ctx is None:
+        log.warning(
+            "retry-paco #%s: evento PRO sin callback_ctx guardado; Paco PRO no va a "
+            "poder escribir de vuelta al quotation_item", event_id,
         )
-        new_action = "verify_passed_to_paco"
+
+    try:
+        if is_pro:
+            result = await paco_integration.submit_pro(
+                entry.product_image_url,
+                callback_ctx=callback_ctx,
+                text_specs=str(ctx.get("text_specs") or ""),
+                use_browser=bool(ctx.get("use_browser")),
+                product_link=entry.product_source_url,
+            )
+        else:
+            result = await paco_integration.submit(
+                entry.product_image_url, product_url=entry.product_source_url,
+            )
         new_detail = (
             f"Reintento manual exitoso. '{(entry.product_name or '?')[:60]}' "
-            f"enviado a Paco (search_id={result.search_id})"
+            f"enviado a Paco {destination} (search_id={result.search_id})"
         )
         new_after = json.dumps({"paco_search_id": result.search_id, "retry_of": event_id})
         session.add(AuditLog(
-            action=new_action,
-            source="manual",
+            action="verify_passed_to_paco",
+            source=source,
             product_id=entry.product_id,
             detail=new_detail,
             after=new_after,
+            verify_ctx=entry.verify_ctx,
             product_name=entry.product_name,
             product_code=entry.product_code,
             product_image_url=entry.product_image_url,
             product_source_url=entry.product_source_url,
         ))
         # Marcar el evento original como dismissed (ya se resolvió)
-        entry.dismissed = True
-        entry.dismissed_at = utcnow()
+        _dismiss(entry)
         session.add(entry)
         session.commit()
-        return {"ok": True, "paco_search_id": result.search_id, "paco_status": result.status}
+        return {
+            "ok": True,
+            "paco": destination,
+            "paco_search_id": result.search_id,
+            "paco_status": result.status,
+        }
     except paco_integration.PacoError as exc:
         session.add(AuditLog(
             action="paco_failed",
-            source="manual",
+            source=source,
             product_id=entry.product_id,
-            detail=f"Reintento manual falló: {str(exc)[:200]}",
+            detail=f"Reintento manual a Paco {destination} falló: {str(exc)[:200]}",
+            verify_ctx=entry.verify_ctx,
             product_name=entry.product_name,
             product_code=entry.product_code,
             product_image_url=entry.product_image_url,
             product_source_url=entry.product_source_url,
         ))
         session.commit()
-        raise HTTPException(502, f"Paco rechazó el reintento: {exc}")
+        raise HTTPException(502, f"Paco {destination} rechazó el reintento: {exc}")
 
 
 @router.get("/api/duplicates-stats")
