@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from sqlalchemy import inspect, text
+from sqlalchemy import DateTime, inspect, text
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.config import get_settings
@@ -123,6 +123,54 @@ def _ensure_indexes() -> None:
                 log.error("Migración: no se pudo crear el índice %s: %s", index.name, exc)
 
 
+def _timestamptz_to_fix(tables, get_columns) -> list[tuple[str, str]]:
+    """(tabla, columna) que el modelo declara como DateTime naive pero la DB
+    tiene como `timestamp with time zone`.
+
+    sqlmodel 0.0.45-0.0.48 crea los datetime como timestamptz (UTCDateTime).
+    El build del 07-oct-2026 tomó 0.0.48 y el deploy del semáforo (08-oct
+    13:00) creó así market_price_snapshot, price_monitor_run y ml_seller_cache.
+    Con sqlmodel <0.0.45 Postgres las devuelve aware y Hugo compara contra
+    utcnow() naive: TypeError en el disparo manual (500) y "Invalid Date" en el
+    dashboard. `get_columns(tabla)` es inspector.get_columns (testeable sin
+    Postgres)."""
+    out: list[tuple[str, str]] = []
+    for table in tables:
+        model_naive = {
+            c.name for c in table.columns
+            if isinstance(c.type, DateTime) and not getattr(c.type, "timezone", False)
+        }
+        if not model_naive:
+            continue
+        for col in get_columns(table.name):
+            if col["name"] in model_naive and getattr(col["type"], "timezone", False):
+                out.append((table.name, col["name"]))
+    return out
+
+
+def _fix_timestamptz_columns() -> None:
+    """Pasa a `timestamp without time zone` (valor en UTC) las columnas de
+    `_timestamptz_to_fix`. Solo Postgres; una columna que falla no frena el
+    arranque."""
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    tables = [t for t in SQLModel.metadata.tables.values() if t.name in existing]
+    for table_name, col_name in _timestamptz_to_fix(tables, inspector.get_columns):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN "{col_name}" '
+                    f'TYPE timestamp without time zone USING "{col_name}" AT TIME ZONE \'UTC\''
+                ))
+            log.warning("Migración: %s.%s pasó de timestamptz a timestamp (UTC)",
+                        table_name, col_name)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Migración: no se pudo pasar %s.%s a timestamp: %s",
+                      table_name, col_name, exc)
+
+
 def init_db() -> None:
     """Crea tablas si no existen, y agrega columnas/índices faltantes."""
     # Asegurar que los modelos están registrados
@@ -130,6 +178,7 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     _add_missing_columns()
+    _fix_timestamptz_columns()
     _ensure_indexes()
 
 
