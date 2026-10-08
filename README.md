@@ -195,8 +195,15 @@ embeddings de fotos de ML (`mlstatic`) más viejos que `pm_embed_cache_days`.
 Robustez:
 
 - Budget diario de requests a ML con reserva atómica (`pm_ml_daily_budget`):
-  al llegar, lo que falta queda `skipped`. 429/5xx/red → backoff exponencial;
-  si persiste, ese producto queda `failed` y la corrida **sigue**.
+  si se acaba a mitad de corrida, lo que falta queda `skipped`; si la corrida
+  arranca sin cupo, se cierra `skipped` sin tocar ningún producto. Cada corrida
+  empieza por los productos que hace más que no se miden (último dato `ok` o
+  `no_data`), así con un budget corto todo el catálogo rota. 429/5xx/red →
+  backoff exponencial; si persiste, ese producto queda `failed` y la corrida
+  **sigue**.
+- El consumo (requests a ML, llamadas al juez) se suma a la corrida en la
+  misma transacción que reserva el cupo: después de un corte, la corrida
+  refleja exactamente lo gastado.
 - Si más del 20 % quedó `failed`, la corrida es `degraded`.
 - Solo corre en el líder, con lock. Si el proceso se reinicia a mitad, al
   levantar **retoma la misma corrida** (mismo `run_id`, solo los productos sin
@@ -233,6 +240,10 @@ Robustez:
 | `pm_tier_policy` | 0 | 0 tramo mínimo (compra chica); 1 tramo más barato |
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
+| `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
+
+Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
+umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
 
 Cambiar un corte recolorea en la **próxima corrida**, sin redeploy. El horario
 es env: `PRICE_MONITOR_CRON_UTC` (default `0 6 * * *` = 03:00 ART).
@@ -276,13 +287,41 @@ PM_LLM_MODEL=qwen3-vl-plus
 
 Opcionales: `PM_LLM_TIMEOUT_S` (30) y, para estimar el costo,
 `PM_LLM_PRICE_IN_PER_M` / `PM_LLM_PRICE_OUT_PER_M` (USD por millón de tokens;
-0.20 / 1.60 por default).
+0.20 / 1.60 por default). La base URL tiene que ser `https://` (si no, el
+juez queda apagado); el cliente no reintenta solo y es uno por corrida.
+
+#### Privacidad del juez
+
+Qué sale hacia el proveedor en cada llamada:
+
+- el **nombre** de nuestro producto (hasta 200 caracteres);
+- hasta **2 URLs de fotos de nuestro catálogo** (solo https): el proveedor
+  las descarga, así que ve esas URLs;
+- hasta **6 fichas públicas de Mercado Libre**: id, título (hasta 160
+  caracteres), una URL de foto de `mlstatic.com` y la mediana de precio
+  publicada en esa ficha.
+
+Qué **no** sale: nuestros precios, costos, tramos o márgenes, datos de
+clientes o pedidos, ni ninguna credencial salvo la API key del propio
+proveedor.
+
+Dónde se procesa:
+
+- **Qwen (Model Studio)**: en la región de la URL que se configure; con la
+  URL internacional de arriba, Singapur.
+- **Xiaomi MiMo**: región y retención **sin verificar**.
+- **OpenRouter**: enruta a terceros; la retención depende del proveedor final
+  que elija.
+
+Antes de subir `pm_vision_max_calls` por encima de 0, revisar los términos de
+retención y de uso de datos para entrenamiento del proveedor elegido.
 
 ### Cómo dispararlo a mano
 
 - Dashboard → **Semáforo** → "Correr ahora" (o `POST /api/price-monitor/run`
-  con la sesión del dashboard). Corre en background; si ya hay una corrida en
-  curso devuelve 409.
+  con la sesión del dashboard). Corre en background. Devuelve 409 si ya hay
+  una corrida en curso y 429 si no queda cupo de ML hoy o si la última
+  corrida arrancó hace menos de `pm_manual_cooldown_min` (con `Retry-After`).
 - Endpoints (sesión del dashboard): `GET /api/price-monitor/runs`,
   `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&page=&page_size=`,
   `GET /api/price-monitor/products/{id}/history`, `GET /api/price-monitor/summary`.
