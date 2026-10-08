@@ -351,7 +351,7 @@ def unavailable_reason() -> str | None:
     if not browser_fetch.available():
         return "el browser no está disponible (BROWSER_FETCH_ENABLED o Camoufox)"
     if not browser_fetch.proxy_configured():
-        return "falta BROWSER_PROXY (ML bloquea la IP del datacenter)"
+        return browser_fetch.proxy_problem() or "falta BROWSER_PROXY (ML bloquea la IP del datacenter)"
     return None
 
 
@@ -454,13 +454,13 @@ class MlWebSource:
         try:
             page = await self._fetch(url)
         except browser_fetch.SsrfBlocked as exc:
-            return WebSearch("error", reason=f"URL rechazada por el guard: {exc}")
+            return WebSearch("error", reason=f"URL rechazada por el guard: {browser_fetch.redact(exc)}")
         except browser_fetch.CircuitOpen:
             self._note_failure("blocked")
             return WebSearch("blocked", reason="ML web en descanso por bloqueos recientes")
         except Exception as exc:  # noqa: BLE001  (BrowserUnavailable, red, timeout)
             self._note_failure("error")
-            return WebSearch("error", reason=f"el browser falló: {str(exc)[:160]}")
+            return WebSearch("error", reason=f"el browser falló: {browser_fetch.redact(exc)[:160]}")
 
         self.bytes += page.bytes
         parsed = parse_search(page.html, self.max_results)

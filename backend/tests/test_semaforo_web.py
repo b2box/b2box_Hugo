@@ -450,3 +450,36 @@ async def test_an_excluded_api_card_is_ignored_too(world):
     await price_monitor.run_price_monitor()
     s1 = _snaps()["1"]
     assert s1.ml_status == "no_data" and "no devolvió fichas" in s1.ml_error
+
+
+# ─── el proxy: ni tumba el resumen ni se filtra a lo que se guarda ────────
+
+
+async def test_a_malformed_proxy_does_not_break_the_summary_or_the_run(world, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(browser_fetch, "available", lambda: True)
+    monkeypatch.setattr(get_settings(), "browser_proxy", "http://usr_b2b:Cl4ve/Secreta@res.proxy.io:8080",
+                        raising=False)
+    FakeVendure.products = [_product("3", "Producto raro")]
+    assert "mal formado" in price_monitor.summary()["web"]["off_reason"]      # antes: ValueError → 500
+    await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert run.status == "ok" and run.web_status.startswith("apagada: BROWSER_PROXY mal formado")
+    assert "Cl4ve" not in run.web_status and "res.proxy.io" not in run.web_status
+
+
+async def test_errors_saved_in_the_run_and_the_snapshot_do_not_carry_the_proxy(world, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_proxy", "http://usr_b2b:Cl4veSecreta@res.proxy.io:8080",
+                        raising=False)
+    FakeVendure.fail_with = RuntimeError("falló vía res.proxy.io con usr_b2b:Cl4veSecreta")
+    await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert "falló vía" in run.error
+    for secret in ("res.proxy.io", "usr_b2b", "Cl4veSecreta"):
+        assert secret not in run.error
+    snap = price_monitor._mark(price_monitor.MarketPriceSnapshot(run_id=1, product_id="1"), "failed",
+                               "tunnel res.proxy.io rechazó a usr_b2b")
+    assert "res.proxy.io" not in snap.ml_error and "usr_b2b" not in snap.ml_error

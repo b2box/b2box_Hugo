@@ -348,3 +348,97 @@ def test_ensure_browser_falta_y_lo_descarga(monkeypatch):
 def test_ensure_browser_descarga_falla_no_tira(monkeypatch):
     _fake_pkgman(monkeypatch, installed=False, download_ok=False)
     assert browser_fetch.ensure_browser_installed() is False
+
+
+# ── BROWSER_PROXY: credenciales que nunca se loguean ni se guardan ─────────────
+
+
+def _set_proxy(monkeypatch, value):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_proxy", value, raising=False)
+
+
+@pytest.mark.parametrize("raw", [
+    "http://usr_b2b:Cl4ve/Secreta@res.proxy.io:8080",       # "/" sin codificar en la clave
+    "http://usr_b2b:Cl4ve#Secreta@res.proxy.io:8080",       # "#"
+    "http://usr_b2b:Cl4ve?Secreta@res.proxy.io:8080",       # "?"
+    "usr_b2b:Cl4veSecreta@res.proxy.io:8080",               # sin esquema
+    "res.proxy.io:8080",                                    # sin esquema ni credenciales
+    "http://usr_b2b:Cl4veSecreta@res.proxy.io:abc",         # puerto que no es número
+    "http://usr_b2b:Cl4veSecreta@res.proxy.io:99999",       # puerto fuera de rango
+    "ftp://usr_b2b:Cl4veSecreta@res.proxy.io:21",           # esquema que Playwright no soporta
+    "http://",                                              # sin host
+])
+def test_a_malformed_proxy_is_ignored_without_logging_it(monkeypatch, caplog, raw):
+    import logging
+
+    _set_proxy(monkeypatch, raw)
+    with caplog.at_level(logging.DEBUG, logger="app.ingest.browser_fetch"):
+        assert browser_fetch._proxy_config() is None
+        assert browser_fetch.proxy_configured() is False
+    assert "BROWSER_PROXY mal formado" in caplog.text and f"({len(raw)} caracteres)" in caplog.text
+    problem = browser_fetch.proxy_problem()
+    assert "mal formado" in problem
+    for secret in ("Cl4ve", "Secreta", "usr_b2b", "res.proxy.io"):
+        assert secret not in caplog.text and secret not in problem, secret
+
+
+def test_proxy_problem_is_silent_when_there_is_no_proxy_or_it_is_fine(monkeypatch):
+    _set_proxy(monkeypatch, "")
+    assert browser_fetch.proxy_problem() is None
+    _set_proxy(monkeypatch, "http://u:p@res.proxy.io:8080")
+    assert browser_fetch.proxy_problem() is None
+
+
+def test_special_characters_in_the_password_work_when_percent_encoded(monkeypatch):
+    _set_proxy(monkeypatch, "http://us%40er:cla%2Fve%23x%3F@res.proxy.io:8080")
+    assert browser_fetch._proxy_config() == {
+        "server": "http://res.proxy.io:8080", "username": "us@er", "password": "cla/ve#x?"}
+
+
+def test_socks_and_https_proxies_are_accepted(monkeypatch):
+    _set_proxy(monkeypatch, "socks5://res.proxy.io:1080")
+    assert browser_fetch._proxy_config() == {"server": "socks5://res.proxy.io:1080"}
+    _set_proxy(monkeypatch, "HTTPS://u:p@res.proxy.io")
+    assert browser_fetch._proxy_config() == {"server": "https://res.proxy.io", "username": "u", "password": "p"}
+
+
+def test_the_launch_log_does_not_name_the_proxy_host(monkeypatch, caplog):
+    import logging
+
+    _set_proxy(monkeypatch, "http://usr:clave@res.proxy.io:8080")
+    with caplog.at_level(logging.INFO, logger="app.ingest.browser_fetch"):
+        browser_fetch._launch_kwargs()
+    assert "proxy" in caplog.text
+    assert "res.proxy.io" not in caplog.text and "clave" not in caplog.text
+
+
+def test_redact_hides_user_password_and_host(monkeypatch):
+    _set_proxy(monkeypatch, "http://usr_b2b:Cl4veSecreta@res.proxy.io:8080")
+    text = ("Error: connect ECONNREFUSED res.proxy.io:8080 (proxy http://usr_b2b:Cl4veSecreta@res.proxy.io:8080) "
+            "user=usr_b2b pass=Cl4veSecreta")
+    out = browser_fetch.redact(text)
+    for secret in ("usr_b2b", "Cl4veSecreta", "res.proxy.io"):
+        assert secret not in out
+    assert "ECONNREFUSED" in out                   # el resto del mensaje se conserva
+
+
+def test_redact_also_covers_a_malformed_proxy_and_encoded_forms(monkeypatch):
+    _set_proxy(monkeypatch, "http://usr_b2b:cla/ve_secreta@res.proxy.io:8080")
+    out = browser_fetch.redact("falló con usr_b2b y cla/ve_secreta en res.proxy.io")
+    assert "usr_b2b" not in out and "cla/ve_secreta" not in out and "res.proxy.io" not in out
+    _set_proxy(monkeypatch, "http://usr_b2b:cla%2Fve_secreta@res.proxy.io:8080")
+    out = browser_fetch.redact("clave cla/ve_secreta y cla%2Fve_secreta")
+    assert "ve_secreta" not in out
+
+
+def test_redact_without_proxy_leaves_the_text_alone(monkeypatch):
+    _set_proxy(monkeypatch, "")
+    assert browser_fetch.redact("nada que tapar") == "nada que tapar"
+
+
+def test_browser_unavailable_messages_are_redacted(monkeypatch):
+    _set_proxy(monkeypatch, "http://usr_b2b:Cl4veSecreta@res.proxy.io:8080")
+    exc = browser_fetch.BrowserUnavailable("no arrancó: proxy res.proxy.io rechazó a usr_b2b (Cl4veSecreta)")
+    assert "Cl4veSecreta" not in str(exc) and "res.proxy.io" not in str(exc) and "no arrancó" in str(exc)

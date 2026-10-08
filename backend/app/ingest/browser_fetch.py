@@ -46,15 +46,16 @@ httpx: sigue redirects solo, carga subrecursos, ejecuta JS que puede hacer fetch
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from app.config import get_settings
 from app.net_guard import SsrfBlocked, assert_public_url
+from app.net_guard import _ip_is_public  # el mismo criterio que el resto de Hugo (CGNAT, mapeadas, site-local…)
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +84,13 @@ class RenderedPage:
 
 
 class BrowserUnavailable(RuntimeError):
-    """Camoufox no está instalado o está deshabilitado por configuración."""
+    """Camoufox no está instalado, está deshabilitado o no pudo cargar la página.
+
+    El mensaje pasa por `redact`: termina en logs, en `WebSearch.reason` y en
+    columnas de la DB, y un error de lanzamiento puede repetir el proxy."""
+
+    def __init__(self, message: object = "", *args: object) -> None:
+        super().__init__(redact(message), *args)
 
 
 def _camoufox():
@@ -122,30 +129,84 @@ def ensure_browser_installed() -> bool:
     return True
 
 
+_PROXY_SCHEMES = ("http", "https", "socks4", "socks5")
+
+
 def _proxy_config() -> dict[str, str] | None:
     """Traduce settings.browser_proxy al dict que espera Camoufox/Playwright.
 
     Playwright quiere el server SIN credenciales embebidas y user/pass en campos
-    aparte: "http://u:p@host:port" embebido no siempre autentica. Devuelve None
-    si no hay proxy configurado.
+    aparte: "http://u:p@host:port" embebido no siempre autentica. Usuario y
+    clave se decodifican (en una URL los caracteres especiales van con %XX).
+
+    Devuelve None si no hay proxy o si está mal formado (clave con "/", "#" o
+    "?" sin codificar, URL sin esquema, puerto raro). NUNCA loguea ni lanza con
+    el valor: lleva usuario y clave, y `urlparse(...).port` tira ValueError.
     """
     raw = (get_settings().browser_proxy or "").strip()
     if not raw:
         return None
-    p = urlparse(raw)
-    if not p.hostname:
-        log.warning("browser_proxy mal formado, lo ignoro: %r", raw[:60])
+    try:
+        p = urlparse(raw)
+        scheme, host, port = (p.scheme or "").lower(), p.hostname, p.port
+        username, password = p.username, p.password
+    except ValueError:
+        log.warning("BROWSER_PROXY mal formado (%d caracteres): se ignora", len(raw))
         return None
-    scheme = p.scheme or "http"
-    server = f"{scheme}://{p.hostname}"
-    if p.port:
-        server += f":{p.port}"
+    if not host or scheme not in _PROXY_SCHEMES:
+        log.warning("BROWSER_PROXY mal formado (%d caracteres): se ignora", len(raw))
+        return None
+    server = f"{scheme}://{host}" if ":" not in host else f"{scheme}://[{host}]"
+    if port:
+        server += f":{port}"
     cfg: dict[str, str] = {"server": server}
-    if p.username:
-        cfg["username"] = p.username
-    if p.password:
-        cfg["password"] = p.password
+    if username:
+        cfg["username"] = unquote(username)
+    if password:
+        cfg["password"] = unquote(password)
     return cfg
+
+
+def proxy_problem() -> str | None:
+    """Por qué hay un BROWSER_PROXY pero no sirve ("mal formado"), o None si no
+    hay nada que decir (sin configurar o válido). Sin el valor."""
+    if (get_settings().browser_proxy or "").strip() and _proxy_config() is None:
+        return "BROWSER_PROXY mal formado (revisá el formato: http://usuario:clave@host:puerto, con la clave codificada)"
+    return None
+
+
+def _secret_tokens() -> list[str]:
+    """Todo lo que identifica al proxy y no tiene que aparecer en un mensaje:
+    el valor entero, usuario, clave y host (también en su forma codificada)."""
+    raw = (get_settings().browser_proxy or "").strip()
+    if not raw:
+        return []
+    found: set[str] = {raw}
+    try:
+        p = urlparse(raw)
+        for part in (p.username, p.password, p.hostname):
+            if part:
+                found.update({part, unquote(part), quote(part, safe="")})
+        if p.hostname and p.port:
+            found.add(f"{p.hostname}:{p.port}")
+    except ValueError:
+        # Mal formado (clave con "/"): lo que hay entre "://" y la última "@"
+        # es credencial, y lo de después es el host.
+        rest = raw.split("://", 1)[-1]
+        creds, _, hostpart = rest.rpartition("@")
+        found.update(t for t in (creds, hostpart, *creds.split(":")) if t)
+        found.update(hostpart.split(":")[0:1])
+    return sorted((t for t in found if len(t) >= 3), key=len, reverse=True)
+
+
+def redact(text: object) -> str:
+    """Tapa usuario, clave y host de BROWSER_PROXY en un texto (mensajes de
+    error, motivos que se guardan en la DB, logs). Un error de Playwright puede
+    repetir el proxy con el que se lanzó."""
+    out = str(text)
+    for token in _secret_tokens():
+        out = out.replace(token, "***")
+    return out
 
 
 def _launch_kwargs() -> dict:
@@ -160,7 +221,7 @@ def _launch_kwargs() -> dict:
     proxy = _proxy_config()
     if proxy:
         kwargs["proxy"] = proxy
-        log.info("browser_fetch: usando proxy %s", proxy["server"])
+        log.info("browser_fetch: saliendo por el proxy configurado (%s)", proxy["server"].split("://")[0])
     return kwargs
 
 
@@ -181,21 +242,6 @@ def available() -> bool:
         log.debug("camoufox no disponible: %s", exc)
         return False
     return True
-
-
-def _ip_is_public(ip: str) -> bool:
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return not (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_reserved
-        or addr.is_unspecified
-    )
 
 
 async def _host_is_public(host: str) -> bool:

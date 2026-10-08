@@ -372,3 +372,27 @@ def test_a_spent_budget_turns_it_off(monkeypatch):
     daily_budget.reserve(web.WEB_COUNTER_KEY, 1)
     assert "sin cupo" in web.disabled_reason()
     assert web.web_budget_status() == {"used": 1, "budget": 1, "remaining": 0}
+
+
+# ─── el proxy mal formado no tumba nada ni se filtra ──────────────────────
+
+
+def test_a_malformed_proxy_turns_the_web_off_with_a_clear_reason(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(browser_fetch, "available", lambda: True)
+    monkeypatch.setattr(get_settings(), "browser_proxy", "http://usr_b2b:Cl4ve/Secreta@res.proxy.io:8080",
+                        raising=False)
+    reason = web.disabled_reason()
+    assert "mal formado" in reason and "Cl4ve" not in reason and "res.proxy.io" not in reason
+
+
+async def test_error_reasons_never_carry_the_proxy_credentials(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "browser_proxy", "http://usr_b2b:Cl4veSecreta@res.proxy.io:8080",
+                        raising=False)
+    src = _source(_fetcher(RuntimeError("tunnel to res.proxy.io failed for usr_b2b:Cl4veSecreta")))
+    res = await src.search("x")
+    assert res.kind == "error"
+    assert "Cl4veSecreta" not in res.reason and "res.proxy.io" not in res.reason and "usr_b2b" not in res.reason

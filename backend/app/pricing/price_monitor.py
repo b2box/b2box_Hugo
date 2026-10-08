@@ -58,7 +58,7 @@ from app.config import get_settings
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import engine
 from app.dedup import catalog_index, image_embed
-from app.ingest import meli
+from app.ingest import browser_fetch, meli
 from app.pricing import (
     daily_budget,
     match_feedback,
@@ -337,7 +337,7 @@ def _finalize_run(run_id: int, *, error: str | None = None, force_status: str | 
             total = max(1, run.total_products or run.processed)
             status = RUN_DEGRADED if run.n_failed / total > DEGRADED_FAILED_RATIO else RUN_OK
         run.status = status
-        run.error = (error or "")[:500] or None
+        run.error = browser_fetch.redact(error or "")[:500] or None
         run.finished_at = utcnow()
         s.add(run)
         s.commit()
@@ -364,7 +364,7 @@ def _base_snapshot(ctx: RunContext, product: VendureProduct) -> MarketPriceSnaps
 
 def _mark(snap: MarketPriceSnapshot, status: str, reason: str) -> MarketPriceSnapshot:
     snap.ml_status = status
-    snap.ml_error = reason[:300]
+    snap.ml_error = browser_fetch.redact(reason)[:300]
     snap.color = semaforo.SIN_DATO
     return snap
 
@@ -716,7 +716,7 @@ def _web_price(ctx: RunContext, c: MlCandidate) -> int | None:
 
 
 def _with_note(snap: MarketPriceSnapshot, note: str) -> MarketPriceSnapshot:
-    snap.ml_error = (f"{snap.ml_error} · {note}" if snap.ml_error else note)[:300]
+    snap.ml_error = browser_fetch.redact(f"{snap.ml_error} · {note}" if snap.ml_error else note)[:300]
     return snap
 
 
