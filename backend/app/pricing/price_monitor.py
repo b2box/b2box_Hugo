@@ -402,6 +402,9 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
     if our is None:
         return _mark(snap, SKIPPED, "sin precio en Vendure")
     snap.our_price_cents, snap.variant_id, snap.tier_used = our.price_cents, our.variant_id, our.tier_used
+    if our.currency and our.currency.upper() != CURRENCY:
+        # ML se compara en pesos: un precio en otra moneda daría un margen sin sentido.
+        return _mark(snap, SKIPPED, f"nuestro precio está en {our.currency}, no en {CURRENCY}")
 
     if not _our_photos(product):
         return _mark(snap, SKIPPED, "sin foto propia para comparar")

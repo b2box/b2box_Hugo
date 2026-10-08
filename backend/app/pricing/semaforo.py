@@ -130,6 +130,7 @@ class OurPrice:
     price_cents: int
     variant_id: str
     tier_used: str
+    currency: str | None = None
 
 
 TIER_POLICY_MIN = 0       # tramo mínimo: el más caro por unidad (compra chica)
@@ -171,18 +172,18 @@ def pick_our_price(variants: Sequence[PricedVariant], tier_policy: int) -> OurPr
     with_tax = int(variant.price_with_tax_cents)
 
     if int(tier_policy) == TIER_POLICY_CHEAPEST:
-        return OurPrice(with_tax, variant.id, "priceWithTax")
+        return OurPrice(with_tax, variant.id, "priceWithTax", variant.currency)
 
     tiers = _usable_tiers(variant)
     if not tiers:
-        return OurPrice(with_tax, variant.id, "priceWithTax")
+        return OurPrice(with_tax, variant.id, "priceWithTax", variant.currency)
 
     cheapest = min(t.sale_price_cents for t in tiers)  # type: ignore[type-var]
     vat_factor = with_tax / cheapest if cheapest else 0.0
     if not (_VAT_FACTOR_MIN <= vat_factor <= _VAT_FACTOR_MAX):
-        return OurPrice(with_tax, variant.id, "priceWithTax(fallback)")
+        return OurPrice(with_tax, variant.id, "priceWithTax(fallback)", variant.currency)
 
     first = min(tiers, key=lambda t: (t.min_quantity if t.min_quantity is not None else 0, t.position))
     price = int(round(first.sale_price_cents * vat_factor))  # type: ignore[operator]
     label = f"tier:min_qty={first.min_quantity if first.min_quantity is not None else first.position}"
-    return OurPrice(price, variant.id, label)
+    return OurPrice(price, variant.id, label, variant.currency)

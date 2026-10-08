@@ -59,9 +59,10 @@ ML_IMG = "https://http2.mlstatic.com/D_NQ_{}.jpg"
 # ─── dobles ─────────────────────────────────────────────────────────────────
 
 
-def _product(pid: str, name: str, price: int | None = 10_000, enabled: bool = True) -> VendureProduct:
+def _product(pid: str, name: str, price: int | None = 10_000, enabled: bool = True,
+             currency: str = "ARS") -> VendureProduct:
     variants = [PricedVariant(id=f"v{pid}", name="", sku="", price_with_tax_cents=price,
-                              currency="ARS")] if price else []
+                              currency=currency)] if price else []
     return VendureProduct(
         id=pid, name=name, slug=f"p-{pid}", description="", enabled=enabled, source_url=None,
         image_urls=[f"https://cdn.b2box/{pid}.jpg"], product_code=f"BX{pid}",
@@ -440,6 +441,14 @@ async def test_product_outside_the_clip_index_is_skipped_before_spending_request
     s = _snaps()["1"]
     assert s.ml_status == "skipped" and "índice CLIP" in s.ml_error
     assert "search:Organizador cocina" not in world.ml.calls
+
+
+async def test_our_price_in_another_currency_is_skipped(world):
+    FakeVendure.products = [_product("9", "Organizador cocina", currency="USD")]
+    await price_monitor.run_price_monitor()
+    s = _snaps()["9"]
+    assert s.ml_status == "skipped" and "USD" in s.ml_error
+    assert world.ml.calls == []
 
 
 async def test_sold_quantity_in_the_payload_skips_the_users_endpoint(world):

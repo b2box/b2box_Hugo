@@ -170,6 +170,11 @@ def test_implausible_vat_factor_falls_back_and_says_so():
     assert (got.price_cents, got.tier_used) == (12_100, "priceWithTax(fallback)")
 
 
+def test_currency_travels_with_the_price():
+    got = pick_our_price([_variant(currency="USD")], semaforo.TIER_POLICY_CHEAPEST)
+    assert got.currency == "USD"
+
+
 def test_first_variant_with_price_represents_the_product():
     got = pick_our_price([_variant("v0", with_tax=0), _variant("v1", with_tax=500)],
                          semaforo.TIER_POLICY_CHEAPEST)
