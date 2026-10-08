@@ -156,8 +156,21 @@ def _duplicate_semantics(entry: AuditLog) -> dict[str, Any] | None:
     }
 
 
+# verify_no_match nace de dos situaciones distintas; el título de _ACTION_LABELS
+# ("sin imagen para mandar a Paco") solo describe la primera.
+_DEDUP_ONLY_NO_MATCH_TITLE = "Consulta de duplicados · no está en el catálogo (Hugo no lo mandó a Paco)"
+
+
+def _is_dedup_only_event(entry: AuditLog) -> bool:
+    """¿La fila viene de un /verify con dedup_only? (el ctx lo guarda _verify_ctx_json)."""
+    return entry.action == "verify_no_match" and bool(_load_verify_ctx(entry).get("dedup_only"))
+
+
 def _humanize(entry: AuditLog) -> dict[str, Any]:
     meta = _ACTION_LABELS.get(entry.action, {"icon": "info", "title": entry.action, "tone": "muted"})
+    dedup_only = _is_dedup_only_event(entry)
+    if dedup_only:
+        meta = {**meta, "title": _DEDUP_ONLY_NO_MATCH_TITLE}
     before = json.loads(entry.before) if entry.before else None
     after = json.loads(entry.after) if entry.after else None
     return {
@@ -168,6 +181,8 @@ def _humanize(entry: AuditLog) -> dict[str, Any]:
         "icon": meta["icon"],
         "tone": meta["tone"],
         "dismissed": entry.dismissed,
+        # Consulta dedup_only: el cliente manda a Paco por su cuenta, no se reintenta desde acá.
+        "dedup_only": dedup_only,
         "product": {
             "id": entry.product_id,
             "name": entry.product_name,
@@ -469,6 +484,10 @@ def _verify_ctx_json(payload: "VerifyRequest") -> str:
     }
     if len(text) > MAX_TEXT_SPECS_STORED:
         ctx["text_specs_truncated"] = True
+    if payload.dedup_only:
+        # Marca de "este evento NO pasó por Hugo hacia Paco": retry-paco lo rechaza
+        # (el que consultó manda a Paco por su cuenta) y el dashboard no ofrece el botón.
+        ctx["dedup_only"] = True
     raw = json.dumps(ctx)
     if len(raw.encode("utf-8")) > MAX_VERIFY_CTX_BYTES:
         ctx["callback_ctx"] = None
@@ -493,8 +512,13 @@ def _record_verify(
     *,
     action: str,
     detail: str,
+    dismissed: bool = False,
 ) -> None:
-    """Escribe la fila de AuditLog de un verify. Sync (corre en background task)."""
+    """Escribe la fila de AuditLog de un verify. Sync (corre en background task).
+
+    `dismissed=True` la crea ya archivada: queda en la base (auditoría, conteos
+    históricos) pero no llena la bandeja del dashboard.
+    """
     try:
         valid_imgs = [u for u in (payload.image_urls or []) if u and u.strip()]
         is_dup = bool(verdict.is_duplicate and verdict.candidate_id)
@@ -514,6 +538,8 @@ def _record_verify(
                     "matched_by": list(verdict.matched_by),
                 }) if is_dup else None,
                 detail=detail[:500],
+                dismissed=dismissed,
+                dismissed_at=utcnow() if dismissed else None,
                 confidence=verdict.confidence,
                 product_name=payload.name[:200] if payload.name else None,
                 product_image_url=valid_imgs[0] if valid_imgs else None,
@@ -630,8 +656,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
             payload, verdict, action="verify_no_match",
             detail=(
                 f"'{short_name}' no está en el catálogo "
-                f"(dedup-only, consultado por {_event_source(payload)})"
+                f"(dedup-only, consultado por {_event_source(payload)}; "
+                f"Hugo no lo mandó a Paco)"
             ),
+            # Una consulta no es algo para revisar a mano: queda archivada.
+            dismissed=True,
         )
         return response
 
@@ -951,6 +980,8 @@ async def retry_paco(
 
     Crea un nuevo AuditLog con el resultado (mismo `source`, para que caiga en
     la misma tab y cuente para la idempotencia) y descarta el original.
+
+    409 si el evento viene de una consulta dedup_only (ver más abajo).
     """
     entry = session.get(AuditLog, event_id)
     if not entry:
@@ -959,6 +990,15 @@ async def retry_paco(
         raise HTTPException(400, "Este evento no tiene image_url para reintentar")
 
     ctx = _load_verify_ctx(entry)
+    if ctx.get("dedup_only"):
+        # Quien hizo la consulta (Luis, Paco PRO) ya manda —o no— a Paco por su
+        # cuenta. Reintentar acá pagaría una segunda búsqueda, justo lo que
+        # dedup_only evita.
+        raise HTTPException(
+            409,
+            "Este evento es una consulta dedup_only: Hugo no manda a Paco, lo hace quien consultó. "
+            "No se reintenta desde acá.",
+        )
     source = entry.source or ctx.get("source") or "manual"
     is_pro = _is_pro_source(source)
     callback_ctx = ctx.get("callback_ctx") if isinstance(ctx.get("callback_ctx"), dict) else None

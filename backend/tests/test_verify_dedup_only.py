@@ -82,8 +82,8 @@ def env(monkeypatch):
         idem_calls.append(source_url)
         return None
 
-    def fake_record(payload, verdict, *, action, detail):  # noqa: ARG001
-        recorded.append({"action": action, "detail": detail})
+    def fake_record(payload, verdict, *, action, detail, dismissed=False):  # noqa: ARG001
+        recorded.append({"action": action, "detail": detail, "dismissed": dismissed})
 
     monkeypatch.setattr(routes.vendure_catalog, "get_catalog", fake_catalog)
     monkeypatch.setattr(routes, "VendureClient", FakeVendureClient)
@@ -149,6 +149,7 @@ async def test_dedup_only_nuevo_no_reenvia_y_audita_como_consulta(env, monkeypat
     assert env["idem_calls"] == []  # se saltea _source_already_sent_to_paco
     assert [r["action"] for r in env["recorded"]] == ["verify_no_match"]
     assert "dedup-only, consultado por b2box-pro" in env["recorded"][0]["detail"]
+    assert env["recorded"][0]["dismissed"] is True  # una consulta no llena la bandeja
 
 
 async def test_dedup_only_nuevo_con_candidato_cercano_viaja_en_response(env, monkeypatch):

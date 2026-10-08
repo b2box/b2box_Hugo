@@ -51,7 +51,10 @@ export default function EventCard({ e, actions }: { e: AuditEvent; actions: Even
   const afterStr = fmtPrice(e.after);
 
   const hasId = !!p.id && p.id !== "(nuevo)";
-  const canRetry = (e.action === "paco_failed" || e.action === "verify_no_match") && !!p.image_url;
+  // Una consulta dedup_only (action verify_no_match) NO se reintenta: reenviar a Paco
+  // desde acá pagaría la segunda búsqueda que dedup_only evita.
+  const canRetry =
+    (e.action === "paco_failed" || (e.action === "verify_no_match" && !e.dedup_only)) && !!p.image_url;
   const canConfirmDuplicate = e.action === "duplicate_flagged" && hasId;
   // Un flag que vino de /verify no tiene nada que apagar: el candidato nunca
   // entró a Vendure y el único id de la fila es el del producto ORIGINAL.
