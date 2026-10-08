@@ -36,6 +36,7 @@ from app.pricing import daily_budget, market_judge, market_match, price_monitor,
 from tests import qa2_world as qw  # noqa: E402
 from tests.store_fixtures import store_db  # noqa: E402,F401  (fixture)
 from tests.test_price_monitor import FakeVendure, world  # noqa: E402,F401
+from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 from tests.test_semaforo_web import webw  # noqa: E402,F401
 
 GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_qa2.json").read_text())
@@ -255,3 +256,79 @@ async def test_with_the_ml_judge_off_the_stores_do_not_use_theirs_even_with_a_ca
     await price_monitor.run_price_monitor()
     assert box["calls"] == [] and daily_budget.used_today(market_judge.STORES_LLM_COUNTER_KEY) == 0
     assert_ml_equal("base_spec1", qw.dump_all(w, box["calls"]))
+
+
+# ─── 4) lo que el dashboard recibe de ML: la API, clave por clave ────────────
+
+API_GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_api_qa2.json").read_text())
+NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis"}
+NEW_LIST_KEYS = {"sources", "stores_affect_color"}
+NEW_RUN_KEYS = {"sources"}
+NEW_SUMMARY_KEYS = {"stores", "stores_affect_color"}
+
+
+def _norm(value, keep_ids: bool = False):
+    """Saca los ids que asigna la base (de snapshot y de corrida): dependen de lo que hubiera antes en la tabla."""
+    if isinstance(value, dict):
+        return {k: _norm(v, keep_ids or k == "product") for k, v in value.items()
+                if keep_ids or k not in ("id", "run_id", "snapshot_id")}
+    if isinstance(value, list):
+        return [_norm(v, keep_ids) for v in value]
+    return value
+
+
+def _assert_old_keys_equal(old, new, path: str, allowed_new: set[str], deep: bool = False) -> None:
+    if isinstance(old, dict):
+        assert isinstance(new, dict), path
+        missing = set(old) - set(new)
+        assert not missing, f"{path}: la API dejó de servir {sorted(missing)}"
+        for k, v in old.items():
+            _assert_old_keys_equal(v, new[k], f"{path}.{k}", allowed_new if deep else set(), deep)
+        extra = set(new) - set(old) - allowed_new
+        assert not extra, f"{path}: claves nuevas no previstas {sorted(extra)}"
+    elif isinstance(old, list):
+        assert isinstance(new, list) and len(new) == len(old), f"{path}: largo {len(old)} -> {len(new)}"
+        for i, (a, b) in enumerate(zip(old, new)):
+            _assert_old_keys_equal(a, b, f"{path}[{i}]", allowed_new, deep)
+    else:
+        assert new == old, f"{path}: {old!r} -> {new!r}"
+
+
+@pytest.mark.parametrize("name", ["base_spec1", "include_disabled", "con_feedback", "juez_cupo_de_sobra"])
+@pytest.mark.parametrize("stores", ["apagadas", "prendidas_sin_identicos"])
+async def test_the_dashboard_api_serves_every_old_key_with_the_same_value_stores_only_add_keys(run_world, client, name, stores):
+    w, opts = await run_variant(name, run_world)
+    box = run_world[1]
+    if stores == "apagadas":
+        with Session(engine) as s:
+            s.execute(update(MarketStore).values(enabled=False))
+            s.commit()
+    else:
+        fill_index()
+        box["score"] = 0.20
+    await price_monitor.run_price_monitor()
+    want = API_GOLDEN[name]
+    for path, old in want.items():
+        r = client.get(path)
+        assert r.status_code == old["status"] == 200, path
+        new = _norm(qw._strip_times(r.json()))
+        old = {**old, "body": _norm(old["body"])}
+        if path.endswith("/runs"):
+            _assert_old_keys_equal(old["body"], new, path, NEW_RUN_KEYS, deep=True)
+        elif path.endswith("/summary"):
+            _assert_old_keys_equal(old["body"], new, path, NEW_SUMMARY_KEYS | NEW_RUN_KEYS, deep=True)
+        elif "/snapshots" in path:
+            # los items traen claves nuevas; el resto del cuerpo, las de la lista
+            assert set(new) - set(old["body"]) <= NEW_LIST_KEYS, path
+            for key, value in old["body"].items():
+                if key == "items":
+                    for i, (a, b) in enumerate(zip(value, new["items"])):
+                        _assert_old_keys_equal(a, b, f"{path}.items[{i}]", NEW_ITEM_KEYS)
+                    assert len(value) == len(new["items"]), path
+                else:
+                    _assert_old_keys_equal(value, new[key], f"{path}.{key}", set())
+        else:
+            _assert_old_keys_equal(old["body"], new, path, {"price_basis"}, deep=True)
+    if stores == "prendidas_sin_identicos":
+        items = client.get("/api/price-monitor/snapshots?page_size=200").json()["items"]
+        assert all(i["price_basis"] == "ml" for i in items) and any(i["stores"] for i in items)

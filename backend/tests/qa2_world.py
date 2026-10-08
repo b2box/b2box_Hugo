@@ -181,3 +181,28 @@ def apply_variant(name: str, *, judge_calls_needed: int | None = None) -> dict:
             value = max(1, (judge_calls_needed or 2) - 2)
         _set(key, value)
     return opts
+
+
+API_PATHS = ["/api/price-monitor/snapshots?page_size=200", "/api/price-monitor/snapshots?page_size=200&color=verde",
+             "/api/price-monitor/snapshots?page_size=200&color=sin_dato", "/api/price-monitor/snapshots?page_size=200&match=igual",
+             "/api/price-monitor/snapshots?page_size=200&match=solo_similar", "/api/price-monitor/snapshots?page_size=200&estimated=any",
+             "/api/price-monitor/snapshots?page_size=200&origin=web", "/api/price-monitor/snapshots?page_size=200&status=failed",
+             "/api/price-monitor/snapshots?page_size=3&page=1", "/api/price-monitor/runs", "/api/price-monitor/summary",
+             "/api/price-monitor/products/1/history", "/api/price-monitor/products/12/history"]
+
+
+def _strip_times(value):
+    if isinstance(value, dict):
+        return {k: _strip_times(v) for k, v in value.items() if not (k.endswith("_at") or k in ("started", "finished", "next_run"))}
+    if isinstance(value, list):
+        return [_strip_times(v) for v in value]
+    return value
+
+
+def api_dump(client) -> dict:
+    """Lo que sirve la API del dashboard (JSON) para las consultas de la tabla, la card de Salud y la tendencia, sin fechas."""
+    out = {}
+    for path in API_PATHS:
+        r = client.get(path)
+        out[path] = {"status": r.status_code, "body": _strip_times(r.json()) if r.status_code == 200 else r.text[:200]}
+    return json.loads(json.dumps(out, sort_keys=True, default=str))
