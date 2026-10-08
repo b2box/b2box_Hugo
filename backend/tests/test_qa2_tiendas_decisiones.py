@@ -377,3 +377,20 @@ def test_the_defaults_are_the_ones_of_nicos_decisions(store_db, client):
     from app.pricing import store_catalog
 
     assert (store_catalog.OUTAGE_STREAK, store_catalog.DEAD_AFTER_FAILS) == (25, 2)
+
+
+async def test_when_ml_failed_and_the_color_came_only_from_a_store_marking_it_not_the_same_takes_the_color_away_and_undo_brings_it_back(sw, client):
+    runtime.set_value("pm_stores_affect_color", 1)
+    FakeVendure.products = [_product("1", "Organizador cocina")]
+    sw.ml.search["Organizador cocina"] = 429
+    add_item(GD, "gd-org", "Organizador de cocina", 25_000, 0.95)
+    await price_monitor.run_price_monitor()
+    assert (_snap().ml_status, _snap().color, _snap().price_basis) == ("failed", "verde", "tiendas")
+    [m] = [m for m in _match_rows() if m.category == "igual"]
+    r = client.post(f"/api/price-monitor/store-matches/{m.id}/label", json={"label": "no_es"})
+    assert r.status_code == 200 and r.json()["snapshot"]["color"] == "sin_dato" and r.json()["snapshot"]["price_basis"] == "ml"
+    item = _items(client)["1"]
+    assert _dashboard(item)["dot"] is None and _dashboard(item)["label"] is None
+    r = client.delete(f"/api/price-monitor/store-matches/{m.id}/label")
+    assert r.json()["snapshot"]["color"] == "verde" and r.json()["snapshot"]["price_basis"] == "tiendas"
+    _counters_equal_snapshots(client)
