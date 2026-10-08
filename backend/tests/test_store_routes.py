@@ -405,3 +405,55 @@ def test_index_now_runs_in_background_and_refuses_a_second_one(client, monkeypat
     finally:
         store_catalog._locks.pop(cp, None)
     assert store_routes._background is not None
+
+
+# ─── Mercado Libre con "siempre trae algo" (match_state, no priced, diferentes) ──────────
+
+
+def _ml_listing(ml_id, category, title, price=None, **kw) -> dict:
+    return {"ml_id": ml_id, "title": title, "permalink": f"https://www.mercadolibre.com.ar/p/{ml_id}", "origin": "api",
+            "category": category, "source": "clip", "image_score": 0.5, "name_score": 0.5, "price_cents": price, **kw}
+
+
+def _seed_ml_states() -> int:
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok", total_products=5)
+        s.add(run)
+        s.commit()
+        s.refresh(run)
+        common = dict(run_id=run.id, our_price_cents=10_000, commission_pct=13.0, shipping_cents=0, ml_status="no_data")
+        s.add(MarketPriceSnapshot(product_id="1", color="sin_dato", match_state="igual_sin_precio", candidates_count=2,
+                                  unpriced_listings=json.dumps([_ml_listing("MLA1", "igual", "Sin vendedores")]), **common))
+        s.add(MarketPriceSnapshot(product_id="2", color="sin_dato", match_state="diferente", candidates_count=2, other_count=1,
+                                  other_listings=json.dumps([_ml_listing("MLA2", "diferente", "Otra cosa", 7_777)]), **common))
+        s.add(MarketPriceSnapshot(product_id="3", color="sin_dato", match_state="similar", candidates_count=1, similar_count=1,
+                                  similar_listings=json.dumps([_ml_listing("MLA3", "similar", "Casi", 8_888)]), **common))
+        s.add(MarketPriceSnapshot(product_id="4", color="sin_dato", match_state="ninguno", **common))
+        s.add(MarketPriceSnapshot(product_id="5", color="sin_dato", ml_status="failed", match_state=None, run_id=run.id))
+        s.commit()
+        run.source_stats = json.dumps(store_match.source_stats(s, run.id))
+        s.add(run)
+        s.commit()
+        return run.id
+
+
+def test_the_ml_cell_follows_the_match_state_of_siempre_trae_algo(client):
+    _seed_ml_states()
+    cells = {pid: i["cells"]["ml"] for pid, i in _items(client.get("/api/price-monitor/snapshots")).items()}
+    assert (cells["1"]["category"], cells["1"]["price_cents"], cells["1"]["title"]) == ("igual", None, "Sin vendedores")
+    assert (cells["2"]["category"], cells["2"]["price_cents"], cells["2"]["title"]) == ("diferente", 7_777, "Otra cosa")
+    assert (cells["3"]["category"], cells["3"]["price_cents"]) == ("similar", 8_888)
+    assert cells["4"]["category"] is None and cells["5"]["category"] is None
+    assert cells["2"]["counts"] == {"igual": 0, "similar": 0, "diferente": 1}
+
+
+def test_ml_counters_use_the_match_state(client):
+    _seed_ml_states()
+    ml = client.get("/api/price-monitor/runs").json()["items"][0]["sources"]["ml"]
+    assert ml == {"label": "Mercado Libre", "total": 5, "igual": 1, "similar": 1, "diferente": 1, "nada": 2}
+
+
+def test_ml_source_filters_use_the_match_state(client):
+    _seed_ml_states()
+    assert _ids(client.get("/api/price-monitor/snapshots?igual_in=ml")) == ["1"]       # idéntico aunque sin precio
+    assert _ids(client.get("/api/price-monitor/snapshots?source=ml")) == ["1", "2", "3"]

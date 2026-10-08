@@ -40,7 +40,7 @@ from typing import Any
 
 import numpy as np
 from rapidfuzz import fuzz, process
-from sqlalchemy import case, delete, exists, func
+from sqlalchemy import case, delete, exists, func, or_
 from sqlmodel import Session, select
 
 from app import runtime
@@ -450,23 +450,35 @@ def reapply_color(session: Session, snap: MarketPriceSnapshot) -> None:
 # ─── Contadores por fuente (card de Salud) ──────────────────────────────────
 
 
+def _ml_bucket(status: str | None, state: str | None, similar: int | None, other: int | None,
+               candidates: int | None) -> str:
+    """En qué casillero cae un producto para Mercado Libre: idéntico (con o sin precio que
+    cuente), solo similares, solo diferentes o nada. Las filas anteriores a `match_state`
+    se deducen de lo que guardaban."""
+    if state in ("igual", "igual_sin_precio"):
+        return IGUAL
+    if state == "similar":
+        return SIMILAR
+    if state == "diferente":
+        return DIFERENTE
+    if state == "ninguno":
+        return "nada"
+    if status == "ok":
+        return IGUAL
+    if (similar or 0) > 0:
+        return SIMILAR
+    return DIFERENTE if (other or 0) > 0 or (candidates or 0) > 0 else "nada"
+
+
 def source_stats(session: Session, run_id: int) -> dict[str, dict[str, Any]]:
     """Por fuente (Mercado Libre y cada tienda): cuántos productos de la corrida tienen un
     idéntico, solo similares, solo diferentes o nada."""
     snaps = session.exec(select(
-        MarketPriceSnapshot.ml_status, MarketPriceSnapshot.similar_count, MarketPriceSnapshot.candidates_count,
+        MarketPriceSnapshot.ml_status, MarketPriceSnapshot.match_state, MarketPriceSnapshot.similar_count,
+        MarketPriceSnapshot.other_count, MarketPriceSnapshot.candidates_count,
     ).where(MarketPriceSnapshot.run_id == run_id)).all()
     total = len(snaps)
-    ml: Counter[str] = Counter()
-    for status, similar, candidates in snaps:
-        if status == "ok":
-            ml[IGUAL] += 1
-        elif (similar or 0) > 0:
-            ml[SIMILAR] += 1
-        elif (candidates or 0) > 0:
-            ml[DIFERENTE] += 1
-        else:
-            ml["nada"] += 1
+    ml: Counter[str] = Counter(_ml_bucket(*row) for row in snaps)
     out: dict[str, dict[str, Any]] = {
         SOURCE_ML: {"label": "Mercado Libre", "total": total, **{k: ml[k] for k in (*CATEGORIES, "nada")}}}
     rank = case((StoreMatch.category == IGUAL, 0), (StoreMatch.category == SIMILAR, 1), else_=2)
@@ -548,22 +560,30 @@ def _cell(key: str, label: str, matches: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def _ml_cell(item: dict[str, Any]) -> dict[str, Any]:
-    """La celda de Mercado Libre, armada con lo que ya trae el snapshot servido."""
+    """La celda de Mercado Libre, armada con lo que ya trae el snapshot servido: el idéntico
+    con precio (la mediana que usa el color), si no el idéntico sin precio, el similar o el
+    diferente más parecido."""
     matched = item.get("matched_listings") or []
+    unpriced = item.get("unpriced_listings") or []
     similar = item.get("similar_listings") or []
-    different = item.get("different_listings") or []
-    counts = {IGUAL: len(matched), SIMILAR: int(item.get("similar_count") or len(similar)), DIFERENTE: len(different)}
-    cell: dict[str, Any] = {"key": SOURCE_ML, "label": "Mercado Libre", "category": None, "counts": counts}
+    different = item.get("other_listings") or []
+    counts = {IGUAL: len(matched) + len(unpriced), SIMILAR: int(item.get("similar_count") or len(similar)),
+              DIFERENTE: int(item.get("other_count") or len(different))}
+    cell: dict[str, Any] = {"key": SOURCE_ML, "label": "Mercado Libre", "category": None, "counts": counts,
+                            "price_doubtful": False}
+
+    def fill(category: str, listing: dict[str, Any], price: Any) -> None:
+        cell.update(category=category, price_cents=price, title=listing.get("title"),
+                    url=listing.get("permalink") or None, image_url=listing.get("image_url"))
+
     if matched and item.get("ml_status") == "ok":
-        b = matched[0]
-        cell.update(category=IGUAL, price_cents=item.get("ml_median_cents"), title=b.get("title"), url=b.get("permalink") or None)
+        fill(IGUAL, matched[0], item.get("ml_median_cents"))
+    elif unpriced:
+        fill(IGUAL, unpriced[0], None)
     elif similar:
-        b = similar[0]
-        cell.update(category=SIMILAR, price_cents=b.get("price_cents"), title=b.get("title"), url=b.get("permalink") or None)
+        fill(SIMILAR, similar[0], similar[0].get("price_cents"))
     elif different:
-        b = different[0]
-        cell.update(category=DIFERENTE, price_cents=b.get("price_cents"), title=b.get("title"), url=b.get("permalink") or None)
-    cell.setdefault("price_doubtful", False)
+        fill(DIFERENTE, different[0], different[0].get("price_cents"))
     return cell
 
 
@@ -631,13 +651,13 @@ def filter_conditions(source: str | None, igual_in: list[str]) -> list[Any]:
 
     out: list[Any] = []
     if source == SOURCE_ML:
-        out.append(MarketPriceSnapshot.candidates_count > 0)
+        out.append(or_(MarketPriceSnapshot.candidates_count > 0, MarketPriceSnapshot.similar_count > 0,
+                       MarketPriceSnapshot.other_count > 0))
     elif source:
         out.append(has_rows(int(source.split(":", 1)[1])))
     if igual_in:
-        from sqlalchemy import or_
-
-        parts = [(MarketPriceSnapshot.ml_status == "ok") if k == SOURCE_ML else has_rows(int(k.split(":", 1)[1]), IGUAL)
+        parts = [or_(MarketPriceSnapshot.ml_status == "ok",
+                     MarketPriceSnapshot.match_state.in_(["igual", "igual_sin_precio"])) if k == SOURCE_ML else has_rows(int(k.split(":", 1)[1]), IGUAL)
                  for k in igual_in]
         out.append(or_(*parts))
     return out
@@ -726,8 +746,6 @@ def prune_embed_cache(days: int) -> int:
     hosts = store_urls.allowed_image_hosts()
     if days <= 0 or not hosts:
         return 0
-    from sqlalchemy import or_
-
     cutoff = utcnow() - timedelta(days=days)
     with Session(engine) as s:
         result = s.execute(delete(ImageEmbedCache).where(
