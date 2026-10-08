@@ -32,7 +32,10 @@ dependencies = [
     "anthropic>=0.69",
     "openai>=1.40",
     # DB
-    "sqlmodel>=0.0.16",
+    # <0.0.45: desde 0.0.45 (21-sep-2026) UTCDateTime rechaza datetimes sin zona
+    # horaria y Hugo guarda naive (utcnow) en 25 lugares: todo INSERT con fecha
+    # tira ValueError. Sacar el tope cuando los modelos usen datetimes aware.
+    "sqlmodel>=0.0.16,<0.0.45",
     "psycopg[binary]>=3.1",   # driver Postgres (para Supabase)
     # Scheduler
     "apscheduler>=3.10",
