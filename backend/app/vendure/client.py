@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 from gql import Client, gql
+from gql.transport import httpx as _gql_httpx_transport
 from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
 
@@ -27,6 +28,19 @@ from app.config import get_settings
 from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
+
+# El módulo httpx que usa el transport de gql, que NO siempre es el nuestro:
+# gql 4.4 importa `httpx2` si está instalado, y anthropic>=1 / openai>=3 lo
+# instalan. Un httpx.Timeout de httpx 0.28 pasado a un cliente httpx2 llega
+# crudo a httpcore2 y toda query revienta con "unsupported operand type(s)
+# for +: 'float' and 'Timeout'" (08-oct-2026: el semáforo y todo lo que lee
+# Vendure desde el build del 07-oct). El timeout y los errores del transport
+# se arman/atrapan con el módulo del transport, no con el nuestro.
+_gql_httpx = _gql_httpx_transport.httpx
+_GQL_TIMEOUT = _gql_httpx.Timeout(60.0, connect=10.0)
+_TRANSPORT_HTTP_ERRORS: tuple[type[BaseException], ...] = tuple(
+    {httpx.HTTPError, _gql_httpx.HTTPError}
+)
 
 
 # ─── DTOs ──────────────────────────────────────────────────────────
@@ -128,7 +142,7 @@ class VendureClient:
         transport = HTTPXAsyncTransport(
             url=self._url,
             headers=headers,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=_GQL_TIMEOUT,
         )
         # execute_timeout: el default de gql es 10s POR QUERY y una página del
         # catálogo en prod puede tardar más que eso — moría con un
@@ -581,7 +595,7 @@ class VendureClient:
             try:
                 async with self._new_client() as session:
                     return await session.execute(query, variable_values=variables)
-            except (TransportError, TransportQueryError, httpx.HTTPError) as exc:
+            except (TransportError, TransportQueryError, *_TRANSPORT_HTTP_ERRORS) as exc:
                 last_exc = exc
                 # Si el error parece ser de auth y todavía no intentamos renovar,
                 # hacemos login y retry SIN consumir attempts del backoff
