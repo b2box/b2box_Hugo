@@ -183,7 +183,7 @@ export interface PriceMonitorRun {
   id: number;
   started_at: string | null;
   finished_at: string | null;
-  status: "running" | "ok" | "degraded" | "failed";
+  status: "running" | "ok" | "degraded" | "failed" | "skipped";
   mode: number;
   trigger: string;
   total_products: number;

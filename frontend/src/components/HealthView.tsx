@@ -152,6 +152,7 @@ const RUN_STATUS_CLASS: Record<string, string> = {
   running: "text-primary",
   degraded: "text-warning",
   failed: "text-destructive",
+  skipped: "text-warning",
 };
 
 // Card de Salud del semáforo: si la corrida de anoche anduvo, cuánto de ML

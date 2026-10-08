@@ -17,9 +17,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, func, select
 
+from app import runtime
+from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
 from app.pricing import price_monitor
+from app.pricing.market_ml import ml_budget_status
 from app.pricing.semaforo import COLORS
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
@@ -33,14 +36,41 @@ STATUSES = ("ok", "no_data", "failed", "skipped")
 _background: set[asyncio.Task] = set()
 
 
+def _manual_run_blocker(session: Session) -> tuple[int, str, int | None] | None:
+    """Por qué no se puede disparar a mano ahora, o None si se puede.
+    (status HTTP, mensaje, segundos para reintentar)."""
+    if price_monitor.price_monitor_lock.locked():
+        return 409, "Ya hay una corrida del semáforo en curso.", None
+    budget = ml_budget_status()
+    if budget["remaining"] <= 0:
+        return 429, (f"Sin cupo de Mercado Libre hoy ({budget['used']} de {budget['budget']} "
+                     "requests). Se renueva a las 00:00 UTC."), None
+    cooldown_min = int(runtime.get("pm_manual_cooldown_min") or 0)
+    last_start = session.exec(
+        select(PriceMonitorRun.started_at)
+        .order_by(PriceMonitorRun.started_at.desc())  # type: ignore[union-attr]
+        .limit(1)
+    ).first()
+    if cooldown_min > 0 and last_start is not None:
+        wait_s = int(cooldown_min * 60 - (utcnow() - last_start).total_seconds())
+        if wait_s > 0:
+            return 429, (f"La última corrida arrancó hace menos de {cooldown_min} min. "
+                         f"Probá de nuevo en {max(1, round(wait_s / 60))} min."), wait_s
+    return None
+
+
 @router.post("/run", status_code=202)
-async def run_now() -> dict[str, Any]:
+async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
     """Dispara una corrida en background (modo sombra: no toca Vendure).
-    409 si ya hay una en curso en este proceso."""
+    409 si ya hay una en curso; 429 si no hay cupo de ML o si la última
+    arrancó hace menos de `pm_manual_cooldown_min`."""
     from app.scheduler import jobs  # import tardío: jobs arrastra todo el scheduler
 
-    if price_monitor.price_monitor_lock.locked():
-        raise HTTPException(409, "Ya hay una corrida del semáforo en curso.")
+    blocker = _manual_run_blocker(session)
+    if blocker is not None:
+        status, detail, retry_after = blocker
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
+        raise HTTPException(status, detail, headers=headers)
     task = asyncio.create_task(jobs.price_monitor(trigger="manual"))
     _background.add(task)
     task.add_done_callback(_background.discard)

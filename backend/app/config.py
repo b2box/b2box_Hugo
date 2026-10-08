@@ -368,6 +368,9 @@ class Settings(BaseSettings):
     # Poda del cache L2 de embeddings para fotos de ML (mlstatic) más viejas que
     # esto. Las fotos del catálogo propio no se tocan.
     pm_embed_cache_days: int = 60
+    # Minutos mínimos entre el arranque de una corrida y un disparo manual
+    # desde el dashboard: un botón apretado varias veces no quema el budget.
+    pm_manual_cooldown_min: int = 30
 
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.

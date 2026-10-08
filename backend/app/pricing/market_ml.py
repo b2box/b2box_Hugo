@@ -462,5 +462,7 @@ def ml_budget_status() -> dict:
     from app.config import get_settings
 
     used = daily_budget.used_today(ML_COUNTER_KEY)
-    budget = int(runtime.get("pm_ml_daily_budget") or get_settings().pm_ml_daily_budget)
+    raw = runtime.get("pm_ml_daily_budget")
+    # `is None`, no `or`: un budget de 0 es "apagado", no "usá el default".
+    budget = int(get_settings().pm_ml_daily_budget if raw is None else raw)
     return {"used": used, "budget": budget, "remaining": max(0, budget - used)}

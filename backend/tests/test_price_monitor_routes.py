@@ -13,7 +13,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
-from app import auth, security  # noqa: E402
+from app import auth, runtime, security  # noqa: E402
 from app import main as main_mod  # noqa: E402
 from app.api import price_monitor_routes  # noqa: E402
 from app.clock import utcnow  # noqa: E402
@@ -148,6 +148,52 @@ def test_manual_run_is_scheduled_in_background(client, monkeypatch):
             break
         time.sleep(0.01)
     assert called == ["manual"]
+
+
+def _no_job(monkeypatch) -> list[str]:
+    called: list[str] = []
+
+    async def fake_job(trigger="cron"):
+        called.append(trigger)
+
+    monkeypatch.setattr(jobs, "price_monitor", fake_job)
+    return called
+
+
+def test_manual_run_without_ml_quota_is_429(client, monkeypatch):
+    called = _no_job(monkeypatch)
+    runtime.set_value("pm_ml_daily_budget", 0)
+    try:
+        resp = client.post("/api/price-monitor/run")
+    finally:
+        runtime.reset_to_default("pm_ml_daily_budget")
+    assert resp.status_code == 429 and "cupo" in resp.json()["detail"]
+    assert called == []
+
+
+@pytest.mark.parametrize("minutes_ago,expected", [(5, 429), (29, 429), (31, 202)])
+def test_manual_run_respects_the_cooldown(client, monkeypatch, minutes_ago, expected):
+    _no_job(monkeypatch)
+    with Session(engine) as s:
+        s.add(PriceMonitorRun(status="ok", started_at=utcnow() - timedelta(minutes=minutes_ago)))
+        s.commit()
+    resp = client.post("/api/price-monitor/run")
+    assert resp.status_code == expected
+    if expected == 429:
+        retry = int(resp.headers["Retry-After"])
+        assert 0 < retry <= (30 - minutes_ago) * 60 + 1
+
+
+def test_cooldown_zero_disables_the_wait(client, monkeypatch):
+    _no_job(monkeypatch)
+    with Session(engine) as s:
+        s.add(PriceMonitorRun(status="ok", started_at=utcnow()))
+        s.commit()
+    runtime.set_value("pm_manual_cooldown_min", 0)
+    try:
+        assert client.post("/api/price-monitor/run").status_code == 202
+    finally:
+        runtime.reset_to_default("pm_manual_cooldown_min")
 
 
 async def test_manual_run_while_running_is_409(client):

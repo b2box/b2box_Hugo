@@ -79,6 +79,9 @@ RUN_RUNNING = "running"
 RUN_OK = "ok"
 RUN_DEGRADED = "degraded"
 RUN_FAILED = "failed"
+# Arrancó sin cupo de ML: no se evaluó nada (una sola marca en la corrida, no
+# un snapshot `skipped` por producto).
+RUN_SKIPPED = "skipped"
 
 # Más que esto de productos `failed` sobre el total → corrida degraded.
 DEGRADED_FAILED_RATIO = 0.20
@@ -588,9 +591,17 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     log.info("price_monitor #%s (%s): %d habilitados, %d ya hechos, %d pendientes",
              run_id, trigger, len(enabled), len(done), len(pending))
 
+    budget_now = await asyncio.to_thread(ml_budget_status)
+    if budget_now["remaining"] <= 0:
+        msg = f"sin cupo de ML hoy: usados {budget_now['used']} de {budget_now['budget']}"
+        log.warning("price_monitor #%s: %s; no se evalúa nada", run_id, msg)
+        status = _finalize_run(run_id, error=msg, force_status=RUN_SKIPPED)
+        return {"run_id": run_id, "status": status, "error": msg,
+                "counts": {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}}
+
     await _ensure_clip_index()
 
-    budget = int(runtime.get("pm_ml_daily_budget"))
+    budget = int(budget_now["budget"])
     concurrency = max(1, int(runtime.get("pm_ml_concurrency")))
     counts: dict[str, int] = {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}
 

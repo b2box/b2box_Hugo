@@ -371,6 +371,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=3000, step=10, group="monitor",
     ),
     SettingMeta(
+        key="pm_manual_cooldown_min",
+        label="Espera entre corridas manuales (min)",
+        description=(
+            "\"Correr ahora\" se rechaza si la última corrida arrancó hace menos que esto. "
+            "Evita gastar el budget de ML apretando el botón varias veces."
+        ),
+        type="int", parser=int,
+        default_attr="pm_manual_cooldown_min",
+        min=0, max=1440, step=5, group="monitor",
+    ),
+    SettingMeta(
         key="pm_embed_cache_days",
         label="Días de cache de fotos de ML",
         description=(

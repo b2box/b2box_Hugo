@@ -41,6 +41,7 @@ export const RUN_STATUS_LABEL: Record<PriceMonitorRun["status"], string> = {
   ok: "ok",
   degraded: "degradada",
   failed: "falló",
+  skipped: "sin cupo de ML",
 };
 
 const MATCH_LABEL: Record<string, string> = {
@@ -151,8 +152,10 @@ export default function SemaforoView() {
   async function handleRun() {
     try {
       const r = await runPriceMonitor();
-      if (r.status === 409) {
-        setFeedback({ ok: false, text: "Ya hay una corrida en curso." });
+      if (r.status === 409 || r.status === 429) {
+        // 409: ya corre. 429: sin cupo de ML o la última arrancó hace poco.
+        const body = (await r.json().catch(() => ({}))) as { detail?: string };
+        setFeedback({ ok: false, text: body.detail || "Ahora no se puede correr." });
       } else if (!r.ok) {
         setFeedback({ ok: false, text: `No se pudo disparar (${r.status}).` });
       } else {

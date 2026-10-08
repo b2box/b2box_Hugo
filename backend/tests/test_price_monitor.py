@@ -726,16 +726,34 @@ async def test_shadow_run_with_the_real_vendure_client_only_reads_over_http(worl
     assert set(snaps) == {"1", "2", "3", "5", "6"} and snaps["1"].ml_status == "ok"
 
 
-async def test_zero_budget_spends_nothing_and_skips_everything(world):
+async def test_zero_budget_spends_nothing_and_leaves_one_mark_on_the_run(world):
+    # Security M2: sin cupo no se escribe un snapshot `skipped` por producto
+    # (1.500 filas de ruido); queda una sola marca en la corrida.
     _set("pm_ml_daily_budget", 0)
-    await price_monitor.run_price_monitor()
+    result = await price_monitor.run_price_monitor()
     assert world.ml.calls == []
-    snaps = _snaps()
-    assert {s.ml_status for s in snaps.values()} == {"skipped"}
-    assert all("budget" in (s.ml_error or "") for pid, s in snaps.items() if pid != "5")
+    assert _snaps() == {}
     [run] = _runs()
-    assert run.ml_requests_used == 0 and run.n_failed == 0 and run.n_skipped == 5
+    assert result["status"] == run.status == "skipped"
+    assert "sin cupo" in run.error and run.total_products == 5
+    assert run.ml_requests_used == 0 and run.processed == 0
     assert daily_budget.used_today(market_ml.ML_COUNTER_KEY) == 0
+
+
+async def test_budget_already_spent_today_also_skips_the_run(world):
+    _set("pm_ml_daily_budget", 2)
+    daily_budget.reserve(market_ml.ML_COUNTER_KEY, 2)
+    daily_budget.reserve(market_ml.ML_COUNTER_KEY, 2)
+    await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert run.status == "skipped" and "usados 2 de 2" in run.error
+    assert _snaps() == {} and world.ml.calls == []
+
+
+def test_budget_status_with_zero_budget_is_zero_not_the_default(world):
+    # QA bug 1: con `or`, 0 caía al default del .env (15000).
+    _set("pm_ml_daily_budget", 0)
+    assert market_ml.ml_budget_status() == {"used": 0, "budget": 0, "remaining": 0}
 
 
 async def test_usd_listings_are_ignored_and_one_listing_is_its_own_median(world):
