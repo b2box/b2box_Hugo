@@ -414,13 +414,9 @@ async def test_a_failed_product_with_stored_lists_has_no_state_and_no_estimate(w
     assert body["states"]["solo_similar"] == 1
 
 
-# ─── criterio 5: propuestas de QA (xfail estricto: pasan cuando se implementen) ──
+# ─── criterio 5: el estimado solo usa similares confirmados (propuestas de QA, ya implementadas) ──
 
 
-PROPOSAL = "PROPUESTA QA (observación, no bug del PR): ver reporte; si se acepta, sacar el xfail"
-
-
-@pytest.mark.xfail(strict=True, reason=PROPOSAL + " - el estimado no debería salir de similares 'sin confirmar'")
 async def test_proposal_unconfirmed_similars_do_not_feed_the_estimate(webw):
     """Sin juez (pm_vision_max_calls=0, el default) toda la banda ambigua (foto 0,40 a 0,80 sin llegar a foto+nombre)
     queda 'similar sin confirmar'. Acá, dos fundas que por foto 0,50/0,55 y nombre >= 0,6 pueden ser de otro
@@ -436,7 +432,6 @@ async def test_proposal_unconfirmed_similars_do_not_feed_the_estimate(webw):
     assert s.estimated_color is None
 
 
-@pytest.mark.xfail(strict=True, reason=PROPOSAL + " - un pack distinto no tiene un precio comparable")
 async def test_proposal_similars_that_differ_in_quantity_do_not_feed_the_estimate(webw):
     """Nuestro precio $100 (una unidad). 'Pack X4' a $1.500 es SIMILAR por cantidad: hoy su precio entero da
     'verde estimado' con 1.205 % de ganancia."""
@@ -453,8 +448,6 @@ async def test_proposal_similars_that_differ_in_quantity_do_not_feed_the_estimat
 # ─── hallazgo: "No es el mismo" con más idénticos que el tope ─────────────
 
 
-@pytest.mark.xfail(strict=True, reason="BUG menor (repro): con idénticos >= pm_ml_keep_listings, la publicación marcada "
-                                       "'No es el mismo' no cabe en ninguna lista y desaparece del detalle de hoy")
 async def test_not_the_same_with_more_identicals_than_the_cap_keeps_the_card_visible(webw, client):
     _set("pm_ml_web_max_results", 24)
     _set("pm_ml_keep_listings", 8)

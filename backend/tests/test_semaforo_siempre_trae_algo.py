@@ -44,11 +44,24 @@ def _entries(raw):
 # ─── solo similares: color ESTIMADO, sin color real ───────────────────────
 
 
+def _sized_product():
+    """Nuestro producto con las medidas de Vendure (40 x 30 cm): un título con otra
+    medida es SIMILAR confirmado por el chequeo de medidas."""
+    from app.pricing.semaforo import PricedVariant
+
+    prod = _product("3", "Producto raro")
+    prod.priced_variants = [PricedVariant(id="v3", name="", sku="", price_with_tax_cents=10_000, currency="ARS",
+                                          specs={"length": 40.0, "width": 30.0})]
+    return prod
+
+
 @pytest.fixture
 def only_similars(webw):
-    """Dos packs distintos del mismo producto (SIMILAR por cantidad), a 250 y 300 pesos."""
+    """Dos tamaños distintos del mismo producto (SIMILAR por medidas, confirmado por
+    el chequeo), a 250 y 300 pesos."""
+    FakeVendure.products = [_sized_product()]
     webw.web.pages["producto-raro"] = _web_page(
-        _card("MLA921", "Pack X6 Producto Raro", 250.0), _card("MLA922", "Set X3 Producto Raro", 300.0, seller="Dos"))
+        _card("MLA921", "Producto Raro 60x80 cm", 250.0), _card("MLA922", "Producto Raro 70x90 cm", 300.0, seller="Dos"))
     _score(webw, "MLA921", 0.95)
     _score(webw, "MLA922", 0.93)
     return webw
@@ -85,8 +98,9 @@ async def test_the_estimate_follows_the_same_thresholds_as_the_real_color(only_s
 
 
 async def test_a_similar_without_a_price_in_pesos_gives_no_estimate(webw):
+    FakeVendure.products = [_sized_product()]
     webw.web.pages["producto-raro"] = _web_page(
-        _card("MLA921", "Pack X6 Producto Raro", 250.0, currency="USD"))
+        _card("MLA921", "Producto Raro 60x80 cm", 250.0, currency="USD"))
     _score(webw, "MLA921", 0.95)
     await price_monitor.run_price_monitor()
     s = _snaps()["3"]
@@ -95,9 +109,10 @@ async def test_a_similar_without_a_price_in_pesos_gives_no_estimate(webw):
 
 
 async def test_a_similar_with_few_sales_is_shown_but_does_not_count_for_the_estimate(webw):
+    FakeVendure.products = [_sized_product()]
     webw.web.pages["producto-raro"] = _web_page(
-        _card("MLA921", "Pack X6 Producto Raro", 250.0, sold=3),            # pocas ventas
-        _card("MLA922", "Set X3 Producto Raro", 400.0, sold=900))
+        _card("MLA921", "Producto Raro 60x80 cm", 250.0, sold=3),            # pocas ventas
+        _card("MLA922", "Producto Raro 70x90 cm", 400.0, sold=900))
     _score(webw, "MLA921", 0.95)
     _score(webw, "MLA922", 0.93)
     await price_monitor.run_price_monitor()
@@ -275,7 +290,7 @@ async def test_every_stored_publication_has_what_the_dashboard_needs(only_simila
     await price_monitor.run_price_monitor()
     for e in _entries(_snaps()["3"].similar_listings):
         assert e["category"] == "similar" and e["origin"] == "web"
-        assert e["reason"] and e["differences"] == ["cantidad"]              # motivo corto: pack
+        assert e["reason"] and e["differences"] == ["medida"]                # motivo corto: otra medida
         assert isinstance(e["image_score"], float) and isinstance(e["name_score"], float)
         assert e["price_cents"] > 0 and e["permalink"].startswith("https://")
 
@@ -454,3 +469,128 @@ async def test_nothing_is_written_to_vendure_with_the_new_lists(only_similars):
     await price_monitor.run_price_monitor()
     assert FakeVendure.forbidden == [] and only_similars.graphql_calls == []
     assert {s.product_enabled for s in _snaps().values()} == {True, False}
+
+
+# ─── el estimado solo usa similares CONFIRMADOS ───────────────────────────
+
+
+@pytest.mark.parametrize("source, differences, feeds", [
+    ("llm", ["marca"], True), ("llm", [], True), ("llm", ["marca", "modelo"], True),
+    ("specs", ["medida"], True), ("specs", ["peso"], True), ("specs", ["medida", "peso"], True),
+    ("manual", [], True),
+    ("llm", ["cantidad"], False), ("llm", ["capacidad"], False), ("llm", ["marca", "cantidad"], False),
+    ("specs", ["cantidad"], False), ("specs", ["capacidad", "medida"], False),
+    ("ambiguo", [], False), ("clip", [], False), ("clip+nombre", [], False), (None, [], False),
+])
+def test_which_similars_can_feed_the_estimate(source, differences, feeds):
+    from app.pricing import market_match
+    from app.pricing.market_ml import MlCandidate
+
+    d = market_match.Decision(MlCandidate(id="MLA1", name="x"), 0.9, 0.9, market_match.SIMILAR, source,
+                              differences=list(differences))
+    assert price_monitor._feeds_estimate(d) is feeds
+
+
+async def test_only_confirmed_similars_feed_the_estimate_the_others_stay_visible(webw):
+    FakeVendure.products = [_sized_product()]
+    webw.web.pages["producto-raro"] = _web_page(
+        _card("MLA921", "Producto Raro 60x80 cm", 250.0),              # medida: confirmada por el chequeo
+        _card("MLA923", "Pack X4 Producto Raro", 4000.0),               # pack: su precio no es comparable
+        _card("MLA924", "Producto Raro Premium", 9000.0))               # banda ambigua, sin juez: sin confirmar
+    _score(webw, "MLA921", 0.95)
+    _score(webw, "MLA923", 0.94)
+    _score(webw, "MLA924", 0.50)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.similar_count == 3
+    assert (s.estimated_color, s.estimated_median_cents, s.estimated_listing_count) == ("verde", 25_000, 1)
+    by_id = {e["ml_id"]: e for e in price_monitor.snapshot_to_dict(s)["similar_listings"]}
+    assert {k: v["in_estimate"] for k, v in by_id.items()} == {"MLA921": True, "MLA923": False, "MLA924": False}
+    assert by_id["MLA923"]["differences"] == ["cantidad"] and by_id["MLA924"]["source"] == "ambiguo"
+    assert by_id["MLA923"]["price_cents"] == 400_000 and by_id["MLA924"]["price_cents"] == 900_000   # se ven con precio
+
+
+async def test_with_no_confirmed_similar_there_is_no_estimate_but_the_list_is_there(webw):
+    webw.web.pages["producto-raro"] = _web_page(
+        _card("MLA923", "Pack X4 Producto Raro", 4000.0), _card("MLA924", "Producto Raro Premium", 9000.0))
+    _score(webw, "MLA923", 0.94)
+    _score(webw, "MLA924", 0.50)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert (s.estimated_color, s.estimated_margin_pct, s.estimated_median_cents, s.estimated_listing_count,
+            s.estimated_from) == (None, None, None, 0, None)
+    assert (s.match_state, s.similar_count, s.color) == ("similar", 2, "sin_dato")
+    assert [e["ml_id"] for e in _entries(s.similar_listings)] == ["MLA923", "MLA924"] or \
+        {e["ml_id"] for e in _entries(s.similar_listings)} == {"MLA923", "MLA924"}
+    [run] = _runs()
+    assert (run.n_est_verde, run.n_est_amarillo, run.n_est_rojo) == (0, 0, 0)
+
+
+async def test_a_judge_similar_on_capacity_does_not_feed_the_estimate_but_one_on_brand_does(world, monkeypatch):
+    FakeVendure.products = [_product("8", "Soporte celular auto")]
+    world.ml.search["Soporte celular auto"] = [_candidate("MLA8", "Soporte celular para auto"),
+                                                _candidate("MLA9", "Soporte celular para auto chico")]
+    world.ml.items["MLA8"] = [_listing("I8", "101", 300.0)]
+    world.ml.items["MLA9"] = [_listing("I9", "101", 500.0)]
+    world.image_scores[ML_IMG.format("MLA8")] = 0.62
+    world.image_scores[ML_IMG.format("MLA9")] = 0.62
+    _set("pm_vision_max_calls", 5)
+    monkeypatch.setattr(market_judge, "enabled", lambda: True)
+    monkeypatch.setattr(market_judge, "make_client", lambda: type("C", (), {"close": lambda s: None})())
+
+    async def judge(our_name, photos, candidates, *, max_calls, on_reserve=None, **kw):
+        assert await daily_budget.reserve_async(market_judge.LLM_COUNTER_KEY, max_calls, None, on_reserve)
+        diffs = {"MLA8": ("marca",), "MLA9": ("capacidad",)}
+        return market_judge.JudgeResult(verdicts={
+            c.ml_id: market_judge.JudgeVerdict(c.ml_id, False, 0.8, "x", "similar", diffs[c.ml_id])
+            for c in candidates})
+
+    monkeypatch.setattr(market_judge, "judge", judge)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["8"]
+    assert s.similar_count == 2 and (s.estimated_median_cents, s.estimated_listing_count) == (30_000, 1)
+
+
+# ─── el tope nunca recorta lo que una persona marcó ───────────────────────
+
+
+def _e(ml_id, image, source="clip", **kw):
+    return {"ml_id": ml_id, "image_score": image, "name_score": 0.5, "source": source, **kw}
+
+
+def test_the_cap_never_trims_manual_entries_and_they_take_room():
+    similar = [_e("S1", 0.9), _e("S2", 0.8), _e("S3", 0.7)]
+    other = [_e("O1", 0.3), _e("O2", None, source="manual"), _e("O3", 0.2)]
+    s, o = price_monitor._cap(similar, other, n_igual=1, keep=4)
+    # 4 en total: 1 idéntico + 1 manual (que no se toca) + 2 más de lo más parecido
+    assert [e["ml_id"] for e in s] == ["S1", "S2"] and [e["ml_id"] for e in o] == ["O2"]
+
+
+def test_manual_entries_survive_even_with_no_room_at_all():
+    s, o = price_monitor._cap([_e("S1", 0.9, source="manual"), _e("S2", 0.8)],
+                              [_e("O1", None, source="manual"), _e("O2", 0.3)], n_igual=9, keep=8)
+    assert [e["ml_id"] for e in s] == ["S1"] and [e["ml_id"] for e in o] == ["O1"]
+
+
+def test_the_cap_without_manual_entries_behaves_as_before():
+    s, o = price_monitor._cap([_e("S1", 0.9)], [_e("O1", 0.3), _e("O2", 0.2), _e("O3", 0.1)], n_igual=1, keep=3)
+    assert [e["ml_id"] for e in s] == ["S1"] and [e["ml_id"] for e in o] == ["O1"]
+
+
+async def test_a_card_marked_not_the_same_stays_visible_whatever_the_cap(webw):
+    _set("pm_ml_web_max_results", 12)
+    _set("pm_ml_keep_listings", 2)
+    cards = [_card(f"MLA95{i}", f"Heladera modelo {i}", 800.0 + i) for i in range(5)]
+    cards.append(_card("MLA960", "Producto Raro", 250.0))
+    webw.web.pages["producto-raro"] = _web_page(*cards)
+    for i in range(5):
+        _score(webw, f"MLA95{i}", 0.10 + i * 0.05)
+    _score(webw, "MLA960", 0.92)
+    _mark("3", "MLA960", 0)                                        # una persona dijo "No es el mismo"
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    ids = {e["ml_id"] for e in _entries(s.other_listings)}
+    # tope 2: la marcada no se recorta (ocupa 1) y queda lugar para la más parecida de las otras
+    assert ids == {"MLA960", "MLA954"}
+    [manual] = [e for e in _entries(s.other_listings) if e["ml_id"] == "MLA960"]
+    assert manual["source"] == "manual" and manual["price_cents"] == 25_000

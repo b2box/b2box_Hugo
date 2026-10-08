@@ -585,20 +585,37 @@ def _listing_entry(d: market_match.Decision, category: str) -> dict[str, Any]:
     }
 
 
+# Fuentes que CONFIRMAN un similar: el juez, el chequeo de medidas o una persona.
+# Un similar "sin confirmar" (banda ambigua sin juez) no se sabe de qué es.
+_CONFIRMED_SOURCES = (market_match.SOURCE_LLM, market_match.SOURCE_SPECS, market_match.SOURCE_MANUAL)
+# Si la diferencia es la cantidad o la capacidad, su precio no es comparable con el
+# nuestro (un pack x4 cuesta 4 veces; un termo de 1 L no vale lo que uno de 500 ml).
+_NOT_COMPARABLE = frozenset({market_specs.DIFF_QUANTITY, market_specs.DIFF_CAPACITY})
+
+
+def _feeds_estimate(d: market_match.Decision) -> bool:
+    """¿Este similar puede entrar al color ESTIMADO? Solo si está confirmado y no
+    difiere en cantidad ni en capacidad. Los demás se siguen mostrando, con su
+    etiqueta, pero no mueven el estimado."""
+    return d.source in _CONFIRMED_SOURCES and not (set(d.differences) & _NOT_COMPARABLE)
+
+
 def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
                prefetched: dict[str, Listings]) -> dict[str, Any]:
     """Una publicación SIMILAR o DIFERENTE para mostrar: con su precio de
     referencia (sin filtrar por vendedores), que no entra a ningún cálculo real.
-    `est_ok` dice si ese precio cuenta para el color ESTIMADO (en pesos y, en la
-    web, con ventas suficientes)."""
+    `est_ok` dice si ese precio cuenta para el color ESTIMADO: similar confirmado
+    (`_feeds_estimate`) y con precio en pesos (y, en la web, con ventas
+    suficientes)."""
     entry = _listing_entry(d, category)
     c = d.candidate
     price = c.price_cents
     if price is None and c.id in prefetched:
         price = _ars_median(prefetched[c.id][0])
     in_pesos = price is not None and price > 0 and (not c.currency or c.currency.upper() == CURRENCY)
-    est_ok = _web_price(ctx, c) is not None if c.origin == ORIGIN_WEB else in_pesos
-    entry.update(price_cents=price if in_pesos else None, est_ok=bool(est_ok and in_pesos),
+    price_ok = _web_price(ctx, c) is not None if c.origin == ORIGIN_WEB else in_pesos
+    entry.update(price_cents=price if in_pesos else None,
+                 est_ok=bool(category == "similar" and _feeds_estimate(d) and price_ok and in_pesos),
                  seller=c.seller[:60] or None, sold_quantity=c.sold_quantity)
     return entry
 
@@ -948,22 +965,32 @@ def _by_similarity(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
                                           e.get("name_score") or 0.0), reverse=True)
 
 
+def _is_manual(entry: dict[str, Any]) -> bool:
+    return entry.get("source") == market_match.SOURCE_MANUAL
+
+
 def _cap(similar: list[dict[str, Any]], other: list[dict[str, Any]], *, n_igual: int, keep: int,
          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Recorta a `keep` publicaciones en total, lo más parecido primero y los
-    SIMILARES antes que los DIFERENTES. Los IGUAL nunca se recortan (definen el
-    precio): si ya son más que `keep`, no queda lugar para el resto."""
-    room = max(0, keep - n_igual)
-    similar = _by_similarity(similar)[:room]
-    other = _by_similarity(other)[:max(0, room - len(similar))]
-    return similar, other
+    SIMILARES antes que los DIFERENTES. Nunca se recortan los IGUAL (definen el
+    precio) ni lo que una persona marcó (`source: manual`): esa card tiene que
+    seguir visible para poder darla vuelta. Ocupan lugar: lo que queda para el
+    resto es `keep` menos ellos (o nada)."""
+    manual_s = [e for e in similar if _is_manual(e)]
+    manual_o = [e for e in other if _is_manual(e)]
+    room = max(0, keep - n_igual - len(manual_s) - len(manual_o))
+    free_s = _by_similarity([e for e in similar if not _is_manual(e)])[:room]
+    free_o = _by_similarity([e for e in other if not _is_manual(e)])[:max(0, room - len(free_s))]
+    return _by_similarity([*manual_s, *free_s]), _by_similarity([*manual_o, *free_o])
 
 
 def _set_estimate(snap: MarketPriceSnapshot, similar: list[dict[str, Any]],
                   *, green_min: float, yellow_min: float) -> None:
-    """Color ESTIMADO por la mediana de los SIMILARES, con la misma fórmula de
-    ganancia, cuando NO hay IGUAL. Va en campos aparte: el color real (`color`) y
-    sus contadores no se tocan nunca por esto."""
+    """Color ESTIMADO por la mediana de los SIMILARES CONFIRMADOS (`est_ok`: juez,
+    medidas o una persona, sin diferencia de cantidad ni de capacidad y con precio
+    en pesos), con la misma fórmula de ganancia, cuando NO hay IGUAL. Si no queda
+    ninguno no hay color estimado (la lista se muestra igual). Va en campos
+    aparte: el color real (`color`) y sus contadores no se tocan nunca por esto."""
     snap.estimated_color = snap.estimated_margin_pct = snap.estimated_median_cents = None
     snap.estimated_listing_count = 0
     snap.estimated_from = None
@@ -1525,6 +1552,8 @@ def _sanitized_listings(raw: str | None) -> list[dict[str, Any]]:
         }
         if "price_cents" in entry:
             entry["price_cents"] = _clean_price(entry["price_cents"])
+        # ¿Este similar cuenta para el color estimado? (la UI lo aclara en cada card)
+        entry["in_estimate"] = bool(m.get("est_ok")) and m.get("category") == "similar"
         out.append(entry)
     return out
 
