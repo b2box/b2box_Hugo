@@ -43,3 +43,18 @@ export function shortUrl(url: string | null | undefined): string {
 export function nfmt(n: number): string {
   return n.toLocaleString("es-AR");
 }
+
+// Centavos de ARS → "$ 12.345" (sin decimales: son precios de referencia).
+export function fmtArs(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  return (cents / 100).toLocaleString("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 0,
+  });
+}
+
+export function fmtPct(value: number | null | undefined, digits = 1): string {
+  if (value == null) return "—";
+  return `${value.toLocaleString("es-AR", { maximumFractionDigits: digits })} %`;
+}

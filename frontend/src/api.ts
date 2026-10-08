@@ -10,7 +10,10 @@ import type {
   BulkConfirmResult,
   HealthMetrics,
   HistoryResponse,
+  PriceMonitorSnapshotsResponse,
+  PriceMonitorSummary,
   SectionsResponse,
+  SemaforoColor,
   Setting,
   StatusResponse,
   VisionCompare,
@@ -187,4 +190,38 @@ export async function compareVision(url: string): Promise<VisionCompare> {
       body: JSON.stringify({ url }),
     }),
   );
+}
+
+// ─── Semáforo de precios contra Mercado Libre ──────────────────────
+
+export interface SnapshotQuery {
+  page: number;
+  pageSize: number;
+  color?: SemaforoColor | null;
+  q?: string;
+  runId?: number | null;
+}
+
+export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<PriceMonitorSnapshotsResponse> {
+  const params = new URLSearchParams({ page: String(query.page), page_size: String(query.pageSize) });
+  if (query.color) params.set("color", query.color);
+  if (query.q && query.q.trim()) params.set("q", query.q.trim());
+  if (query.runId) params.set("run_id", String(query.runId));
+  return asJson<PriceMonitorSnapshotsResponse>(await apiFetch("/api/price-monitor/snapshots?" + params));
+}
+
+export async function getPriceMonitorHistory(
+  productId: string,
+): Promise<{ product_id: string; items: PriceMonitorSnapshotsResponse["items"] }> {
+  return asJson(await apiFetch(`/api/price-monitor/products/${encodeURIComponent(productId)}/history?limit=30`));
+}
+
+// Devuelve la Response cruda: el 409 ("ya hay una corrida") no es un error
+// para la UI, es un aviso.
+export async function runPriceMonitor(): Promise<Response> {
+  return apiFetch("/api/price-monitor/run", { method: "POST" });
+}
+
+export async function getPriceMonitorSummary(): Promise<PriceMonitorSummary> {
+  return asJson<PriceMonitorSummary>(await apiFetch("/api/price-monitor/summary"));
 }

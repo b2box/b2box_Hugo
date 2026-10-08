@@ -103,6 +103,7 @@ export interface HistoryResponse {
 
 export interface HealthMetrics {
   otapi_budget: { used: number; budget: number; remaining: number };
+  price_monitor?: PriceMonitorSummary;
   paco: { passed: number; failed: number; success_rate: number | null };
   duplicates: { pending_flagged: number; disabled_total: number };
   quality_pending: number;
@@ -170,4 +171,90 @@ export interface VisionCompare {
   candidates?: VisionCandidate[];
   verdicts?: Record<string, VisionVerdict>;
   index?: Record<string, unknown>;
+}
+
+// ─── Semáforo de precios contra Mercado Libre (modo sombra) ────────
+// Reflejan price_monitor.run_to_dict / snapshot_to_dict / summary.
+
+export type SemaforoColor = "verde" | "amarillo" | "rojo" | "sin_dato";
+export type MlStatus = "ok" | "no_data" | "failed" | "skipped";
+
+export interface PriceMonitorRun {
+  id: number;
+  started_at: string | null;
+  finished_at: string | null;
+  status: "running" | "ok" | "degraded" | "failed";
+  mode: number;
+  trigger: string;
+  total_products: number;
+  processed: number;
+  counts: Record<MlStatus, number>;
+  colors: Record<SemaforoColor, number>;
+  pct_no_data: number | null;
+  pct_failed: number | null;
+  ml_requests_used: number;
+  llm: { calls: number; input_tokens: number; output_tokens: number; cost_usd: number };
+  resumed_count: number;
+  error: string | null;
+}
+
+export interface MatchedListing {
+  ml_id: string;
+  title: string;
+  permalink: string;
+  listings: number;
+  min_cents: number;
+  median_cents: number;
+  source: string | null;
+  image_score: number | null;
+  name_score: number | null;
+  confidence: number | null;
+}
+
+export interface PriceMonitorSnapshot {
+  id: number;
+  run_id: number;
+  product: { id: string; name: string | null; code: string | null; image_url: string | null; slug: string | null };
+  variant_id: string | null;
+  captured_at: string | null;
+  ml_status: MlStatus;
+  ml_error: string | null;
+  ml_median_cents: number | null;
+  ml_min_cents: number | null;
+  ml_listing_count: number;
+  ml_seller_count: number;
+  ml_currency: string | null;
+  matched_listings: MatchedListing[];
+  match_source: string | null;
+  match_confidence: number | null;
+  image_score_max: number | null;
+  name_score_max: number | null;
+  candidates_count: number;
+  ambiguous_count: number;
+  our_price_cents: number | null;
+  tier_used: string | null;
+  commission_pct: number | null;
+  shipping_cents: number | null;
+  est_margin_pct: number | null;
+  color: SemaforoColor;
+  prev_color: SemaforoColor | null;
+}
+
+export interface PriceMonitorSnapshotsResponse {
+  run_id: number | null;
+  items: PriceMonitorSnapshot[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  colors: Partial<Record<SemaforoColor, number>>;
+}
+
+export interface PriceMonitorSummary {
+  last_run: PriceMonitorRun | null;
+  running: boolean;
+  mode: number;
+  ml_budget: { used: number; budget: number; remaining: number };
+  judge_enabled: boolean;
+  cron_utc: string;
 }
