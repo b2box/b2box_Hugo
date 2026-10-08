@@ -220,6 +220,7 @@ def world(monkeypatch):
     w = World()
     w.ml, w.image_scores, w.sleeps, w.graphql_calls = ml, image_scores, sleeps, graphql_calls
     yield w
+    runtime.reset_to_default("pm_include_disabled")   # que no le pise el default a otros módulos
     runtime.invalidate()
 
 

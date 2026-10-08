@@ -20,11 +20,17 @@ from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 
 @pytest.fixture(autouse=True)
 def _clean_feedback(_env):
+    from app import runtime
+    from app.db.models import Setting
+
     with Session(engine) as s:
-        for row in s.exec(select(MarketMatchFeedback)).all():
-            s.delete(row)
+        for model in (MarketMatchFeedback, Setting):
+            for row in s.exec(select(model)).all():
+                s.delete(row)
         s.commit()
+    runtime.invalidate()
     yield
+    runtime.invalidate()
 
 
 def _igual(ml_id="MLA901", price=25_000, **kw):
