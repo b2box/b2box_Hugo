@@ -19,7 +19,7 @@ las acepte. Vacía = ninguna foto de tienda pasa (falla cerrado).
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 from app.pricing.market_ml import _clean_https_parts, _host_in
 

@@ -493,6 +493,30 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_stores_affect_color",
+        label="Tiendas cuentan para el color (1 / 0)",
+        description=(
+            "0 = Casa Perfecta, Gadnic y las demás tiendas se muestran como referencia y el color "
+            "sale solo de Mercado Libre. 1 = el color y la ganancia usan la mediana de los "
+            "idénticos de Mercado Libre Y de las tiendas (un precio dudoso nunca cuenta)."
+        ),
+        type="int", parser=int,
+        default_attr="pm_stores_affect_color",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_stores_topup_minutes",
+        label="Tiendas: minutos para refrescar el índice al empezar",
+        description=(
+            "Si al arrancar una corrida el índice de una tienda está viejo, Hugo lo refresca hasta "
+            "este tiempo (dentro del tope diario de páginas de la tienda) antes de comparar. "
+            "0 = no se refresca ahí: solo lo hace el job de la madrugada."
+        ),
+        type="int", parser=int,
+        default_attr="pm_stores_topup_minutes",
+        min=0, max=180, step=5, group="monitor",
+    ),
+    SettingMeta(
         key="pm_embed_cache_days",
         label="Días de cache de fotos de ML",
         description=(

@@ -107,7 +107,8 @@ def _agent_matches(declared: str, token: str) -> int:
 
 def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
     """Texto de robots.txt → reglas que valen para `agent`."""
-    token = agent.split("/")[0].strip().lower()
+    # "HugoPriceBot/1.0 (+https://…)" → "hugopricebot": el token de producto del User-Agent.
+    token = re.split(r"[/\s(;]", agent.strip(), maxsplit=1)[0].lower()
     groups: list[tuple[list[str], list[tuple[bool, str]], list[float]]] = []
     sitemaps: list[str] = []
     agents: list[str] = []

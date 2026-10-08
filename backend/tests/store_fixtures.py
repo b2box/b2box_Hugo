@@ -133,3 +133,99 @@ def urlset(*locs: str, with_hreflang: bool = False) -> str:
         items += f"<url>\n<loc>{html.escape(loc)}</loc>\n<changefreq>weekly</changefreq>{alt}\n</url>\n"
     return ('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
             f'xmlns:xhtml="http://www.w3.org/1999/xhtml">{items}</urlset>')
+
+
+# ─── Base de datos y sitio de mentira para los tests del indexador ───────────
+
+from collections.abc import Callable  # noqa: E402
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+from sqlalchemy import delete  # noqa: E402
+from sqlmodel import Session  # noqa: E402
+
+from app import net_guard  # noqa: E402
+from app.db.models import (  # noqa: E402
+    MarketStore,
+    Setting,
+    StoreCatalogItem,
+    StoreMatch,
+    StoreMatchFeedback,
+)
+from app.db.session import engine, init_db  # noqa: E402
+
+
+def reset_store_tables() -> None:
+    init_db()
+    with Session(engine) as s:
+        for model in (StoreMatch, StoreMatchFeedback, StoreCatalogItem, MarketStore):
+            s.execute(delete(model))
+        s.execute(delete(Setting).where(Setting.key.like("_meta:store%")))  # type: ignore[attr-defined]
+        s.commit()
+
+
+@pytest.fixture
+def store_db():
+    """Tablas de tiendas vacías antes y después de cada test."""
+    reset_store_tables()
+    yield
+    reset_store_tables()
+
+
+class FakeSite:
+    """Un sitio web de mentira. `pages[url] = (status, body, headers)`; sirve
+    robots.txt, sitemap y fichas, y anota cada pedido. Contesta 304 si le llega el
+    If-None-Match que él mismo dio. Se usa como el `get` de `index_store`."""
+
+    def __init__(self) -> None:
+        self.pages: dict[str, tuple[int, str, dict[str, str]]] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        self.errors: dict[str, Exception] = {}
+        self.sleeps: list[float] = []
+        self.too_large: set[str] = set()
+        self.on_request: Callable[[str], None] | None = None
+
+    def add(self, url: str, body: str = "", status: int = 200, **headers: str) -> None:
+        self.pages[url] = (status, body, {k.replace("_", "-"): v for k, v in headers.items()})
+
+    @property
+    def urls(self) -> list[str]:
+        return [u for u, _ in self.requests]
+
+    def fetched_pages(self) -> list[str]:
+        return [u for u in self.urls if not u.endswith(("/robots.txt", ".xml", ".gz"))]
+
+    async def get(self, url: str, *, timeout=None, headers=None, max_bytes=None, **_kw) -> httpx.Response:  # noqa: ARG002
+        headers = dict(headers or {})
+        self.requests.append((url, headers))
+        if self.on_request:
+            self.on_request(url)
+        if url in self.errors:
+            raise self.errors[url]
+        if url in self.too_large:
+            raise net_guard.ResponseTooLarge("tope")
+        status, body, resp_headers = self.pages.get(url, (404, "no existe", {}))
+        etag = resp_headers.get("etag")
+        if status == 200 and etag and headers.get("If-None-Match") == etag:
+            status, body = 304, ""
+        return httpx.Response(status, content=body.encode(), headers=resp_headers,
+                              request=httpx.Request("GET", url))
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+
+class Clock:
+    """`time.monotonic` de mentira: avanza solo cuando se duerme."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def attach(self, site: FakeSite) -> None:
+        async def sleep(seconds: float) -> None:
+            site.sleeps.append(seconds)
+            self.t += seconds
+        site.sleep = sleep  # type: ignore[method-assign]

@@ -408,6 +408,31 @@ class Settings(BaseSettings):
     # por eso, ponerlo en 0 desde el dashboard.
     pm_ml_web_block_scripts: int = 1
 
+    # ── Tiendas como fuentes de comparación (Casa Perfecta, Gadnic…) ──
+    # Ver app/pricing/store_catalog.py. El catálogo de cada tienda se indexa en un
+    # job aparte, de madrugada y ANTES del semáforo; la corrida solo lo lee. Las
+    # tiendas se cargan en la tabla `market_store` (dashboard → Configuración).
+    store_index_cron_utc: str = Field(
+        default="20 3 * * *",
+        description="Cron (UTC) del indexador de tiendas. 03:20 UTC = 00:20 ART, antes del semáforo",
+    )
+    # Identificación honesta de Hugo ante las tiendas (sin disfrazarse de navegador).
+    store_user_agent: str = Field(
+        default="HugoPriceBot/1.0 (+https://b2box.pro)",
+        description="User-Agent con que Hugo pide páginas de las tiendas",
+    )
+    # Pausa entre dos páginas de la MISMA tienda (al azar entre los dos valores).
+    store_request_delay_min_s: float = 2.0
+    store_request_delay_max_s: float = 3.0
+    # Una página que dio 404/500 dos veces no se vuelve a pedir por estos días.
+    store_dead_retry_days: int = 30
+    # 1 = la mediana de los idénticos de ML Y de las tiendas manda el color (lo
+    # decide Nico). 0 = las tiendas solo se muestran como referencia.
+    pm_stores_affect_color: int = 0
+    # Si al empezar la corrida el índice de una tienda está viejo, se refresca
+    # hasta este tiempo antes de comparar. 0 = no se refresca ahí (solo el job).
+    pm_stores_topup_minutes: int = 15
+
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.
     # Proveedor por defecto: Qwen (Alibaba Model Studio, modelo qwen3-vl-plus).

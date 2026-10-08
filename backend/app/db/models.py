@@ -224,6 +224,10 @@ class PriceMonitorRun(SQLModel, table=True):
     n_est_amarillo: int = Field(default=0)
     n_est_rojo: int = Field(default=0)
     n_solo_diferentes: int = Field(default=0)
+    # JSON {"ml": {igual, similar, diferente, nada}, "store:3": {...}}: cuántos
+    # productos tienen, por fuente, un idéntico, solo similares, solo diferentes o
+    # nada (ver pricing/store_match.source_stats).
+    source_stats: str | None = Field(default=None)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -320,6 +324,9 @@ class MarketPriceSnapshot(SQLModel, table=True):
     estimated_median_cents: int | None = Field(default=None)
     estimated_listing_count: int = Field(default=0)
     estimated_from: str | None = Field(default=None, max_length=8)   # 'similar'
+    # De qué precios sale el color: ml | ml+tiendas | tiendas. Solo cambia de "ml"
+    # con `pm_stores_affect_color` prendido (ver pricing/store_match.apply_color).
+    price_basis: str = Field(default="ml", max_length=12)
 
 
 class MarketMatchFeedback(SQLModel, table=True):
@@ -365,3 +372,144 @@ class MlSellerCache(SQLModel, table=True):
     seller_id: str = Field(primary_key=True, max_length=32)
     completed_sales: int | None = Field(default=None)
     fetched_at: datetime = Field(default_factory=utcnow)
+
+
+# ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───
+# Ver app/pricing/store_catalog.py (indexador) y store_match.py (matching). Las
+# tiendas son una fila en `market_store`: agregar otra Tiendanube es cargarla
+# desde el dashboard, sin deploy.
+
+
+class MarketStore(SQLModel, table=True):
+    """Una tienda que se usa como fuente de comparación (solo referencia: no cambia
+    el color del semáforo salvo que `pm_stores_affect_color` esté prendido)."""
+    __tablename__ = "market_store"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(max_length=60, unique=True, index=True)
+    base_url: str = Field(max_length=200)
+    # tiendanube | jsonld_sitemap
+    platform: str = Field(max_length=20)
+    enabled: bool = Field(default=True)
+    # Un producto indexado se vuelve a leer pasados estos días.
+    refresh_days: int = Field(default=7)
+    # Páginas de producto que Hugo lee por día (UTC) de esta tienda.
+    max_pages_per_day: int = Field(default=1000)
+    # Vacío = /sitemap.xml (con índice, se siguen los que dicen "product").
+    sitemap_url: str | None = Field(default=None, max_length=300)
+    # CSV de dominios de los que se aceptan fotos (la tienda y su CDN).
+    image_hosts: str | None = Field(default=None, max_length=300)
+    # Marca propia de la tienda: se trata como genérica (Nico: marca genérica = igual).
+    house_brand: str | None = Field(default=None, max_length=60)
+    notes: str | None = Field(default=None, max_length=500)
+    created_at: datetime = Field(default_factory=utcnow)
+    # Última pasada del indexador y cómo le fue (para la card de Salud).
+    last_indexed_at: datetime | None = Field(default=None)
+    last_index_status: str | None = Field(default=None, max_length=300)
+
+
+class StoreCatalogItem(SQLModel, table=True):
+    """Un producto de una tienda, tal como lo leyó el indexador."""
+    __tablename__ = "store_catalog_item"
+    __table_args__ = (
+        Index("ix_sci_store_url", "store_id", "url", unique=True),
+        Index("ix_sci_store_rotation", "store_id", "dead", "last_checked_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    store_id: int
+    url: str = Field(max_length=500)
+    sku: str | None = Field(default=None, max_length=80)
+    title: str | None = Field(default=None, max_length=300)
+    price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    # El precio no coincide con otro bloque de la página o es absurdo: se muestra
+    # con aviso y no cuenta para "más barato afuera" ni para el color.
+    price_doubtful: bool = Field(default=False)
+    price_note: str | None = Field(default=None, max_length=200)
+    image_url: str | None = Field(default=None, max_length=500)
+    brand: str | None = Field(default=None, max_length=80)
+    stock: int | None = Field(default=None)
+    # Para el GET condicional (If-None-Match / If-Modified-Since).
+    etag: str | None = Field(default=None, max_length=200)
+    last_modified: str | None = Field(default=None, max_length=100)
+    first_seen_at: datetime = Field(default_factory=utcnow)
+    # Última vez que se leyó bien la página.
+    last_seen_at: datetime | None = Field(default=None)
+    # Último intento (bien o mal): es la clave de la rotación.
+    last_checked_at: datetime | None = Field(default=None)
+    # Dio 404/500 (o dejó de ser un producto) dos veces: no se reintenta por 30 días.
+    dead: bool = Field(default=False)
+    dead_since: datetime | None = Field(default=None)
+    fails: int = Field(default=0)
+    fail_reason: str | None = Field(default=None, max_length=100)
+    # False = ya no figura en el sitemap: no se lee ni se compara.
+    in_sitemap: bool = Field(default=True)
+
+
+class StoreMatch(SQLModel, table=True):
+    """Lo que se encontró en UNA tienda para UN producto nuestro en UNA corrida:
+    hasta 6 candidatos, cada uno IGUAL / SIMILAR / DIFERENTE (siempre se trae
+    algo). Es referencia: no toca el color del semáforo salvo con
+    `pm_stores_affect_color`. Los textos, links y fotos se guardan ya saneados."""
+    __tablename__ = "store_match"
+    __table_args__ = (
+        Index("ix_sm_run_product", "run_id", "product_id"),
+        Index("ix_sm_run_product_item", "run_id", "product_id", "store_id", "item_id", unique=True),
+        Index("ix_sm_store_item", "store_id", "item_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: int
+    product_id: str = Field(max_length=64)
+    store_id: int
+    item_id: int
+    captured_at: datetime = Field(default_factory=utcnow)
+    # 1 = el mejor candidato de esa tienda para este producto.
+    rank: int = Field(default=1)
+    # igual | similar | diferente
+    category: str = Field(max_length=12)
+    # La categoría que dijo el algoritmo, para deshacer una corrección humana.
+    auto_category: str = Field(max_length=12)
+    # clip | clip+nombre | llm | specs | veto | none | humano
+    source: str | None = Field(default=None, max_length=16)
+    title: str = Field(default="", max_length=300)
+    url: str = Field(default="", max_length=500)
+    image_url: str | None = Field(default=None, max_length=500)
+    brand: str | None = Field(default=None, max_length=80)
+    price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    price_doubtful: bool = Field(default=False)
+    price_note: str | None = Field(default=None, max_length=200)
+    stock: int | None = Field(default=None)
+    image_score: float | None = Field(default=None)
+    name_score: float | None = Field(default=None)
+    confidence: float | None = Field(default=None)
+    # JSON: lista cerrada de "qué cambia" (marca, medida, cantidad…).
+    differences: str | None = Field(default=None)
+    reason: str | None = Field(default=None, max_length=300)
+    notes: str | None = Field(default=None, max_length=300)
+    # es | no_es: corrección de una persona (ver StoreMatchFeedback).
+    human_label: str | None = Field(default=None, max_length=8)
+
+
+class StoreMatchFeedback(SQLModel, table=True):
+    """"No es el mismo" / "Es el mismo" sobre un candidato de una tienda. Vale para
+    ese producto en las próximas corridas: lo marcado "no es" no se vuelve a
+    proponer como igual y lo marcado "es" entra como igual."""
+    __tablename__ = "store_match_feedback"
+    __table_args__ = (
+        Index("ix_smf_product_store_item", "product_id", "store_id", "item_id", unique=True),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    store_id: int
+    item_id: int
+    label: str = Field(max_length=8)                 # es | no_es
+    created_at: datetime = Field(default_factory=utcnow)
+    actor: str | None = Field(default=None, max_length=120)
+    # Lo que Hugo había dicho (para calibrar).
+    auto_category: str | None = Field(default=None, max_length=12)
+    image_score: float | None = Field(default=None)
+    name_score: float | None = Field(default=None)
+    title: str | None = Field(default=None, max_length=300)
+    product_name: str | None = Field(default=None, max_length=200)
