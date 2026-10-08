@@ -560,3 +560,18 @@ async def test_a_disabled_product_scores_exactly_like_the_same_photo_inside_the_
         on_the_fly = await market_match.clip_index_scorer(disabled, [ml_photo])
         assert inside is not None and on_the_fly is not None
         assert on_the_fly == pytest.approx(inside, abs=1e-5), trial
+
+
+async def test_only_pesos_count_a_dollar_listing_never_enters_the_median(webw):
+    """Criterio 7: precio en ARS solamente. Una publicación en USD que es IGUAL en
+    foto y nombre no mueve ni la mediana ni el mínimo (un 10 «dólares» sería 10 pesos)."""
+    webw.web.pages["producto-raro"] = _web_page(
+        _card("MLA901", "Producto Raro", 250.0),
+        _card("MLA902", "Producto Raro Premium", 10.0, currency="USD", seller="Dos"),
+        _card("MLA903", "Producto Raro Plus", 300.0, currency="usd", seller="Tres"))
+    for ref in ("MLA901", "MLA902", "MLA903"):
+        _score(webw, ref, 0.9)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert (s.ml_status, s.ml_median_cents, s.ml_min_cents, s.ml_listing_count) == ("ok", 25_000, 25_000, 1)
+    assert [m["ml_id"] for m in json.loads(s.matched_listings)] == ["MLA901"]
