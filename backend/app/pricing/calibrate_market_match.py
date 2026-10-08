@@ -26,8 +26,8 @@ Dos pasos:
        python -m app.pricing.calibrate_market_match evaluate pares.csv --grid
        python -m app.pricing.calibrate_market_match evaluate pares.csv --image 0.62 --name 0.55
 
-Los pares que una persona marcó "No es el mismo" en el dashboard
-(`market_match_feedback`) salen en el CSV ya etiquetados con 0.
+Los pares que una persona marcó en el dashboard (`market_match_feedback`: "No es
+el mismo" = 0, "Es el mismo" = 1) salen en el CSV ya etiquetados.
 
 La banda ambigua se cuenta como "no es el mismo producto" (así se comporta el
 job con el juez LLM apagado) y se informa aparte cuántos positivos cayeron ahí:
@@ -103,10 +103,12 @@ def _unescape(text: str | None) -> str:
     return text[1:] if text.startswith("'") and text[1:].startswith(_FORMULA_PREFIXES) else text
 
 
-def export_row(product, decision, *, known_negative: bool = False) -> dict[str, str]:
+def export_row(product, decision, *, known_negative: bool = False,
+               known_positive: bool = False) -> dict[str, str]:
     """Una fila del CSV a etiquetar (texto escapado contra fórmulas).
-    `known_negative`: alguien ya marcó "No es el mismo" en el dashboard; la fila
-    sale etiquetada 0 (se puede corregir en la planilla)."""
+    `known_negative` / `known_positive`: alguien ya marcó "No es el mismo" / "Es el
+    mismo" en el dashboard; la fila sale etiquetada 0 / 1 (se puede corregir en la
+    planilla)."""
     row = {
         "product_id": product.id, "product_code": product.product_code or "",
         "our_name": product.name, "our_image_url": product.featured_image_url or "",
@@ -118,7 +120,7 @@ def export_row(product, decision, *, known_negative: bool = False) -> dict[str, 
     out = {k: csv_safe(v) for k, v in row.items()}
     out["image_score"] = "" if decision.image_score is None else f"{decision.image_score:.4f}"
     out["name_score"] = f"{decision.name_score:.4f}"
-    out["same_product"] = "0" if known_negative else ""
+    out["same_product"] = "0" if known_negative else "1" if known_positive else ""
     return out
 
 
@@ -267,6 +269,7 @@ async def _export(sample: int, seed: int, out: Path) -> int:
     thr = market_match.Thresholds.from_runtime()
     # Lo que una persona ya descartó con "No es el mismo" sale etiquetado 0.
     negatives = match_feedback.feedback_pairs()
+    positives = match_feedback.positive_pairs()
     rows = 0
     async with MlMarket(budget=int(runtime.get("pm_ml_daily_budget"))) as ml, \
             open(out, "w", newline="", encoding="utf-8") as fh:
@@ -285,7 +288,8 @@ async def _export(sample: int, seed: int, out: Path) -> int:
                 continue
             for d in await market_match.score_candidates(product, candidates, thr):
                 writer.writerow(export_row(
-                    product, d, known_negative=(product.id, d.candidate.id) in negatives))
+                    product, d, known_negative=(product.id, d.candidate.id) in negatives,
+                    known_positive=(product.id, d.candidate.id) in positives))
                 rows += 1
             print(f"  {i}/{len(products)} {product.id}: {len(candidates)} fichas")
     print(f"\n{rows} pares en {out}. Completá la columna same_product y corré `evaluate`. "
