@@ -375,16 +375,20 @@ class Settings(BaseSettings):
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.
     # Proveedor por defecto: Qwen (Alibaba Model Studio, modelo qwen3-vl-plus).
-    # Alternativas con el mismo contrato: Xiaomi MiMo (mimo-v2-omni) y
+    # Alternativas con el mismo contrato: Xiaomi MiMo (mimo-v2.6-flash) y
     # OpenRouter. La URL no se hardcodea a un proveedor: ver README.
     pm_llm_base_url: str = Field(default="", description="Base URL OpenAI-compatible del juez")
     pm_llm_api_key: str = Field(default="", description="API key del juez")
     pm_llm_model: str = "qwen3-vl-plus"
     pm_llm_timeout_s: float = 30.0
     # Precio por millón de tokens (USD) para estimar el costo por corrida.
-    # Defaults = Qwen3-VL-Plus internacional; MiMo omni es 0.40 / 2.00.
+    # Defaults = Qwen3-VL-Plus internacional; MiMo v2.6 Flash es 0.14 / 0.28.
     pm_llm_price_in_per_m: float = 0.20
     pm_llm_price_out_per_m: float = 1.60
+    # Campos extra (objeto JSON) que se suman al body de cada llamada. Vacío =
+    # el default según el host de PM_LLM_BASE_URL (MiMo y Qwen: pensamiento
+    # apagado); "{}" = no mandar nada. Ver market_judge.extra_body.
+    pm_llm_extra_body: str = ""
 
     # ── Alertas: email (SMTP) ──────────────────────────────────
     alert_smtp_host: str = "smtp.gmail.com"

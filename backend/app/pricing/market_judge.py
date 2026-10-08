@@ -8,7 +8,12 @@ ficha, si es el mismo producto y con qué confianza.
 
 Proveedor: el que diga `PM_LLM_BASE_URL`. Por defecto el modelo es Qwen
 (`qwen3-vl-plus`, Alibaba Model Studio); también sirven Xiaomi MiMo
-(`mimo-v2-omni`) u OpenRouter. No se hardcodea ninguna URL: ver README.
+(`mimo-v2.6-flash`) u OpenRouter. No se hardcodea ninguna URL: ver README.
+
+Pensamiento apagado: MiMo y Qwen tienen modelos "híbridos" que, si piensan,
+gastan todo `max_tokens` razonando y devuelven el contenido vacío (medido con
+mimo-v2.6-flash el 08-oct-2026). Según el host de la base URL se manda el
+campo que lo apaga (`extra_body`); `PM_LLM_EXTRA_BODY` lo pisa.
 
 Costo bajo control:
   * solo corre si `pm_vision_max_calls` > 0 (default 0 = sombra sin IA);
@@ -82,6 +87,15 @@ class JudgeResult:
 
 
 _warned_insecure_url = False
+# Avisos que se loguean una sola vez por proceso (config rota, modelo pensando).
+_warned_once: set[str] = set()
+
+
+def _warn_once(key: str, msg: str, *args: Any) -> None:
+    if key in _warned_once:
+        return
+    _warned_once.add(key)
+    log.warning(msg, *args)
 
 
 def enabled() -> bool:
@@ -101,6 +115,72 @@ def enabled() -> bool:
             _warned_insecure_url = True
         return False
     return True
+
+
+# ─── Particularidades de cada proveedor ────────────────────────────────────
+
+MIMO_HOST = "api.xiaomimimo.com"
+# Lo que el juez controla y un PM_LLM_EXTRA_BODY no puede pisar: el SDK mezcla
+# extra_body ENCIMA del body, así que un "max_tokens" ahí rompería el techo de
+# costo y un "stream" el parseo.
+_RESERVED_BODY_KEYS = frozenset({
+    "model", "messages", "max_tokens", "max_completion_tokens", "temperature", "stream", "n",
+})
+
+
+def _host_in(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _base_host() -> str:
+    try:
+        return (urlsplit(get_settings().pm_llm_base_url.strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_qwen_host(host: str) -> bool:
+    """Alibaba Model Studio: dashscope(-intl|-us).aliyuncs.com, el dominio
+    nuevo {WorkspaceId}.<región>.maas.aliyuncs.com (el que recomienda el
+    README) y qwencloudapi.com."""
+    if _host_in(host, "qwencloudapi.com"):
+        return True
+    return host.endswith(".aliyuncs.com") and (
+        host.split(".", 1)[0].startswith("dashscope") or host.endswith(".maas.aliyuncs.com")
+    )
+
+
+def _default_extra_body(host: str) -> dict[str, Any]:
+    if host == MIMO_HOST:
+        return {"thinking": {"type": "disabled"}}
+    if _is_qwen_host(host):
+        return {"enable_thinking": False}
+    return {}
+
+
+def extra_body() -> dict[str, Any]:
+    """Campos extra del body según el proveedor (hoy: apagar el pensamiento).
+
+    `PM_LLM_EXTRA_BODY` (objeto JSON) reemplaza al default entero; "{}" no
+    manda nada. Si no es un objeto JSON válido se avisa una vez y se usa el
+    default. Las claves que maneja el juez (model, max_tokens…) se descartan.
+    """
+    raw = (get_settings().pm_llm_extra_body or "").strip()
+    if not raw:
+        return _default_extra_body(_base_host())
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        _warn_once("extra_body_invalid",
+                   "PM_LLM_EXTRA_BODY no es un objeto JSON válido: se ignora y va el default del proveedor")
+        return _default_extra_body(_base_host())
+    dropped = sorted(k for k in parsed if k in _RESERVED_BODY_KEYS)
+    if dropped:
+        _warn_once("extra_body_reserved",
+                   "PM_LLM_EXTRA_BODY trae claves que maneja el juez (%s): se ignoran", ", ".join(dropped))
+    return {k: v for k, v in parsed.items() if k not in _RESERVED_BODY_KEYS}
 
 
 def estimate_cost(input_tokens: int, output_tokens: int,
@@ -250,13 +330,17 @@ async def judge(
     s = get_settings()
     own_client = client is None
     client = client or make_client()
+    request: dict[str, Any] = dict(
+        model=s.pm_llm_model,
+        messages=build_messages(our_name, our_image_urls, candidates),
+        temperature=0,
+        max_tokens=_MAX_TOKENS,
+    )
+    body = extra_body()
+    if body:
+        request["extra_body"] = body
     try:
-        response = await client.chat.completions.create(
-            model=s.pm_llm_model,
-            messages=build_messages(our_name, our_image_urls, candidates),
-            temperature=0,
-            max_tokens=_MAX_TOKENS,
-        )
+        response = await client.chat.completions.create(**request)
     except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red)
         log.warning("Juez LLM falló (%s): %s", type(exc).__name__, str(exc)[:200])
         return None

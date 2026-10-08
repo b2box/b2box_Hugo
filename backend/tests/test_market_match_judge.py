@@ -302,3 +302,76 @@ async def test_a_failed_call_still_counts_against_the_cap_and_runs_the_hook(monk
                                     on_reserve=lambda session: hooked.append(1)) is None
     assert hooked == [1] and daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1
     assert client.closed == 0  # el cliente es del llamador: no lo cierra el juez
+
+
+# ─── proveedor: pensamiento apagado por host (extra_body) ─────────────────
+
+
+@pytest.fixture
+def fresh_warnings(monkeypatch):
+    monkeypatch.setattr(market_judge, "_warned_once", set())
+
+
+MIMO_URL = "https://api.xiaomimimo.com/v1"
+
+
+@pytest.mark.parametrize("base_url,expected", [
+    (MIMO_URL, {"thinking": {"type": "disabled"}}),
+    ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://dashscope.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://ws-123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://api.qwencloudapi.com/v1", {"enable_thinking": False}),
+    ("https://openrouter.ai/api/v1", {}),
+    ("https://llm.invalid/v1", {}),
+    ("https://evil-dashscope.example.com/v1", {}),       # "dashscope" en otro dominio no cuenta
+    ("https://api.xiaomimimo.com.evil.com/v1", {}),
+])
+def test_extra_body_by_provider_host(monkeypatch, base_url, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=base_url)
+    assert market_judge.extra_body() == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("{}", {}),                                                    # apagar el default
+    ('{"reasoning": {"enabled": false}}', {"reasoning": {"enabled": False}}),
+    ('  {"thinking": {"type": "enabled"}}  ', {"thinking": {"type": "enabled"}}),
+])
+def test_extra_body_env_override_replaces_the_default(monkeypatch, raw, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_extra_body=raw)
+    assert market_judge.extra_body() == expected
+
+
+@pytest.mark.parametrize("raw", ["{roto", "[1, 2]", '"texto"', "42", "null"])
+def test_invalid_extra_body_warns_once_and_falls_back_to_the_default(monkeypatch, caplog, fresh_warnings, raw):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_extra_body=raw)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            assert market_judge.extra_body() == {"thinking": {"type": "disabled"}}
+    assert caplog.text.count("PM_LLM_EXTRA_BODY no es un objeto JSON") == 1
+
+
+def test_extra_body_cannot_override_what_the_judge_controls(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 99999, "stream": true, "top_p": 0.5}')
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert market_judge.extra_body() == {"top_p": 0.5}
+    assert "max_tokens, stream" in caplog.text
+
+
+async def test_judge_sends_the_provider_extra_body(monkeypatch):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_model="mimo-v2.6-flash",
+                    pm_llm_image_mode="url")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert client.calls[0]["max_tokens"] == market_judge._MAX_TOKENS
+
+
+async def test_judge_sends_no_extra_body_when_there_is_nothing_to_send(monkeypatch):
+    _judge_settings(monkeypatch, pm_llm_base_url="https://openrouter.ai/api/v1")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert "extra_body" not in client.calls[0]
