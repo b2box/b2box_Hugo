@@ -28,7 +28,7 @@ from app.db.session import engine
 log = logging.getLogger(__name__)
 
 # Ítems (MLA123), productos de usuario (MLAU123) y fichas de catálogo (MLA123).
-ML_ID = re.compile(r"^MLAU?\d{3,20}$")
+ML_ID = re.compile(r"^MLAU?\d{3,20}$", re.ASCII)
 
 
 def valid_ml_id(value: object) -> bool:

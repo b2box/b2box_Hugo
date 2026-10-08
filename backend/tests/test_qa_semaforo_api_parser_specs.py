@@ -429,8 +429,6 @@ def test_good_permalinks_are_https_and_mercadolibre_only():
         assert cand.permalink == want
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L4: un resultado PATROCINADO trae como url el click-tracker sin los "
-                                       "parámetros (url_params va aparte) y el permalink guardado es un link muerto")
 def test_a_sponsored_result_does_not_keep_a_dead_click_tracker_as_its_link():
     [cand] = web.parse_search(_html(polycard(
         "MLA1154769187", "Fuente para impresora", 4830.0,
@@ -438,8 +436,6 @@ def test_a_sponsored_result_does_not_keep_a_dead_click_tracker_as_its_link():
     assert "click1." not in cand.permalink
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L5: \\d de Python acepta dígitos Unicode: «MLA١٢٣» pasa como id de ML "
-                                       "(en el parser y en valid_ml_id). Usar re.ASCII")
 def test_ml_ids_are_ascii_digits_only():
     assert web.parse_search(_html(polycard("MLA١٢٣٤٥٦", "Producto A", 100.0)), 5).candidates == []
     assert not match_feedback.valid_ml_id("MLA١٢٣٤")

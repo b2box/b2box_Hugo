@@ -287,7 +287,7 @@ def build_messages(
     for c in list(candidates)[:MAX_CANDIDATES]:
         price = f" · precio ARS {c.price_cents / 100:.0f}" if c.price_cents else ""
         brand = f" · marca declarada: {_one_line(c.brand, 40)}" if _one_line(c.brand, 40) else ""
-        content.append({"type": "text", "text": f"- {c.ml_id}: {c.title.strip()[:160]}{brand}{price}"})
+        content.append({"type": "text", "text": f"- {c.ml_id}: {_one_line(c.title, 160)}{brand}{price}"})
         content.extend(_image_parts(c.image_url, inline))
     content.append({"type": "text", "text": "Respondé solo el JSON pedido."})
     return [

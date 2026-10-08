@@ -72,9 +72,10 @@ _RETRY_AFTER_CAP_S = 60.0
 # se acepta solo lo que tiene la forma esperada.
 _LINK_DOMAINS = ("mercadolibre.com.ar", "mercadolibre.com")
 _IMAGE_DOMAIN = "mlstatic.com"
-_PRODUCT_ID = re.compile(r"^MLA\d+$")    # fichas de catálogo e items
-_USER_ID = re.compile(r"^\d+$")
-_CATEGORY_ID = re.compile(r"^MLA\d+$")
+# re.ASCII: \d de Python acepta dígitos de otros alfabetos ("MLA١٢٣"), que no son ids de ML.
+_PRODUCT_ID = re.compile(r"^MLA\d+$", re.ASCII)    # fichas de catálogo e items
+_USER_ID = re.compile(r"^\d+$", re.ASCII)
+_CATEGORY_ID = re.compile(r"^MLA\d+$", re.ASCII)
 
 
 def _host_in(host: str, domain: str) -> bool:
@@ -109,7 +110,23 @@ def safe_permalink(url: object) -> str:
     parts = _clean_https_parts(url)
     if parts is None or not any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS):
         return ""
+    if _looks_like_click_tracker(parts):
+        return ""
     return parts.geturl()
+
+
+def _looks_like_click_tracker(parts) -> bool:
+    """Click-trackers de publicidad (click1.mercadolibre.com.ar/mclics/…): un
+    link que no lleva a la publicación y que además contaría un clic al
+    anunciante cada vez que una persona lo abre."""
+    return parts.hostname.lower().split(".")[0].startswith("click") or "/mclics/" in parts.path.lower()
+
+
+def is_click_tracker(url: object) -> bool:
+    """¿Es un link de ML, pero de un click-tracker publicitario?"""
+    parts = _clean_https_parts(url if not isinstance(url, str) or "://" in url else "https://" + url.lstrip("/"))
+    return (parts is not None and any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS)
+            and _looks_like_click_tracker(parts))
 
 
 def safe_image_url(url: object) -> str | None:

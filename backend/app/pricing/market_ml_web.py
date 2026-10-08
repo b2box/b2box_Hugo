@@ -48,7 +48,7 @@ from urllib.parse import quote, urlsplit
 from app.config import get_settings
 from app.ingest import browser_fetch
 from app.pricing import daily_budget
-from app.pricing.market_ml import ORIGIN_WEB, MlCandidate, safe_image_url, safe_permalink
+from app.pricing.market_ml import ORIGIN_WEB, MlCandidate, is_click_tracker, safe_image_url, safe_permalink
 
 log = logging.getLogger(__name__)
 
@@ -57,14 +57,18 @@ SEARCH_HOST = "listado.mercadolibre.com.ar"
 
 # Ítems (MLA123…) y productos de usuario (MLAU123…). Las fichas de catálogo
 # (MLA123 en /p/) comparten el mismo formato que los ítems.
-_REF = re.compile(r"^MLAU?\d+$")
-_PICTURE_ID = re.compile(r"^[0-9A-Za-z_-]{6,80}$")
-_ANY_ML_ID = re.compile(r"MLAU?-?(\d{5,})")
+_REF = re.compile(r"^MLAU?\d+$", re.ASCII)
+_PICTURE_ID = re.compile(r"^[0-9A-Za-z_-]{6,80}$", re.ASCII)
+_ANY_ML_ID = re.compile(r"MLAU?-?(\d{5,})", re.ASCII)
 _BRACES = re.compile(r"\{[^}]*\}")
 _WS = re.compile(r"\s+")
 _NORDIC_CTX = re.compile(r'<script[^>]*id="__NORDIC_RENDERING_CTX__"[^>]*>', re.I)
 _JSON_LD = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.I | re.S)
 _CTX_PREFIX = "_n.ctx.r="
+# Tope de HTML que se mira. Las páginas reales pesan 2,2 a 3,6 MB sin comprimir y
+# el JSON-LD (de donde sale la marca) puede quedar pasando los 3,0 MB: se corta
+# más arriba para no perderlo, pero no se parsea una página sin techo.
+MAX_HTML_CHARS = 5_000_000
 _PICTURE_URL = "https://http2.mlstatic.com/D_NQ_NP_{}-F.jpg"
 _MAX_PRICE_CENTS = 10**11
 
@@ -111,7 +115,7 @@ def _json_after(text: str, start: int) -> Any:
     termina el objeto, sin importar lo que venga después (`;_n.ctx.r.assets…`)."""
     try:
         obj, _ = json.JSONDecoder().raw_decode(text, start)
-    except ValueError:
+    except (ValueError, RecursionError):   # RecursionError: un JSON anidado a propósito
         return None
     return obj
 
@@ -179,14 +183,31 @@ def _component(polycard: dict, component_id: str) -> dict:
     return {}
 
 
-def _permalink(url: object) -> str:
-    """El `url` de la polycard viene sin esquema ("www.mercadolibre.com.ar/…")."""
+def _clean_url(url: object) -> str:
+    """El `url` de la polycard sin fragmento y con esquema."""
     if not isinstance(url, str) or not url.strip():
         return ""
     raw = url.strip().split("#", 1)[0]
-    if "://" not in raw:
-        raw = "https://" + raw.lstrip("/")
-    return safe_permalink(raw)
+    return raw if "://" in raw else "https://" + raw.lstrip("/")
+
+
+def _permalink(url: object) -> str:
+    """El `url` de la polycard viene sin esquema ("www.mercadolibre.com.ar/…").
+    Un resultado PATROCINADO trae como url el click-tracker de ML
+    (`click1.mercadolibre.com.ar/mclics/…`) y el link real nunca viaja: eso no se
+    guarda (cada clic de un humano cobraría un clic al anunciante) y `safe_permalink`
+    lo descarta. Quien llama arma entonces el link canónico por id."""
+    return safe_permalink(_clean_url(url))
+
+
+def canonical_permalink(ref: str) -> str:
+    """Link por id cuando la publicación no trae uno usable: un ítem (MLA123) en
+    articulo.mercadolibre.com.ar, un producto de usuario (MLAU123) en /up/."""
+    if _REF.fullmatch(ref or ""):
+        if ref.startswith("MLAU"):
+            return f"https://www.mercadolibre.com.ar/up/{ref}"
+        return f"https://articulo.mercadolibre.com.ar/MLA-{ref[3:]}"
+    return ""
 
 
 def _from_polycard(item: dict) -> MlCandidate | None:
@@ -213,7 +234,8 @@ def _from_polycard(item: dict) -> MlCandidate | None:
         id=ref,
         name=title,
         image_urls=[image] if image else [],
-        permalink=_permalink(meta.get("url")),
+        permalink=_permalink(meta.get("url")) or (
+            canonical_permalink(ref) if is_click_tracker(_clean_url(meta.get("url"))) else ""),
         domain_id=str(meta.get("domain_id") or "")[:60],
         origin=ORIGIN_WEB,
         price_cents=_price_cents(price.get("value")),
@@ -229,7 +251,7 @@ def _ld_products(html: str) -> list[dict]:
     for m in _JSON_LD.finditer(html):
         try:
             data = json.loads(m.group(1))
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         graph = data.get("@graph") if isinstance(data, dict) else data
         for node in graph if isinstance(graph, list) else [graph]:
@@ -243,8 +265,8 @@ def _ids_in(text: object) -> set[str]:
     (ficha) o MLA-123-titulo (ítem)."""
     if not isinstance(text, str):
         return set()
-    ids = {"MLA" + n for n in re.findall(r"MLA-?(\d{5,})", text)}
-    ids.update(re.findall(r"MLAU\d+", text))
+    ids = {"MLA" + n for n in re.findall(r"MLA-?(\d{5,})", text, re.ASCII)}
+    ids.update(re.findall(r"MLAU\d+", text, re.ASCII))
     return ids
 
 
@@ -277,7 +299,7 @@ def parse_search(html: str, max_results: int) -> ParsedSearch:
     """Resultados de una página de listado. Nunca lanza: lo ilegible vuelve
     como `source="none"`."""
     limit = max(1, int(max_results))
-    html = html or ""
+    html = (html or "")[:MAX_HTML_CHARS]
     ld_list: list[MlCandidate] = []
     ld_by_id: dict[str, MlCandidate] = {}
     for node in _ld_products(html):
