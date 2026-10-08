@@ -360,13 +360,74 @@ def test_invalid_extra_body_warns_once_and_falls_back_to_the_default(monkeypatch
     assert caplog.text.count("PM_LLM_EXTRA_BODY no es un objeto JSON") == 1
 
 
-def test_extra_body_cannot_override_what_the_judge_controls(monkeypatch, caplog, fresh_warnings):
+ALLOWED_EXTRA = {
+    "thinking": {"type": "disabled"}, "enable_thinking": False, "thinking_budget": 0,
+    "reasoning": {"enabled": False}, "reasoning_effort": "none", "top_p": 0.5, "seed": 7,
+    "response_format": {"type": "json_object"},
+}
+
+
+def test_extra_body_allowlist_is_exactly_the_documented_one():
+    assert market_judge._ALLOWED_BODY_KEYS == set(ALLOWED_EXTRA)
+
+
+def test_extra_body_lets_every_allowed_key_through(monkeypatch):
+    import json
+
+    _judge_settings(monkeypatch, pm_llm_extra_body=json.dumps(ALLOWED_EXTRA))
+    assert market_judge.extra_body() == ALLOWED_EXTRA
+
+
+DROPPED = ["model", "messages", "max_tokens", "max_completion_tokens", "temperature", "stream", "n",
+           "tools", "tool_choice", "user", "stop", "logit_bias", "metadata", "store", "base_url",
+           "extra_headers", "api_key"]
+
+
+def test_extra_body_drops_everything_that_is_not_allowed_and_warns_once_per_key(monkeypatch, caplog,
+                                                                              fresh_warnings):
+    """Lista blanca: el aviso nombra la clave y nunca el valor."""
+    import json
     import logging
 
-    _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 99999, "stream": true, "top_p": 0.5}')
+    secret = "valor-que-no-debe-loguearse"
+    raw = json.dumps({**{k: secret for k in DROPPED}, "top_p": 0.5, "seed": 3})
+    _judge_settings(monkeypatch, pm_llm_extra_body=raw)
     with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
-        assert market_judge.extra_body() == {"top_p": 0.5}
-    assert "max_tokens, stream" in caplog.text
+        for _ in range(3):
+            assert market_judge.extra_body() == {"top_p": 0.5, "seed": 3}
+    for key in DROPPED:
+        assert caplog.text.count(f"la clave '{key}' no está permitida") == 1, key
+    assert secret not in caplog.text and "0.5" not in caplog.text
+    assert len(caplog.records) == len(DROPPED)
+
+
+def test_extra_body_warns_about_a_dropped_key_only_once_across_changes(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 1}')
+        market_judge.extra_body()
+        _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 2, "stream": true}')
+        market_judge.extra_body()
+    assert caplog.text.count("'max_tokens'") == 1 and caplog.text.count("'stream'") == 1
+
+
+def test_a_very_long_dropped_key_is_truncated_in_the_log(monkeypatch, caplog, fresh_warnings):
+    import json
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_extra_body=json.dumps({"k" * 500: 1}))
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert market_judge.extra_body() == {}
+    assert "k" * 41 not in caplog.text and "k" * 40 in caplog.text
+
+
+def test_the_readme_documents_the_allowed_extra_body_keys():
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    for key in ALLOWED_EXTRA:
+        assert f"`{key}`" in readme, key
 
 
 async def test_judge_sends_the_provider_extra_body(monkeypatch):
@@ -459,6 +520,19 @@ def test_invalid_image_mode_warns_once_and_uses_the_default(monkeypatch, caplog,
     with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
         assert [market_judge.image_mode() for _ in range(3)] == ["base64"] * 3
     assert caplog.text.count("PM_LLM_IMAGE_MODE") == 1
+
+
+@pytest.mark.parametrize("raw", ["inline", "sk-1234567890abcdef-esto-es-una-key", "Base 64"])
+def test_invalid_image_mode_warning_does_not_repeat_the_value(monkeypatch, caplog, fresh_warnings, raw):
+    """Una variable mal pegada puede traer una credencial: el aviso dice a lo
+    sumo el largo."""
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode=raw)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        market_judge.image_mode()
+    assert raw.strip().lower()[:6] not in caplog.text.lower().replace("pm_llm_image_mode", "")
+    assert f"({len(raw.strip())} caracteres)" in caplog.text
 
 
 OUR_PHOTO = "https://example.invalid/assets/preview/p1__preview.jpg"   # host de VENDURE_API_URL

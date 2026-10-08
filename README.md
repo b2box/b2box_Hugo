@@ -315,7 +315,11 @@ tardó 163 s). Según el host de `PM_LLM_BASE_URL` el juez manda en el body:
 
 `PM_LLM_EXTRA_BODY` (objeto JSON) reemplaza ese default entero; `{}` no manda
 nada. Si no es un objeto JSON válido se loguea un aviso y se usa el default.
-No puede pisar `model`, `messages`, `max_tokens`, `temperature` ni `stream`.
+Es una lista blanca: solo pasan `thinking`, `enable_thinking`,
+`thinking_budget`, `reasoning`, `reasoning_effort`, `top_p`, `seed` y
+`response_format`. Cualquier otra clave (`model`, `messages`, `max_tokens`,
+`temperature`, `stream`, `tools`…) se descarta, con un aviso por clave y una
+sola vez que dice el nombre y nunca el valor.
 Si igual llega una respuesta con `reasoning_tokens` > 0 o vacía, cuenta como
 sin veredicto y queda un aviso "el modelo está pensando, revisá
 PM_LLM_EXTRA_BODY" en el log.

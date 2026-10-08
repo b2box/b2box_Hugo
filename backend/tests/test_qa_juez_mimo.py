@@ -222,7 +222,7 @@ async def test_c2_the_wire_body_carries_the_provider_field(llm_env, clean_budget
     assert body["max_tokens"] == market_judge._MAX_TOKENS and body["temperature"] == 0
 
 
-async def test_c2_env_override_replaces_the_default_but_not_the_protected_fields(llm_env, clean_budget, caplog):
+async def test_c2_env_override_is_an_allowlist_and_replaces_the_default(llm_env, clean_budget, caplog):
     llm_env(PM_LLM_BASE_URL=MIMO, PM_LLM_API_KEY="k", PM_LLM_MODEL="mimo-v2.6-flash", PM_LLM_IMAGE_MODE="url",
             PM_LLM_EXTRA_BODY=json.dumps({
                 "model": "otro", "messages": [], "max_tokens": 99999, "max_completion_tokens": 99999,
@@ -236,7 +236,11 @@ async def test_c2_env_override_replaces_the_default_but_not_the_protected_fields
         assert set(body) == BASE_KEYS | {"enable_thinking", "top_p"}   # sin "thinking": el default se reemplaza
         assert (body["model"], body["max_tokens"], body["temperature"]) == ("mimo-v2.6-flash", 700, 0)
         assert body["enable_thinking"] is True and len(body["messages"]) == 2
-    assert caplog.text.count("claves que maneja el juez") == 1
+    # Lista blanca: cada clave descartada se nombra UNA vez en total (aunque haya
+    # dos llamadas) y sus valores nunca aparecen en el log.
+    for key in ("model", "messages", "max_tokens", "max_completion_tokens", "temperature", "stream", "n"):
+        assert caplog.text.count(f"la clave '{key}' no está permitida") == 1, key
+    assert "otro" not in caplog.text and "99999" not in caplog.text and "1.5" not in caplog.text
 
 
 @pytest.mark.parametrize("raw", ["{roto", "[]", "true", '{"a": 1', "  "])

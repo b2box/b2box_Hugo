@@ -13,7 +13,8 @@ Proveedor: el que diga `PM_LLM_BASE_URL`. Por defecto el modelo es Qwen
 Pensamiento apagado: MiMo y Qwen tienen modelos "híbridos" que, si piensan,
 gastan todo `max_tokens` razonando y devuelven el contenido vacío (medido con
 mimo-v2.6-flash el 08-oct-2026). Según el host de la base URL se manda el
-campo que lo apaga (`extra_body`); `PM_LLM_EXTRA_BODY` lo pisa.
+campo que lo apaga (`extra_body`); `PM_LLM_EXTRA_BODY` lo pisa (solo con las
+claves de una lista blanca, ver `_ALLOWED_BODY_KEYS`).
 
 Fotos: por URL (las baja el proveedor) o en base64 (las baja Hugo, ver
 judge_images.py). MiMo no baja URLs remotas, así que con su host el default
@@ -126,11 +127,15 @@ def enabled() -> bool:
 # ─── Particularidades de cada proveedor ────────────────────────────────────
 
 MIMO_HOST = "api.xiaomimimo.com"
-# Lo que el juez controla y un PM_LLM_EXTRA_BODY no puede pisar: el SDK mezcla
-# extra_body ENCIMA del body, así que un "max_tokens" ahí rompería el techo de
-# costo y un "stream" el parseo.
-_RESERVED_BODY_KEYS = frozenset({
-    "model", "messages", "max_tokens", "max_completion_tokens", "temperature", "stream", "n",
+# PM_LLM_EXTRA_BODY es una LISTA BLANCA: el SDK mezcla extra_body ENCIMA del
+# body, así que cualquier clave que no esté acá se descarta. Son las que
+# apagan o acotan el razonamiento (cada proveedor usa un nombre) y el muestreo.
+# Quedan afuera lo que maneja el juez (model, messages, max_tokens,
+# temperature, stream, n…: un "max_tokens" rompería el techo de costo y un
+# "stream" el parseo) y todo lo demás (tools, user, base_url, headers…).
+_ALLOWED_BODY_KEYS = frozenset({
+    "thinking", "enable_thinking", "thinking_budget", "reasoning", "reasoning_effort",
+    "top_p", "seed", "response_format",
 })
 
 
@@ -165,7 +170,8 @@ def extra_body() -> dict[str, Any]:
 
     `PM_LLM_EXTRA_BODY` (objeto JSON) reemplaza al default entero; "{}" no
     manda nada. Si no es un objeto JSON válido se avisa una vez y se usa el
-    default. Las claves que maneja el juez (model, max_tokens…) se descartan.
+    default. Solo pasan las claves de `_ALLOWED_BODY_KEYS`; de cada clave
+    descartada se avisa una vez (el nombre, nunca el valor).
     """
     raw = (get_settings().pm_llm_extra_body or "").strip()
     if not raw:
@@ -178,11 +184,12 @@ def extra_body() -> dict[str, Any]:
         _warn_once("extra_body_invalid",
                    "PM_LLM_EXTRA_BODY no es un objeto JSON válido: se ignora y va el default del proveedor")
         return _default_extra_body(_base_host())
-    dropped = sorted(k for k in parsed if k in _RESERVED_BODY_KEYS)
-    if dropped:
-        _warn_once("extra_body_reserved",
-                   "PM_LLM_EXTRA_BODY trae claves que maneja el juez (%s): se ignoran", ", ".join(dropped))
-    return {k: v for k, v in parsed.items() if k not in _RESERVED_BODY_KEYS}
+    for key in parsed:
+        if key not in _ALLOWED_BODY_KEYS:
+            _warn_once(f"extra_body_key:{key[:40]}",
+                       "PM_LLM_EXTRA_BODY: la clave %r no está permitida y se descarta (permitidas: %s)",
+                       key[:40], ", ".join(sorted(_ALLOWED_BODY_KEYS)))
+    return {k: v for k, v in parsed.items() if k in _ALLOWED_BODY_KEYS}
 
 
 IMAGE_MODE_URL = "url"
@@ -196,8 +203,10 @@ def image_mode() -> str:
     if raw in (IMAGE_MODE_URL, IMAGE_MODE_BASE64):
         return raw
     if raw:
+        # Sin el valor: la variable puede venir mal pegada (con una key adentro).
         _warn_once("image_mode_invalid",
-                   "PM_LLM_IMAGE_MODE=%r no es url ni base64: va el default del proveedor", raw[:20])
+                   "PM_LLM_IMAGE_MODE no es url ni base64 (%d caracteres): va el default del proveedor",
+                   len(raw))
     return IMAGE_MODE_BASE64 if _base_host() == MIMO_HOST else IMAGE_MODE_URL
 
 
