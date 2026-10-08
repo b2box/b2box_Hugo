@@ -1,0 +1,82 @@
+Sitemap: https://www.gadnic.com.ar/sitemap.xml
+# === Bots de entrenamiento de IA: bloqueo total ===
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: Claude-Web
+User-agent: CCBot
+User-agent: Amazonbot
+User-agent: Bytespider
+User-agent: PetalBot
+User-agent: meta-externalagent
+User-agent: DeepSeekBot
+User-agent: GrokBot
+User-agent: xAI-Grok
+User-agent: cohere-ai
+User-agent: cohere-training-data-crawler
+User-agent: Diffbot
+User-agent: NeevaBot
+User-agent: ImagesiftBot
+User-agent: Seekr
+User-agent: TurnitinBot
+Disallow: /
+# === Bots de búsqueda/respuesta de IA: acceso total (estrategia GEO/AEO) ===
+User-agent: ChatGPT-User
+User-agent: OAI-SearchBot
+User-agent: Claude-User
+User-agent: Claude-SearchBot
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Google-Extended
+User-agent: Google-NotebookLM
+User-agent: meta-externalfetcher
+User-agent: meta-webindexer
+User-agent: Copilot
+User-agent: CopilotNative
+User-agent: CopilotSapphire
+User-agent: Grok-DeepSearch
+User-agent: MistralAI-User
+User-agent: YouBot
+Allow: /
+# === Bots de preview social: acceso total ===
+User-agent: facebookexternalhit
+User-agent: Twitterbot
+User-agent: LinkedInBot
+Allow: /
+Allow: /*?
+# === Motores de búsqueda: acceso total a Googlebot (necesario para Merchant Center) ===
+User-agent: Googlebot
+Disallow:
+User-agent: Googlebot-Image
+Disallow:
+User-agent: Googlebot-News
+Disallow:
+User-agent: AdsBot-Google
+Disallow:
+User-agent: Storebot-Google
+Disallow:
+# === Otros motores de búsqueda: solo URLs limpias, sin query params ===
+User-agent: Bingbot
+Crawl-delay: 5
+Disallow: /*?
+User-agent: DuckDuckBot
+Disallow: /*?
+User-agent: YandexBot
+Disallow: /*?
+User-agent: Applebot
+Disallow: /*?
+# === Bots de SEO/monitoreo: solo URLs limpias ===
+User-agent: AhrefsBot
+Disallow: /*?
+User-agent: SemrushBot
+Disallow: /*?
+# === Cualquier otro bot no listado ===
+User-agent: *
+Disallow: /*?
+Disallow: /*?s=
+Disallow: /*?item_menu=
+Disallow: /*?orden=
+# === Legacy / scrapers ===
+User-agent: msnbot
+Disallow: /
+User-agent: HTTrack 3.0x
+Disallow: /

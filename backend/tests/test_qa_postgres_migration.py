@@ -56,7 +56,9 @@ def pg(monkeypatch):
 
 def _old_tables(engine) -> None:
     old = MetaData()
-    for name, new_cols in (("price_monitor_run", NEW_RUN_COLS), ("market_price_snapshot", NEW_SNAPSHOT_COLS),
+    # Las tablas «como estaban» no tienen tampoco lo que agrega feat/semaforo-tiendas (price_basis, source_stats).
+    for name, new_cols in (("price_monitor_run", NEW_RUN_COLS | {"source_stats"}),
+                           ("market_price_snapshot", NEW_SNAPSHOT_COLS | {"price_basis"}),
                            ("ml_seller_cache", set()), ("settings", set()),
                            ("market_match_feedback", NEW_FEEDBACK_COLS)):
         src = SQLModel.metadata.tables[name]
