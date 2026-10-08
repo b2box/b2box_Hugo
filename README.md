@@ -156,25 +156,68 @@ solo mide y guarda**: no toca Vendure.
 
 ### Qué hace
 
-Por cada producto habilitado (job `price_monitor`, `pricing/price_monitor.py`):
+Por cada producto del catálogo (job `price_monitor`, `pricing/price_monitor.py`).
+Con `pm_include_disabled = 1` (default) entran también los **deshabilitados**
+(Nico tiene ~1.800 productos en Vendure y antes solo se medían los ~1.088
+habilitados): quedan marcados en el snapshot y en la API, se pueden filtrar en
+el dashboard, y **ni ellos ni nadie llevan a escribir nada en Vendure**. Sus
+fotos no están en el índice CLIP del app (a propósito: un deshabilitado no debe
+devolverse como "lo tenemos"), así que se embeben al vuelo y se comparan en el
+mismo espacio centrado.
 
 1. Lee **nuestro precio fresco** de Vendure (`variantList` + `bulkPriceTiers`,
    concurrencia 2; no usa el cache del catálogo, que puede tener 12 h). La
    variante representativa es la primera con precio; el tramo sale de
-   `pm_tier_policy`.
-2. Busca en ML por **título** (`/products/search`, fichas de catálogo). La API
-   de ML no tiene búsqueda por foto: la foto se usa para **filtrar**. Si la
-   búsqueda no trae nada, prueba una segunda con las primeras palabras.
-3. Filtro "mismo producto" (`pricing/market_match.py`): CLIP contra las fotos
-   del producto en el índice del catálogo (escala centrada) + similitud de
+   `pm_tier_policy`. En la misma query lee las **medidas de esa variante**
+   (custom fields `length`, `width`, `height`, `weight` y `boxLength`,
+   `boxWidth`, `boxHeight`, `boxWeight`; cm y kg: son columnas de la misma fila,
+   no suman consultas del lado de Vendure). Si el schema no tuviera esos
+   campos, la query se repite sin ellos y el semáforo sigue sin medidas.
+2. **Fuente 1, API de ML**: busca por **título** (`/products/search`, fichas de
+   catálogo). La API de ML no tiene búsqueda por foto: la foto se usa para
+   **filtrar**. Si la búsqueda no trae nada, prueba una segunda con las
+   primeras palabras.
+3. **Fuente 2, web de ML** (solo si la API no dio un IGUAL con precio): el mismo
+   título en `listado.mercadolibre.com.ar` con el navegador de Hugo. Ver
+   ["Búsqueda web de ML"](#búsqueda-web-de-ml-fuente-2).
+4. Filtro "mismo producto" (`pricing/market_match.py`), igual para las dos
+   fuentes: CLIP contra las fotos del producto (escala centrada) + similitud de
    nombre. Vetos, match por imagen fuerte o por imagen+nombre; lo que queda en
    el medio es la **banda ambigua** (sin juez = no es el mismo producto).
-4. Para las fichas aceptadas trae los vendedores (`/products/{id}/items`) y
-   descarta los de pocas ventas (`sold_quantity` si viene; si no,
-   `/users/{id}`, cacheado 30 días). Solo pesos.
-5. Guarda **mediana, mínimo, cantidad de publicaciones y vendedores**, links
-   a las fichas, de dónde vino el match (`clip`, `clip+nombre`, `llm`) y, con
-   nuestro precio, la ganancia y el color.
+   Después, el veredicto **igual / similar / diferente**:
+   - **IGUAL** es lo único que entra a mediana, mínimo, ganancia y color.
+     Pedido de Nico: que cuente SOLO lo idéntico.
+   - **SIMILAR** es el mismo tipo de producto con una diferencia que importa. Se
+     guarda aparte (`similar_listings`) para mostrarlo y **nunca toca el color**
+     (hay un test que compara el snapshot con y sin los similares).
+   - **DIFERENTE** se descarta.
+
+   Reglas de Nico (08-oct-2026): marca genérica o inventada = igual; marca
+   conocida con valor propio (Stanley, Philips, Samsung…) = similar; pack o
+   cantidad distinta = similar; color distinto = igual. Las aplican dos cosas:
+   el **juez IA** (marca, modelo, diseño; solo con `pm_vision_max_calls` > 0) y
+   el **chequeo de medidas** (`pricing/market_specs.py`, `pm_spec_check`), que
+   sin IA compara con el título de la publicación la **cantidad** ("x3", "pack
+   de 6", "4 unidades"), la **capacidad** ("500 ml" contra "1 L") y las
+   **medidas** contra las de Vendure (±`pm_dim_tol_pct` = 10 % por lado, sin
+   importar cuál es el largo) y el **peso** (±`pm_weight_tol_pct` = 15 %). Un
+   IGUAL que difiere en algo de eso baja a SIMILAR con la diferencia anotada.
+   Sin número no se inventa una diferencia, salvo la cantidad: un pack
+   explícito contra un título sin cantidad cuenta como pack distinto. Las
+   medidas de caja (`box*`) se guardan y se muestran, pero no deciden (una caja
+   puede traer varias unidades). **Sin juez prendido la regla de marca no se
+   aplica**: una publicación con marca conocida sale IGUAL si la foto y el
+   nombre coinciden.
+5. Para las fichas de la API aceptadas trae los vendedores
+   (`/products/{id}/items`) y descarta los de pocas ventas (`sold_quantity` si
+   viene; si no, `/users/{id}`, cacheado 30 días). Solo pesos. Para la web, el
+   precio y las ventas del ítem vienen en el propio resultado (ML las publica en
+   baldes: 100, 1.000, 5.000…); se descarta lo que tiene ventas conocidas por
+   debajo de `pm_min_seller_sales` y lo que no está en pesos.
+6. Guarda **mediana, mínimo, cantidad de publicaciones y vendedores**, links,
+   el **origen** del precio (`api` | `web`), de dónde vino cada match (`clip`,
+   `clip+nombre`, `llm`, `specs`) con sus % de foto y de nombre, y, con nuestro
+   precio, la ganancia y el color.
 
 Ganancia estimada (en % sobre lo que nos paga el revendedor):
 
@@ -213,10 +256,118 @@ Robustez:
   (`_meta:pm_probe_listing_prices`, `_meta:pm_probe_sold_quantity`) para
   decidir si ML nos da comisión/envío por categoría y ventas por publicación.
 
+### Búsqueda web de ML (fuente 2)
+
+**Por qué.** La API de ML solo deja buscar **fichas de catálogo**
+(`/products/search`); las publicaciones comunes (`/sites/MLA/search`,
+`/items/{id}`) dan 403 por política de ML y un token de usuario no lo cambia.
+Lo importado de China casi nunca tiene ficha: en la primera corrida, 1.021 de
+1.088 productos quedaron "sin dato". La web pública de ML sí lista esas
+publicaciones.
+
+**Cómo.** `pricing/market_ml_web.py` abre `https://listado.mercadolibre.com.ar/<título>`
+(el mismo nombre que la API, sin códigos BX/PA; si no hay resultados, una
+segunda búsqueda con las primeras 4 palabras) con **el mismo navegador y el
+mismo proxy que Hugo ya usa para leer links de ML** (`ingest/browser_fetch.py`:
+Camoufox, `BROWSER_PROXY`, el mismo guard anti-SSRF; no hay otro lanzador).
+Para ~1.000 búsquedas por noche se reusa **un** navegador
+(`browser_fetch.ListingBrowser`, se relanza cada 150 páginas) en vez de uno por
+búsqueda (~50 s de reloj cada uno).
+
+**Qué lee.** No parsea HTML: lee lo que la página trae embebido.
+
+1. `_n.ctx.r = {...}` (script `__NORDIC_RENDERING_CTX__`): el estado con el que ML
+   renderiza la página. Cada resultado es una "polycard" con id, título, precio
+   en pesos, link, id de la foto (la URL sale de `D_NQ_NP_<id>-F.jpg` en
+   `mlstatic.com`), vendedor y ventas del ítem. Se toma `appProps.pageProps.
+   initialState.results`; si ML mueve el árbol, se busca la primera lista
+   `results` de polycards.
+2. El JSON-LD (`application/ld+json`, schema.org `Product`): de ahí sale la
+   **marca**, que la polycard no trae, y es el respaldo si el estado cambia.
+
+Si la página no trae ninguno de los dos queda como "formato desconocido" y
+cuenta como fallo (ver abajo). Ids, links y fotos pasan por las mismas listas
+blancas que la API (`market_ml.safe_*`: https, hosts de ML, `*.mlstatic.com`).
+Se leen como máximo `pm_ml_web_max_results` (8) resultados por búsqueda, los
+primeros de ML; todos pasan por el filtro "mismo producto".
+
+**Cuánto pesa.** Medido el 08-oct-2026 con Camoufox contra 4 búsquedas reales
+(desde una Mac, sin proxy; el cable es el mismo, un proxy suma algo de
+overhead de túnel):
+
+| | por búsqueda |
+|---|---|
+| HTML de la búsqueda (2,4 a 3,6 MB sin comprimir) | **170 a 210 KB** por el cable |
+| scripts + estilos de ML (no se reusan: Playwright apaga la cache HTTP si hay interceptación) | ~1,5 MB |
+| total sin bloquear nada más que imágenes/fuentes/media | ~1,7 MB |
+
+Por eso `pm_ml_web_block_scripts` = 1 (default): el navegador corta imágenes,
+fuentes, media, **scripts y estilos** (el estado viene en el HTML; verificado en
+las 4 búsquedas) y cada búsqueda baja **~0,2 MB**. La corrida guarda los bytes
+reales (`Request.sizes`: cabeceras + cuerpo de lo completado) por producto y
+por corrida (`web_bytes`; el dashboard muestra el promedio por búsqueda).
+
+Costo estimado de proxy residencial (a USD 2,75 a 4 por GB, precios publicados
+de Decodo; **estimación**, no hay proxy contratado medido): hasta 2.000
+búsquedas por noche son ~0,4 GB (≈ USD 1 a 1,6 por noche, USD 33 a 48 por mes).
+Sin bloquear scripts serían ~3,4 GB por noche (USD 280 a 410 por mes).
+
+**Cuándo corre y cuánto.**
+
+- Solo para el producto que la API no resolvió (sin IGUAL con precio). Tope
+  diario `pm_ml_web_daily_budget` (2000) con la reserva atómica de
+  `daily_budget.py`: nunca se pasa, ni con reinicios a mitad.
+- Concurrencia `pm_ml_web_concurrency` (1; máx. 2) y pausa de
+  `pm_ml_web_pause_s` (4 s, ±30 % al azar) después de cada búsqueda. La carga
+  tardó 2 a 4 s medida sin proxy (con proxy residencial será más); con la pausa
+  son unos 7 a 10 s por búsqueda (estimación): 1.700 búsquedas son ~3 a 5 horas,
+  que se suman a lo que ya tardaba la corrida.
+- **Sin `BROWSER_PROXY` la fuente queda apagada** (no se intenta desde la IP del
+  datacenter: ML la bloquea). También si el navegador no está disponible
+  (`BROWSER_FETCH_ENABLED`, Camoufox) o el cupo es 0. Queda un aviso en el log,
+  en `price_monitor_run.web_status` ("apagada: falta BROWSER_PROXY…") y en el
+  dashboard; los productos se evalúan solo con la API.
+- **Bloqueos.** Captcha, redirect a verificación de cuenta, HTTP 403/429, proxy
+  caído o página ilegible: ese producto queda **sin dato** con el motivo en
+  `ml_error` ("ML web: ML pidió verificación anti-bot…") y `web_state`
+  (`blocked` | `error`), no se reintenta y la corrida sigue. Con
+  `pm_ml_web_block_streak` (5) fallos seguidos la fuente se **corta por esa
+  noche**: lo que falta queda con `web_state = off` y la corrida termina `ok`
+  (no es culpa de ML: no hay `degraded`). El corta-circuito por host de
+  `browser_fetch` (3 fallos, 15 min) también cuenta. Un producto cuya web no
+  pudo correr (bloqueo, cupo, proxy) **no cuenta como medido** y vuelve a la
+  cabeza de la fila la noche siguiente.
+- Un listado válido sin resultados NO es un fallo: es "ML no tiene nada para ese
+  título" y corta la racha de fallos.
+
+**Riesgos.** Es una fuente que depende de cómo ML arma su página y de que no la
+bloquee: si ML cambia el estado embebido el JSON-LD sirve de respaldo, y si
+cambia los dos, la fuente degrada a "formato desconocido" y se corta sola.
+Términos de uso: el `robots.txt` de `listado.mercadolibre.com.ar` (consultado el
+08-oct-2026) permite a los agentes genéricos las búsquedas por palabra (sin
+filtros ni ordenamientos en la URL, que es lo que usa Hugo) y prohíbe las
+páginas de ítem (`*/mla-`, que Hugo no abre), y bloquea por nombre a varios
+rastreadores de IA (incluidos `ClaudeBot` y `Claude-User`); Hugo es una
+herramienta interna, no se identifica como ninguno de ellos y no entrena
+modelos, pero **no se revisaron los Términos y Condiciones de ML**: antes de
+prender la fuente en producción conviene que Nico y Gabriel den el OK explícito
+(poner `pm_ml_web_daily_budget` en 0 la apaga sin redeploy). Una IP residencial
+es la única forma de que ML responda; no se intenta evadir captchas.
+
+**"No es el mismo".** En el detalle de cada producto, cada publicación (igual o
+parecida) tiene un botón que la saca del snapshot, **recalcula** mediana, mínimo,
+ganancia y color con las que quedan (`POST /api/price-monitor/snapshots/{id}/
+not-same`), la guarda en la tabla `market_match_feedback` (con los puntajes y el
+origen que tenía) y **la excluye para ese producto en las próximas corridas**.
+Esas filas son etiquetas negativas para calibrar: `calibrate_market_match
+export` las saca ya etiquetadas con 0. `DELETE /api/price-monitor/products/{id}/
+not-same/{ml_id}` la vuelve a considerar.
+
 ### Qué NO hace todavía
 
 - No pasa los rojos a inactivo ni escribe nada en Vendure (`pm_mode=1` existe
-  pero solo loguea "modo activo todavía no implementado").
+  pero solo loguea "modo activo todavía no implementado"). Tampoco con los
+  productos deshabilitados que ahora se miden.
 - No hay diagnóstico automático, bandeja de revisión de Pao, histéresis,
   alertas (26 h sin correr, >20 % del catálogo cambia de color) ni campos en
   Vendure para la web o para pauta. Eso es la etapa siguiente.
@@ -241,6 +392,15 @@ Robustez:
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
 | `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
+| `pm_include_disabled` | 1 | también mide los productos deshabilitados (filtro en el dashboard) |
+| `pm_spec_check` | 1 | chequeo de cantidad, capacidad, medidas y peso (IGUAL → SIMILAR) |
+| `pm_dim_tol_pct` / `pm_weight_tol_pct` | 10 / 15 | tolerancia de medidas por lado y de peso, en % |
+| `pm_ml_web_daily_budget` | 2000 | búsquedas web de ML por día (UTC); 0 = fuente apagada |
+| `pm_ml_web_max_results` | 8 | resultados de cada búsqueda web que se comparan |
+| `pm_ml_web_concurrency` | 1 | búsquedas web en paralelo (1-2) |
+| `pm_ml_web_pause_s` | 4 | pausa entre búsquedas web, en segundos |
+| `pm_ml_web_block_streak` | 5 | fallos seguidos que cortan la web por esa noche |
+| `pm_ml_web_block_scripts` | 1 | no bajar scripts ni estilos (~0,2 MB en vez de ~1,7 MB por búsqueda) |
 
 Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
 umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
@@ -260,9 +420,16 @@ python -m app.pricing.calibrate_market_match evaluate pares.csv --grid
 
 ### Juez IA para la banda ambigua (opcional)
 
-Un modelo multimodal barato mira nuestras fotos y las de las fichas dudosas y
-contesta, por ficha, `{ml_id, same_product, confidence, reason}` en JSON. Solo
-se consulta si `pm_vision_max_calls` > 0, con tope diario atómico; una
+Un modelo multimodal barato mira nuestras fotos y las de las publicaciones
+dudosas y contesta, por publicación, `{ml_id, verdict, confidence,
+differences, reason}` en JSON, con `verdict` = `igual` | `similar` |
+`diferente` (el formato viejo `same_product` sí/no sigue funcionando). Una
+`igual` con confianza ≥ 0,60 es IGUAL; con 0,50 a 0,59 baja a SIMILAR (ante la
+duda no se contamina el precio); una `similar` con confianza ≥ 0,50 es SIMILAR;
+`differences` solo admite un vocabulario cerrado (marca, modelo, medida,
+capacidad, cantidad, funcion, accesorio). En la web el juez también revisa los
+matches por reglas que declaran una marca (para aplicar "marca conocida =
+similar"). Solo se consulta si `pm_vision_max_calls` > 0, con tope diario atómico; una
 respuesta ilegible, un timeout o la falta de cupo = sin veredicto. Tokens y
 costo estimado quedan en `price_monitor_run`. Se configura con tres variables
 (API OpenAI-compatible):
@@ -360,9 +527,11 @@ Qué sale hacia el proveedor en cada llamada:
 - la **foto destacada de nuestro catálogo** (solo https, una sola versión:
   la preview): en modo `url` el proveedor la descarga y ve esa URL; en modo
   `base64` le llega la imagen (achicada a 768 px), sin la URL;
-- hasta **6 fichas públicas de Mercado Libre**: id, título (hasta 160
-  caracteres), una foto de `mlstatic.com` (URL o imagen, según el modo) y la
-  mediana de precio publicada en esa ficha.
+- hasta **6 publicaciones públicas de Mercado Libre** (fichas de la API o
+  resultados de la web): id, título (hasta 160 caracteres), la **marca que
+  declara** la publicación (hasta 40 caracteres: en la web sale del JSON-LD; en
+  las fichas de la API, del atributo `BRAND` si lo tienen), una foto
+  de `mlstatic.com` (URL o imagen, según el modo) y el precio publicado.
 
 Qué **no** sale: nuestros precios, costos, tramos o márgenes, datos de
 clientes o pedidos, ni ninguna credencial salvo la API key del propio
@@ -387,8 +556,19 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   una corrida en curso y 429 si no queda cupo de ML hoy o si la última
   corrida arrancó hace menos de `pm_manual_cooldown_min` (con `Retry-After`).
 - Endpoints (sesión del dashboard): `GET /api/price-monitor/runs`,
-  `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&page=&page_size=`,
-  `GET /api/price-monitor/products/{id}/history`, `GET /api/price-monitor/summary`.
+  `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&enabled=&match=&origin=&page=&page_size=`
+  (`enabled`: `enabled` | `disabled` | `all`; `match`: `igual` | `similar` |
+  `solo_similar`; `origin`: `api` | `web`),
+  `GET /api/price-monitor/products/{id}/history`, `GET /api/price-monitor/summary`,
+  `POST /api/price-monitor/snapshots/{id}/not-same` (`{"ml_id": "MLA…"}`) y
+  `DELETE /api/price-monitor/products/{id}/not-same/{ml_id}`.
+- El dashboard (Semáforo) muestra, por cada publicación, el % de similitud de
+  foto y de nombre, el veredicto (igual / similar) con su origen (ficha API /
+  web) y cómo se decidió (foto + nombre, juez IA con su confianza, medidas), las
+  medidas nuestras junto a las de la publicación y el botón "No es el mismo".
+  Filtros: producto (habilitados / deshabilitados / todos), similitud y origen.
+  Los parecidos van en un bloque aparte y en la tabla como un chip gris: no
+  cambian el color.
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
   su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
 
@@ -409,14 +589,18 @@ backend/
 │   │   ├── fuzzy_text.py
 │   │   └── orchestrator.py
 │   ├── ingest/
-│   │   └── image_from_url.py # saca la foto de una URL de marketplace
+│   │   ├── image_from_url.py # saca la foto de una URL de marketplace
+│   │   └── browser_fetch.py  # Camoufox: render de una ficha y ListingBrowser (listados)
 │   ├── pricing/
 │   │   ├── source_check.py   # precio del proveedor (OTAPI) + budget diario
 │   │   ├── daily_budget.py   # contador diario con reserva atómica (OTAPI, ML, juez)
 │   │   ├── price_monitor.py  # job del semáforo contra ML (modo sombra)
 │   │   ├── semaforo.py       # reglas puras: ganancia, color, tramo
 │   │   ├── market_ml.py      # API de ML: budget, backoff, vendedores
+│   │   ├── market_ml_web.py  # búsqueda web de ML (estado embebido) + cupo y cortes
 │   │   ├── market_match.py   # filtro "mismo producto" (CLIP + nombre)
+│   │   ├── market_specs.py   # cantidad, capacidad, medidas y peso (IGUAL → SIMILAR)
+│   │   ├── match_feedback.py # "No es el mismo": exclusiones y etiquetas negativas
 │   │   ├── market_judge.py   # juez IA opcional (OpenAI-compatible)
 │   │   ├── judge_images.py   # fotos del juez en base64 (descarga acotada)
 │   │   ├── calibrate_market_match.py  # precisión/recall del filtro
@@ -748,5 +932,8 @@ Ver `.env.example`. Las críticas:
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
+- `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
+  e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
+  y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
 - `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo
   (opcionales: `PM_LLM_IMAGE_MODE`, `PM_LLM_EXTRA_BODY`; ver "Juez IA").
