@@ -161,7 +161,11 @@ def reset_store_tables() -> None:
         for model in (StoreMatch, StoreMatchFeedback, StoreCatalogItem, MarketStore):
             s.execute(delete(model))
         s.execute(delete(Setting).where(Setting.key.like("_meta:store%")))  # type: ignore[attr-defined]
+        s.execute(delete(Setting).where(Setting.key.like("pm_stores%")))  # type: ignore[attr-defined]
         s.commit()
+    from app import runtime
+
+    runtime.invalidate()
 
 
 @pytest.fixture
