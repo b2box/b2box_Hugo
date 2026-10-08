@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { GROUP_LABELS } from "../sections";
 import { IconCheck } from "../icons";
+import StoresSettings from "./StoresSettings";
 import type { Setting } from "../types";
 
 // Vista de configuración runtime: sliders agrupados que se aplican en vivo.
@@ -102,6 +103,8 @@ export default function SettingsView() {
           ))}
         </div>
       )}
+
+      <StoresSettings />
     </section>
   );
 }
