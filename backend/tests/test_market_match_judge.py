@@ -17,7 +17,7 @@ from sqlmodel import Session, SQLModel, select  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.db.models import Setting  # noqa: E402
 from app.db.session import engine  # noqa: E402
-from app.pricing import market_judge, market_match  # noqa: E402
+from app.pricing import daily_budget, market_judge, market_match  # noqa: E402
 from app.pricing.market_judge import JudgeCandidate  # noqa: E402
 from app.pricing.market_match import AMBIGUOUS, MATCH, NO, Thresholds  # noqa: E402
 from app.pricing.market_ml import MlCandidate  # noqa: E402
@@ -163,8 +163,12 @@ def test_messages_carry_our_photos_and_each_candidate():
 class FakeClient:
     def __init__(self, text="", exc: Exception | None = None, usage=(1200, 80)):
         self.calls: list[dict] = []
+        self.closed = 0
         self._text, self._exc, self._usage = text, exc, usage
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def close(self):
+        self.closed += 1
 
     async def _create(self, **kwargs):
         self.calls.append(kwargs)
@@ -243,3 +247,58 @@ async def test_judge_without_base_url_or_key_sends_nothing_and_spends_no_quota(m
     assert await market_judge.judge("x", [], CANDS, max_calls=10, client=client) is None
     assert client.calls == []
     assert market_judge.daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 0  # ni reserva cupo
+
+
+# ─── cliente y transporte (security L3, L4) ────────────────────────────────
+
+
+def test_client_never_retries_on_its_own(monkeypatch):
+    _judge_settings(monkeypatch, pm_llm_timeout_s=12.0)
+    client = market_judge.make_client()
+    assert client.max_retries == 0
+    assert client.timeout == 12.0
+
+
+@pytest.mark.parametrize("url", ["http://llm.invalid/v1", "ftp://llm.invalid", "llm.invalid/v1", "https://"])
+async def test_non_https_base_url_turns_the_judge_off(monkeypatch, caplog, url):
+    _judge_settings(monkeypatch, pm_llm_base_url=url)
+    monkeypatch.setattr(market_judge, "_warned_insecure_url", False)
+    client = FakeClient(GOOD)
+    assert market_judge.enabled() is False
+    assert await market_judge.judge("x", [], CANDS, max_calls=5, client=client) is None
+    assert client.calls == []
+    assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 0
+
+
+def test_insecure_url_warns_once(monkeypatch, caplog):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url="http://llm.invalid/v1")
+    monkeypatch.setattr(market_judge, "_warned_insecure_url", False)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            market_judge.enabled()
+    assert caplog.text.count("no es una URL https") == 1
+
+
+async def test_a_client_created_by_the_judge_is_closed(monkeypatch):
+    _judge_settings(monkeypatch)
+    created: list[FakeClient] = []
+
+    def factory():
+        created.append(FakeClient(exc=TimeoutError("30s")))
+        return created[-1]
+
+    monkeypatch.setattr(market_judge, "make_client", factory)
+    assert await market_judge.judge("x", [], CANDS, max_calls=5) is None
+    assert len(created) == 1 and created[0].closed == 1
+
+
+async def test_a_failed_call_still_counts_against_the_cap_and_runs_the_hook(monkeypatch):
+    _judge_settings(monkeypatch)
+    hooked = []
+    client = FakeClient(exc=TimeoutError("30s"))
+    assert await market_judge.judge("x", [], CANDS, max_calls=5, client=client,
+                                    on_reserve=lambda session: hooked.append(1)) is None
+    assert hooked == [1] and daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1
+    assert client.closed == 0  # el cliente es del llamador: no lo cierra el juez

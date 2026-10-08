@@ -551,6 +551,96 @@ async def test_judge_confirms_the_ambiguous_match_and_its_cost_is_recorded(world
     assert run.llm_cost_usd == pytest.approx(0.00036)
 
 
+class _DummyJudgeClient:
+    def __init__(self, registry):
+        registry.append(self)
+        self.closed = 0
+
+    async def close(self):
+        self.closed += 1
+
+
+@pytest.fixture
+def judge_on(monkeypatch):
+    """Juez "configurado" (https + key) con un cliente de mentira."""
+    clients: list[_DummyJudgeClient] = []
+    monkeypatch.setattr(market_judge, "enabled", lambda: True)
+    monkeypatch.setattr(market_judge, "make_client", lambda: _DummyJudgeClient(clients))
+    _set("pm_vision_max_calls", 5)
+    return clients
+
+
+async def test_the_judge_sees_the_ml_price_and_listings_are_not_fetched_twice(world, monkeypatch, judge_on):
+    _ambiguous_world(world)
+    seen = {}
+
+    async def judge(our_name, our_images, candidates, *, max_calls, on_reserve=None, client=None, **kw):
+        seen["prices"] = {c.ml_id: c.price_cents for c in candidates}
+        seen["client"] = client
+        await daily_budget.reserve_async(market_judge.LLM_COUNTER_KEY, max_calls, None, on_reserve)
+        return market_judge.JudgeResult(
+            verdicts={"MLA8": market_judge.JudgeVerdict("MLA8", True, 0.9, "igual")})
+
+    monkeypatch.setattr(market_judge, "judge", judge)
+    await price_monitor.run_price_monitor()
+    assert seen["prices"] == {"MLA8": 30_000}
+    assert world.ml.calls.count("items:MLA8") == 1  # el prefetch se reusa para la mediana
+    assert _snaps()["8"].ml_status == "ok"
+    [client] = judge_on
+    assert seen["client"] is client and client.closed == 1
+
+
+async def test_one_judge_client_per_run_closed_at_the_end(world, monkeypatch, judge_on):
+    _ambiguous_world(world)
+    FakeVendure.products.append(_product("10", "Soporte celular auto"))
+
+    async def judge(*a, **kw):
+        return None
+
+    monkeypatch.setattr(market_judge, "judge", judge)
+    await price_monitor.run_price_monitor()
+    assert len(judge_on) == 1 and judge_on[0].closed == 1
+
+
+async def test_no_prefetch_when_the_judge_will_not_answer(world, monkeypatch):
+    _ambiguous_world(world)
+    _set("pm_vision_max_calls", 5)  # pero sin base URL / key: enabled() es False
+
+    async def judge(*a, **kw):
+        return None
+
+    monkeypatch.setattr(market_judge, "judge", judge)
+    await price_monitor.run_price_monitor()
+    assert "items:MLA8" not in world.ml.calls
+
+
+async def test_a_failed_judge_call_counts_in_the_run(world, monkeypatch):
+    """Con el juez REAL: la llamada que revienta igual suma en llm_calls."""
+    from types import SimpleNamespace
+
+    from app.config import Settings
+
+    _ambiguous_world(world)
+    _set("pm_vision_max_calls", 5)
+    monkeypatch.setattr(market_judge, "get_settings", lambda: Settings(
+        vendure_api_url="https://example.invalid/admin-api", pm_llm_base_url="https://llm.invalid/v1",
+        pm_llm_api_key="k"))
+    closed = []
+
+    async def boom(**kw):
+        raise TimeoutError("30s")
+
+    async def close():
+        closed.append(1)
+
+    monkeypatch.setattr(market_judge, "make_client", lambda: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=boom)), close=close))
+    await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert run.llm_calls == 1 and run.llm_input_tokens == 0
+    assert _snaps()["8"].ml_status == "no_data" and closed == [1]
+
+
 async def test_judge_low_confidence_does_not_promote(world, monkeypatch):
     _ambiguous_world(world)
     _set("pm_vision_max_calls", 5)

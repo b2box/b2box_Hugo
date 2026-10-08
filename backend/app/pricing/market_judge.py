@@ -27,6 +27,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.config import get_settings
 from app.pricing import daily_budget
@@ -36,7 +37,8 @@ log = logging.getLogger(__name__)
 LLM_COUNTER_KEY = "_meta:pm_llm_calls_today"
 # Confianza mínima del juez para tomar su "sí" como match.
 MIN_CONFIDENCE = 0.60
-_MAX_CANDIDATES = 6
+# Fichas de ML por consulta (el llamador no debería mandar más).
+MAX_CANDIDATES = 6
 _MAX_OUR_PHOTOS = 2
 _MAX_TOKENS = 700
 
@@ -79,9 +81,26 @@ class JudgeResult:
     raw: str = ""
 
 
+_warned_insecure_url = False
+
+
 def enabled() -> bool:
+    """Hay credenciales y la base URL es https. Con http la API key y las
+    fotos viajarían en claro: el juez queda apagado y se avisa una vez."""
+    global _warned_insecure_url
     s = get_settings()
-    return bool(s.pm_llm_base_url and s.pm_llm_api_key)
+    if not (s.pm_llm_base_url and s.pm_llm_api_key):
+        return False
+    try:
+        parts = urlsplit(s.pm_llm_base_url.strip())
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme.lower() != "https" or not parts.hostname:
+        if not _warned_insecure_url:
+            log.warning("PM_LLM_BASE_URL no es una URL https: el juez LLM queda apagado")
+            _warned_insecure_url = True
+        return False
+    return True
 
 
 def estimate_cost(input_tokens: int, output_tokens: int,
@@ -108,7 +127,7 @@ def build_messages(
     ]
     content.extend(_image_part(u) for u in list(our_image_urls)[:_MAX_OUR_PHOTOS] if u)
     content.append({"type": "text", "text": "PUBLICACIONES DE MERCADO LIBRE:"})
-    for c in list(candidates)[:_MAX_CANDIDATES]:
+    for c in list(candidates)[:MAX_CANDIDATES]:
         price = f" · precio ARS {c.price_cents / 100:.0f}" if c.price_cents else ""
         content.append({"type": "text", "text": f"- {c.ml_id}: {c.title.strip()[:160]}{price}"})
         if c.image_url:
@@ -195,12 +214,16 @@ def parse_verdicts(text: str) -> list[JudgeVerdict] | None:
     return out or None
 
 
-def _make_client():
+def make_client():
+    """Cliente OpenAI-compatible. Uno por corrida (el llamador lo cierra) y SIN
+    reintentos del SDK: cada intento sería una llamada facturada que el tope
+    diario no vería, y el timeout efectivo se multiplicaría."""
     from openai import AsyncOpenAI  # ya es dependencia (vision_rerank)
 
     s = get_settings()
     return AsyncOpenAI(
         base_url=s.pm_llm_base_url, api_key=s.pm_llm_api_key, timeout=s.pm_llm_timeout_s,
+        max_retries=0,
     )
 
 
@@ -225,7 +248,8 @@ async def judge(
         return None
 
     s = get_settings()
-    client = client or _make_client()
+    own_client = client is None
+    client = client or make_client()
     try:
         response = await client.chat.completions.create(
             model=s.pm_llm_model,
@@ -236,6 +260,9 @@ async def judge(
     except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red)
         log.warning("Juez LLM falló (%s): %s", type(exc).__name__, str(exc)[:200])
         return None
+    finally:
+        if own_client:
+            await client.close()
 
     choice = response.choices[0] if getattr(response, "choices", None) else None
     text = (getattr(getattr(choice, "message", None), "content", None) or "") if choice else ""

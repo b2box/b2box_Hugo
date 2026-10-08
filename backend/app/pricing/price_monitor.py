@@ -49,7 +49,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import engine
 from app.dedup import catalog_index, image_embed
 from app.ingest import meli
-from app.pricing import market_judge, market_match, market_ml, semaforo
+from app.pricing import daily_budget, market_judge, market_match, market_ml, semaforo
 from app.pricing.market_ml import (
     PROBE_LISTING_PRICES_KEY,
     PROBE_SOLD_QUANTITY_KEY,
@@ -114,6 +114,9 @@ class RunContext:
     # el request de búsqueda (ver market_match.indexed).
     can_score: Callable[[VendureProduct], bool] = market_match.indexed
     judge_fn: JudgeFn = market_judge.judge
+    # Un solo cliente del juez por corrida (se crea al primer uso y se cierra
+    # al terminar).
+    judge_client: Any | None = None
     # Para la sonda de listing_prices: la primera categoría que vimos.
     first_category_id: str | None = None
     sold_quantity_probed: bool = False
@@ -308,20 +311,59 @@ def _our_photos(product: VendureProduct) -> list[str]:
     return urls
 
 
+Listings = tuple[list[MlListing], dict]
+
+
+async def _judge_will_answer(ctx: RunContext) -> bool:
+    """¿Vale la pena preparar la consulta? Juez configurado y con cupo hoy."""
+    if ctx.judge_max_calls <= 0 or not market_judge.enabled():
+        return False
+    used = await asyncio.to_thread(daily_budget.used_today, market_judge.LLM_COUNTER_KEY)
+    return used < ctx.judge_max_calls
+
+
+async def _prefetch_prices(ctx: RunContext, ambiguous: list[market_match.Decision],
+                           prefetched: dict[str, Listings]) -> dict[str, int | None]:
+    """Mediana en pesos de cada ficha ambigua, para que el juez vea el precio.
+    Lo que se baja queda en `prefetched` y se reusa si la ficha termina siendo
+    match (no se pide dos veces)."""
+    prices: dict[str, int | None] = {}
+    for d in ambiguous[:market_judge.MAX_CANDIDATES]:
+        try:
+            listings, raw = await ctx.ml.listings(d.candidate.id)
+        except BudgetExhausted:
+            break
+        except meli.MeliError:
+            continue
+        prefetched[d.candidate.id] = (listings, raw)
+        ars = [x.price_cents for x in listings
+               if x.price_cents and (not x.currency or x.currency.upper() == CURRENCY)]
+        prices[d.candidate.id] = semaforo.median_cents(ars)
+    return prices
+
+
 async def _consult_judge(ctx: RunContext, product: VendureProduct,
-                         ambiguous: list[market_match.Decision]) -> None:
+                         ambiguous: list[market_match.Decision],
+                         prefetched: dict[str, Listings]) -> None:
     """Le pregunta al juez por la banda ambigua y promueve a MATCH (fuente llm)
     los que confirma con confianza suficiente. Nunca lanza."""
+    prices: dict[str, int | None] = {}
+    if await _judge_will_answer(ctx):
+        prices = await _prefetch_prices(ctx, ambiguous, prefetched)
+        if ctx.judge_client is None:
+            ctx.judge_client = market_judge.make_client()
     cands = [
         market_judge.JudgeCandidate(
             ml_id=d.candidate.id, title=d.candidate.name,
             image_url=(d.candidate.image_urls or [None])[0],
+            price_cents=prices.get(d.candidate.id),
         )
-        for d in ambiguous
+        for d in ambiguous[:market_judge.MAX_CANDIDATES]
     ]
     try:
         result = await ctx.judge_fn(
             product.name, _our_photos(product), cands, max_calls=ctx.judge_max_calls,
+            client=ctx.judge_client,
             # La llamada se cuenta al reservar el cupo, aunque después falle.
             on_reserve=_usage_increment(ctx.run_id, llm_calls=1),
         )
@@ -412,8 +454,9 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
 
     ambiguous = [d for d in decisions if d.verdict == market_match.AMBIGUOUS]
     snap.ambiguous_count = len(ambiguous)
+    prefetched: dict[str, Listings] = {}
     if ambiguous and ctx.judge_max_calls > 0:
-        await _consult_judge(ctx, product, ambiguous)
+        await _consult_judge(ctx, product, ambiguous, prefetched)
 
     matches = [d for d in decisions if d.verdict == market_match.MATCH]
     if not matches:
@@ -429,7 +472,7 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
     try:
         for d in matches[:MAX_MATCHED_PRODUCTS]:
             try:
-                listings, raw = await ctx.ml.listings(d.candidate.id)
+                listings, raw = prefetched.get(d.candidate.id) or await ctx.ml.listings(d.candidate.id)
             except meli.MeliError as exc:
                 ml_errors.append(str(exc))
                 continue
@@ -483,6 +526,16 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
 
 
 # ─── La corrida ───────────────────────────────────────────────────
+
+
+async def _close_judge_client(ctx: RunContext) -> None:
+    if ctx.judge_client is None:
+        return
+    try:
+        await ctx.judge_client.close()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("No se pudo cerrar el cliente del juez: %s", exc)
+    ctx.judge_client = None
 
 
 def _context(run_id: int, ml: MlMarket) -> RunContext:
@@ -607,33 +660,36 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
 
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml)
-        sem = asyncio.Semaphore(concurrency)
+        try:
+            sem = asyncio.Semaphore(concurrency)
 
-        async def _one(product: VendureProduct) -> None:
-            async with sem:
-                try:
-                    snap = await evaluate_product(ctx, product)
-                except Exception as exc:  # noqa: BLE001
-                    log.exception("price_monitor: %s reventó", product.id)
-                    snap = _mark(_base_snapshot(ctx, product), FAILED,
-                                 f"{type(exc).__name__}: {exc}")
-                status = snap.ml_status
-                try:
-                    await asyncio.to_thread(_persist, snap, run_id)
-                except Exception:  # noqa: BLE001
-                    log.exception("price_monitor: no se pudo guardar el snapshot de %s", product.id)
-                counts[status] = counts.get(status, 0) + 1
+            async def _one(product: VendureProduct) -> None:
+                async with sem:
+                    try:
+                        snap = await evaluate_product(ctx, product)
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("price_monitor: %s reventó", product.id)
+                        snap = _mark(_base_snapshot(ctx, product), FAILED,
+                                     f"{type(exc).__name__}: {exc}")
+                    status = snap.ml_status
+                    try:
+                        await asyncio.to_thread(_persist, snap, run_id)
+                    except Exception:  # noqa: BLE001
+                        log.exception("price_monitor: no se pudo guardar el snapshot de %s", product.id)
+                    counts[status] = counts.get(status, 0) + 1
 
-        # `_one` ya atrapa todo lo esperable; return_exceptions evita que un bug
-        # en un producto deje a los demás corriendo huérfanos tras el gather.
-        for result in await asyncio.gather(*(_one(p) for p in pending), return_exceptions=True):
-            if isinstance(result, Exception):
-                log.error("price_monitor #%s: error no atrapado en un producto: %r", run_id, result)
+            # `_one` ya atrapa todo lo esperable; return_exceptions evita que un bug
+            # en un producto deje a los demás corriendo huérfanos tras el gather.
+            for result in await asyncio.gather(*(_one(p) for p in pending), return_exceptions=True):
+                if isinstance(result, Exception):
+                    log.error("price_monitor #%s: error no atrapado en un producto: %r", run_id, result)
 
-        if ctx.first_category_id and not await asyncio.to_thread(probe_recorded, PROBE_LISTING_PRICES_KEY):
-            await ml.probe_listing_prices(ctx.first_category_id)
+            if ctx.first_category_id and not await asyncio.to_thread(probe_recorded, PROBE_LISTING_PRICES_KEY):
+                await ml.probe_listing_prices(ctx.first_category_id)
 
-        status = _finalize_run(run_id)
+            status = _finalize_run(run_id)
+        finally:
+            await _close_judge_client(ctx)
 
     with Session(engine) as s:
         run = s.get(PriceMonitorRun, run_id)
