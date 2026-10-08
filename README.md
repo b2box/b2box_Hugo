@@ -203,9 +203,15 @@ mismo espacio centrado.
    importar cuál es el largo) y el **peso** (±`pm_weight_tol_pct` = 15 %). Un
    IGUAL que difiere en algo de eso baja a SIMILAR con la diferencia anotada.
    Sin número no se inventa una diferencia, salvo la cantidad: un pack
-   explícito contra un título sin cantidad cuenta como pack distinto. Las
-   medidas de caja (`box*`) se guardan y se muestran, pero no deciden (una caja
-   puede traer varias unidades). **Sin juez prendido la regla de marca no se
+   explícito contra un título sin cantidad cuenta como pack distinto ("x 3"
+   después de un código como "E27" o "talle 42" es un pack; "30 x 40 cm" es una
+   medida). Las medidas de caja (`box*`) se guardan y se muestran, pero no
+   deciden (una caja puede traer varias unidades); de los atributos de una ficha
+   de la API también se descartan los de la caja de envío (`PACKAGE_*`). **Tope
+   de cordura:** si la medida de Vendure es absurda (lados fuera de 0,1 a 300 cm,
+   peso fuera de 1 g a 200 kg) o está a más de 10 veces de la de la publicación
+   (mm cargados como cm, gramos como kilos), no decide SIMILAR: la publicación
+   queda con el aviso "medida dudosa en Vendure" y no se penaliza. **Sin juez prendido la regla de marca no se
    aplica**: una publicación con marca conocida sale IGUAL si la foto y el
    nombre coinciden.
 5. Para las fichas de la API aceptadas trae los vendedores
@@ -232,8 +238,11 @@ Color: **verde** ≥ `pm_green_min_pct` (30 %), **amarillo** ≥ `pm_yellow_min_
 Historial: tablas propias `market_price_snapshot` (una fila por producto y
 corrida, siempre, con `ml_status` = `ok` | `no_data` | `failed` | `skipped`) y
 `price_monitor_run` (una por corrida: estado, totales por color, requests a ML,
-llamadas/tokens/costo del juez). `prune_price_history` no las toca; sí poda los
-embeddings de fotos de ML (`mlstatic`) más viejos que `pm_embed_cache_days`.
+llamadas/tokens/costo del juez, y los bytes y búsquedas de la web). Retención:
+`prune_price_history` borra los snapshots de más de `PRICE_MONITOR_RETENTION_DAYS`
+(180; 0 = nunca) salvo **el último de cada producto**, y las corridas viejas que
+se quedan sin snapshots (una en curso no se toca). También poda los embeddings de
+fotos de ML (`mlstatic`) más viejos que `pm_embed_cache_days`.
 
 Robustez:
 
@@ -271,8 +280,31 @@ segunda búsqueda con las primeras 4 palabras) con **el mismo navegador y el
 mismo proxy que Hugo ya usa para leer links de ML** (`ingest/browser_fetch.py`:
 Camoufox, `BROWSER_PROXY`, el mismo guard anti-SSRF; no hay otro lanzador).
 Para ~1.000 búsquedas por noche se reusa **un** navegador
-(`browser_fetch.ListingBrowser`, se relanza cada 150 páginas) en vez de uno por
-búsqueda (~50 s de reloj cada uno).
+(`browser_fetch.ListingBrowser`, se relanza cada `BROWSER_LISTING_RECYCLE_AFTER`
+páginas, 75; con concurrencia 2 espera a las páginas en vuelo antes de
+relanzar) en vez de uno por búsqueda (~50 s de reloj cada uno).
+
+Seguridad y memoria del navegador (el guard de `browser_fetch.py` es el mismo
+para `render()` y para el listado):
+
+- Cada request del navegador se valida contra red pública, con la cache DNS
+  vencida (5 min si resuelve a una IP pública, 30 s si no; los fallos de DNS no
+  se cachean) y el listado **solo puede hablar con `*.mercadolibre.com.ar`,
+  `*.mercadolibre.com` y `*.mlstatic.com`** (con chequeo de borde: ni
+  `evilmercadolibre.com.ar` ni `mercadolibre.com.ar.evil.com`); la búsqueda
+  además tiene que terminar en un host de ML o no se lee.
+- Hay **un solo Firefox a la vez en todo el proceso** (el container es de 3 GB y
+  lo comparte CLIP). Un `render()` con un cliente esperando (/verify, /app/lookup)
+  le pide al listado que suelte el suyo y el listado se relanza en la búsqueda
+  siguiente; nunca quedan dos.
+- Cerrar una página o Firefox espera como máximo 10 a 15 s; si no contesta se
+  sigue y el navegador se relanza.
+- `BROWSER_PROXY` va como `http://usuario:clave@host:puerto` con los caracteres
+  especiales de la clave codificados (`/` = `%2F`, `#` = `%23`, `?` = `%3F`,
+  `@` = `%40`). Si está mal formado Hugo lo ignora, la web queda apagada con el
+  motivo "BROWSER_PROXY mal formado" y no pasa nada más (antes tiraba un 500).
+  Usuario, clave y host del proxy se tapan en los errores, en `ml_error`, en
+  `run.error` y en los logs; el log nunca imprime el valor.
 
 **Qué lee.** No parsea HTML: lee lo que la página trae embebido.
 
@@ -308,14 +340,14 @@ reales (`Request.sizes`: cabeceras + cuerpo de lo completado) por producto y
 por corrida (`web_bytes`; el dashboard muestra el promedio por búsqueda).
 
 Costo estimado de proxy residencial (a USD 2,75 a 4 por GB, precios publicados
-de Decodo; **estimación**, no hay proxy contratado medido): hasta 2.000
-búsquedas por noche son ~0,4 GB (≈ USD 1 a 1,6 por noche, USD 33 a 48 por mes).
-Sin bloquear scripts serían ~3,4 GB por noche (USD 280 a 410 por mes).
+de Decodo; **estimación**, no hay proxy contratado medido): hasta 2.500
+búsquedas por noche son ~0,5 GB (≈ USD 1,4 a 2 por noche, USD 41 a 60 por mes).
+Sin bloquear scripts serían ~4,3 GB por noche (USD 350 a 510 por mes).
 
 **Cuándo corre y cuánto.**
 
 - Solo para el producto que la API no resolvió (sin IGUAL con precio). Tope
-  diario `pm_ml_web_daily_budget` (2000) con la reserva atómica de
+  diario `pm_ml_web_daily_budget` (2500) con la reserva atómica de
   `daily_budget.py`: nunca se pasa, ni con reinicios a mitad.
 - Concurrencia `pm_ml_web_concurrency` (1; máx. 2) y pausa de
   `pm_ml_web_pause_s` (4 s, ±30 % al azar) después de cada búsqueda. La carga
@@ -357,13 +389,22 @@ prender la fuente en producción conviene que Nico y Gabriel den el OK explícit
 es la única forma de que ML responda; no se intenta evadir captchas.
 
 **"No es el mismo".** En el detalle de cada producto, cada publicación (igual o
-parecida) tiene un botón que la saca del snapshot, **recalcula** mediana, mínimo,
-ganancia y color con las que quedan (`POST /api/price-monitor/snapshots/{id}/
-not-same`), la guarda en la tabla `market_match_feedback` (con los puntajes y el
-origen que tenía) y **la excluye para ese producto en las próximas corridas**.
-Esas filas son etiquetas negativas para calibrar: `calibrate_market_match
-export` las saca ya etiquetadas con 0. `DELETE /api/price-monitor/products/{id}/
-not-same/{ml_id}` la vuelve a considerar.
+parecida) tiene un botón que **pide confirmación** y, al confirmar, la saca del
+snapshot, **recalcula** mediana, mínimo, ganancia y color con las que quedan y
+rehace los contadores de la corrida (`POST /api/price-monitor/snapshots/{id}/
+not-same`), la guarda en la tabla `market_match_feedback` (con los puntajes, el
+origen que tenía y **quién la marcó**: el usuario de la sesión) y **la excluye
+para ese producto en las próximas corridas**. La exclusión, el snapshot y los
+contadores se guardan en una sola transacción. El panel ofrece "Deshacer"
+(`DELETE /api/price-monitor/products/{id}/not-same/{ml_id}`): la próxima corrida
+vuelve a considerarla; el detalle de hoy no se reconstruye. Esas filas son
+etiquetas negativas para calibrar: `calibrate_market_match export` las saca ya
+etiquetadas con 0.
+
+**Pendiente (B3, fuera de este PR): CSRF.** Los POST/DELETE del dashboard
+(`run`, `not-same`) se apoyan en la cookie de sesión `SameSite=Lax` y no llevan
+token CSRF. `Lax` ya frena los POST entre sitios, pero conviene sumar un token (o
+validar `Origin`) para todos los endpoints que escriben, no solo estos.
 
 ### Qué NO hace todavía
 
@@ -397,7 +438,7 @@ not-same/{ml_id}` la vuelve a considerar.
 | `pm_include_disabled` | 1 | también mide los productos deshabilitados (filtro en el dashboard) |
 | `pm_spec_check` | 1 | chequeo de cantidad, capacidad, medidas y peso (IGUAL → SIMILAR) |
 | `pm_dim_tol_pct` / `pm_weight_tol_pct` | 10 / 15 | tolerancia de medidas por lado y de peso, en % |
-| `pm_ml_web_daily_budget` | 2000 | búsquedas web de ML por día (UTC); 0 = fuente apagada |
+| `pm_ml_web_daily_budget` | 2500 | búsquedas web de ML por día (UTC); 0 = fuente apagada |
 | `pm_ml_web_max_results` | 8 | resultados de cada búsqueda web que se comparan |
 | `pm_ml_web_concurrency` | 1 | búsquedas web en paralelo (1-2) |
 | `pm_ml_web_pause_s` | 4 | pausa entre búsquedas web, en segundos |
@@ -934,6 +975,9 @@ Ver `.env.example`. Las críticas:
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
+- `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
+  (default 180; siempre queda el último snapshot de cada producto; 0 = nunca).
+- `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**

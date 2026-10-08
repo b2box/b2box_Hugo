@@ -7,9 +7,8 @@
   * Parser del listado: precio solo en pesos, links y fotos saneados, páginas
     enormes, ilegibles o de verificación.
 
-Los casos marcados xfail(strict=True) son BUGS REPRODUCIDOS que quedaron
-reportados al developer: cuando se arreglen el test pasa a XPASS y falla, así
-que hay que sacarle el xfail.
+Los bugs que reprodujo QA (BUG-L1 a L8) ya están arreglados y sus casos corren como
+tests normales.
 """
 
 from __future__ import annotations

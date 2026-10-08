@@ -203,7 +203,8 @@ def proxy_problem() -> str | None:
     """Por qué hay un BROWSER_PROXY pero no sirve ("mal formado"), o None si no
     hay nada que decir (sin configurar o válido). Sin el valor."""
     if (get_settings().browser_proxy or "").strip() and _proxy_config() is None:
-        return "BROWSER_PROXY mal formado (revisá el formato: http://usuario:clave@host:puerto, con la clave codificada)"
+        return ("BROWSER_PROXY mal formado (revisá el formato: "
+                "http://usuario:clave@host:puerto, con la clave codificada)")
     return None
 
 
