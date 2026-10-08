@@ -247,8 +247,10 @@ class MlMarket:
     """Acceso a ML para UNA corrida: cuenta sus requests y comparte conexión.
 
     `budget` es el tope diario (`pm_ml_daily_budget`); el contador vive en
-    `settings` y lo comparten todas las corridas del día. `sleep` y
-    `token_getter` se inyectan para que los tests no esperen ni pidan token.
+    `settings` y lo comparten todas las corridas del día. `on_reserve` corre en
+    la misma transacción que cada reserva (el semáforo suma ahí el request a su
+    corrida). `sleep` y `token_getter` se inyectan para que los tests no
+    esperen ni pidan token.
     """
 
     def __init__(
@@ -258,12 +260,14 @@ class MlMarket:
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         token_getter: TokenGetter = meli.get_token,
+        on_reserve: Callable[[Session], None] | None = None,
     ) -> None:
         self.budget = int(budget)
         self._client = client
         self._own_client = client is None
         self._sleep = sleep
         self._token = token_getter
+        self._on_reserve = on_reserve
         self.requests_used = 0
         self.retries = 0
         # Una vez agotado el cupo del día no se vuelve a consultar la DB por
@@ -280,8 +284,10 @@ class MlMarket:
             await self._client.aclose()
             self._client = None
 
-    def _reserve(self) -> None:
-        if self.exhausted or daily_budget.reserve(ML_COUNTER_KEY, self.budget) is None:
+    async def _reserve(self) -> None:
+        if self.exhausted or await daily_budget.reserve_async(
+            ML_COUNTER_KEY, self.budget, None, self._on_reserve,
+        ) is None:
             self.exhausted = True
             raise BudgetExhausted(f"budget ML del día agotado ({self.budget})")
         self.requests_used += 1
@@ -293,7 +299,7 @@ class MlMarket:
         last_status: int | None = None
         last_error = ""
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            self._reserve()
+            await self._reserve()
             token = await self._token()
             try:
                 resp = await self._client.get(
@@ -350,7 +356,7 @@ class MlMarket:
         lo dice (o el request falló): el llamador decide qué hacer con eso."""
         if not seller_id:
             return None
-        fresh, cached = _seller_cache_get(seller_id)
+        fresh, cached = await asyncio.to_thread(_seller_cache_get, seller_id)
         if fresh:
             return cached
         try:
@@ -359,7 +365,7 @@ class MlMarket:
             log.info("Sin reputación para el vendedor %s: %s", seller_id, exc)
             return None
         sales = completed_sales_from_user(raw)
-        _seller_cache_put(seller_id, sales)
+        await asyncio.to_thread(_seller_cache_put, seller_id, sales)
         return sales
 
     async def probe_listing_prices(self, category_id: str) -> dict:

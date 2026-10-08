@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -211,12 +211,16 @@ async def judge(
     *,
     max_calls: int,
     client: Any | None = None,
+    on_reserve: Callable[[Any], None] | None = None,
 ) -> JudgeResult | None:
     """Pregunta al modelo. None = sin veredicto (apagado, sin cupo, falló o no
-    se entendió la respuesta). El llamador trata None como "sigue ambiguo"."""
+    se entendió la respuesta). El llamador trata None como "sigue ambiguo".
+
+    `on_reserve` corre en la transacción que reserva el cupo del día: la
+    llamada queda contada aunque después falle (timeout, 5xx)."""
     if max_calls <= 0 or not candidates or not enabled():
         return None
-    if daily_budget.reserve(LLM_COUNTER_KEY, int(max_calls)) is None:
+    if await daily_budget.reserve_async(LLM_COUNTER_KEY, int(max_calls), None, on_reserve) is None:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
         return None
 

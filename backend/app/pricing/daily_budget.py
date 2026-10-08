@@ -18,6 +18,7 @@ manda. Presupuesto desconocido no puede querer decir "gastá tranquilo".
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import Callable
@@ -73,7 +74,12 @@ def used_today(key: str, floor: Callable[[], int] | None = None) -> int:
     return floor() if floor else 0
 
 
-def reserve(key: str, budget: int, floor: Callable[[], int] | None = None) -> int | None:
+def reserve(
+    key: str,
+    budget: int,
+    floor: Callable[[], int] | None = None,
+    also: Callable[[Session], None] | None = None,
+) -> int | None:
     """Reserva cupo para UN request contra `budget`.
 
     Devuelve el total del día (ya incluyendo este request) si había lugar, o
@@ -81,6 +87,11 @@ def reserve(key: str, budget: int, floor: Callable[[], int] | None = None) -> in
 
     `floor` se consulta una sola vez por día, cuando el contador arranca en 0:
     sirve para sembrarlo con un piso que ya se gastó por otra vía.
+
+    `also` corre en la MISMA transacción que la reserva, solo si la reserva
+    entra: el semáforo lo usa para sumar el request a su corrida. Así un corte
+    del proceso en cualquier punto deja la corrida y el contador del día
+    iguales (o se commitean los dos, o ninguno).
     """
     today = today_utc()
     try:
@@ -99,6 +110,8 @@ def reserve(key: str, budget: int, floor: Callable[[], int] | None = None) -> in
                 value = f"{today}:{total}"
                 if row is None:
                     s.add(Setting(key=key, value=value))
+                    if also is not None:
+                        also(s)
                     try:
                         s.commit()
                     except IntegrityError:
@@ -111,10 +124,13 @@ def reserve(key: str, budget: int, floor: Callable[[], int] | None = None) -> in
                     .where(Setting.key == key, Setting.value == previous)
                     .values(value=value, updated_at=datetime.now(timezone.utc))
                 )
-                s.commit()
                 if done.rowcount == 1:
+                    if also is not None:
+                        also(s)
+                    s.commit()
                     return total
                 # rowcount 0 = alguien más escribió entre la lectura y el UPDATE.
+                s.rollback()
                 s.expire_all()
             log.warning("No se pudo reservar cupo en %s tras %d intentos — no mando el request",
                         key, _CAS_ATTEMPTS)
@@ -122,3 +138,14 @@ def reserve(key: str, budget: int, floor: Callable[[], int] | None = None) -> in
     except Exception as exc:  # noqa: BLE001
         log.warning("No se pudo reservar cupo en %s (%s) — no mando el request", key, exc)
         return None
+
+
+async def reserve_async(
+    key: str,
+    budget: int,
+    floor: Callable[[], int] | None = None,
+    also: Callable[[Session], None] | None = None,
+) -> int | None:
+    """`reserve` fuera del event loop: es I/O de DB bloqueante y el semáforo
+    lo llama una vez por request a ML con varios productos en paralelo."""
+    return await asyncio.to_thread(reserve, key, budget, floor, also)

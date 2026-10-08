@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
@@ -85,9 +86,6 @@ DEGRADED_FAILED_RATIO = 0.20
 # `failed` y arranca una nueva. Sin esto, un proceso caído todo un día haría que
 # el cron de la noche siguiente "retome" una corrida de ayer en vez de medir hoy.
 STALE_RUN_HOURS = 20
-# Cada cuántos productos se persisten el avance y los requests gastados: si el
-# proceso muere, la corrida retomada no pierde la cuenta de lo ya consumido.
-CHECKPOINT_EVERY = 25
 # Fichas de ML (ya matcheadas) cuyos vendedores se consultan por producto.
 MAX_MATCHED_PRODUCTS = 4
 # Solo comparamos pesos con pesos.
@@ -113,52 +111,10 @@ class RunContext:
     # el request de búsqueda (ver market_match.indexed).
     can_score: Callable[[VendureProduct], bool] = market_match.indexed
     judge_fn: JudgeFn = market_judge.judge
-    # Acumuladores del juez (un solo hilo: el event loop).
-    llm_calls: int = 0
-    llm_input_tokens: int = 0
-    llm_output_tokens: int = 0
-    llm_cost_usd: float = 0.0
     # Para la sonda de listing_prices: la primera categoría que vimos.
     first_category_id: str | None = None
     sold_quantity_probed: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class Totals:
-    """Consumo acumulado de una corrida (absoluto, no delta). Al retomar se
-    parte de lo que ya tenía guardado la fila."""
-    ml_requests: int = 0
-    llm_calls: int = 0
-    llm_input_tokens: int = 0
-    llm_output_tokens: int = 0
-    llm_cost_usd: float = 0.0
-
-    @classmethod
-    def of(cls, run: PriceMonitorRun) -> "Totals":
-        return cls(
-            ml_requests=int(run.ml_requests_used or 0),
-            llm_calls=int(run.llm_calls or 0),
-            llm_input_tokens=int(run.llm_input_tokens or 0),
-            llm_output_tokens=int(run.llm_output_tokens or 0),
-            llm_cost_usd=float(run.llm_cost_usd or 0.0),
-        )
-
-    def plus(self, ml: MlMarket, ctx: RunContext) -> "Totals":
-        return Totals(
-            ml_requests=self.ml_requests + ml.requests_used,
-            llm_calls=self.llm_calls + ctx.llm_calls,
-            llm_input_tokens=self.llm_input_tokens + ctx.llm_input_tokens,
-            llm_output_tokens=self.llm_output_tokens + ctx.llm_output_tokens,
-            llm_cost_usd=round(self.llm_cost_usd + ctx.llm_cost_usd, 6),
-        )
-
-    def apply(self, run: PriceMonitorRun) -> None:
-        run.ml_requests_used = self.ml_requests
-        run.llm_calls = self.llm_calls
-        run.llm_input_tokens = self.llm_input_tokens
-        run.llm_output_tokens = self.llm_output_tokens
-        run.llm_cost_usd = self.llm_cost_usd
 
 
 # ─── Persistencia de la corrida ───────────────────────────────────
@@ -230,42 +186,55 @@ def _last_color(product_id: str, current_run_id: int) -> str | None:
         ).first()
 
 
+def _usage_increment(run_id: int, **deltas: int | float) -> Callable[[Session], None]:
+    """UPDATE atómico `col = col + delta` sobre la fila de la corrida, para
+    correr DENTRO de otra transacción (la reserva del budget, el insert del
+    snapshot). Así lo gastado y lo avanzado nunca quedan atrás de un corte."""
+    def _apply(session: Session) -> None:
+        session.execute(
+            update(PriceMonitorRun)
+            .where(PriceMonitorRun.id == run_id)  # type: ignore[arg-type]
+            .values({getattr(PriceMonitorRun, col): getattr(PriceMonitorRun, col) + delta
+                     for col, delta in deltas.items()})
+        )
+    return _apply
+
+
+def _add_usage(run_id: int, **deltas: int | float) -> None:
+    """Lo mismo, en su propia transacción (tokens y costo del juez, que se
+    conocen recién cuando vuelve la respuesta)."""
+    with Session(engine) as s:
+        _usage_increment(run_id, **deltas)(s)
+        s.commit()
+
+
 def _save_snapshot(snap: MarketPriceSnapshot) -> bool:
-    """Guarda la fila. False si ya existía (otro worker la hizo): el índice
-    único (run_id, product_id) es lo que hace idempotente la reanudación."""
+    """Guarda la fila y suma 1 a `processed` en la misma transacción. False si
+    ya existía (otro worker la hizo): el índice único (run_id, product_id) es
+    lo que hace idempotente la reanudación."""
     # expire_on_commit=False: el llamador sigue leyendo la instancia después
-    # de guardarla (status para los conteos) y la sesión ya está cerrada.
+    # de guardarla y la sesión ya está cerrada.
     with Session(engine, expire_on_commit=False) as s:
         s.add(snap)
         try:
-            s.commit()
+            s.flush()
         except IntegrityError:
             s.rollback()
             return False
+        _usage_increment(snap.run_id, processed=1)(s)
+        s.commit()
     return True
 
 
-def _checkpoint(run_id: int, processed: int, totals: Totals) -> None:
-    """Persiste el avance a mitad de corrida. Si falla, la corrida sigue."""
-    try:
-        with Session(engine) as s:
-            run = s.get(PriceMonitorRun, run_id)
-            if run is None:
-                return
-            run.processed = processed
-            totals.apply(run)
-            s.add(run)
-            s.commit()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("price_monitor: no se pudo guardar el avance de #%s: %s", run_id, exc)
+def _persist(snap: MarketPriceSnapshot, run_id: int) -> None:
+    """prev_color + insert. Bloqueante: se llama con asyncio.to_thread."""
+    snap.prev_color = _last_color(snap.product_id, run_id)
+    _save_snapshot(snap)
 
 
-def _finalize_run(
-    run_id: int, *, totals: Totals | None, error: str | None = None,
-    force_status: str | None = None,
-) -> str:
-    """Cierra la corrida con los conteos calculados desde los snapshots.
-    `totals` None = dejar el consumo que ya tenía guardado la fila."""
+def _finalize_run(run_id: int, *, error: str | None = None, force_status: str | None = None) -> str:
+    """Cierra la corrida con los conteos calculados desde los snapshots. El
+    consumo (requests ML, juez) ya está al día: se suma request a request."""
     with Session(engine) as s:
         run = s.get(PriceMonitorRun, run_id)
         if run is None:
@@ -289,8 +258,6 @@ def _finalize_run(
         run.n_amarillo = int(by_color.get(semaforo.AMARILLO, 0))
         run.n_rojo = int(by_color.get(semaforo.ROJO, 0))
         run.n_sin_dato = int(by_color.get(semaforo.SIN_DATO, 0))
-        if totals is not None:
-            totals.apply(run)
         if force_status:
             status = force_status
         else:
@@ -350,16 +317,19 @@ async def _consult_judge(ctx: RunContext, product: VendureProduct,
     try:
         result = await ctx.judge_fn(
             product.name, _our_photos(product), cands, max_calls=ctx.judge_max_calls,
+            # La llamada se cuenta al reservar el cupo, aunque después falle.
+            on_reserve=_usage_increment(ctx.run_id, llm_calls=1),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Juez LLM reventó para %s: %s", product.id, exc)
         return
     if result is None:
         return
-    ctx.llm_calls += 1
-    ctx.llm_input_tokens += result.input_tokens
-    ctx.llm_output_tokens += result.output_tokens
-    ctx.llm_cost_usd += result.cost_usd
+    if result.input_tokens or result.output_tokens or result.cost_usd:
+        await asyncio.to_thread(
+            _add_usage, ctx.run_id, llm_input_tokens=result.input_tokens,
+            llm_output_tokens=result.output_tokens, llm_cost_usd=result.cost_usd,
+        )
     for d in ambiguous:
         verdict = result.verdicts.get(d.candidate.id)
         if verdict is None:
@@ -460,9 +430,11 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
                 continue
             if not ctx.sold_quantity_probed and raw.get("results"):
                 ctx.sold_quantity_probed = True
-                if not probe_recorded(PROBE_SOLD_QUANTITY_KEY):
-                    record_probe(PROBE_SOLD_QUANTITY_KEY,
-                                 {"present": payload_has_sold_quantity(raw), "product": d.candidate.id})
+                if not await asyncio.to_thread(probe_recorded, PROBE_SOLD_QUANTITY_KEY):
+                    await asyncio.to_thread(
+                        record_probe, PROBE_SOLD_QUANTITY_KEY,
+                        {"present": payload_has_sold_quantity(raw), "product": d.candidate.id},
+                    )
             accepted = await _accepted_prices(ctx, listings)
             if not accepted:
                 continue
@@ -555,7 +527,7 @@ def _open_or_resume(mode: int, trigger: str) -> tuple[PriceMonitorRun, str]:
     if run is not None and _is_stale(run):
         log.warning("price_monitor: la corrida #%s quedó abandonada desde %s; la cierro y arranco otra",
                     run.id, run.started_at.isoformat(timespec="minutes"))
-        _finalize_run(int(run.id), totals=None,  # type: ignore[arg-type]
+        _finalize_run(int(run.id),  # type: ignore[arg-type]
                       error=f"abandonada: sin terminar después de {STALE_RUN_HOURS} h",
                       force_status=RUN_FAILED)
         run = None
@@ -579,12 +551,11 @@ async def _run(trigger: str) -> dict[str, Any] | None:
 
     run, trigger = _open_or_resume(mode, trigger)
     run_id = int(run.id)  # type: ignore[arg-type]
-    base = Totals.of(run)
 
     if not meli.enabled():
         msg = "MELI_CLIENT_ID / MELI_CLIENT_SECRET no configurados"
         log.error("price_monitor: %s", msg)
-        status = _finalize_run(run_id, totals=None, error=msg, force_status=RUN_FAILED)
+        status = _finalize_run(run_id, error=msg, force_status=RUN_FAILED)
         return {"run_id": run_id, "status": status, "error": msg}
 
     try:
@@ -592,24 +563,22 @@ async def _run(trigger: str) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001
         log.exception("price_monitor: Vendure no respondió")
         error = f"Vendure: {type(exc).__name__}: {exc}"
-        status = _finalize_run(run_id, totals=None, error=error, force_status=RUN_FAILED)
+        status = _finalize_run(run_id, error=error, force_status=RUN_FAILED)
         return {"run_id": run_id, "status": status, "error": error}
 
     try:
-        return await _evaluate_catalog(run_id, base, trigger, products)
+        return await _evaluate_catalog(run_id, trigger, products)
     except Exception as exc:  # noqa: BLE001
         # Un bug no puede dejar la corrida `running` para siempre: se reintentaría
         # en cada arranque y reventaría igual. (Un reinicio del proceso NO pasa
         # por acá — eso sí se retoma.)
         log.exception("price_monitor: la corrida #%s reventó", run_id)
         error = f"{type(exc).__name__}: {exc}"
-        status = _finalize_run(run_id, totals=None, error=error, force_status=RUN_FAILED)
+        status = _finalize_run(run_id, error=error, force_status=RUN_FAILED)
         return {"run_id": run_id, "status": status, "error": error}
 
 
-async def _evaluate_catalog(
-    run_id: int, base: Totals, trigger: str, products: list[VendureProduct],
-) -> dict[str, Any]:
+async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendureProduct]) -> dict[str, Any]:
     enabled = [p for p in products if p.enabled]
     done = _done_product_ids(run_id)
     pending = [p for p in enabled if p.id not in done]
@@ -622,14 +591,12 @@ async def _evaluate_catalog(
     budget = int(runtime.get("pm_ml_daily_budget"))
     concurrency = max(1, int(runtime.get("pm_ml_concurrency")))
     counts: dict[str, int] = {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}
-    processed = len(done)
 
-    async with MlMarket(budget=budget) as ml:
+    async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml)
         sem = asyncio.Semaphore(concurrency)
 
         async def _one(product: VendureProduct) -> None:
-            nonlocal processed
             async with sem:
                 try:
                     snap = await evaluate_product(ctx, product)
@@ -639,16 +606,10 @@ async def _evaluate_catalog(
                                  f"{type(exc).__name__}: {exc}")
                 status = snap.ml_status
                 try:
-                    snap.prev_color = _last_color(product.id, run_id)
-                    _save_snapshot(snap)
+                    await asyncio.to_thread(_persist, snap, run_id)
                 except Exception:  # noqa: BLE001
                     log.exception("price_monitor: no se pudo guardar el snapshot de %s", product.id)
                 counts[status] = counts.get(status, 0) + 1
-                processed += 1
-                if processed % CHECKPOINT_EVERY == 0:
-                    _checkpoint(run_id, processed, base.plus(ml, ctx))
-                # Cede el loop: el job dura horas y no debe dejar sin atender HTTP.
-                await asyncio.sleep(0)
 
         # `_one` ya atrapa todo lo esperable; return_exceptions evita que un bug
         # en un producto deje a los demás corriendo huérfanos tras el gather.
@@ -656,16 +617,18 @@ async def _evaluate_catalog(
             if isinstance(result, Exception):
                 log.error("price_monitor #%s: error no atrapado en un producto: %r", run_id, result)
 
-        if ctx.first_category_id and not probe_recorded(PROBE_LISTING_PRICES_KEY):
+        if ctx.first_category_id and not await asyncio.to_thread(probe_recorded, PROBE_LISTING_PRICES_KEY):
             await ml.probe_listing_prices(ctx.first_category_id)
 
-        totals = base.plus(ml, ctx)
-        status = _finalize_run(run_id, totals=totals)
+        status = _finalize_run(run_id)
 
-    log.info("price_monitor terminado: corrida #%s %s — %s, %d requests ML, %d llamadas LLM (USD %.4f)",
-             run_id, status, counts, ml.requests_used, ctx.llm_calls, ctx.llm_cost_usd)
+    with Session(engine) as s:
+        run = s.get(PriceMonitorRun, run_id)
+    log.info("price_monitor terminado: corrida #%s %s — %s, %d requests ML (%d esta vez), "
+             "%d llamadas LLM (USD %.4f)", run_id, status, counts, run.ml_requests_used,
+             ml.requests_used, run.llm_calls, run.llm_cost_usd)
     return {"run_id": run_id, "status": status, "counts": counts,
-            "ml_requests_used": totals.ml_requests, "llm_calls": totals.llm_calls}
+            "ml_requests_used": run.ml_requests_used, "llm_calls": run.llm_calls}
 
 
 # ─── Para el dashboard ────────────────────────────────────────────

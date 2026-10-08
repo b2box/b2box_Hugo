@@ -19,6 +19,7 @@ Criterios de la etapa sombra que se cubren acá:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -190,10 +191,10 @@ def world(monkeypatch):
     async def _token():
         return "tok"
 
-    def _market(budget):
+    def _market(budget, on_reserve=None):
         transport = httpx.MockTransport(ml.handler)
         return MlMarket(budget=budget, client=httpx.AsyncClient(transport=transport),
-                        sleep=_sleep, token_getter=_token)
+                        sleep=_sleep, token_getter=_token, on_reserve=on_reserve)
 
     async def _scorer(our, urls):  # noqa: ARG001
         return image_scores.get(urls[0])
@@ -363,20 +364,52 @@ async def test_an_abandoned_run_is_closed_and_a_new_one_starts(world):
     assert result["run_id"] == new_run.id and new_run.status == "ok"
 
 
-async def test_progress_is_checkpointed_during_the_run(world, monkeypatch):
-    monkeypatch.setattr(price_monitor, "CHECKPOINT_EVERY", 1)
-    seen: list[tuple[int, int]] = []
-    real = price_monitor._checkpoint
+async def _cut_after(n_done: int, monkeypatch) -> None:
+    """Corre el job y lo corta (como un kill del proceso) cuando arranca el
+    producto n_done + 1. Los n_done primeros quedan guardados."""
+    gate = asyncio.Event()
+    real_eval = price_monitor.evaluate_product
+    started = {"n": 0}
 
-    def spy(run_id, processed, totals):
-        seen.append((processed, totals.ml_requests))
-        real(run_id, processed, totals)
+    async def slow_eval(ctx, product):
+        started["n"] += 1
+        if started["n"] == n_done + 1:
+            await gate.wait()  # el proceso "muere" acá
+        return await real_eval(ctx, product)
 
-    monkeypatch.setattr(price_monitor, "_checkpoint", spy)
+    monkeypatch.setattr(price_monitor, "evaluate_product", slow_eval)
+    task = asyncio.create_task(price_monitor.run_price_monitor())
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if started["n"] > n_done:
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    monkeypatch.setattr(price_monitor, "evaluate_product", real_eval)
+
+
+async def test_a_cut_keeps_exactly_what_was_spent_and_resume_adds_up(world, monkeypatch):
+    """QA bug 7: el consumo de la corrida se perdía si el proceso moría entre
+    checkpoints. Ahora cada request se suma a la corrida en la misma
+    transacción que reserva el cupo del día."""
+    FakeVendure.products = [_product(str(i), "Organizador cocina") for i in range(1, 7)]
     _set("pm_ml_concurrency", 1)
+
+    await _cut_after(3, monkeypatch)
+
+    [run] = _runs()
+    spent = daily_budget.used_today(market_ml.ML_COUNTER_KEY)
+    assert run.status == "running" and len(_snaps(run.id)) == 3
+    assert spent > 0 and run.ml_requests_used == spent  # nada perdido en el corte
+    assert run.processed == 3
+
     await price_monitor.run_price_monitor()
-    assert [p for p, _ in seen] == [1, 2, 3, 4, 5]
-    assert [r for _, r in seen] == sorted(r for _, r in seen)
+
+    [run] = _runs()
+    assert run.status == "ok" and run.resumed_count == 1 and len(_snaps(run.id)) == 6
+    assert run.processed == 6
+    assert run.ml_requests_used == daily_budget.used_today(market_ml.ML_COUNTER_KEY) > spent
 
 
 async def test_pm_mode_1_only_logs_and_stays_in_shadow(world, caplog):
@@ -498,8 +531,10 @@ async def test_judge_confirms_the_ambiguous_match_and_its_cost_is_recorded(world
     _set("pm_vision_max_calls", 5)
     seen = {}
 
-    async def judge(our_name, our_images, candidates, *, max_calls):
+    async def judge(our_name, our_images, candidates, *, max_calls, on_reserve=None, **kw):
         seen.update(name=our_name, ids=[c.ml_id for c in candidates], max_calls=max_calls)
+        # Como el juez real: reserva el cupo y cuenta la llamada en la corrida.
+        assert await daily_budget.reserve_async(market_judge.LLM_COUNTER_KEY, max_calls, None, on_reserve)
         return market_judge.JudgeResult(
             verdicts={"MLA8": market_judge.JudgeVerdict("MLA8", True, 0.8, "mismo soporte")},
             input_tokens=1_000, output_tokens=100, cost_usd=0.00036, model="qwen3-vl-plus",
