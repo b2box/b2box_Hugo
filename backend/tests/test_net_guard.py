@@ -176,3 +176,65 @@ async def test_assert_peer_public_with_the_real_httpcore_extension():
     finally:
         server.close()
         await server.wait_closed()
+
+
+# ─── safe_get(max_bytes=…): tope del cuerpo descomprimido ───────────────────
+
+
+def _patch_for_streaming(monkeypatch, handler):
+    monkeypatch.setattr(net_guard.httpx, "AsyncClient", _client_factory(handler))
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", lambda host, *a, **kw: [(0, 0, 0, "", ("93.184.216.34", 0))])
+    # El transporte de mentira no expone el socket: el chequeo de la IP conectada se salta.
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
+
+
+async def test_safe_get_with_max_bytes_returns_a_normal_response(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: httpx.Response(200, content=b"hola mundo",
+                                                                 headers={"x-test": "1"}, request=req))
+    resp = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100)
+    assert resp.status_code == 200 and resp.content == b"hola mundo" and resp.text == "hola mundo"
+    assert resp.headers["x-test"] == "1"
+
+
+async def test_safe_get_with_max_bytes_rejects_a_body_over_the_cap(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: httpx.Response(200, content=b"x" * 5000, request=req))
+    with pytest.raises(net_guard.ResponseTooLarge):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_safe_get_with_max_bytes_counts_the_decompressed_size(monkeypatch):
+    import gzip
+
+    bomb = gzip.compress(b"a" * 200_000)           # chico en el cable, grande al abrirlo
+    assert len(bomb) < 1000
+    _patch_for_streaming(monkeypatch, lambda req: httpx.Response(
+        200, content=bomb, headers={"content-encoding": "gzip"}, request=req))
+    with pytest.raises(net_guard.ResponseTooLarge):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=10_000)
+    ok = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=300_000)
+    assert ok.content == b"a" * 200_000
+
+
+async def test_safe_get_with_max_bytes_still_follows_and_validates_redirects(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/a":
+            return httpx.Response(301, headers={"location": "https://example.com/b"}, request=req)
+        return httpx.Response(200, content=b"final", request=req)
+
+    _patch_for_streaming(monkeypatch, handler)
+    resp = await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)
+    assert resp.content == b"final" and seen == ["https://example.com/a", "https://example.com/b"]
+
+
+async def test_safe_get_with_max_bytes_refuses_a_redirect_into_a_private_network(monkeypatch):
+    def handler(req):
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/x"}, request=req)
+
+    _patch_for_streaming(monkeypatch, handler)
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo",
+                        lambda host, *a, **kw: [(0, 0, 0, "", (host if host[0].isdigit() else "93.184.216.34", 0))])
+    with pytest.raises(SsrfBlocked):
+        await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)

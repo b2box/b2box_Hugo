@@ -33,6 +33,10 @@ class SsrfBlocked(ValueError):
     """La URL apunta (directa o vía redirect/DNS) a una red no pública."""
 
 
+class ResponseTooLarge(ValueError):
+    """El cuerpo de la respuesta (ya descomprimido) pasó el tope `max_bytes`."""
+
+
 # NAT64 (RFC 6052): un gateway NAT64 traduce 64:ff9b::a.b.c.d a la IPv4
 # a.b.c.d, incluidas las privadas. Hugo no corre detrás de uno: se bloquea todo.
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
@@ -109,20 +113,57 @@ def assert_peer_public(resp: httpx.Response) -> None:
         raise SsrfBlocked(f"el servidor contestó desde una IP no pública: {host}")
 
 
+async def _read_capped(client: httpx.AsyncClient, url: str, headers: dict[str, str] | None,
+                       max_bytes: int) -> httpx.Response:
+    """GET en streaming que corta apenas el cuerpo DESCOMPRIMIDO pasa `max_bytes`
+    (también frena un gzip bomba). Devuelve una Response normal con el cuerpo ya
+    leído; si no cabe lanza ResponseTooLarge sin haberlo juntado entero."""
+    async with client.stream("GET", url, headers=headers) as resp:
+        # Ya conectado, todavía sin leer el body: ¿a quién nos conectamos de verdad?
+        # (assert_public_url resuelve el DNS por su cuenta y httpx vuelve a resolver.)
+        assert_peer_public(resp)
+        if resp.is_redirect:
+            redirect = httpx.Response(resp.status_code, headers=resp.headers, request=resp.request)
+            redirect.next_request = resp.next_request
+            return redirect
+        declared = resp.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_bytes and not resp.headers.get("content-encoding"):
+            raise ResponseTooLarge(f"el servidor declara {declared} bytes (tope {max_bytes})")
+        buf = bytearray()
+        async for chunk in resp.aiter_bytes():
+            buf += chunk
+            if len(buf) > max_bytes:
+                raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
+        # El cuerpo ya viene decodificado: sin estos headers httpx intentaría
+        # descomprimirlo otra vez al leer `.content`.
+        kept = [(k, v) for k, v in resp.headers.multi_items()
+                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+        return httpx.Response(resp.status_code, headers=kept, content=bytes(buf),
+                              request=resp.request, extensions={"http_version": resp.http_version})
+
+
 async def safe_get(
     url: str,
     *,
     timeout: httpx.Timeout,
     headers: dict[str, str] | None = None,
     max_redirects: int = _MAX_REDIRECTS,
+    max_bytes: int | None = None,
 ) -> httpx.Response:
     """GET con protección SSRF, validando cada redirect. `follow_redirects=False`
-    a propósito: seguimos a mano para validar cada `Location`."""
+    a propósito: seguimos a mano para validar cada `Location`.
+
+    `max_bytes`: tope del cuerpo ya descomprimido. Si se pasa, la respuesta se
+    lee en streaming y lanza ResponseTooLarge sin bajar el resto. Sin él se lee
+    entera (como siempre)."""
     current = url
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         for _ in range(max_redirects + 1):
             assert_public_url(current)
-            resp = await client.get(current, headers=headers)
+            if max_bytes is None:
+                resp = await client.get(current, headers=headers)
+            else:
+                resp = await _read_capped(client, current, headers, max_bytes)
             if resp.is_redirect and resp.has_redirect_location:
                 current = str(resp.next_request.url)  # type: ignore[union-attr]
                 continue
