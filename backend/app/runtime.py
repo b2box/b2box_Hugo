@@ -470,6 +470,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=50, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_ml_keep_listings",
+        label="Publicaciones de ML que se guardan por producto",
+        description=(
+            "Hasta cuántas publicaciones (idénticas, similares y diferentes, las más parecidas "
+            "primero) se guardan y se muestran por producto. Solo las idénticas entran al color real."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_keep_listings",
+        min=1, max=24, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_ml_web_block_scripts",
         label="ML web: no bajar scripts ni estilos (1 / 0)",
         description=(

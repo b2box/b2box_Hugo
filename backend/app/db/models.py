@@ -218,6 +218,12 @@ class PriceMonitorRun(SQLModel, table=True):
     n_web_ok: int = Field(default=0)
     # Productos con al menos una publicación SIMILAR guardada aparte.
     n_con_similares: int = Field(default=0)
+    # Color ESTIMADO (por similares) de los productos sin IGUAL, aparte del real, y
+    # productos donde ML solo devolvió DIFERENTES.
+    n_est_verde: int = Field(default=0)
+    n_est_amarillo: int = Field(default=0)
+    n_est_rojo: int = Field(default=0)
+    n_solo_diferentes: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -294,6 +300,26 @@ class MarketPriceSnapshot(SQLModel, table=True):
     web_state: str | None = Field(default=None, max_length=8)
     # JSON: medidas nuestras de Vendure (length/width/height/weight y box*).
     our_specs: str | None = Field(default=None)
+    # Publicaciones DIFERENTES (otro producto): se guardan igual, solo para
+    # mostrar (nunca entran a ningún cálculo). Misma estructura que similar_listings.
+    other_listings: str | None = Field(default=None)
+    other_count: int = Field(default=0)
+    # Publicaciones IGUAL a las que no se les pudo sacar un precio que cuente
+    # (sin vendedores, pocas ventas, tope de fichas): se muestran con los idénticos
+    # pero no suman a la mediana. Aparte de `matched_listings`, que son solo las
+    # IGUAL con precio (el color real sale de ahí).
+    unpriced_listings: str | None = Field(default=None)
+    # Qué devolvió ML para este producto, en una palabra: igual | igual_sin_precio |
+    # similar (solo similares) | diferente (solo diferentes) | ninguno (ML no
+    # devolvió nada). None = falló o no se evaluó (o fila vieja).
+    match_state: str | None = Field(default=None, max_length=16)
+    # Color ESTIMADO por la mediana de los SIMILARES (misma fórmula de ganancia).
+    # Solo cuando no hay IGUAL; `color` (el real) NO cambia nunca por esto.
+    estimated_color: str | None = Field(default=None, max_length=16)
+    estimated_margin_pct: float | None = Field(default=None)
+    estimated_median_cents: int | None = Field(default=None)
+    estimated_listing_count: int = Field(default=0)
+    estimated_from: str | None = Field(default=None, max_length=8)   # 'similar'
 
 
 class MarketMatchFeedback(SQLModel, table=True):
@@ -322,6 +348,9 @@ class MarketMatchFeedback(SQLModel, table=True):
     product_name: str | None = Field(default=None)
     # Quién lo marcó (el usuario de la sesión del dashboard, un email con Supabase).
     actor: str | None = Field(default=None, max_length=120)
+    # 0 = "No es el mismo" (se excluye); 1 = "Es el mismo" (se promueve a IGUAL
+    # para ese producto en las próximas corridas). Una fila por (producto, id).
+    label: int = Field(default=0)
 
 
 class MlSellerCache(SQLModel, table=True):

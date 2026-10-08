@@ -30,8 +30,13 @@ PG_URL = os.environ.get("HUGO_TEST_PG_URL", "")
 pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Postgres descartable)")
 
 NEW_SNAPSHOT_COLS = {"product_enabled", "match_origin", "similar_count", "similar_listings", "web_searches",
-                     "web_bytes", "web_state", "our_specs"}
-NEW_RUN_COLS = {"web_status", "web_searches", "web_bytes", "web_blocked", "n_web_ok", "n_con_similares"}
+                     "web_bytes", "web_state", "our_specs",
+                     # «Siempre trae algo»: diferentes, idénticos sin precio, estado y color estimado
+                     "other_listings", "other_count", "unpriced_listings", "match_state", "estimated_color",
+                     "estimated_margin_pct", "estimated_median_cents", "estimated_listing_count", "estimated_from"}
+NEW_RUN_COLS = {"web_status", "web_searches", "web_bytes", "web_blocked", "n_web_ok", "n_con_similares",
+                "n_est_verde", "n_est_amarillo", "n_est_rojo", "n_solo_diferentes"}
+NEW_FEEDBACK_COLS = {"actor", "label"}
 
 
 @pytest.fixture
@@ -52,13 +57,15 @@ def pg(monkeypatch):
 def _old_tables(engine) -> None:
     old = MetaData()
     for name, new_cols in (("price_monitor_run", NEW_RUN_COLS), ("market_price_snapshot", NEW_SNAPSHOT_COLS),
-                           ("ml_seller_cache", set()), ("settings", set())):
+                           ("ml_seller_cache", set()), ("settings", set()),
+                           ("market_match_feedback", NEW_FEEDBACK_COLS)):
         src = SQLModel.metadata.tables[name]
         Table(name, old, *[c._copy() for c in src.columns if c.name not in new_cols])
     old.create_all(engine)
     with engine.begin() as c:
         for table, cols in (("price_monitor_run", ("started_at", "finished_at")),
-                            ("market_price_snapshot", ("captured_at",)), ("ml_seller_cache", ("fetched_at",))):
+                            ("market_price_snapshot", ("captured_at",)), ("ml_seller_cache", ("fetched_at",)),
+                            ("market_match_feedback", ("created_at",))):
             for col in cols:
                 c.execute(text(f'ALTER TABLE "{table}" ALTER COLUMN "{col}" TYPE timestamp with time zone '
                                f'USING "{col}" AT TIME ZONE \'UTC\''))
@@ -66,6 +73,8 @@ def _old_tables(engine) -> None:
                        "n_ok, n_no_data, n_failed, n_skipped, n_verde, n_amarillo, n_rojo, n_sin_dato, "
                        "ml_requests_used, llm_calls, llm_input_tokens, llm_output_tokens, llm_cost_usd, resumed_count) "
                        "VALUES (now(), 'ok', 0, 'cron', 2, 2, 1, 1, 0, 0, 1, 0, 0, 1, 10, 0, 0, 0, 0, 0)"))
+        c.execute(text("INSERT INTO market_match_feedback (product_id, ml_id, created_at, category, origin) "
+                       "VALUES ('11', 'MLA555', now(), 'igual', 'web')"))
         for pid, st, col in (("11", "ok", "verde"), ("12", "no_data", "sin_dato")):
             c.execute(text("INSERT INTO market_price_snapshot (run_id, product_id, captured_at, ml_status, color, "
                            "ml_listing_count, ml_seller_count, candidates_count, ambiguous_count, commission_pct, "
@@ -93,6 +102,7 @@ def test_an_old_postgres_gets_the_new_columns_the_new_table_and_naive_dates(pg):
     snap_cols = {c["name"] for c in insp.get_columns("market_price_snapshot")}
     run_cols = {c["name"] for c in insp.get_columns("price_monitor_run")}
     assert NEW_SNAPSHOT_COLS <= snap_cols and NEW_RUN_COLS <= run_cols
+    assert NEW_FEEDBACK_COLS <= {c["name"] for c in insp.get_columns("market_match_feedback")}
     assert "market_match_feedback" in insp.get_table_names()
     assert {i["name"]: bool(i["unique"]) for i in insp.get_indexes("market_match_feedback")} == {
         "ix_mmf_product_ml": True}
@@ -108,6 +118,13 @@ def test_an_old_postgres_gets_the_new_columns_the_new_table_and_naive_dates(pg):
                         ("12", True, 0, 0, 0, None, None, "no_data", "sin_dato")]
         assert tuple(c.execute(text("SELECT status, web_searches, web_bytes, web_blocked, n_web_ok, n_con_similares, "
                                     "web_status FROM price_monitor_run")).one()) == ("ok", 0, 0, 0, 0, 0, None)
+        # lo nuevo arranca vacío (no hay "estimado" ni "diferentes" de antes) y las marcas viejas son "No es el mismo"
+        assert [tuple(r) for r in c.execute(text(
+            "SELECT other_count, other_listings, match_state, estimated_color, estimated_listing_count, "
+            "unpriced_listings FROM market_price_snapshot ORDER BY id"))] == [(0, None, None, None, 0, None)] * 2
+        assert tuple(c.execute(text("SELECT n_est_verde, n_est_amarillo, n_est_rojo, n_solo_diferentes "
+                                    "FROM price_monitor_run")).one()) == (0, 0, 0, 0)
+        assert tuple(c.execute(text("SELECT label, actor FROM market_match_feedback")).one()) == (0, None)
 
 
 def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
@@ -134,7 +151,8 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
                                        product_name="p") is True
     assert match_feedback.add_feedback(product_id="11", ml_id="MLA901", entry=entry, snapshot_id=sid,
                                        product_name="p") is False                     # único (producto, ml_id)
-    assert match_feedback.load_excluded() == {"11": frozenset({"MLA901"})}
+    # la marca vieja (sin label) quedó como "No es el mismo" (0) y la nueva se suma
+    assert match_feedback.load_excluded() == {"11": frozenset({"MLA555", "MLA901"})}
     with Session(pg) as s:
         snap = s.get(MarketPriceSnapshot, sid)
         assert price_monitor.drop_listing(snap, "MLA901")["ml_id"] == "MLA901"
@@ -142,7 +160,7 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
         s.commit()
         s.refresh(snap)
         assert (snap.ml_status, snap.color, snap.ml_median_cents) == ("no_data", "sin_dato", None)
-        assert s.exec(select(MarketMatchFeedback)).one().created_at.tzinfo is None
+        assert all(f.created_at.tzinfo is None for f in s.exec(select(MarketMatchFeedback)).all())
         run = s.exec(select(PriceMonitorRun)).one()
         assert run.started_at.tzinfo is None                                         # utcnow() naive compara bien
 
@@ -195,3 +213,49 @@ def test_the_retention_prune_runs_on_postgres(pg, monkeypatch):
         mine = sorted((x.product_id, x.run_id) for x in s.exec(select(models.MarketPriceSnapshot))
                       if x.product_id in ("1", "2"))
     assert mine == [("1", old_id + 1), ("2", old_id)]
+
+
+def test_estimated_and_other_listings_round_trip_on_postgres(pg, monkeypatch):
+    """Lo nuevo de «Siempre trae algo» se escribe y se lee con el ORM sobre Postgres,
+    incluidas las promociones ("Es el mismo", label 1) y el recuento de la corrida."""
+    import json
+
+    from app.db.models import MarketPriceSnapshot, PriceMonitorRun
+    from app.pricing import match_feedback, price_monitor
+
+    _old_tables(pg)
+    session.init_db()
+    for mod in (match_feedback, price_monitor):
+        monkeypatch.setattr(mod, "engine", pg)
+    sim = {"ml_id": "MLA905", "title": "Pack x6", "origin": "web", "category": "similar", "source": "specs",
+           "price_cents": 25_000, "est_ok": True, "image_score": 0.9, "name_score": 0.8}
+    dif = {"ml_id": "MLA906", "title": "Otro", "origin": "web", "category": "diferente", "source": "clip",
+           "price_cents": 99_000, "image_score": 0.2, "name_score": 0.3, "reason": "otro producto"}
+    with Session(pg) as s:
+        snap = s.exec(select(MarketPriceSnapshot).where(MarketPriceSnapshot.product_id == "12")).one()
+        snap.our_price_cents, snap.commission_pct = 10_000, 13.0
+        snap.similar_listings, snap.similar_count = json.dumps([sim]), 1
+        snap.other_listings, snap.other_count = json.dumps([dif]), 1
+        price_monitor._store_listings(snap, [], [], [sim], [dif], keep=8, green_min=30.0, yellow_min=10.0)
+        s.add(snap)
+        s.commit()
+        sid = snap.id
+    with Session(pg) as s:
+        snap = s.get(MarketPriceSnapshot, sid)
+        assert (snap.match_state, snap.estimated_color, snap.estimated_from, snap.color) == (
+            "similar", "verde", "similar", "sin_dato")
+        assert snap.estimated_median_cents == 25_000 and snap.estimated_listing_count == 1
+        price_monitor.promote_listing(snap, "MLA905")
+        assert match_feedback.add_feedback(product_id="12", ml_id="MLA905", entry={"category": "similar"},
+                                           snapshot_id=sid, product_name="p", actor="pao@b2box.pro",
+                                           label=1, session=s) is True
+        price_monitor.recount_run(s, snap.run_id)
+        s.add(snap)
+        s.commit()
+    assert match_feedback.load_promoted() == {"12": frozenset({"MLA905"})}
+    assert match_feedback.load_excluded() == {"11": frozenset({"MLA555"})}      # solo la marca vieja
+    with Session(pg) as s:
+        snap = s.get(MarketPriceSnapshot, sid)
+        assert (snap.ml_status, snap.color, snap.match_state, snap.estimated_color) == ("ok", "verde", "igual", None)
+        run = s.get(PriceMonitorRun, snap.run_id)
+        assert (run.n_ok, run.n_est_verde, run.n_solo_diferentes) == (2, 0, 0)

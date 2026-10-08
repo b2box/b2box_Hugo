@@ -400,6 +400,9 @@ class Settings(BaseSettings):
     # Fallos seguidos (bloqueo, captcha, proxy caído) que cortan la fuente web
     # por esa noche.
     pm_ml_web_block_streak: int = 5
+    # Cuántas publicaciones de ML se guardan por producto (idénticas + similares +
+    # diferentes, las más parecidas primero): siempre se trae algo para mostrar.
+    pm_ml_keep_listings: int = 8
     # 1 = el navegador no baja scripts ni estilos de ML (la búsqueda se lee del
     # HTML): ~0,2 MB por búsqueda en vez de ~1,7 MB. Si ML empezara a bloquear
     # por eso, ponerlo en 0 desde el dashboard.

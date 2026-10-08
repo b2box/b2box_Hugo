@@ -67,6 +67,11 @@ SOURCE_CLIP = "clip"
 SOURCE_CLIP_NAME = "clip+nombre"
 SOURCE_LLM = "llm"
 SOURCE_SPECS = "specs"
+# Una persona la marcó ("Es el mismo" / "No es el mismo"): manda sobre todo lo demás.
+SOURCE_MANUAL = "manual"
+# Parecida en foto y nombre pero sin confirmar (no hay juez, no hay cupo o no
+# contestó): se muestra como SIMILAR, no entra a ningún cálculo real.
+SOURCE_UNCONFIRMED = "ambiguo"
 
 # Fotos de cada ficha de ML que se embeben. La primera es la foto principal
 # (fondo blanco) y es la que mejor compara contra nuestra featured. Cada foto
@@ -195,14 +200,36 @@ def apply_judge_verdict(
     d.source = SOURCE_LLM
 
 
+def rank_key(d: Decision) -> tuple[float, float]:
+    """Orden por parecido, el más parecido primero (foto y después nombre)."""
+    return (d.image_score if d.image_score is not None else -1.0, d.name_score)
+
+
+def explain_different(d: Decision, thr: Thresholds) -> str:
+    """Motivo corto de por qué una publicación quedó DIFERENTE (o, sin juez, solo
+    "parecida sin confirmar"). Lo que ya trae un motivo (juez, medidas, una
+    persona) lo conserva."""
+    if d.reason:
+        return d.reason
+    if d.image_score is None:
+        return "no se pudo comparar la foto (sin foto o sin CLIP)"
+    if d.image_score < thr.image_veto:
+        return "otro producto: la foto no se parece"
+    if d.name_score < thr.name_veto:
+        return "otro producto: el nombre no tiene relación"
+    if d.verdict == NO:
+        return "el juez no lo confirma como el mismo producto"
+    return "parecido en foto y nombre, sin confirmar"
+
+
 def apply_specs(
     d: Decision, our_name: str, our_specs: "market_specs.OurSpecs | None", *,
     dim_tol_pct: float, weight_tol_pct: float,
 ) -> None:
     """Baja un MATCH a SIMILAR si la cantidad, la capacidad, las medidas o el
     peso de la publicación difieren de los nuestros (ver market_specs)."""
-    if d.verdict != MATCH:
-        return
+    if d.verdict != MATCH or d.source == SOURCE_MANUAL:
+        return                                   # una persona dijo que es el mismo
     result = market_specs.check(
         our_name, our_specs, d.candidate.name, d.candidate.attributes,
         dim_tol_pct=dim_tol_pct, weight_tol_pct=weight_tol_pct,
