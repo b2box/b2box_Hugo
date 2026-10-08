@@ -204,6 +204,18 @@ class PriceMonitorRun(SQLModel, table=True):
     # Cuántas veces un reinicio del proceso retomó esta corrida.
     resumed_count: int = Field(default=0)
     error: str | None = Field(default=None)
+    # Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar). `web_status`:
+    # "ok", o por qué no corrió / se cortó ("apagada: falta BROWSER_PROXY…",
+    # "cortada por esta noche: 5 fallos seguidos…"). Los bytes son lo que bajó
+    # el navegador por el proxy (piso del consumo real: Request.sizes).
+    web_status: str | None = Field(default=None)
+    web_searches: int = Field(default=0)
+    web_bytes: int = Field(default=0)
+    web_blocked: int = Field(default=0)
+    # Productos cuyo precio salió de la web (no de una ficha de la API).
+    n_web_ok: int = Field(default=0)
+    # Productos con al menos una publicación SIMILAR guardada aparte.
+    n_con_similares: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -263,6 +275,49 @@ class MarketPriceSnapshot(SQLModel, table=True):
     product_code: str | None = Field(default=None)
     product_image_url: str | None = Field(default=None)
     product_slug: str | None = Field(default=None)
+    # ¿El producto estaba habilitado en Vendure al medirlo? Los deshabilitados se
+    # miden solo para mostrar (pm_include_disabled) y nunca llevan a escribir.
+    product_enabled: bool = Field(default=True)
+    # De dónde salió el precio del snapshot: api (ficha de catálogo) | web.
+    match_origin: str | None = Field(default=None, max_length=8)
+    # Publicaciones SIMILARES (no cuentan para mediana/mínimo/ganancia/color):
+    # misma estructura que matched_listings + `differences`.
+    similar_count: int = Field(default=0)
+    similar_listings: str | None = Field(default=None)
+    # Búsquedas web de este producto y bytes que bajaron por el proxy.
+    web_searches: int = Field(default=0)
+    web_bytes: int = Field(default=0)
+    # Cómo le fue a la fuente web con este producto: ok | empty | blocked |
+    # error | budget | off. None = no se usó.
+    web_state: str | None = Field(default=None, max_length=8)
+    # JSON: medidas nuestras de Vendure (length/width/height/weight y box*).
+    our_specs: str | None = Field(default=None)
+
+
+class MarketMatchFeedback(SQLModel, table=True):
+    """"No es el mismo": una persona dijo que esta publicación de ML NO es el
+    producto. Excluye ese id de ML para ese producto en las próximas corridas y
+    queda como etiqueta negativa para calibrar el filtro."""
+    __tablename__ = "market_match_feedback"
+    __table_args__ = (
+        Index("ix_mmf_product_ml", "product_id", "ml_id", unique=True),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    ml_id: str = Field(max_length=64)
+    created_at: datetime = Field(default_factory=utcnow)
+    # Lo que Hugo había dicho de esa publicación y por qué (para calibrar).
+    category: str | None = Field(default=None, max_length=12)     # igual | similar
+    origin: str | None = Field(default=None, max_length=8)        # api | web
+    source: str | None = Field(default=None, max_length=16)       # clip | clip+nombre | llm | specs
+    image_score: float | None = Field(default=None)
+    name_score: float | None = Field(default=None)
+    confidence: float | None = Field(default=None)
+    title: str | None = Field(default=None)
+    permalink: str | None = Field(default=None)
+    snapshot_id: int | None = Field(default=None)
+    product_name: str | None = Field(default=None)
 
 
 class MlSellerCache(SQLModel, table=True):

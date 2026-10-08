@@ -152,6 +152,9 @@ def world(monkeypatch):
                 s.delete(row)
         s.commit()
     runtime.invalidate()
+    # Estos tests describen la sombra de siempre (solo habilitados); los
+    # deshabilitados tienen sus propios tests en test_semaforo_web.py.
+    runtime.set_value("pm_include_disabled", 0)
 
     FakeVendure.products = [
         _product("1", "Organizador cocina"),
