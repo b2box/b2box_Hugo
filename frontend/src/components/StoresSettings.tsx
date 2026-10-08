@@ -11,8 +11,9 @@ import type { MarketStore, MarketStoreInput, StorePlatform } from "../types";
 // Tiendas que se usan como fuente de comparación del semáforo (Casa Perfecta, Gadnic…). Agregar otra
 // tienda es completar este formulario: no hace falta código ni deploy. Hugo lee el sitemap de la
 // tienda (respetando su robots.txt, a un ritmo suave y con un tope de páginas por día) y compara
-// contra lo que quedó indexado. Son referencia: no cambian el color salvo el ajuste "Tiendas
-// cuentan para el color" (grupo Semáforo de precios, arriba).
+// contra lo que quedó indexado. Un idéntico de tienda cambia el color como uno de ML (ajuste
+// "Tiendas cuentan para el color", grupo Semáforo de precios, arriba) si tiene stock, un precio creíble
+// y lo confirman la foto + el nombre, las medidas o una persona.
 
 const PLATFORM_LABEL: Record<StorePlatform, string> = {
   tiendanube: "Tiendanube",
@@ -106,8 +107,10 @@ export default function StoresSettings() {
       <p className="text-xs text-muted-foreground">
         Hugo compara cada producto contra Mercado Libre y contra estas tiendas, en la misma corrida. Lee el sitemap de
         cada tienda de madrugada (sin usar su buscador, respetando su robots.txt, una página cada 2-3 segundos y hasta
-        el tope diario) y compara contra lo indexado. Son referencia: no cambian el color. Para sumar otra tienda
-        Tiendanube, cargala acá con su dirección y elegí «Tiendanube».
+        el tope diario) y compara contra lo indexado. Un idéntico de tienda cambia el color como uno de Mercado Libre si
+        tiene stock, un precio creíble y lo confirman la foto + el nombre, las medidas o una persona (no el juez IA solo).
+        Para sumar otra tienda Tiendanube, cargala acá con su dirección y elegí «Tiendanube»; los dominios de fotos
+        extra los autoriza un administrador.
       </p>
 
       {adding && (
@@ -186,6 +189,16 @@ function StoreRow({ store, onChanged }: { store: MarketStore; onChanged: () => P
           <span className="text-sm font-medium text-foreground">{store.name}</span>
           <Badge variant="outline">{PLATFORM_LABEL[store.platform] ?? store.platform}</Badge>
           {!store.enabled && <Badge variant="warning">apagada</Badge>}
+          {store.health === "caida" && (
+            <Badge variant="destructive" title="Contesta 5xx en todas las fichas y no dio una bien en la última semana">
+              caída
+            </Badge>
+          )}
+          {store.health === "degradada" && (
+            <Badge variant="warning" title="La mitad o más de las fichas dio 5xx en la última pasada">
+              degradada
+            </Badge>
+          )}
           {store.house_brand && (
             <Badge variant="outline" title="Su marca propia se trata como genérica (marca genérica = idéntico)">
               marca propia: {store.house_brand}
@@ -248,6 +261,13 @@ function StoreRow({ store, onChanged }: { store: MarketStore; onChanged: () => P
           <span className="num-tabular">{nfmt(ix.pages_today)}</span>/<span className="num-tabular">{nfmt(ix.max_pages_per_day)}</span>{" "}
           páginas
           {ix.doubtful_price > 0 && <> · {nfmt(ix.doubtful_price)} con precio dudoso</>}
+          {(ix.failing ?? 0) > 0 && (
+            <>
+              {" "}
+              · {nfmt(ix.failing ?? 0)} fallando
+              {(ix.errors_5xx ?? 0) > 0 && <> ({nfmt(ix.errors_5xx ?? 0)} con 5xx)</>}
+            </>
+          )}
         </p>
       )}
       {store.last_index_status && (

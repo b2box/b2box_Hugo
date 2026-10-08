@@ -63,7 +63,8 @@ const SOURCE_LABEL: Record<string, string> = {
   specs: "medidas",
   veto: "descartado por foto o nombre",
   none: "sin confirmar",
-  humano: "marcado por una persona",
+  manual: "marcado por una persona",
+  ambiguo: "parecido, sin confirmar",
 };
 
 const pct = (v: number | null | undefined): string => (v == null ? "—" : `${Math.round(v * 100)} %`);
@@ -161,6 +162,11 @@ export function SourceCell({ cell, hideCounts = false }: { cell: SourceCellData 
             precio dudoso
           </Badge>
         )}
+        {cell.stock === 0 && (
+          <Badge variant="outline" title="Agotado: se ve, pero no cuenta para el color ni para «más barato afuera»">
+            sin stock
+          </Badge>
+        )}
       </div>
       {href ? (
         <a
@@ -187,8 +193,18 @@ export function CheapestCell({ c }: { c: CheapestOutside | null | undefined }) {
   const href = safeHttpsUrl(c.url);
   const body = (
     <>
-      <span className="block text-xs font-semibold text-foreground num-tabular">{fmtArs(c.price_cents)}</span>
-      <span className="block text-[11px] text-muted-foreground">{c.label}</span>
+      <span
+        className={cn(
+          "block text-xs num-tabular",
+          c.out_of_stock ? "text-muted-foreground" : "font-semibold text-foreground",
+        )}
+      >
+        {fmtArs(c.price_cents)}
+      </span>
+      <span className="block text-[11px] text-muted-foreground">
+        {c.label}
+        {c.out_of_stock && " · sin stock"}
+      </span>
     </>
   );
   return href ? (
@@ -307,8 +323,10 @@ export function StoresPanel({ s, affectColor = false }: { s: PriceMonitorSnapsho
       <p className="text-xs text-muted-foreground">
         Tiendas:{" "}
         {counted
-          ? "los idénticos de las tiendas con precio creíble cuentan para el color de este producto."
-          : "solo referencia, no cambian el color (que sale de Mercado Libre)."}
+          ? "los idénticos de las tiendas cuentan para el color de este producto."
+          : affectColor
+            ? "un idéntico de tienda cuenta para el color si tiene stock, un precio creíble y lo confirman la foto + el nombre, las medidas o una persona (el juez IA solo no alcanza)."
+            : "solo referencia, no cambian el color (que sale de Mercado Libre)."}
       </p>
       {error && <p className="text-xs text-destructive">{error}</p>}
       {done && (
@@ -441,7 +459,6 @@ function StoreMatchCard({
         {m.notes && <p className="text-[11px] text-warning">{m.notes}</p>}
         <p className="text-[11px]">
           {m.brand && <>marca {m.brand} · </>}
-          {m.stock === 0 && <>sin stock · </>}
           {m.human_label && <>corregido a mano · </>}
         </p>
       </div>
@@ -452,6 +469,11 @@ function StoreMatchCard({
         {m.price_doubtful && (
           <Badge variant="warning" title={m.price_note ?? "El precio no es creíble: no cuenta para nada"}>
             precio dudoso
+          </Badge>
+        )}
+        {m.stock === 0 && (
+          <Badge variant="outline" title="Agotado: no cuenta para el color ni para «más barato afuera»">
+            sin stock
           </Badge>
         )}
         {affectColor && m.in_estimate && (
@@ -533,6 +555,25 @@ export function SourcesStats({ run, stores }: { run: PriceMonitorRun; stores?: S
                 muertos · hoy <span className="num-tabular">{nfmt(st.pages_today)}</span>/
                 <span className="num-tabular">{nfmt(st.max_pages_per_day)}</span> páginas
                 {st.doubtful_price > 0 && <> · {nfmt(st.doubtful_price)} con precio dudoso</>}
+                {(st.failing ?? 0) > 0 && (
+                  <>
+                    {" "}
+                    · {nfmt(st.failing ?? 0)} fichas fallando
+                    {(st.errors_5xx ?? 0) > 0 && <> ({nfmt(st.errors_5xx ?? 0)} con error 5xx)</>}
+                  </>
+                )}
+                {st.health === "caida" && (
+                  <>
+                    {" "}
+                    · <span className="text-destructive font-medium">caída: contesta 5xx en todo, la pasada se cortó</span>
+                  </>
+                )}
+                {st.health === "degradada" && (
+                  <>
+                    {" "}
+                    · <span className="text-warning font-medium">degradada: la mitad de las fichas da 5xx</span>
+                  </>
+                )}
                 {st.last_indexed_at && <> · última pasada {fmtTime(st.last_indexed_at)}</>}
                 {st.last_index_status && <span className="block">{st.last_index_status}</span>}
               </li>

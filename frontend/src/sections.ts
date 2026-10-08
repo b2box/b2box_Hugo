@@ -55,7 +55,7 @@ export const SECTION_META: Record<string, SectionMeta> = {
     desc: "Pegá un link y compará qué contesta cada proveedor de visión sobre la misma lista corta de CLIP. No toca el catálogo ni abre pedidos.",
   },
   semaforo: {
-    desc: "Cada noche Hugo compara el catálogo contra Mercado Libre y calcula cuánto ganaría un revendedor. El color real sale solo de las publicaciones idénticas; sin idénticos hay un color estimado por las similares, y siempre se muestra lo que devolvió ML (idénticos, similares y diferentes). En la misma corrida se compara también contra las tiendas (Gadnic, Casa Perfecta…): una columna por fuente y «Más barato afuera»; las tiendas son referencia y no cambian el color. Modo sombra: solo mide, no toca Vendure.",
+    desc: "Cada noche Hugo compara el catálogo contra Mercado Libre y calcula cuánto ganaría un revendedor. El color real sale solo de las publicaciones idénticas; sin idénticos hay un color estimado por las similares, y siempre se muestra lo que devolvió ML (idénticos, similares y diferentes). En la misma corrida se compara también contra las tiendas (Gadnic, Casa Perfecta…): una columna por fuente y «Más barato afuera»; un idéntico de tienda con stock y precio creíble cambia el color como uno de ML. Modo sombra: solo mide, no toca Vendure.",
   },
   settings: {
     desc: "Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.",

@@ -390,6 +390,8 @@ export interface SourceCell {
   image_url?: string | null;
   match_id?: number;
   human_label?: "es" | "no_es" | null;
+  // 0 = agotado (se muestra con «sin stock» y no cuenta para el color ni para «más barato afuera»).
+  stock?: number | null;
 }
 
 export interface CheapestOutside {
@@ -398,6 +400,8 @@ export interface CheapestOutside {
   price_cents: number;
   title: string | null;
   url: string | null;
+  // Lo único idéntico que hay afuera está agotado: se muestra como dato, no como «más barato».
+  out_of_stock?: boolean;
 }
 
 export interface StoreMatchRow {
@@ -446,6 +450,11 @@ export interface StoreIndexStatus {
   dead: number;
   never_read: number;
   doubtful_price: number;
+  // Fichas que vienen fallando (todavía no se dan por muertas) y cuántas dieron 5xx: una tienda caída aparece acá.
+  failing?: number;
+  errors_5xx?: number;
+  // ok | degradada (la mitad o más dio 5xx) | caida (todas, ninguna bien: se corta la pasada)
+  health?: StoreHealth | null;
   pages_today: number;
   max_pages_per_day: number;
   last_indexed_at: string | null;
@@ -453,6 +462,7 @@ export interface StoreIndexStatus {
 }
 
 export type StorePlatform = "tiendanube" | "jsonld_sitemap";
+export type StoreHealth = "ok" | "degradada" | "caida";
 
 export interface MarketStore {
   id: number;
@@ -468,6 +478,7 @@ export interface MarketStore {
   notes: string | null;
   last_indexed_at: string | null;
   last_index_status: string | null;
+  health?: StoreHealth | null;
   index?: StoreIndexStatus | null;
 }
 
