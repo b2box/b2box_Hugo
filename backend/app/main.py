@@ -21,6 +21,7 @@ from app import auth, security
 from app.api.app_routes import router as app_router
 from app.api.price_monitor_routes import router as price_monitor_router
 from app.api.routes import router
+from app.api.store_routes import router as store_router
 from app.config import get_settings
 from app.db.session import init_db
 from app.scheduler.jobs import register_jobs, scheduler
@@ -70,6 +71,18 @@ def _enforce_prod_secrets() -> None:
         )
 
 
+def _seed_stores() -> None:
+    """Siembra Casa Perfecta y Gadnic (una sola vez) y carga los hosts de foto de las
+    tiendas activas. Un error acá no puede impedir que Hugo arranque."""
+    from app.pricing import store_catalog
+
+    try:
+        store_catalog.seed_default_stores()
+        store_catalog.refresh_allowed_image_hosts()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("No se pudieron sembrar las tiendas: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     import asyncio
@@ -77,6 +90,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _configure_logging()
     _enforce_prod_secrets()
     init_db()
+    _seed_stores()
 
     # Precalentar el catálogo de Vendure en background: así el primer /verify tras
     # el deploy no espera un cold-fetch de todo el catálogo. No bloquea el arranque.
@@ -234,6 +248,7 @@ async def logout() -> JSONResponse:
 app.include_router(router)
 app.include_router(app_router)
 app.include_router(price_monitor_router)
+app.include_router(store_router)
 
 
 # ─── Dashboard estático ────────────────────────────────────────────

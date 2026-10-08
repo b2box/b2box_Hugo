@@ -270,10 +270,15 @@ async def clip_index_scorer(our: VendureProduct, urls: Sequence[str]) -> float |
     None cuando no se puede comparar: CLIP apagado, índice sin construir,
     producto sin foto en el índice, o ninguna foto de ML se pudo embeber.
     """
-    safe = [u for u in (safe_image_url(x) for x in urls) if u]
+    return await clip_score_urls(our, [u for u in (safe_image_url(x) for x in urls) if u])
+
+
+async def clip_score_urls(our: VendureProduct, safe: Sequence[str]) -> float | None:
+    """El mismo score, para fotos que YA pasaron por la lista de hosts de su fuente
+    (mlstatic para ML; el CDN de cada tienda para las tiendas, ver store_match)."""
     if not safe or not image_embed.available() or not catalog_index.is_ready():
         return None
-    vecs = await image_embed.embed_urls_aligned(safe[:PHOTOS_PER_CANDIDATE], concurrency=2)
+    vecs = await image_embed.embed_urls_aligned(list(safe)[:PHOTOS_PER_CANDIDATE], concurrency=2)
     own: list[np.ndarray] | None = None
     if not catalog_index.has_product(our.id):
         # Deshabilitado (fuera del índice): se compara contra sus fotos embebidas

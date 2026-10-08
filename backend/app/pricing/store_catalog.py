@@ -653,18 +653,19 @@ def index_status() -> list[dict]:
 
 # ─── Alta de tiendas: validación, CRUD y semilla ─────────────────────────────
 
+# Orden de las columnas en el dashboard (por id): Mercado Libre | Gadnic | Casa Perfecta.
 DEFAULT_STORES: tuple[dict, ...] = (
-    {
-        "name": "Casa Perfecta", "base_url": "https://www.casaperfecta.com.ar", "platform": "tiendanube",
-        "refresh_days": 7, "max_pages_per_day": 1000,
-        "notes": "Tiendanube. robots permite /productos/ y prohíbe /search/. ~150 productos: se lee todo.",
-    },
     {
         "name": "Gadnic", "base_url": "https://www.gadnic.com.ar", "platform": "jsonld_sitemap",
         "refresh_days": 11, "max_pages_per_day": 2000,
         "image_hosts": "gadnic.com.ar,bidcom.com.ar", "house_brand": "Gadnic",
         "notes": ("Next.js con JSON-LD. robots prohíbe las URLs con «?» (no se usa su buscador). ~22.000 URLs, la "
                   "mitad muertas (500): a 2.000 por día rota en ~11 días. Su marca propia se trata como genérica."),
+    },
+    {
+        "name": "Casa Perfecta", "base_url": "https://www.casaperfecta.com.ar", "platform": "tiendanube",
+        "refresh_days": 7, "max_pages_per_day": 1000,
+        "notes": "Tiendanube. robots permite /productos/ y prohíbe /search/. ~150 productos: se lee todo.",
     },
 )
 

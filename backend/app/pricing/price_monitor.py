@@ -68,6 +68,8 @@ from app.pricing import (
     market_ml_web,
     market_specs,
     semaforo,
+    store_catalog,
+    store_match,
 )
 from app.pricing.market_ml import (
     ORIGIN_API,
@@ -349,6 +351,7 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.match_state == STATE_DIFFERENT)
     ).one() or 0)
+    run.source_stats = json.dumps(store_match.source_stats(s, run_id))
     run.processed = sum(by_status.values())
 
 
@@ -1053,7 +1056,15 @@ def _store_listings(snap: MarketPriceSnapshot, igual: list[dict[str, Any]], unpr
 
 
 async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPriceSnapshot:
-    """Todo el camino de UN producto → snapshot (sin guardar).
+    """Todo el camino de UN producto → snapshot (sin guardar): Mercado Libre y, en la
+    MISMA corrida, las tiendas (Casa Perfecta, Gadnic…). Las tiendas son referencia: no
+    cambian el color salvo `pm_stores_affect_color` (ver store_match)."""
+    snap = await _evaluate_ml(ctx, product)
+    return await store_match.attach(ctx, product, snap, judge=_consult_judge, brand_of=_declared_brand)
+
+
+async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceSnapshot:
+    """El camino de ML para UN producto.
 
     1. Fichas de catálogo por la API de ML. Con un IGUAL con precio, listo.
     2. Si no, el título en la web de ML (si la fuente está prendida).
@@ -1252,6 +1263,8 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
                 "counts": {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}}
 
     await _ensure_clip_index()
+    # Tiendas: si su índice está viejo se refresca (dentro del cupo) y se carga para comparar.
+    stores = await store_match.prepare()
 
     budget = int(budget_now["budget"])
     concurrency = max(1, int(runtime.get("pm_ml_concurrency")))
@@ -1262,6 +1275,7 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     promoted = await asyncio.to_thread(match_feedback.load_promoted)
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml, web, excluded, promoted)
+        ctx.extra["stores"] = stores
         try:
             sem = asyncio.Semaphore(concurrency)
 
@@ -1522,6 +1536,8 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         # devolvió publicaciones diferentes.
         "estimated": {"verde": run.n_est_verde, "amarillo": run.n_est_amarillo, "rojo": run.n_est_rojo},
         "solo_diferentes": run.n_solo_diferentes,
+        # Por fuente (ML y cada tienda): productos con idéntico / similar / solo diferentes / nada.
+        "sources": store_match.run_sources(run),
     }
 
 
@@ -1630,6 +1646,8 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "est_margin_pct": snap.est_margin_pct,
         "color": snap.color,
         "prev_color": snap.prev_color,
+        # De qué precios sale el color: ml | ml+tiendas | tiendas.
+        "price_basis": snap.price_basis or "ml",
     }
 
 
@@ -1650,4 +1668,6 @@ def summary() -> dict[str, Any]:
         "cron_utc": get_settings().price_monitor_cron_utc,
         "include_disabled": bool(int(runtime.get("pm_include_disabled") or 0)),
         "web": {**market_ml_web.web_budget_status(), "off_reason": market_ml_web.disabled_reason()},
+        "stores": store_catalog.index_status(),
+        "stores_affect_color": store_match.affect_color_enabled(),
     }
