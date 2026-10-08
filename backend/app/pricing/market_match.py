@@ -26,6 +26,18 @@ Reglas, en orden (ver `classify`):
 La banda ambigua es la única que mira el juez LLM (market_judge.py), y solo si
 `pm_vision_max_calls` > 0. Sin juez, ambiguo = no es el mismo producto: en
 sombra preferimos un `no_data` a inventar un precio de referencia.
+
+Igual / similar / diferente (pedido de Nico: "que cuente SOLO lo idéntico"):
+`MATCH` es IGUAL y es lo único que entra a mediana, mínimo, ganancia y color.
+`SIMILAR` es el mismo tipo de producto pero con una diferencia que importa
+(marca conocida, pack, medidas, capacidad): se guarda aparte para mostrarlo y
+nunca toca el color. Dos cosas pueden bajar un MATCH a SIMILAR: el veredicto del
+juez (`apply_judge_verdict`) y el chequeo de medidas (`apply_specs`).
+
+Productos deshabilitados: el índice CLIP del app solo tiene los habilitados (un
+duplicado deshabilitado no debe devolverse como "lo tenemos"). Para el semáforo
+sus fotos se embeben al vuelo (cache L2) y se comparan en el MISMO espacio
+centrado del índice, así los umbrales valen igual.
 """
 
 from __future__ import annotations
@@ -33,22 +45,28 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import numpy as np
 
 from app import runtime
+from app.config import get_settings
 from app.dedup import catalog_index, fuzzy_text, image_embed
+from app.pricing import market_judge, market_specs
 from app.pricing.market_ml import MlCandidate, safe_image_url
 from app.vendure.client import VendureProduct
 
 log = logging.getLogger(__name__)
 
 MATCH = "match"
+SIMILAR = "similar"
 NO = "no"
 AMBIGUOUS = "ambiguous"
 
 SOURCE_CLIP = "clip"
 SOURCE_CLIP_NAME = "clip+nombre"
 SOURCE_LLM = "llm"
+SOURCE_SPECS = "specs"
 
 # Fotos de cada ficha de ML que se embeben. La primera es la foto principal
 # (fondo blanco) y es la que mejor compara contra nuestra featured. Cada foto
@@ -86,10 +104,14 @@ class Decision:
     candidate: MlCandidate
     image_score: float | None
     name_score: float
-    verdict: str                 # match | no | ambiguous
-    source: str | None = None    # clip | clip+nombre | llm
+    verdict: str                 # match (= IGUAL) | similar | no | ambiguous
+    source: str | None = None    # clip | clip+nombre | llm | specs
     confidence: float | None = None
     reason: str = ""
+    # Qué cambia respecto de lo nuestro (vocabulario cerrado), si es SIMILAR.
+    differences: list[str] = field(default_factory=list)
+    # El juez opinó sobre esta publicación (aunque no haya cambiado el veredicto).
+    judged: bool = False
 
 
 def classify(image_score: float | None, name_score: float, thr: Thresholds) -> tuple[str, str | None]:
@@ -133,6 +155,59 @@ def name_score(our_name: str, ml_name: str) -> float:
     return fuzzy_text.text_similarity(our_name, "", ml_name, "")
 
 
+def apply_judge_verdict(
+    d: Decision, v: "market_judge.JudgeVerdict", *,
+    igual_min: float = market_judge.MIN_CONFIDENCE,
+    similar_min: float = market_judge.SIMILAR_MIN_CONFIDENCE,
+) -> None:
+    """Aplica el veredicto del juez a una decisión. Puro.
+
+    Banda ambigua (el juez es el único que decide):
+        igual   con confianza ≥ igual_min     → MATCH (fuente llm)
+        igual   entre similar_min e igual_min → SIMILAR (ante la duda no se contamina el precio)
+        similar con confianza ≥ similar_min   → SIMILAR
+        el resto                              → NO
+    Ya aceptada por reglas (foto + nombre) y revisada por el juez para aplicar la
+    regla de marca: solo cambia si el juez está seguro. "diferente" o "igual"
+    dudoso con confianza baja NO la tumban (la foto ya la había aceptado).
+    """
+    was_match = d.verdict == MATCH
+    cat, conf = v.cat, v.confidence
+    d.confidence, d.reason, d.judged = conf, v.reason, True
+    if cat == market_judge.CAT_IGUAL and conf >= igual_min:
+        new = MATCH
+    elif cat in (market_judge.CAT_IGUAL, market_judge.CAT_SIMILAR) and conf >= similar_min:
+        new = SIMILAR
+    elif was_match and conf < igual_min:
+        return                      # el juez no está seguro: queda lo de las reglas
+    else:
+        new = NO
+    d.differences = list(v.differences) if new == SIMILAR else []
+    if new == d.verdict:
+        return
+    d.verdict = new
+    d.source = SOURCE_LLM
+
+
+def apply_specs(
+    d: Decision, our_name: str, our_specs: "market_specs.OurSpecs | None", *,
+    dim_tol_pct: float, weight_tol_pct: float,
+) -> None:
+    """Baja un MATCH a SIMILAR si la cantidad, la capacidad, las medidas o el
+    peso de la publicación difieren de los nuestros (ver market_specs)."""
+    if d.verdict != MATCH:
+        return
+    diffs = market_specs.differences(
+        our_name, our_specs, d.candidate.name, d.candidate.attributes,
+        dim_tol_pct=dim_tol_pct, weight_tol_pct=weight_tol_pct,
+    )
+    if diffs:
+        d.verdict = SIMILAR
+        d.source = SOURCE_SPECS
+        d.differences = sorted({*d.differences, *diffs})
+        d.reason = d.reason or "difiere en " + ", ".join(diffs)
+
+
 ImageScorer = Callable[[VendureProduct, Sequence[str]], Awaitable[float | None]]
 
 
@@ -140,7 +215,18 @@ def indexed(product: VendureProduct) -> bool:
     """¿Podemos puntuar este producto por imagen con el scorer por defecto?
     Se chequea ANTES de buscar en ML: un producto sin fotos en el índice
     terminaría `skipped` igual, después de gastar el request."""
-    return image_embed.available() and catalog_index.is_ready() and catalog_index.has_product(product.id)
+    if not (image_embed.available() and catalog_index.is_ready()):
+        return False
+    if catalog_index.has_product(product.id):
+        return True
+    # Deshabilitado: no está en el índice a propósito, sus fotos se embeben al vuelo.
+    return not product.enabled and bool(_own_photos(product))
+
+
+def _own_photos(product: VendureProduct) -> list[str]:
+    """Fotos propias para embeber al vuelo (las mismas que indexa el catálogo)."""
+    urls = [u for u in [product.featured_image_url, *(product.image_urls or [])] if u]
+    return list(dict.fromkeys(urls))[:max(1, get_settings().embed_images_per_product)]
 
 
 async def clip_index_scorer(our: VendureProduct, urls: Sequence[str]) -> float | None:
@@ -154,11 +240,24 @@ async def clip_index_scorer(our: VendureProduct, urls: Sequence[str]) -> float |
     if not safe or not image_embed.available() or not catalog_index.is_ready():
         return None
     vecs = await image_embed.embed_urls_aligned(safe[:PHOTOS_PER_CANDIDATE], concurrency=2)
+    own: list[np.ndarray] | None = None
+    if not catalog_index.has_product(our.id):
+        # Deshabilitado (fuera del índice): se compara contra sus fotos embebidas
+        # al vuelo, proyectadas al mismo espacio centrado.
+        own = [v for v in await image_embed.embed_urls_aligned(_own_photos(our), concurrency=2)
+               if v is not None]
+        if not own:
+            return None
+        own = [p for p in (catalog_index.project(v) for v in own) if p is not None]
     best: float | None = None
     for vec in vecs:
         if vec is None:
             continue
-        for _product, score, _url in catalog_index.score_products(vec, [our.id]):
+        if own is not None:
+            scores = [float(np.dot(catalog_index.project(vec), o)) for o in own]
+        else:
+            scores = [score for _p, score, _u in catalog_index.score_products(vec, [our.id])]
+        for score in scores:
             best = score if best is None else max(best, score)
     return best
 
