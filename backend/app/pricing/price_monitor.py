@@ -532,7 +532,7 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
     snap.ml_listing_count = len(prices)
     snap.ml_seller_count = len(sellers)
     margin = semaforo.estimated_margin_pct(
-        snap.ml_median_cents, snap.our_price_cents, ctx.commission_pct, ctx.shipping_cents, digits=None,
+        snap.ml_median_cents, snap.our_price_cents, ctx.commission_pct, ctx.shipping_cents,
     )
     # El color con el margen exacto; redondeado solo para guardar/mostrar.
     snap.color = semaforo.color(

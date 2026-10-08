@@ -46,11 +46,11 @@ def test_median_of_nothing_is_none():
 def test_margin_formula_matches_the_spec():
     # (mediana − comisión − envío − nuestro) / nuestro × 100
     # mediana 20.000, comisión 13 % = 2.600, envío 1.000, nuestro 10.000 → 64 %
-    assert estimated_margin_pct(2_000_000, 1_000_000, 13.0, 100_000) == 64.0
+    assert estimated_margin_pct(2_000_000, 1_000_000, 13.0, 100_000) == pytest.approx(64.0)
 
 
 def test_margin_can_be_negative():
-    assert estimated_margin_pct(1_000_000, 1_000_000, 13.0, 0) == -13.0
+    assert estimated_margin_pct(1_000_000, 1_000_000, 13.0, 0) == pytest.approx(-13.0)
 
 
 @pytest.mark.parametrize("median,ours", [(None, 100), (100, None), (100, 0), (100, -5)])
@@ -60,14 +60,14 @@ def test_margin_without_both_sides_is_none(median, ours):
 
 def test_color_uses_the_unrounded_margin():
     # QA bug 6: 29,996 % redondeado daba 30,0 y salía verde.
-    raw = estimated_margin_pct(129_996, 100_000, 0.0, 0, digits=None)
+    raw = estimated_margin_pct(129_996, 100_000, 0.0, 0)  # default: sin redondear
     assert raw == pytest.approx(29.996)
     assert color(raw, 100_000, 129_996, GREEN, YELLOW) == AMARILLO
-    assert estimated_margin_pct(129_996, 100_000, 0.0, 0) == 30.0  # para mostrar
+    assert estimated_margin_pct(129_996, 100_000, 0.0, 0, digits=2) == 30.0  # para mostrar
 
 
 def test_negative_commission_or_shipping_are_ignored():
-    assert estimated_margin_pct(2_000, 1_000, -50.0, -999) == 100.0
+    assert estimated_margin_pct(2_000, 1_000, -50.0, -999) == pytest.approx(100.0)
 
 
 # ─── color ─────────────────────────────────────────────────────────────────
