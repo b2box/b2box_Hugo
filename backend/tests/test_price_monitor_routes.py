@@ -276,3 +276,26 @@ def test_monitor_settings_are_listed_and_editable_without_redeploy(client):
     assert runtime.get("pm_green_min_pct") == 30.0
     anon = TestClient(main_mod.app)
     assert anon.put("/api/settings/pm_mode", json={"value": 1}).status_code == 401
+
+
+
+def test_api_never_serves_an_unsafe_permalink(client):
+    """Security M1: aunque una fila vieja tenga un permalink peligroso guardado,
+    la API no lo devuelve."""
+    import json
+
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok", total_products=1)
+        s.add(run)
+        s.commit()
+        s.refresh(run)
+        s.add(MarketPriceSnapshot(run_id=run.id, product_id="p1", color="rojo", ml_status="ok",
+                                  matched_listings=json.dumps([
+                                      {"ml_id": "MLA1", "title": "t", "permalink": "javascript:alert(1)"},
+                                      {"ml_id": "MLA2", "title": "t",
+                                       "permalink": "https://www.mercadolibre.com.ar/p/MLA2"},
+                                  ])))
+        s.commit()
+    [item] = client.get("/api/price-monitor/snapshots").json()["items"]
+    assert [m["permalink"] for m in item["matched_listings"]] == [
+        "", "https://www.mercadolibre.com.ar/p/MLA2"]

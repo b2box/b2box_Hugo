@@ -763,6 +763,11 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         matched = json.loads(snap.matched_listings) if snap.matched_listings else []
     except ValueError:
         matched = []
+    if not isinstance(matched, list):
+        matched = []
+    # Se sanea también al servir: cubre filas guardadas antes de sanear al parsear.
+    matched = [{**m, "permalink": market_ml.safe_permalink(m.get("permalink"))}
+               for m in matched if isinstance(m, dict)]
     return {
         "id": snap.id,
         "run_id": snap.run_id,
