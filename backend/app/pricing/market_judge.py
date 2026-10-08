@@ -15,6 +15,10 @@ gastan todo `max_tokens` razonando y devuelven el contenido vacío (medido con
 mimo-v2.6-flash el 08-oct-2026). Según el host de la base URL se manda el
 campo que lo apaga (`extra_body`); `PM_LLM_EXTRA_BODY` lo pisa.
 
+Fotos: por URL (las baja el proveedor) o en base64 (las baja Hugo, ver
+judge_images.py). MiMo no baja URLs remotas, así que con su host el default
+es base64; `PM_LLM_IMAGE_MODE` lo pisa.
+
 Costo bajo control:
   * solo corre si `pm_vision_max_calls` > 0 (default 0 = sombra sin IA);
   * tope diario con reserva atómica (misma mecánica que el budget de ML);
@@ -26,16 +30,18 @@ veredicto" (None) y el producto sigue como ambiguo.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
 from app.config import get_settings
-from app.pricing import daily_budget
+from app.pricing import daily_budget, judge_images
+from app.pricing.market_ml import _host_in
 
 log = logging.getLogger(__name__)
 
@@ -128,10 +134,6 @@ _RESERVED_BODY_KEYS = frozenset({
 })
 
 
-def _host_in(host: str, domain: str) -> bool:
-    return host == domain or host.endswith("." + domain)
-
-
 def _base_host() -> str:
     try:
         return (urlsplit(get_settings().pm_llm_base_url.strip()).hostname or "").lower()
@@ -183,6 +185,22 @@ def extra_body() -> dict[str, Any]:
     return {k: v for k, v in parsed.items() if k not in _RESERVED_BODY_KEYS}
 
 
+IMAGE_MODE_URL = "url"
+IMAGE_MODE_BASE64 = "base64"
+
+
+def image_mode() -> str:
+    """"url" o "base64". `PM_LLM_IMAGE_MODE` manda; vacío o inválido → base64
+    con MiMo (no descarga URLs remotas) y url con el resto."""
+    raw = (get_settings().pm_llm_image_mode or "").strip().lower()
+    if raw in (IMAGE_MODE_URL, IMAGE_MODE_BASE64):
+        return raw
+    if raw:
+        _warn_once("image_mode_invalid",
+                   "PM_LLM_IMAGE_MODE=%r no es url ni base64: va el default del proveedor", raw[:20])
+    return IMAGE_MODE_BASE64 if _base_host() == MIMO_HOST else IMAGE_MODE_URL
+
+
 def estimate_cost(input_tokens: int, output_tokens: int,
                   price_in_per_m: float, price_out_per_m: float) -> float:
     return round(
@@ -192,26 +210,32 @@ def estimate_cost(input_tokens: int, output_tokens: int,
     )
 
 
-def _image_part(url: str) -> dict[str, Any]:
-    # URLs públicas (nuestro CDN, mlstatic): el proveedor las descarga. Más
-    # barato que base64 y evita bajar las fotos acá. Pendiente de verificar
-    # contra cada proveedor que acepte URL remota (OpenAI y Qwen sí).
-    return {"type": "image_url", "image_url": {"url": url}}
+def _our_photos(our_image_urls: Sequence[str]) -> list[str]:
+    return [u for u in list(our_image_urls)[:_MAX_OUR_PHOTOS] if u]
+
+
+def _image_parts(url: str | None, inline: Mapping[str, str] | None) -> list[dict[str, Any]]:
+    """Modo url (`inline` None): la URL pública tal cual y el proveedor la
+    descarga (Qwen, OpenAI). Modo base64: la data URL que bajó Hugo; si esa
+    foto no se pudo bajar, no va."""
+    src = url if inline is None else inline.get(url or "")
+    return [{"type": "image_url", "image_url": {"url": src}}] if src else []
 
 
 def build_messages(
     our_name: str, our_image_urls: Sequence[str], candidates: Sequence[JudgeCandidate],
+    inline: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {"type": "text", "text": f"NUESTRO PRODUCTO: {our_name.strip()[:200]}"},
     ]
-    content.extend(_image_part(u) for u in list(our_image_urls)[:_MAX_OUR_PHOTOS] if u)
+    for u in _our_photos(our_image_urls):
+        content.extend(_image_parts(u, inline))
     content.append({"type": "text", "text": "PUBLICACIONES DE MERCADO LIBRE:"})
     for c in list(candidates)[:MAX_CANDIDATES]:
         price = f" · precio ARS {c.price_cents / 100:.0f}" if c.price_cents else ""
         content.append({"type": "text", "text": f"- {c.ml_id}: {c.title.strip()[:160]}{price}"})
-        if c.image_url:
-            content.append(_image_part(c.image_url))
+        content.extend(_image_parts(c.image_url, inline))
     content.append({"type": "text", "text": "Respondé solo el JSON pedido."})
     return [
         {"role": "system", "content": _SYSTEM},
@@ -306,6 +330,29 @@ def _reasoning_tokens(usage: Any) -> int:
         return 0
 
 
+async def _inline_photos(
+    our_image_urls: Sequence[str], candidates: Sequence[JudgeCandidate], max_calls: int,
+) -> dict[str, str] | None:
+    """Modo base64: baja las fotos ANTES de reservar cupo, así una foto rota
+    no gasta una llamada. None = sin veredicto: ya no hay cupo hoy (no vale
+    la pena bajar nada) o no se pudo bajar ninguna foto nuestra (comparar
+    solo contra las de ML no dice nada)."""
+    used = await asyncio.to_thread(daily_budget.used_today, LLM_COUNTER_KEY)
+    if used >= max_calls:
+        log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
+        return None
+    ours = _our_photos(our_image_urls)
+    theirs = [c.image_url for c in list(candidates)[:MAX_CANDIDATES] if c.image_url]
+    inline = await judge_images.inline_images([*ours, *theirs])
+    if not any(u in inline for u in ours):
+        _warn_once("no_our_photos",
+                   "Juez LLM (base64): no se pudo bajar ninguna foto nuestra; revisá que salgan "
+                   "del host de VENDURE_API_URL. Esos productos quedan sin veredicto.")
+        log.info("Juez LLM: ninguna foto nuestra descargable (%d), sin veredicto", len(ours))
+        return None
+    return inline
+
+
 def make_client():
     """Cliente OpenAI-compatible. Uno por corrida (el llamador lo cierra) y SIN
     reintentos del SDK: cada intento sería una llamada facturada que el tope
@@ -335,6 +382,11 @@ async def judge(
     llamada queda contada aunque después falle (timeout, 5xx)."""
     if max_calls <= 0 or not candidates or not enabled():
         return None
+    inline: dict[str, str] | None = None
+    if image_mode() == IMAGE_MODE_BASE64:
+        inline = await _inline_photos(our_image_urls, candidates, max_calls)
+        if inline is None:
+            return None
     if await daily_budget.reserve_async(LLM_COUNTER_KEY, int(max_calls), None, on_reserve) is None:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
         return None
@@ -344,7 +396,7 @@ async def judge(
     client = client or make_client()
     request: dict[str, Any] = dict(
         model=s.pm_llm_model,
-        messages=build_messages(our_name, our_image_urls, candidates),
+        messages=build_messages(our_name, our_image_urls, candidates, inline),
         temperature=0,
         max_tokens=_MAX_TOKENS,
     )

@@ -389,6 +389,10 @@ class Settings(BaseSettings):
     # el default según el host de PM_LLM_BASE_URL (MiMo y Qwen: pensamiento
     # apagado); "{}" = no mandar nada. Ver market_judge.extra_body.
     pm_llm_extra_body: str = ""
+    # Cómo viajan las fotos al juez: "url" (las baja el proveedor) o "base64"
+    # (las baja Hugo, ver pricing/judge_images.py). Vacío = base64 con MiMo
+    # (no baja URLs remotas), url con el resto.
+    pm_llm_image_mode: str = ""
 
     # ── Alertas: email (SMTP) ──────────────────────────────────
     alert_smtp_host: str = "smtp.gmail.com"

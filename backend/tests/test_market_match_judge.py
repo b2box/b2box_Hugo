@@ -7,17 +7,21 @@ doble que devuelve el texto que el test quiere.
 from __future__ import annotations
 
 import os
+from io import BytesIO
 from types import SimpleNamespace
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
 
 from app.config import Settings  # noqa: E402
 from app.db.models import Setting  # noqa: E402
 from app.db.session import engine  # noqa: E402
-from app.pricing import daily_budget, market_judge, market_match  # noqa: E402
+from app import net_guard  # noqa: E402
+from app.pricing import daily_budget, judge_images, market_judge, market_match  # noqa: E402
 from app.pricing.market_judge import JudgeCandidate  # noqa: E402
 from app.pricing.market_match import AMBIGUOUS, MATCH, NO, Thresholds  # noqa: E402
 from app.pricing.market_ml import MlCandidate  # noqa: E402
@@ -431,3 +435,106 @@ async def test_zero_reasoning_tokens_keeps_the_verdicts(monkeypatch):
 ])
 def test_reasoning_tokens_reader(usage, expected):
     assert market_judge._reasoning_tokens(usage) == expected
+
+
+# ─── modo de imágenes: url vs base64 ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("base_url,raw,expected", [
+    (MIMO_URL, "", "base64"),                          # MiMo no baja URLs remotas
+    ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "", "url"),
+    ("https://openrouter.ai/api/v1", "", "url"),
+    (MIMO_URL, "url", "url"),                          # el env manda
+    ("https://openrouter.ai/api/v1", " BASE64 ", "base64"),
+])
+def test_image_mode(monkeypatch, base_url, raw, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=base_url, pm_llm_image_mode=raw)
+    assert market_judge.image_mode() == expected
+
+
+def test_invalid_image_mode_warns_once_and_uses_the_default(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode="inline")
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert [market_judge.image_mode() for _ in range(3)] == ["base64"] * 3
+    assert caplog.text.count("PM_LLM_IMAGE_MODE") == 1
+
+
+OUR_PHOTO = "https://example.invalid/assets/preview/p1__preview.jpg"   # host de VENDURE_API_URL
+ML_PHOTO = "https://http2.mlstatic.com/D_1.jpg"
+B64_CANDS = [JudgeCandidate("MLA1", "Org A", ML_PHOTO),
+             JudgeCandidate("MLA2", "Org B", "https://http2.mlstatic.com/D_rota.jpg")]
+
+
+@pytest.fixture
+def photos(monkeypatch):
+    """Fotos servidas por un MockTransport: {url: bytes}. Las que no están dan 404."""
+    buf = BytesIO()
+    Image.new("RGB", (900, 600), (10, 120, 200)).save(buf, format="JPEG")
+    served = {OUR_PHOTO: buf.getvalue(), ML_PHOTO: buf.getvalue()}
+    requested: list[str] = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        body = served.get(str(request.url))
+        if body is None:
+            return httpx.Response(404, request=request)
+        return httpx.Response(200, content=body, headers={"content-type": "image/jpeg"}, request=request)
+
+    monkeypatch.setattr(net_guard, "assert_public_url", lambda url: None)
+    monkeypatch.setattr(judge_images, "make_http_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return SimpleNamespace(served=served, requested=requested)
+
+
+def _sent_images(call) -> list[str]:
+    return [p["image_url"]["url"] for p in call["messages"][1]["content"] if p["type"] == "image_url"]
+
+
+async def test_base64_mode_sends_inline_photos_and_skips_the_broken_one(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_model="mimo-v2.6-flash")
+    client = FakeClient(GOOD)
+    res = await market_judge.judge("Organizador", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client)
+    assert set(res.verdicts) == {"MLA1"}
+    sent = _sent_images(client.calls[0])
+    assert len(sent) == 2 and all(u.startswith("data:image/jpeg;base64,") for u in sent)
+    texts = " ".join(p.get("text", "") for p in client.calls[0]["messages"][1]["content"])
+    assert "MLA2" in texts                         # la ficha va igual, sin su foto
+    assert OUR_PHOTO not in str(client.calls[0])   # ninguna URL viaja al proveedor
+
+
+async def test_base64_mode_without_any_of_our_photos_is_no_verdict_and_spends_nothing(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    photos.served.pop(OUR_PHOTO)
+    client = FakeClient(GOOD)
+    hooked = []
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client,
+                                    on_reserve=lambda s: hooked.append(1)) is None
+    assert client.calls == [] and hooked == []
+    assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 0
+
+
+async def test_base64_mode_our_photo_from_a_foreign_host_is_not_downloaded(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    client = FakeClient(GOOD)
+    assert await market_judge.judge("x", ["https://cdn.evil.com/p1.jpg"], B64_CANDS,
+                                    max_calls=5, client=client) is None
+    assert "https://cdn.evil.com/p1.jpg" not in photos.requested and client.calls == []
+
+
+async def test_base64_mode_without_quota_downloads_nothing(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    client = FakeClient(GOOD)
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=1, client=client) is not None
+    photos.requested.clear()
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=1, client=client) is None
+    assert photos.requested == [] and len(client.calls) == 1
+
+
+async def test_url_mode_never_downloads(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode="url")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client)
+    assert photos.requested == []
+    assert _sent_images(client.calls[0])[0] == OUR_PHOTO
