@@ -36,7 +36,7 @@ NEW_SNAPSHOT_COLS = {"product_enabled", "match_origin", "similar_count", "simila
                      "estimated_margin_pct", "estimated_median_cents", "estimated_listing_count", "estimated_from"}
 NEW_RUN_COLS = {"web_status", "web_searches", "web_bytes", "web_blocked", "n_web_ok", "n_con_similares",
                 "n_est_verde", "n_est_amarillo", "n_est_rojo", "n_solo_diferentes"}
-NEW_FEEDBACK_COLS = {"actor", "label"}
+NEW_FEEDBACK_COLS = {"actor", "label", "previous_label"}
 
 
 @pytest.fixture

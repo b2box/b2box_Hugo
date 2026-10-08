@@ -232,9 +232,13 @@ def test_it_is_the_same_not_the_same_and_undo_on_postgres(api, pg):
         "no_data", "similar", ["MLA221"])
     with Session(pg) as s:
         [fb] = s.exec(select(MarketMatchFeedback)).all()
-        assert fb.label == 0
+        assert (fb.label, fb.previous_label) == (0, 1)
         run = s.get(PriceMonitorRun, run_id)
         assert (run.n_verde, run.n_est_verde, run.n_est_rojo, run.n_ok) == (1, 1, 1, 1)   # contadores de vuelta
+    # "Deshacer" después del cambio de opinión vuelve a la marca anterior ("Es el mismo")…
+    assert api.delete("/api/price-monitor/products/2/feedback/MLA221").json() == {"removed": False, "restored": 1}
+    assert match_feedback.load_promoted() == {"2": frozenset({"MLA221"})} and match_feedback.load_excluded() == {}
+    # …y otro "Deshacer" ya no tiene a qué volver: borra la marca
     assert api.delete("/api/price-monitor/products/2/feedback/MLA221").json() == {"removed": True}
     assert api.delete("/api/price-monitor/products/2/feedback/MLA221").status_code == 404
     assert match_feedback.load_excluded() == {} and match_feedback.load_promoted() == {}

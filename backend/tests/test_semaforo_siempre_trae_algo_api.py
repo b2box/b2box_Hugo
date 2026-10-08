@@ -358,3 +358,69 @@ def test_the_whole_correction_is_one_transaction(client, monkeypatch):
     with Session(engine) as s:
         assert s.exec(select(MarketMatchFeedback)).all() == []
         assert s.get(MarketPriceSnapshot, sid).ml_status == "no_data"
+
+
+# ─── Deshacer después de cambiar de opinión ───────────────────────────────
+
+
+def _row(product_id, ml_id):
+    with Session(engine) as s:
+        return s.exec(select(MarketMatchFeedback).where(
+            MarketMatchFeedback.product_id == product_id, MarketMatchFeedback.ml_id == ml_id)).first()
+
+
+def test_undo_after_changing_your_mind_goes_back_to_the_previous_mark(client):
+    _seed()
+    _post(client, "2", "MLA221")                                              # Es el mismo   (1)
+    _post(client, "2", "MLA221", path="not-same")                             # y no          (0, antes 1)
+    row = _row("2", "MLA221")
+    assert (row.label, row.previous_label) == (0, 1)
+    assert client.delete("/api/price-monitor/products/2/feedback/MLA221").json() == {"removed": False, "restored": 1}
+    row = _row("2", "MLA221")
+    assert (row.label, row.previous_label) == (1, None)                       # volvió a "Es el mismo", la fila sigue
+    assert match_feedback_state() == {"2": {"MLA221"}}
+    # un segundo "Deshacer" ya no tiene a qué volver: borra la marca
+    assert client.delete("/api/price-monitor/products/2/feedback/MLA221").json() == {"removed": True}
+    assert _row("2", "MLA221") is None
+    assert client.delete("/api/price-monitor/products/2/feedback/MLA221").status_code == 404
+
+
+def test_undo_of_a_first_mark_still_deletes_the_row(client):
+    _seed()
+    _post(client, "1", "MLA101", path="not-same")
+    assert _row("1", "MLA101").previous_label is None
+    assert client.delete("/api/price-monitor/products/1/not-same/MLA101").json() == {"removed": True}
+    assert _row("1", "MLA101") is None
+
+
+def test_repeating_the_same_mark_does_not_become_a_previous_one(client):
+    _seed()
+    _post(client, "2", "MLA221")
+    _post(client, "2", "MLA221")                                              # idempotente: no cambia nada
+    assert (_row("2", "MLA221").label, _row("2", "MLA221").previous_label) == (1, None)
+
+
+def test_changing_your_mind_twice_remembers_only_the_last_mark(client):
+    _seed()
+    _post(client, "2", "MLA221")                                              # 1
+    _post(client, "2", "MLA221", path="not-same")                             # 0 (antes 1)
+    _post(client, "2", "MLA221")                                              # 1 (antes 0)
+    row = _row("2", "MLA221")
+    assert (row.label, row.previous_label) == (1, 0)
+    assert client.delete("/api/price-monitor/products/2/feedback/MLA221").json() == {"removed": False, "restored": 0}
+    assert _row("2", "MLA221").label == 0
+
+
+def test_the_snapshot_flags_which_similars_count_for_the_estimate(client):
+    _seed()
+    with Session(engine) as s:
+        snap = s.exec(select(MarketPriceSnapshot).where(MarketPriceSnapshot.product_id == "2")).one()
+        price_monitor._store_listings(
+            snap, [], [], [_pub("MLA221", "similar", 25_000, differences=["medida"]),
+                           _pub("MLA222", "similar", 30_000, est_ok=False, source="ambiguo", differences=[])],
+            [], keep=8, green_min=30.0, yellow_min=10.0)
+        s.add(snap)
+        s.commit()
+    item = next(i for i in _get(client).json()["items"] if i["product"]["id"] == "2")
+    assert {m["ml_id"]: m["in_estimate"] for m in item["similar_listings"]} == {"MLA221": True, "MLA222": False}
+    assert item["estimated_listing_count"] == 1 and item["estimated_median_cents"] == 25_000

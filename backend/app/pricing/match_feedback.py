@@ -107,6 +107,8 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
             return True
         if int(existing.label or 0) == int(label):
             return False
+        # Cambió de opinión: se guarda la marca anterior para que "Deshacer" vuelva a ella.
+        existing.previous_label = int(existing.label or 0)
         existing.label, existing.actor, existing.snapshot_id = int(label), row.actor, snapshot_id
         s.add(existing)
         return True
@@ -121,6 +123,27 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
             s.rollback()
             return False
     return added
+
+
+def undo_feedback(product_id: str, ml_id: str) -> dict[str, Any] | None:
+    """"Deshacer": si la marca es el segundo parecer de una persona que cambió de
+    opinión, vuelve a la anterior (`{"removed": False, "restored": 0|1}`); si no,
+    borra la fila (`{"removed": True}`). None si no había marca."""
+    with Session(engine) as s:
+        row = s.exec(select(MarketMatchFeedback).where(
+            MarketMatchFeedback.product_id == product_id,
+            MarketMatchFeedback.ml_id == ml_id)).first()
+        if row is None:
+            return None
+        if row.previous_label is not None:
+            restored = int(row.previous_label)
+            row.label, row.previous_label = restored, None
+            s.add(row)
+            s.commit()
+            return {"removed": False, "restored": restored}
+        s.delete(row)
+        s.commit()
+    return {"removed": True}
 
 
 def remove_feedback(product_id: str, ml_id: str) -> bool:

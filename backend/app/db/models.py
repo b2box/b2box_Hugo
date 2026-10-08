@@ -351,6 +351,9 @@ class MarketMatchFeedback(SQLModel, table=True):
     # 0 = "No es el mismo" (se excluye); 1 = "Es el mismo" (se promueve a IGUAL
     # para ese producto en las próximas corridas). Una fila por (producto, id).
     label: int = Field(default=0)
+    # La marca anterior cuando una persona cambió de opinión (0 → 1 o 1 → 0): "Deshacer"
+    # vuelve a ella en vez de borrar la fila. None = nunca cambió.
+    previous_label: int | None = Field(default=None)
 
 
 class MlSellerCache(SQLModel, table=True):

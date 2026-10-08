@@ -408,11 +408,14 @@ async def undo_feedback(
     product_id: str = Path(..., min_length=1, max_length=PRODUCT_ID_MAX_LEN),
     ml_id: str = Path(..., min_length=3, max_length=24),
 ) -> dict[str, Any]:
-    """Deshacer: borra la marca ("No es el mismo" o "Es el mismo") de esa
-    publicación para ese producto. La próxima corrida vuelve a juzgarla sola; el
-    snapshot de hoy no se reconstruye."""
+    """Deshacer la última marca ("No es el mismo" o "Es el mismo") de esa
+    publicación para ese producto. Si la persona había cambiado de opinión vuelve a
+    la marca anterior (`{"removed": false, "restored": 0|1}`); si no, borra la marca
+    (`{"removed": true}`) y la próxima corrida vuelve a juzgarla sola. El snapshot de
+    hoy no se reconstruye."""
     if not match_feedback.valid_ml_id(ml_id):
         raise HTTPException(400, "ml_id inválido")
-    if not match_feedback.remove_feedback(product_id, ml_id):
+    result = match_feedback.undo_feedback(product_id, ml_id)
+    if result is None:
         raise HTTPException(404, "esa publicación no estaba marcada")
-    return {"removed": True}
+    return result
