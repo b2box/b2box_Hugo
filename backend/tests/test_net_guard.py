@@ -118,3 +118,61 @@ async def test_safe_get_refuses_a_redirect_into_cgnat(monkeypatch):
     with pytest.raises(SsrfBlocked, match="100.100.100.200"):
         await net_guard.safe_get("https://example.com/a.jpg", timeout=httpx.Timeout(2.0))
     assert seen == ["https://example.com/a.jpg"]
+
+
+# ─── assert_peer_public: la IP a la que quedó conectado el socket ───────────
+
+
+class _Stream:
+    def __init__(self, server_addr):
+        self.server_addr = server_addr
+
+    def get_extra_info(self, name):
+        return self.server_addr if name == "server_addr" else None
+
+
+def _response(server_addr="__none__"):
+    ext = {} if server_addr == "__none__" else {"network_stream": _Stream(server_addr)}
+    return httpx.Response(200, extensions=ext)
+
+
+@pytest.mark.parametrize("addr", [("93.184.216.34", 443), ("2606:4700:4700::1111", 443, 0, 0), ["8.8.8.8", 80]])
+def test_assert_peer_public_accepts_public_peers(addr):
+    net_guard.assert_peer_public(_response(addr))
+
+
+@pytest.mark.parametrize("addr", [
+    ("127.0.0.1", 80), ("10.0.0.1", 443), ("169.254.169.254", 80), ("100.100.100.200", 80),
+    ("::1", 80, 0, 0), ("fec0::1", 80, 0, 0), ("::ffff:10.0.0.1", 80, 0, 0), ("64:ff9b::a00:1", 80, 0, 0),
+])
+def test_assert_peer_public_rejects_internal_peers(addr):
+    with pytest.raises(SsrfBlocked, match="no pública"):
+        net_guard.assert_peer_public(_response(addr))
+
+
+@pytest.mark.parametrize("addr", ["__none__", None, (), "/var/run/docker.sock", (None, 80), (1234, 80)])
+def test_assert_peer_public_fails_closed_when_the_peer_is_unknown(addr):
+    with pytest.raises(SsrfBlocked, match="no se pudo verificar"):
+        net_guard.assert_peer_public(_response(addr))
+
+
+async def test_assert_peer_public_with_the_real_httpcore_extension():
+    """El `network_stream` de verdad (httpcore + anyio) expone server_addr."""
+    import asyncio
+
+    async def serve(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nab")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            async with client.stream("GET", f"http://127.0.0.1:{port}/") as resp:
+                with pytest.raises(SsrfBlocked, match="127.0.0.1"):
+                    net_guard.assert_peer_public(resp)
+    finally:
+        server.close()
+        await server.wait_closed()

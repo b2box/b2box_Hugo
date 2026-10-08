@@ -123,6 +123,8 @@ def photos(monkeypatch):
         return httpx.Response(200, content=body, headers={"content-type": "image/jpeg"}, request=request)
 
     monkeypatch.setattr(net_guard, "assert_public_url", lambda url: None)
+
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
     monkeypatch.setattr(judge_images, "make_http_client",
                         lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     return state
@@ -394,6 +396,7 @@ async def test_c5_eight_hanging_photos_finish_within_the_deadline(monkeypatch):
     deadline = 0.3
     monkeypatch.setattr(judge_images, "DEADLINE_S", deadline)
     monkeypatch.setattr(net_guard, "assert_public_url", lambda url: None)
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
 
     async def drip():
         yield b"\xff\xd8"

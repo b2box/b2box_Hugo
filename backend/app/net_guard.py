@@ -91,6 +91,24 @@ def assert_public_url(url: str) -> None:
             raise SsrfBlocked(f"host {host!r} resuelve a IP no pública: {ip}")
 
 
+def assert_peer_public(resp: httpx.Response) -> None:
+    """Lanza SsrfBlocked si el servidor que contestó NO es una IP pública.
+
+    Para respuestas en streaming: se llama con los headers ya recibidos y
+    ANTES de leer el body. `assert_public_url` resuelve el DNS por su cuenta y
+    httpx vuelve a resolver al conectar (DNS rebinding): esta es la IP a la
+    que quedó conectado el socket de verdad. Fail-closed: si el transporte no
+    la expone (`network_stream`), se rechaza.
+    """
+    stream = resp.extensions.get("network_stream")
+    addr = stream.get_extra_info("server_addr") if stream is not None else None
+    host = addr[0] if isinstance(addr, (tuple, list)) and addr else None
+    if not isinstance(host, str):
+        raise SsrfBlocked("no se pudo verificar la IP del servidor")
+    if not _ip_is_public(host):
+        raise SsrfBlocked(f"el servidor contestó desde una IP no pública: {host}")
+
+
 async def safe_get(
     url: str,
     *,

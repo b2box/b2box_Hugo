@@ -36,12 +36,25 @@ def image_bytes(fmt="JPEG", size=(64, 48), mode="RGB", color=(200, 30, 30)) -> b
 JPEG = image_bytes()
 
 
+class FakeNetworkStream:
+    """Lo que httpcore cuelga en `response.extensions["network_stream"]`."""
+
+    def __init__(self, server_addr):
+        self.server_addr = server_addr
+
+    def get_extra_info(self, name):
+        return self.server_addr if name == "server_addr" else None
+
+
 class PhotoServer:
-    """Rutas fijas → respuesta. Registra cada request que llega."""
+    """Rutas fijas → respuesta. Registra cada request que llega. Cada respuesta
+    dice haber salido de `peer` (IP del socket), una pública por default."""
 
     def __init__(self):
         self.routes: dict[str, object] = {}
         self.requested: list[str] = []
+        self.peer: object = ("93.184.216.34", 443)
+        self.request_headers: list[httpx.Headers] = []
 
     def add(self, url, body=JPEG, ctype="image/jpeg", status=200, headers=None):
         self.routes[url] = (status, body, {"content-type": ctype, **(headers or {})})
@@ -49,13 +62,18 @@ class PhotoServer:
     async def handler(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         self.requested.append(url)
+        self.request_headers.append(request.headers)
         route = self.routes.get(url)
         if callable(route):
-            return await route(request)
-        if route is None:
-            return httpx.Response(404, request=request)
-        status, body, headers = route
-        return httpx.Response(status, content=body, headers=headers, request=request)
+            resp = await route(request)
+        elif route is None:
+            resp = httpx.Response(404, request=request)
+        else:
+            status, body, headers = route
+            resp = httpx.Response(status, content=body, headers=headers, request=request)
+        if self.peer is not None:
+            resp.extensions["network_stream"] = FakeNetworkStream(self.peer)
+        return resp
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handler), follow_redirects=False)
@@ -209,6 +227,137 @@ async def test_redirect_loop_is_cut(server):
     async with server.client() as http:
         with pytest.raises(ImageRejected, match="redirects"):
             await judge_images.download(http, ML)
+
+
+# ─── IP real del servidor (B1), proxy de entorno (B2), compresión (B3) ──────
+
+
+class NeverRead:
+    """Cuerpo que no se puede leer: si el código lo toca, el test falla."""
+
+    def __aiter__(self):
+        raise AssertionError("se leyó el body de un servidor que no era público")
+
+
+async def test_the_real_peer_ip_is_checked_before_reading_the_body(server, monkeypatch):
+    """DNS dijo "pública" (assert_public_url pasa) pero el socket quedó
+    conectado a una IP interna: rebinding. Hay que cortar sin leer el body."""
+    async def read(resp):
+        raise AssertionError("se leyó el body de un servidor que no era público")
+
+    monkeypatch.setattr(judge_images, "_read_capped", read)
+    for peer in [("127.0.0.1", 443), ("10.1.2.3", 443), ("169.254.169.254", 80), ("100.100.100.200", 443),
+                 ("::1", 443, 0, 0), ("fec0::1", 443, 0, 0), ("::ffff:10.0.0.1", 443, 0, 0)]:
+        server.peer = peer
+        server.add(ML)
+        async with server.client() as http:
+            with pytest.raises(net_guard.SsrfBlocked, match="no pública"):
+                await judge_images.download(http, ML)
+
+
+async def test_a_redirect_from_a_non_public_peer_is_not_followed(server):
+    final = "https://http2.mlstatic.com/final.jpg"
+    server.peer = ("10.0.0.7", 443)
+    server.add(ML, status=302, body=b"", headers={"location": final})
+    server.add(final)
+    async with server.client() as http:
+        with pytest.raises(net_guard.SsrfBlocked):
+            await judge_images.download(http, ML)
+    assert server.requested == [ML]
+
+
+async def test_when_the_transport_does_not_expose_the_peer_it_fails_closed(server):
+    server.peer = None
+    server.add(ML)
+    async with server.client() as http:
+        with pytest.raises(net_guard.SsrfBlocked, match="no se pudo verificar"):
+            await judge_images.download(http, ML)
+
+
+@pytest.mark.parametrize("peer", [("93.184.216.34", 443), ("2606:4700:4700::1111", 443, 0, 0)])
+async def test_a_public_peer_passes(server, peer):
+    server.peer = peer
+    server.add(ML)
+    async with server.client() as http:
+        assert await judge_images.download(http, ML) == JPEG
+
+
+async def test_a_photo_from_a_non_public_peer_is_just_omitted(server):
+    server.add(OURS)
+    server.add(ML)
+    server.peer = ("10.0.0.7", 443)
+    assert await judge_images.inline_images([OURS, ML]) == {}
+
+
+async def test_dns_rebinding_against_a_real_socket(monkeypatch):
+    """Sin dobles de transporte: cliente real contra un servidor en 127.0.0.1
+    con el chequeo de DNS "engañado". No se lee ni un byte del body."""
+    async def serve(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: 2\r\n\r\nab")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    url = f"http://127.0.0.1:{port}/x.jpg"
+    monkeypatch.setattr(judge_images, "allowed_url", lambda u: u)          # el host "pasa" la lista
+    monkeypatch.setattr(net_guard, "assert_public_url", lambda u: None)    # y el DNS "dio" pública
+
+    async def read(resp):
+        raise AssertionError("se leyó el body")
+
+    monkeypatch.setattr(judge_images, "_read_capped", read)
+    try:
+        async with judge_images.make_http_client() as http:
+            with pytest.raises(net_guard.SsrfBlocked, match="127.0.0.1"):
+                await judge_images.download(http, url)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+def test_the_client_ignores_proxy_and_ssl_environment(monkeypatch):
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(var, "http://10.9.9.9:3128")
+    assert httpx.AsyncClient()._mounts                      # control: por default el proxy de entorno entra
+    client = judge_images.make_http_client()
+    assert client.trust_env is False and not client._mounts and client.follow_redirects is False
+
+
+async def test_it_asks_for_no_compression(server):
+    server.add(ML)
+    async with server.client() as http:
+        await judge_images.download(http, ML)
+    assert server.request_headers[0]["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "br", "deflate", "zstd", "GZIP", "identity, gzip", "gzip, gzip"])
+async def test_a_compressed_response_is_rejected_before_reading(server, monkeypatch, encoding):
+    async def read(resp):
+        raise AssertionError("se leyó un body comprimido")
+
+    monkeypatch.setattr(judge_images, "_read_capped", read)
+
+    async def body():
+        yield JPEG
+
+    async def route(request):
+        # Body en streaming: con bytes, httpx intentaría descomprimirlo al construir la respuesta.
+        return httpx.Response(200, content=body(), request=request,
+                              headers={"content-type": "image/jpeg", "content-encoding": encoding})
+
+    server.routes[ML] = route
+    async with server.client() as http:
+        with pytest.raises(ImageRejected, match="content-encoding"):
+            await judge_images.download(http, ML)
+
+
+@pytest.mark.parametrize("encoding", ["identity", "Identity", ""])
+async def test_identity_encoding_is_fine(server, encoding):
+    server.add(ML, headers={"content-encoding": encoding} if encoding else None)
+    async with server.client() as http:
+        assert await judge_images.download(http, ML) == JPEG
 
 
 # ─── reducción a JPEG ──────────────────────────────────────────────────────

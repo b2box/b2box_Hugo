@@ -483,6 +483,8 @@ def photos(monkeypatch):
         return httpx.Response(200, content=body, headers={"content-type": "image/jpeg"}, request=request)
 
     monkeypatch.setattr(net_guard, "assert_public_url", lambda url: None)
+
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
     monkeypatch.setattr(judge_images, "make_http_client",
                         lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     return SimpleNamespace(served=served, requested=requested)

@@ -330,7 +330,10 @@ En base64:
 
 - solo se bajan fotos `https://` de `*.mlstatic.com` y del host de
   `VENDURE_API_URL` (de ahí salen las de nuestro catálogo); cada redirect se
-  valida igual y el host tiene que resolver a una IP pública;
+  valida igual y el host tiene que resolver a una IP pública. Ya conectado y
+  antes de leer el body se vuelve a validar la IP real del servidor (DNS
+  rebinding); el cliente ignora `HTTP(S)_PROXY` y pide el body sin comprimir
+  (un `content-encoding` distinto de `identity` se rechaza);
 - hasta 5 MB por foto, `image/jpeg|png|webp|gif|bmp`, y un tope de 15 s para
   todas las fotos de la consulta juntas (las que no llegan se omiten);
 - se reducen a 768 px de lado y se re-encodean JPEG, sin metadata (ni EXIF,

@@ -11,8 +11,12 @@ sigue):
     host de VENDURE_API_URL, que es de donde salen las fotos de nuestro
     catálogo (`/assets/...`). Cada redirect se valida igual y el host tiene
     que resolver a IP pública (net_guard);
+  * después de conectar y antes de leer el body se valida la IP REAL del
+    servidor (el DNS puede cambiar entre el chequeo y la conexión);
   * hasta 5 MB, content-type image/jpeg|png|webp|gif|bmp, y el formato real
-    (lo que detecta Pillow) también tiene que ser uno de esos;
+    (lo que detecta Pillow) también tiene que ser uno de esos. Sin compresión
+    (Accept-Encoding: identity; un content-encoding distinto se rechaza): el
+    tope de bytes se mide sobre lo que viaja, no sobre un gzip descomprimido;
   * timeouts de conexión y lectura por foto y un tope GLOBAL (DEADLINE_S) para
     todas las fotos de la consulta juntas: lo que no llegó a tiempo se omite;
   * se reduce a 768 px de lado y se re-encodea JPEG: menos tokens;
@@ -76,6 +80,9 @@ _DECODE_WORKERS = 1
 _DECODE_POOL = ThreadPoolExecutor(max_workers=_DECODE_WORKERS, thread_name_prefix="judge-decode")
 CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"})
 _PIL_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "BMP")
+# httpx descomprime solo (gzip, br…): un body chico en el cable podría
+# inflarse mucho antes de que el tope de bytes lo vea.
+_HEADERS = {**_IMAGE_HEADERS, "Accept-Encoding": "identity"}
 
 
 class ImageRejected(Exception):
@@ -107,8 +114,10 @@ def allowed_url(url: object) -> str | None:
 
 def make_http_client() -> httpx.AsyncClient:
     """Uno por consulta al juez. Sin redirects automáticos: se siguen a mano
-    para validar cada salto."""
-    return httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False)
+    para validar cada salto. `trust_env=False`: ni HTTP(S)_PROXY / ALL_PROXY
+    (un proxy de entorno haría que el chequeo de IP validara al proxy y no al
+    destino), ni SSL_CERT_*, ni ~/.netrc."""
+    return httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False, trust_env=False)
 
 
 async def _read_capped(resp: httpx.Response) -> bytes:
@@ -131,7 +140,9 @@ async def download(http: httpx.AsyncClient, url: str) -> bytes:
     for _ in range(_MAX_REDIRECTS + 1):
         # getaddrinfo es bloqueante: al thread.
         await asyncio.to_thread(net_guard.assert_public_url, current)
-        async with http.stream("GET", current, headers=_IMAGE_HEADERS) as resp:
+        async with http.stream("GET", current, headers=_HEADERS) as resp:
+            # Ya conectado, todavía sin leer el body: ¿a quién nos conectamos de verdad?
+            net_guard.assert_peer_public(resp)
             if resp.is_redirect:
                 location = resp.headers.get("location") or ""
                 nxt = allowed_url(str(resp.url.join(location))) if location else None
@@ -141,6 +152,9 @@ async def download(http: httpx.AsyncClient, url: str) -> bytes:
                 continue
             if resp.status_code != 200:
                 raise ImageRejected(f"HTTP {resp.status_code}")
+            encoding = (resp.headers.get("content-encoding") or "").strip().lower()
+            if encoding not in ("", "identity"):
+                raise ImageRejected(f"content-encoding no permitido: {encoding[:20]}")
             ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
             if ctype not in CONTENT_TYPES:
                 raise ImageRejected(f"content-type no permitido: {ctype or 'vacío'}")
