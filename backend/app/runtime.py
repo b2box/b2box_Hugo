@@ -470,6 +470,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=50, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_ml_web_block_scripts",
+        label="ML web: no bajar scripts ni estilos (1 / 0)",
+        description=(
+            "1 = el navegador baja solo el HTML de la búsqueda (~0,2 MB por el proxy en vez de "
+            "~1,7 MB): el estado con los resultados viene en el HTML. Si ML empezara a bloquear "
+            "por no ver los scripts, ponerlo en 0."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_web_block_scripts",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_embed_cache_days",
         label="Días de cache de fotos de ML",
         description=(

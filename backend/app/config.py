@@ -390,6 +390,10 @@ class Settings(BaseSettings):
     # Fallos seguidos (bloqueo, captcha, proxy caído) que cortan la fuente web
     # por esa noche.
     pm_ml_web_block_streak: int = 5
+    # 1 = el navegador no baja scripts ni estilos de ML (la búsqueda se lee del
+    # HTML): ~0,2 MB por búsqueda en vez de ~1,7 MB. Si ML empezara a bloquear
+    # por eso, ponerlo en 0 desde el dashboard.
+    pm_ml_web_block_scripts: int = 1
 
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.

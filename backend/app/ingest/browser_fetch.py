@@ -38,9 +38,9 @@ httpx: sigue redirects solo, carga subrecursos, ejecuta JS que puede hacer fetch
   - `ListingBrowser`: UN browser para MUCHAS páginas de listado seguidas (el
     semáforo busca ~1.000 títulos por noche en la web de ML). Mismo lanzamiento
     (`_launch_kwargs`: headless, humanize, geoip, BROWSER_PROXY), mismo guard
-    anti-SSRF (`_install_guard`) y mismo `available()`; suma bloqueo de
-    imágenes/fuentes/media y el conteo de bytes, porque cada byte pasa por un
-    proxy residencial que se paga por GB.
+    anti-SSRF (`_install_guard`) y mismo `available()`; suma el corte de
+    imágenes/fuentes/media (y de scripts y estilos) y el conteo de bytes, porque
+    cada byte pasa por un proxy residencial que se paga por GB.
 """
 
 from __future__ import annotations
@@ -261,12 +261,18 @@ async def _guard_route(route, request, blocked: list[str]) -> None:
 # listado: imágenes, fuentes y media. Son la mayor parte de los bytes de una
 # página de ML y se pagan por GB de proxy.
 HEAVY_RESOURCE_TYPES = frozenset({"image", "imageset", "font", "media"})
+# Además, scripts y hojas de estilo. Medido el 08-oct-2026 contra una búsqueda
+# real de ML (Camoufox, sin proxy): con scripts ~1,7 MB por búsqueda, y solo el
+# documento ~0,2 MB. El estado que se lee viene en el HTML (SSR), no lo arma el
+# JS. Playwright desactiva la cache HTTP cuando hay interceptación, así que los
+# bundles no se reutilizan entre páginas: se bajan completos cada vez.
+LEAN_RESOURCE_TYPES = HEAVY_RESOURCE_TYPES | {"script", "stylesheet"}
 
 
-async def _guard_and_slim_route(route, request, blocked: list[str]) -> None:
-    """`_guard_route` + aborta imágenes/fuentes/media (sin contarlas como
-    "bloqueadas por el guard": no son un intento de SSRF sino ahorro)."""
-    if getattr(request, "resource_type", "") in HEAVY_RESOURCE_TYPES:
+async def _guard_and_slim_route(route, request, blocked: list[str], skip: frozenset[str]) -> None:
+    """`_guard_route` + aborta los tipos de recurso de `skip` (sin contarlos como
+    "bloqueados por el guard": no son un intento de SSRF sino ahorro)."""
+    if getattr(request, "resource_type", "") in skip:
         try:
             await route.abort()
         except Exception as exc:  # noqa: BLE001
@@ -275,11 +281,13 @@ async def _guard_and_slim_route(route, request, blocked: list[str]) -> None:
     await _guard_route(route, request, blocked)
 
 
-async def _install_guard(target, blocked: list[str], *, slim: bool = False) -> None:
+async def _install_guard(target, blocked: list[str], *, skip: frozenset[str] = frozenset()) -> None:
     """Instala el guard anti-SSRF en una página o en un contexto (`target.route`).
-    `slim=True` además corta imágenes, fuentes y media."""
-    handler = _guard_and_slim_route if slim else _guard_route
-    await target.route("**/*", lambda route, request: handler(route, request, blocked))
+    `skip` son los tipos de recurso que además se cortan sin bajarlos."""
+    if skip:
+        await target.route("**/*", lambda route, request: _guard_and_slim_route(route, request, blocked, skip))
+    else:
+        await target.route("**/*", lambda route, request: _guard_route(route, request, blocked))
 
 
 # JS que corre en la página ya renderizada. Junta las fotos del producto en
@@ -483,20 +491,24 @@ class ListingBrowser:
     `render()` abre un browser por llamada (~50 s de reloj): para 1.000
     búsquedas por noche eso son 14 horas. Acá se lanza una vez (mismos
     argumentos y mismo proxy que `render()`), todas las páginas comparten un
-    contexto —y con él la cache: los scripts y estilos de ML se bajan una sola
-    vez— y se relanza cada `LISTING_RECYCLE_AFTER` páginas.
+    contexto (cookies y sesión) y se relanza cada `LISTING_RECYCLE_AFTER`
+    páginas para no acumular memoria.
 
     Seguridad: el contexto lleva el mismo guard que `render()` (cada request,
-    redirects y subrecursos incluidos, se valida contra red pública) y además
-    corta imágenes, fuentes y media.
+    redirects y subrecursos incluidos, se valida contra red pública).
+
+    Ahorro: corta imágenes, fuentes y media y, con `block_scripts` (default),
+    también scripts y estilos: el estado de la búsqueda viene en el HTML. Sin
+    eso cada búsqueda baja ~1,7 MB por el proxy en vez de ~0,2 MB.
 
     Uso:
         async with ListingBrowser() as lb:
             page = await lb.fetch("https://listado.mercadolibre.com.ar/...")
     """
 
-    def __init__(self, *, recycle_after: int = LISTING_RECYCLE_AFTER) -> None:
+    def __init__(self, *, recycle_after: int = LISTING_RECYCLE_AFTER, block_scripts: bool = True) -> None:
         self._recycle_after = max(1, recycle_after)
+        self._skip = LEAN_RESOURCE_TYPES if block_scripts else HEAVY_RESOURCE_TYPES
         self._lock = asyncio.Lock()
         self._cm = None
         self._context = None
@@ -518,7 +530,7 @@ class ListingBrowser:
         try:
             browser = await asyncio.wait_for(cm.__aenter__(), timeout=_LAUNCH_TIMEOUT_S)
             context = await browser.new_context()
-            await _install_guard(context, self._blocked, slim=True)
+            await _install_guard(context, self._blocked, skip=self._skip)
         except Exception as exc:  # noqa: BLE001
             try:
                 await cm.__aexit__(None, None, None)

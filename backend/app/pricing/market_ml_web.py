@@ -371,6 +371,7 @@ class MlWebSource:
         concurrency: int = 1,
         pause_s: float = 4.0,
         block_streak: int = 5,
+        block_scripts: bool = True,
         on_reserve: Callable[[Any], None] | None = None,
         fetcher: Fetcher | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -380,6 +381,7 @@ class MlWebSource:
         self.max_results = max(1, int(max_results))
         self.pause_s = max(0.0, float(pause_s))
         self.block_streak = max(1, int(block_streak))
+        self._block_scripts = bool(block_scripts)
         self._on_reserve = on_reserve
         self._sleep = sleep
         self._jitter = jitter
@@ -397,7 +399,7 @@ class MlWebSource:
 
     async def _default_fetch(self, url: str) -> browser_fetch.ListingPage:
         if self._browser is None:
-            self._browser = browser_fetch.ListingBrowser()
+            self._browser = browser_fetch.ListingBrowser(block_scripts=self._block_scripts)
         return await self._browser.fetch(url)
 
     async def aclose(self) -> None:
@@ -503,6 +505,7 @@ def from_runtime(on_reserve: Callable[[Any], None] | None = None) -> MlWebSource
         concurrency=int(runtime.get("pm_ml_web_concurrency")),
         pause_s=float(runtime.get("pm_ml_web_pause_s")),
         block_streak=int(runtime.get("pm_ml_web_block_streak")),
+        block_scripts=bool(int(runtime.get("pm_ml_web_block_scripts"))),
         on_reserve=on_reserve,
     )
 

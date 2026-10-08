@@ -210,13 +210,22 @@ async def test_render_uses_the_same_launch_kwargs(world, monkeypatch):
     assert captured["proxy"]["server"] == "http://res.proxy.io:8080"
 
 
-async def test_images_fonts_and_media_are_not_downloaded(world):
+async def test_only_the_document_is_downloaded_by_default(world):
+    world.subrequests.append(_Req("https://http2.mlstatic.com/s.css", "stylesheet", 110_000))
     async with browser_fetch.ListingBrowser() as lb:
         page = await lb.fetch(URL)
     aborted = {rtype for _, rtype, route in world.routed if route.aborted}
     followed = {rtype for _, rtype, route in world.routed if route.continued}
-    assert aborted == {"image", "font", "media"} and followed == {"document", "script"}
-    # Solo se cuentan los bytes de lo que bajó: documento + script.
+    assert aborted == {"image", "font", "media", "script", "stylesheet"} and followed == {"document"}
+    # Solo se cuentan los bytes de lo que bajó: el documento.
+    assert page.bytes == 100 + 400 + 300_000
+
+
+async def test_scripts_can_be_let_through(world):
+    async with browser_fetch.ListingBrowser(block_scripts=False) as lb:
+        page = await lb.fetch(URL)
+    aborted = {rtype for _, rtype, route in world.routed if route.aborted}
+    assert aborted == {"image", "font", "media"}          # imágenes, fuentes y media siempre se cortan
     assert page.bytes == (100 + 400 + 300_000) + (100 + 400 + 150_000)
 
 

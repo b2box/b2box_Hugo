@@ -339,6 +339,30 @@ def test_with_proxy_and_budget_it_runs(monkeypatch):
     runtime.set_value("pm_ml_web_max_results", 5)
     src = web.from_runtime()
     assert (src.budget, src.max_results, src.block_streak) == (2000, 5, 5)
+    assert src._block_scripts is True and src.pause_s == 4.0 and src._sem._value == 1
+
+
+async def test_the_default_fetch_opens_one_listing_browser_with_the_script_setting(monkeypatch):
+    made = []
+
+    class FakeLB:
+        def __init__(self, **kw):
+            made.append(kw)
+            self.closed = 0
+
+        async def fetch(self, url):
+            return page(listing_html(POLY))
+
+        async def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(browser_fetch, "ListingBrowser", FakeLB)
+    src = web.MlWebSource(budget=10, pause_s=0, block_scripts=False)
+    await src.search("a")
+    await src.search("b")
+    assert made == [{"block_scripts": False}]          # un solo browser para toda la corrida
+    await src.aclose()
+    assert src._browser is None
 
 
 def test_a_spent_budget_turns_it_off(monkeypatch):
