@@ -162,3 +162,115 @@ class AuditLog(SQLModel, table=True):
     # use_browser). retry-paco lo usa para reenviar al MISMO Paco (APP o PRO) con
     # el mismo callback; sin esto un reintento de un pedido PRO caía en Paco APP.
     verify_ctx: str | None = Field(default=None, description="JSON del contexto del /verify")
+
+
+# ─── Semáforo de precios contra Mercado Libre ──────────────────────
+# Tablas PROPIAS a propósito: `price_history` se poda a los 120 días
+# (prune_price_history) y acá queremos la tendencia completa. El job de poda
+# solo mira PriceHistory; estas no las toca.
+
+
+class PriceMonitorRun(SQLModel, table=True):
+    """Una corrida nocturna del monitor. Es también el cursor de reanudación:
+    mientras `status == "running"` el job retoma esta misma corrida y procesa
+    solo los productos que todavía no tienen snapshot con este `run_id`."""
+    __tablename__ = "price_monitor_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    finished_at: datetime | None = Field(default=None)
+    # running | ok | degraded (>20 % failed) | failed (reventó antes de terminar)
+    status: str = Field(default="running", index=True)
+    # pm_mode al arrancar: 0 sombra, 1 activo (todavía no implementado).
+    mode: int = Field(default=0)
+    # cron | manual | resume
+    trigger: str = Field(default="cron")
+    total_products: int = Field(default=0)
+    processed: int = Field(default=0)
+    n_ok: int = Field(default=0)
+    n_no_data: int = Field(default=0)
+    n_failed: int = Field(default=0)
+    n_skipped: int = Field(default=0)
+    n_verde: int = Field(default=0)
+    n_amarillo: int = Field(default=0)
+    n_rojo: int = Field(default=0)
+    n_sin_dato: int = Field(default=0)
+    ml_requests_used: int = Field(default=0)
+    # Juez LLM de la banda ambigua (apagado por default: pm_vision_max_calls=0).
+    llm_calls: int = Field(default=0)
+    llm_input_tokens: int = Field(default=0)
+    llm_output_tokens: int = Field(default=0)
+    llm_cost_usd: float = Field(default=0.0)
+    # Cuántas veces un reinicio del proceso retomó esta corrida.
+    resumed_count: int = Field(default=0)
+    error: str | None = Field(default=None)
+
+
+class MarketPriceSnapshot(SQLModel, table=True):
+    """Lo que vimos en ML para UN producto en UNA corrida. Una fila por
+    producto habilitado y corrida, siempre — aunque no haya dato (`ml_status`
+    dice por qué). Es el historial para ver tendencias."""
+    __tablename__ = "market_price_snapshot"
+    # Tres índices compuestos cubren todas las consultas (historial por
+    # producto, tabla por corrida y color, cursor de reanudación); índices
+    # sueltos por columna solo encarecerían los ~1.500 inserts por noche.
+    __table_args__ = (
+        Index("ix_mps_product_time", "product_id", "captured_at"),
+        Index("ix_mps_run_color", "run_id", "color"),
+        # El cursor de reanudación se apoya en esto: un producto no puede tener
+        # dos snapshots en la misma corrida.
+        Index("ix_mps_run_product", "run_id", "product_id", unique=True),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: int
+    product_id: str = Field(max_length=64)
+    variant_id: str | None = Field(default=None, max_length=64)
+    captured_at: datetime = Field(default_factory=utcnow)
+    # ok       → hubo matches y precio
+    # no_data  → ML no tiene (o no reconocimos) el producto: NO es malo
+    # failed   → ML falló (429, 5xx, red): el dato viejo sigue valiendo
+    # skipped  → no se pudo evaluar (sin precio propio, sin foto, sin budget)
+    ml_status: str = Field(default="no_data", max_length=16)
+    ml_error: str | None = Field(default=None)
+    ml_median_cents: int | None = Field(default=None)
+    ml_min_cents: int | None = Field(default=None)
+    ml_listing_count: int = Field(default=0)
+    ml_seller_count: int = Field(default=0)
+    ml_currency: str | None = Field(default=None, max_length=8)
+    # JSON: [{ml_id, permalink, title, listings, min_cents, median_cents, source}]
+    matched_listings: str | None = Field(default=None)
+    # Cómo se decidió que es el mismo producto: clip | clip+nombre | llm
+    match_source: str | None = Field(default=None)
+    # Confianza del juez LLM cuando el match vino por ahí (0-1).
+    match_confidence: float | None = Field(default=None)
+    image_score_max: float | None = Field(default=None)
+    name_score_max: float | None = Field(default=None)
+    candidates_count: int = Field(default=0)
+    # Cuántos candidatos cayeron en la banda ambigua (los que iría a mirar el juez).
+    ambiguous_count: int = Field(default=0)
+    our_price_cents: int | None = Field(default=None)
+    # "tier:min_qty=12" | "priceWithTax" | "priceWithTax(fallback)"
+    tier_used: str | None = Field(default=None)
+    commission_pct: float | None = Field(default=None)
+    shipping_cents: int | None = Field(default=None)
+    est_margin_pct: float | None = Field(default=None)
+    # verde | amarillo | rojo | sin_dato
+    color: str = Field(default="sin_dato", max_length=16)
+    prev_color: str | None = Field(default=None)
+    # Denormalizado para que el dashboard no repregunte a Vendure.
+    product_name: str | None = Field(default=None)
+    product_code: str | None = Field(default=None)
+    product_image_url: str | None = Field(default=None)
+    product_slug: str | None = Field(default=None)
+
+
+class MlSellerCache(SQLModel, table=True):
+    """Ventas concretadas de un vendedor de ML (`/users/{id}`), cacheadas 30
+    días. Los mismos vendedores aparecen en cientos de fichas: sin cache serían
+    miles de requests por noche para el mismo dato."""
+    __tablename__ = "ml_seller_cache"
+
+    seller_id: str = Field(primary_key=True, max_length=32)
+    completed_sales: int | None = Field(default=None)
+    fetched_at: datetime = Field(default_factory=utcnow)

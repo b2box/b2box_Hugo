@@ -323,6 +323,66 @@ class Settings(BaseSettings):
     # en el día (UTC), los siguientes fetch devuelven None (skip).
     otapi_daily_budget: int = 300
 
+    # ── Semáforo de precios contra Mercado Libre (modo sombra) ──
+    # Ver app/pricing/price_monitor.py. Todos los `pm_*` son editables desde el
+    # dashboard (grupo "monitor" de runtime.SETTINGS_SCHEMA); acá van los
+    # defaults. El cron es solo env: cambiarlo pide redeploy.
+    price_monitor_cron_utc: str = Field(
+        default="0 6 * * *", description="Cron (UTC) del job price_monitor. 06:00 UTC = 03:00 ART",
+    )
+    # 0 = sombra (calcula y guarda, no toca Vendure). 1 = activo: todavía NO
+    # implementado (PR 2); con 1 el job solo lo loguea y sigue en sombra.
+    pm_mode: int = 0
+    # Cortes del semáforo, en % de ganancia estimada del revendedor.
+    pm_green_min_pct: float = 30.0
+    pm_yellow_min_pct: float = 10.0
+    # Costos de vender en ML que se le restan a la mediana. VALORES A FIJAR POR
+    # GABRIEL: 13 % es la comisión Clásica típica de MLA; el envío depende de la
+    # categoría y del peso, por eso arranca en 0 y se mide con la sonda de
+    # /sites/MLA/listing_prices.
+    pm_ml_commission_pct: float = 13.0
+    pm_ml_shipping_cents: int = 0
+    # Vendedores con menos ventas concretadas que esto no cuentan para el precio.
+    pm_min_seller_sales: int = 50
+    # Filtro "mismo producto". Escala de imagen = la CENTRADA del índice CLIP del
+    # catálogo (misma que embed_*_threshold): el par correcto da ~0.72 y el
+    # impostor mediano ~0.38-0.49. Nombre = token_set_ratio de rapidfuzz.
+    #   image_threshold + name_threshold → match "clip+nombre"
+    #   image_strong (y nombre no vetado) → match "clip" solo
+    #   image_veto / name_veto           → descartado sin más
+    #   entre medio                      → banda ambigua: juez LLM si está prendido
+    pm_image_threshold: float = 0.65
+    pm_name_threshold: float = 0.60
+    pm_image_strong: float = 0.80
+    pm_image_veto: float = 0.40
+    pm_name_veto: float = 0.30
+    # Requests a la API de ML por día (UTC) y cuántos productos se consultan a la
+    # vez. 1.500 productos ≈ 13.500 requests en régimen.
+    pm_ml_daily_budget: int = 15000
+    pm_ml_concurrency: int = 4
+    # Contra qué tramo comparamos: 0 = tramo mínimo (el más caro por unidad, el
+    # que paga quien compra lo justo); 1 = tramo más barato (= priceWithTax).
+    pm_tier_policy: int = 0
+    # Tope diario de llamadas al juez LLM para la banda ambigua. 0 = apagado.
+    pm_vision_max_calls: int = 0
+    # Poda del cache L2 de embeddings para fotos de ML (mlstatic) más viejas que
+    # esto. Las fotos del catálogo propio no se tocan.
+    pm_embed_cache_days: int = 60
+
+    # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
+    # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.
+    # Proveedor por defecto: Qwen (Alibaba Model Studio, modelo qwen3-vl-plus).
+    # Alternativas con el mismo contrato: Xiaomi MiMo (mimo-v2-omni) y
+    # OpenRouter. La URL no se hardcodea a un proveedor: ver README.
+    pm_llm_base_url: str = Field(default="", description="Base URL OpenAI-compatible del juez")
+    pm_llm_api_key: str = Field(default="", description="API key del juez")
+    pm_llm_model: str = "qwen3-vl-plus"
+    pm_llm_timeout_s: float = 30.0
+    # Precio por millón de tokens (USD) para estimar el costo por corrida.
+    # Defaults = Qwen3-VL-Plus internacional; MiMo omni es 0.40 / 2.00.
+    pm_llm_price_in_per_m: float = 0.20
+    pm_llm_price_out_per_m: float = 1.60
+
     # ── Alertas: email (SMTP) ──────────────────────────────────
     alert_smtp_host: str = "smtp.gmail.com"
     alert_smtp_port: int = 587
