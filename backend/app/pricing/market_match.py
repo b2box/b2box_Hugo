@@ -167,21 +167,25 @@ def apply_judge_verdict(
         igual   entre similar_min e igual_min → SIMILAR (ante la duda no se contamina el precio)
         similar con confianza ≥ similar_min   → SIMILAR
         el resto                              → NO
+
     Ya aceptada por reglas (foto + nombre) y revisada por el juez para aplicar la
-    regla de marca: solo cambia si el juez está seguro. "diferente" o "igual"
-    dudoso con confianza baja NO la tumban (la foto ya la había aceptado).
+    regla de marca: solo cambia si el juez está SEGURO (confianza ≥ igual_min).
+    "igual" la confirma, "similar" la baja a SIMILAR y "diferente" la descarta;
+    un juez dudoso no la toca ni deja su confianza anotada (la foto ya la había
+    aceptado y mostrar "confirmado por el juez 40 %" sería engañoso).
     """
-    was_match = d.verdict == MATCH
     cat, conf = v.cat, v.confidence
-    d.confidence, d.reason, d.judged = conf, v.reason, True
-    if cat == market_judge.CAT_IGUAL and conf >= igual_min:
+    if d.verdict == MATCH:
+        if conf < igual_min:
+            return
+        new = {market_judge.CAT_IGUAL: MATCH, market_judge.CAT_SIMILAR: SIMILAR}.get(cat, NO)
+    elif cat == market_judge.CAT_IGUAL and conf >= igual_min:
         new = MATCH
     elif cat in (market_judge.CAT_IGUAL, market_judge.CAT_SIMILAR) and conf >= similar_min:
         new = SIMILAR
-    elif was_match and conf < igual_min:
-        return                      # el juez no está seguro: queda lo de las reglas
     else:
         new = NO
+    d.confidence, d.reason, d.judged = conf, v.reason, True
     d.differences = list(v.differences) if new == SIMILAR else []
     if new == d.verdict:
         return

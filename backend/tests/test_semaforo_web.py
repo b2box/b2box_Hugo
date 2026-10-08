@@ -13,12 +13,12 @@ import os
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
 import pytest  # noqa: E402
-from sqlmodel import Session, select  # noqa: E402
+from sqlmodel import Session  # noqa: E402
 
-from app.db.models import MarketMatchFeedback, PriceMonitorRun  # noqa: E402
+from app.db.models import MarketMatchFeedback  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.ingest import browser_fetch  # noqa: E402
-from app.pricing import daily_budget, market_judge, market_match, market_ml_web, price_monitor  # noqa: E402
+from app.pricing import daily_budget, market_judge, market_ml_web, price_monitor  # noqa: E402
 from tests.ml_web_fixtures import ANTIBOT_HTML, ld_product, listing_html, page, polycard  # noqa: E402
 from tests.test_price_monitor import (  # noqa: E402,F401
     FakeVendure, _candidate, _listing, _product, _runs, _set, _snaps, world)
@@ -108,11 +108,7 @@ async def test_web_fills_in_what_the_api_has_no_card_for(webw):
     assert (run.web_searches, run.web_bytes, run.n_web_ok, run.web_status) == (1, 350_000, 1, "ok")
     assert daily_budget.used_today(market_ml_web.WEB_COUNTER_KEY) == 1
     assert result["counts"]["ok"] == 1
-    assert FakeVendure.forbidden == [] and world_graphql(webw) == []
-
-
-def world_graphql(w):
-    return w.graphql_calls
+    assert FakeVendure.forbidden == [] and webw.graphql_calls == []
 
 
 async def test_the_web_is_not_touched_when_the_api_already_has_an_igual(webw):

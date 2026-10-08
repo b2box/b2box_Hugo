@@ -543,7 +543,8 @@ def _similar_entry(d: market_match.Decision, prefetched: dict[str, Listings]) ->
     if price is None and d.candidate.id in prefetched:
         price = _ars_median(prefetched[d.candidate.id][0])
     # Referencia sin filtrar por vendedores: no entra a ningún cálculo.
-    entry.update(price_cents=price, seller=d.candidate.seller[:60] or None)
+    entry.update(price_cents=price, seller=d.candidate.seller[:60] or None,
+                 sold_quantity=d.candidate.sold_quantity)
     return entry
 
 

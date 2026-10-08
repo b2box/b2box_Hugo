@@ -148,6 +148,11 @@ def test_a_rule_match_reviewed_for_brand_drops_to_similar_only_if_the_judge_is_s
     unsure = _d(MATCH, "clip")
     market_match.apply_judge_verdict(unsure, _v("diferente", 0.4))
     assert (unsure.verdict, unsure.source) == (MATCH, "clip")      # la foto ya la había aceptado
+    assert unsure.confidence is None and not unsure.judged         # y no se anota una confianza engañosa
+
+    half = _d(MATCH, "clip")
+    market_match.apply_judge_verdict(half, _v("igual", 0.55))      # 0,50-0,59 solo baja en la banda ambigua
+    assert half.verdict == MATCH and half.confidence is None
 
     confirmed = _d(MATCH, "clip+nombre")
     market_match.apply_judge_verdict(confirmed, _v("igual", 0.9, "mismo"))

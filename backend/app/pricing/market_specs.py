@@ -28,7 +28,7 @@ import itertools
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 DIFF_QUANTITY = "cantidad"
 DIFF_CAPACITY = "capacidad"
