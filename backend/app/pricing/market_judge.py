@@ -366,6 +366,18 @@ def make_client():
     )
 
 
+def _error_summary(exc: Exception) -> str:
+    """Qué loguear de un error de la llamada. Una respuesta HTTP de error
+    (APIStatusError) trae en su mensaje el body del proveedor, que puede
+    repetir parte del request (nombres, URLs, headers): solo el status y el
+    código de error. El resto (timeout, conexión) tiene mensajes propios."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        code = getattr(exc, "code", None)
+        return f"HTTP {status}, code={str(code)[:40] if code is not None else '-'}"
+    return str(exc)[:200]
+
+
 async def judge(
     our_name: str,
     our_image_urls: Sequence[str],
@@ -406,7 +418,7 @@ async def judge(
     try:
         response = await client.chat.completions.create(**request)
     except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red)
-        log.warning("Juez LLM falló (%s): %s", type(exc).__name__, str(exc)[:200])
+        log.warning("Juez LLM falló (%s): %s", type(exc).__name__, _error_summary(exc))
         return None
     finally:
         if own_client:

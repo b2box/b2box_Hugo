@@ -252,6 +252,55 @@ async def test_c2_invalid_override_warns_once_and_sends_the_default(llm_env, cle
     assert caplog.text.count("PM_LLM_EXTRA_BODY no es un objeto JSON") == expected_warnings
 
 
+# ─── 2b. errores del proveedor: no se vuelca su body al log ────────────────
+
+
+class ErrorProvider(FakeProvider):
+    def __init__(self, status: int, body: dict | str):
+        super().__init__()
+        self.status, self.error_body = status, body
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.bodies.append(json.loads(request.content))
+        if isinstance(self.error_body, str):
+            return httpx.Response(self.status, text=self.error_body)
+        return httpx.Response(self.status, json=self.error_body)
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (400, {"error": {"code": "invalid_media", "message": "failed to download SECRETO-DEL-PROMPT"}},
+     "HTTP 400, code=invalid_media"),
+    (401, {"error": {"message": "bad key sk-SECRETO", "type": "auth"}}, "HTTP 401, code=-"),
+    (429, {"error": {"code": 40029, "message": "rate limit para SECRETO"}}, "HTTP 429, code=40029"),
+    (500, "<html>SECRETO upstream</html>", "HTTP 500, code=-"),
+    (400, {"error": {"code": "x" * 500, "message": "SECRETO"}}, "HTTP 400, code=" + "x" * 40),
+])
+async def test_c2b_http_errors_log_only_status_and_code(llm_env, clean_budget, caplog, status, body, expected):
+    llm_env(PM_LLM_BASE_URL=MIMO, PM_LLM_API_KEY="k", PM_LLM_IMAGE_MODE="url")
+    provider = ErrorProvider(status, body)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        res = await market_judge.judge("x", [], [JudgeCandidate("MLA8", "t", None)], max_calls=5,
+                                       client=provider.client())
+    assert res is None
+    assert f"Juez LLM falló (" in caplog.text and expected in caplog.text
+    assert "SECRETO" not in caplog.text and "x" * 41 not in caplog.text
+    assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1      # la llamada cuenta igual
+
+
+async def test_c2b_a_timeout_keeps_its_own_message(llm_env, clean_budget, caplog):
+    llm_env(PM_LLM_BASE_URL=MIMO, PM_LLM_API_KEY="k", PM_LLM_IMAGE_MODE="url")
+
+    def boom(request):
+        raise httpx.ReadTimeout("se agotó", request=request)
+
+    provider = FakeProvider()
+    provider.handler = boom
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert await market_judge.judge("x", [], [JudgeCandidate("MLA8", "t", None)], max_calls=5,
+                                        client=provider.client()) is None
+    assert "Juez LLM falló (APITimeoutError): Request timed out." in caplog.text
+
+
 # ─── 3. modelo pensando = sin veredicto, tokens a la corrida, un aviso ─────
 
 
