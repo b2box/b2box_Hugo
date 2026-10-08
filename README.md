@@ -333,7 +333,12 @@ En base64:
   valida igual y el host tiene que resolver a una IP pública;
 - hasta 5 MB por foto, `image/jpeg|png|webp|gif|bmp`, y un tope de 15 s para
   todas las fotos de la consulta juntas (las que no llegan se omiten);
-- se reducen a 768 px de lado y se re-encodean JPEG;
+- se reducen a 768 px de lado y se re-encodean JPEG, sin metadata (ni EXIF,
+  ni comentario, ni perfil de color);
+- memoria acotada (el container es de 3 GB y lo comparte Camoufox): PNG, WebP,
+  GIF y BMP hasta 16 MP, JPEG hasta 40 MP (se decodifica ya reducido); el
+  tamaño se mira en el header, antes de decodificar, y hay un solo decode a la
+  vez en todo el proceso;
 - una foto que falla se omite y el veredicto sigue; si no se pudo bajar
   ninguna foto nuestra, ese producto queda sin veredicto (no gasta cupo).
 
@@ -345,9 +350,9 @@ van sin foto: probar con `PM_LLM_IMAGE_MODE=url`.
 Qué sale hacia el proveedor en cada llamada:
 
 - el **nombre** de nuestro producto (hasta 200 caracteres);
-- hasta **2 fotos de nuestro catálogo** (solo https): en modo `url` el
-  proveedor las descarga y ve esas URLs; en modo `base64` le llega la imagen
-  (achicada a 768 px), sin la URL;
+- la **foto destacada de nuestro catálogo** (solo https, una sola versión:
+  la preview): en modo `url` el proveedor la descarga y ve esa URL; en modo
+  `base64` le llega la imagen (achicada a 768 px), sin la URL;
 - hasta **6 fichas públicas de Mercado Libre**: id, título (hasta 160
   caracteres), una foto de `mlstatic.com` (URL o imagen, según el modo) y la
   mediana de precio publicada en esa ficha.

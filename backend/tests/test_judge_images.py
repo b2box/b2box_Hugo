@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import threading
+import time
 from io import BytesIO
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageFile  # noqa: E402
 
 from app import net_guard  # noqa: E402
 from app.pricing import judge_images  # noqa: E402
@@ -243,6 +245,137 @@ def test_decompression_bomb_is_rejected(monkeypatch):
     monkeypatch.setattr(judge_images, "_MAX_PIXELS", 1000)
     with pytest.raises(ImageRejected, match="dimensiones"):
         judge_images.to_jpeg_data_url(image_bytes("PNG", size=(100, 100)))
+
+
+# ─── memoria acotada (QA-2) ────────────────────────────────────────────────
+
+
+def _never_decode(monkeypatch):
+    def boom(self, *a, **kw):
+        raise AssertionError("se decodificó una imagen que se tenía que rechazar por el header")
+
+    monkeypatch.setattr(ImageFile.ImageFile, "load", boom)
+
+
+@pytest.mark.parametrize("fmt,mode,color", [
+    ("PNG", "RGBA", (10, 20, 30, 128)), ("PNG", "RGB", (10, 20, 30)), ("WEBP", "RGB", (10, 20, 30)),
+    ("BMP", "RGB", (10, 20, 30)), ("GIF", "P", 3),
+])
+def test_formats_without_draft_are_capped_at_16_mp_from_the_header(monkeypatch, fmt, mode, color):
+    """PNG/WebP/GIF/BMP se decodifican enteros: 17 MP se rechazan sin decodificar."""
+    raw = image_bytes(fmt, size=(4100, 4100), mode=mode, color=color)
+    _never_decode(monkeypatch)
+    with pytest.raises(ImageRejected, match=r"dimensiones fuera de rango \(4100x4100\)"):
+        judge_images.to_jpeg_data_url(raw)
+
+
+def test_a_40_mp_png_is_rejected_from_the_header_and_weighs_kb(monkeypatch):
+    raw = image_bytes("PNG", size=(8000, 5000), mode="RGBA", color=(200, 10, 10, 128))
+    assert len(raw) < 300_000                       # una bomba: KB en el cable, 160 MB decodificada
+    _never_decode(monkeypatch)
+    with pytest.raises(ImageRejected, match="dimensiones"):
+        judge_images.to_jpeg_data_url(raw)
+
+
+def test_a_png_just_under_16_mp_still_goes_through():
+    img = decode(judge_images.to_jpeg_data_url(image_bytes("PNG", size=(4000, 4000), mode="RGBA",
+                                                          color=(200, 10, 10, 255))))
+    assert img.size == (768, 768)
+
+
+def test_a_jpeg_keeps_the_higher_cap_because_draft_decodes_it_reduced():
+    raw = image_bytes("JPEG", size=(5500, 4000))    # 22 MP: pasa de 16 MP pero es JPEG
+    assert 5500 * 4000 > judge_images._MAX_PIXELS
+    width, height = decode(judge_images.to_jpeg_data_url(raw)).size
+    assert width == 768 and abs(height - 558) <= 1
+
+
+def test_a_jpeg_over_its_own_cap_is_rejected(monkeypatch):
+    monkeypatch.setattr(judge_images, "_MAX_PIXELS_JPEG", 1000)
+    with pytest.raises(ImageRejected, match="dimensiones"):
+        judge_images.to_jpeg_data_url(image_bytes("JPEG", size=(100, 100)))
+
+
+@pytest.mark.parametrize("mode,color", [("RGBA", (200, 10, 10, 128)), ("LA", (90, 128)), ("RGB", (1, 2, 3)),
+                                        ("L", 5), ("P", 3)])
+def test_the_photo_is_shrunk_before_it_is_flattened(monkeypatch, mode, color):
+    """Aplanar la transparencia a tamaño completo copiaba la imagen entera
+    (RGBA → RGBA → canvas): _flatten_rgb solo debe ver la imagen ya chica."""
+    seen = []
+    real = judge_images._flatten_rgb
+    monkeypatch.setattr(judge_images, "_flatten_rgb", lambda img: seen.append(img.size) or real(img))
+    raw = image_bytes("PNG", size=(3000, 2000), mode=mode, color=color)
+    assert decode(judge_images.to_jpeg_data_url(raw)).size == (768, 512)
+    assert seen == [(768, 512)]
+
+
+def test_a_palette_png_with_transparency_goes_on_white_and_is_filtered_not_nearest():
+    buf = BytesIO()
+    pal = Image.new("P", (2000, 2000), 1)
+    pal.putpalette([255, 255, 255, 0, 0, 0] + [0, 0, 0] * 254)   # 0 = blanco (transparente), 1 = negro
+    pal.paste(0, (0, 0, 2000, 1000))
+    pal.save(buf, format="PNG", transparency=0)
+    img = decode(judge_images.to_jpeg_data_url(buf.getvalue())).convert("RGB")
+    assert img.size == (768, 768)
+    assert min(img.getpixel((384, 100))) > 240           # arriba, transparente → blanco
+    assert max(img.getpixel((384, 700))) < 30            # abajo, negro opaco
+
+
+def test_metadata_is_not_kept_in_the_jpeg():
+    """El comentario COM, el EXIF y el perfil ICC no viajan al proveedor."""
+    exif = Image.Exif()
+    exif[0x010E] = "descripcion-secreta"
+    buf = BytesIO()
+    Image.new("RGB", (200, 100), (9, 9, 9)).save(buf, format="JPEG", comment=b"comentario-secreto",
+                                                 exif=exif, icc_profile=b"\x00" * 128)
+    out = base64.b64decode(judge_images.to_jpeg_data_url(buf.getvalue()).split(",", 1)[1])
+    assert b"comentario-secreto" not in out and b"descripcion-secreta" not in out
+    img = Image.open(BytesIO(out))
+    assert "comment" not in img.info and "icc_profile" not in img.info and len(img.getexif()) == 0
+
+
+async def test_decode_runs_one_at_a_time_across_concurrent_queries(server, monkeypatch):
+    """Descarga concurrente, pero UN decode a la vez en todo el proceso, aunque
+    haya dos consultas (dos inline_images) en paralelo."""
+    lock, state = threading.Lock(), {"now": 0, "max": 0, "calls": 0}
+
+    def fake_decode(raw):
+        with lock:
+            state["now"] += 1
+            state["calls"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return "data:image/jpeg;base64,AAAA"
+
+    monkeypatch.setattr(judge_images, "to_jpeg_data_url", fake_decode)
+    first, second = _mlstatic(8), [f"https://http2.mlstatic.com/E_{i}.jpg" for i in range(8)]
+    for u in [*first, *second]:
+        server.add(u)
+    a, b = await asyncio.gather(judge_images.inline_images(first), judge_images.inline_images(second))
+    assert len(a) == len(b) == 8 and state["calls"] == 16
+    assert state["max"] == judge_images._DECODE_WORKERS == 1
+
+
+async def test_a_decode_still_queued_at_the_deadline_never_runs(server, monkeypatch):
+    monkeypatch.setattr(judge_images, "DEADLINE_S", 0.25)
+    started = []
+
+    def slow_decode(raw):
+        started.append(1)
+        time.sleep(0.1)
+        return "data:image/jpeg;base64,AAAA"
+
+    monkeypatch.setattr(judge_images, "to_jpeg_data_url", slow_decode)
+    urls = _mlstatic(8)
+    for u in urls:
+        server.add(u)
+    out = await judge_images.inline_images(urls)
+    at_return = len(started)
+    assert 1 <= len(out) < 8 and at_return < 8
+    await asyncio.sleep(0.5)                     # lo que quedó en cola no arranca después
+    assert len(started) == at_return
 
 
 # ─── varias fotos: la que falla se omite ───────────────────────────────────

@@ -15,10 +15,15 @@ sigue):
     (lo que detecta Pillow) también tiene que ser uno de esos;
   * timeouts de conexión y lectura por foto y un tope GLOBAL (DEADLINE_S) para
     todas las fotos de la consulta juntas: lo que no llegó a tiempo se omite;
-  * se reduce a 768 px de lado y se re-encodea JPEG: menos tokens.
+  * se reduce a 768 px de lado y se re-encodea JPEG: menos tokens;
+  * memoria acotada (el container es de 3 GB y lo comparte Camoufox): un PNG
+    de 40 MP pesa unos KB y descomprimido ~160 MB. Las que Pillow no puede
+    decodificar ya reducidas (PNG, WebP, GIF, BMP) tienen tope de 16 MP
+    (se mira el header antes de decodificar), se reducen ANTES de aplanar la
+    transparencia, y hay UN solo decode a la vez en todo el proceso.
 
-La descarga es async (httpx) y el decode/resize corre en un thread: nada de
-esto bloquea el event loop del job.
+La descarga es async (httpx) y el decode/resize corre en un thread aparte:
+nada de esto bloquea el event loop del job.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import asyncio
 import base64
 import logging
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from urllib.parse import urlsplit
 
@@ -44,8 +50,14 @@ MAX_BYTES = 5 * 1024 * 1024
 MAX_SIDE = 768
 JPEG_QUALITY = 85
 # Una imagen chica en bytes puede ser enorme en píxeles (bomba de
-# descompresión). 40 MP es ~6.300 × 6.300: de sobra para una foto de producto.
-_MAX_PIXELS = 40_000_000
+# descompresión). Tope de píxeles según el formato:
+#  * PNG, WebP, GIF, BMP: se decodifican enteros (sin draft), RGBA = 4 bytes
+#    por píxel. 16 MP (4.000 x 4.000) son ~64 MB y sobra para una foto de
+#    producto.
+#  * JPEG: `draft` lo decodifica ya reducido (hasta 1/8 por lado), así que
+#    aguanta un tope más alto (una cámara de 40 MP entra).
+_MAX_PIXELS = 16_000_000
+_MAX_PIXELS_JPEG = 40_000_000
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # El read timeout de httpx es por chunk: un servidor que gotea bytes podría
 # estirar una foto indefinidamente. Este es el tope de punta a punta de TODAS
@@ -55,6 +67,13 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 DEADLINE_S = 15.0
 _MAX_REDIRECTS = 3
 _CONCURRENCY = 4
+# Decode/resize: UN solo thread para todo el proceso, sin importar cuántas
+# consultas (o loops) haya a la vez. Es el "semáforo global" del decode: la
+# descarga es concurrente y barata, el decode no (decenas de MB por foto).
+# Un pool con cola y no un asyncio.Semaphore: ese queda atado al loop donde
+# se usa por primera vez. Un trabajo en cola cuya tarea se cancela no corre.
+_DECODE_WORKERS = 1
+_DECODE_POOL = ThreadPoolExecutor(max_workers=_DECODE_WORKERS, thread_name_prefix="judge-decode")
 CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"})
 _PIL_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "BMP")
 
@@ -129,10 +148,19 @@ async def download(http: httpx.AsyncClient, url: str) -> bytes:
     raise ImageRejected(f"más de {_MAX_REDIRECTS} redirects")
 
 
+# Modos que Image.thumbnail reduce con filtro de calidad. Paleta ("P"/"PA"),
+# "1", CMYK, "I;16"… se pasan antes a RGB(A): el resize de paleta es NEAREST.
+_RESIZABLE_MODES = frozenset({"RGB", "RGBA", "L", "LA"})
+
+
+def _has_alpha(img: Image.Image) -> bool:
+    return img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info)
+
+
 def _flatten_rgb(img: Image.Image) -> Image.Image:
     """RGB sobre blanco: una transparencia convertida a pelo queda negra y el
     modelo ve otro producto."""
-    if img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info):
+    if _has_alpha(img):
         rgba = img.convert("RGBA")
         canvas = Image.new("RGB", rgba.size, (255, 255, 255))
         canvas.paste(rgba, mask=rgba.getchannel("A"))
@@ -140,16 +168,29 @@ def _flatten_rgb(img: Image.Image) -> Image.Image:
     return img.convert("RGB")
 
 
+def _small_rgb(img: Image.Image) -> Image.Image:
+    """RGB de lado máx MAX_SIDE. Se REDUCE primero y se aplana después:
+    aplanar a tamaño completo copiaba la imagen entera dos veces más (RGBA →
+    RGBA → canvas RGB), unos 500 MB para un PNG de 40 MP."""
+    if img.mode not in _RESIZABLE_MODES:
+        img = img.convert("RGBA" if _has_alpha(img) else "RGB")
+    img.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
+    return _flatten_rgb(img)
+
+
 def to_jpeg_data_url(raw: bytes) -> str:
-    """Bytes → data URL JPEG de lado máx MAX_SIDE. CPU: correr en un thread."""
+    """Bytes → data URL JPEG de lado máx MAX_SIDE. CPU y memoria: correr en el
+    pool de decode (`_DECODE_POOL`), nunca en el event loop."""
     try:
         with Image.open(BytesIO(raw), formats=_PIL_FORMATS) as img:
-            width, height = img.size
-            if width <= 0 or height <= 0 or width * height > _MAX_PIXELS:
+            width, height = img.size  # del header: todavía no se decodificó nada
+            limit = _MAX_PIXELS_JPEG if img.format == "JPEG" else _MAX_PIXELS
+            if width <= 0 or height <= 0 or width * height > limit:
                 raise ImageRejected(f"dimensiones fuera de rango ({width}x{height})")
             img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # JPEG: decodifica ya reducida
-            frame = _flatten_rgb(img)  # GIF animado: el primer cuadro
-        frame.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
+            frame = _small_rgb(img)  # GIF animado: el primer cuadro
+        # Sin metadata: ni el comentario COM del JPEG, ni EXIF, ni perfil ICC.
+        frame.info.clear()
         out = BytesIO()
         frame.save(out, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     except ImageRejected:
@@ -162,7 +203,7 @@ def to_jpeg_data_url(raw: bytes) -> str:
 async def fetch_inline(http: httpx.AsyncClient, url: str) -> str:
     """Una foto → data URL. Sin tope propio: lo pone `inline_images`."""
     raw = await download(http, url)
-    return await asyncio.to_thread(to_jpeg_data_url, raw)
+    return await asyncio.get_running_loop().run_in_executor(_DECODE_POOL, to_jpeg_data_url, raw)
 
 
 async def inline_images(urls: Sequence[str]) -> dict[str, str]:
