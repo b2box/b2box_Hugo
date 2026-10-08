@@ -62,7 +62,7 @@ def _gd_page(name: str) -> tuple[str, str]:
 
 def _add_gadnic() -> int:
     return add_store(name="Gadnic", base_url=fx.GD, platform="jsonld_sitemap", refresh_days=11, max_pages_per_day=2000,
-                     image_hosts="gadnic.com.ar,bidcom.com.ar", house_brand="Gadnic")
+                     image_hosts="gadnic.com.ar,*.bidcom.com.ar", house_brand="Gadnic")
 
 
 # ─── robots.txt reales ───────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ def test_real_gadnic_page_with_stock_reads_price_brand_stock_and_photos():
     url, raw = _gd_page("gadnic_tripode_2026-10-08.html")
     it = _parse_gadnic(raw, url)
     assert (it.price_cents, it.price_doubtful, it.brand, it.stock, it.sku) == (8_784_900, False, "Gadnic", 10, "TRIPODE3")
-    hosts = ("gadnic.com.ar", "bidcom.com.ar")
+    hosts = ("gadnic.com.ar", "*.bidcom.com.ar")
     photos = [store_urls.safe_image(u, hosts) for u in it.image_urls]
     assert photos[0] == "https://static.bidcom.com.ar/publicacionesML/productos/TRIPODE3/1000x1000-TRIPODE3-A.jpg"
     assert all(p and p.startswith("https://") for p in photos)
@@ -372,8 +372,6 @@ async def test_a_429_on_robots_txt_stops_the_pass(store_db):
     assert site.fetched_pages() == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: safe_get sigue los redirects sin consultar robots.txt: una ficha que redirige a una URL que "
-                                       "la tienda prohíbe (con «?» en Gadnic, /search/ en Tiendanube) se pide igual")
 @pytest.mark.parametrize("target", ["/tripodes/otro?utm=1", "/search?q=x"])
 async def test_a_redirect_into_a_forbidden_url_is_not_followed(store_db, monkeypatch, target):
     sid = _add_gadnic()

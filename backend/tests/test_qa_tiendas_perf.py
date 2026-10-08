@@ -56,7 +56,7 @@ def title(rng: random.Random) -> str:
 def make_index(n: int, seed: int = 1, name: str = "Gadnic") -> store_match.StoreIndex:
     rng = random.Random(seed)
     info = store_catalog.StoreInfo(1, name, "https://www.gadnic.com.ar", "jsonld_sitemap", 11, 2000, "",
-                                   ("gadnic.com.ar", "bidcom.com.ar"), "Gadnic")
+                                   ("gadnic.com.ar", "*.bidcom.com.ar"), "Gadnic")
     entries = [store_match.CatalogEntry(
         id=i + 1, url=f"https://www.gadnic.com.ar/categoria-{i % 90}/{'-'.join(title(rng).lower().split())}-{i}",
         title=(t := title(rng)), price_cents=rng.randint(150_000, 9_000_000), price_doubtful=False, price_note="",
@@ -155,7 +155,7 @@ async def test_cpu_and_db_cost_of_matching_a_product_against_both_stores_at_the_
     monkeypatch.setattr(market_match, "clip_score_urls", clip)
     gd, cp = make_index(22_000, 1), make_index(150, 2, "Casa Perfecta")
     cp.info = store_catalog.StoreInfo(2, "Casa Perfecta", "https://www.casaperfecta.com.ar", "tiendanube", 7, 1000, "",
-                                      ("casaperfecta.com.ar", "mitiendanube.com"), "")
+                                      ("casaperfecta.com.ar", "acdn*.mitiendanube.com"), "")
     run = store_match.StoresRun(stores=[gd, cp], feedback={}, affect_color=False)
     ctx = price_monitor._context(1, None)
     rng = random.Random(11)

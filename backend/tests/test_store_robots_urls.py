@@ -130,18 +130,19 @@ def test_a_huge_robots_file_is_bounded():
 
 CP = "https://www.casaperfecta.com.ar"
 TN_HOSTS = store_urls.default_image_hosts("tiendanube", CP)
-GD_HOSTS = ("gadnic.com.ar", "bidcom.com.ar")
+GD_HOSTS = ("gadnic.com.ar", "*.bidcom.com.ar")
 
 
 def test_default_image_hosts():
-    assert TN_HOSTS == ("casaperfecta.com.ar", "mitiendanube.com")
+    assert TN_HOSTS == ("casaperfecta.com.ar", "acdn*.mitiendanube.com")
     assert store_urls.default_image_hosts("jsonld_sitemap", "https://www.gadnic.com.ar") == ("gadnic.com.ar",)
 
 
 @pytest.mark.parametrize("url,ok", [
     ("https://www.casaperfecta.com.ar/productos/picador-de-ajo/", True),
     ("https://casaperfecta.com.ar/productos/x/", True),
-    ("https://tienda.casaperfecta.com.ar/x", True),
+    ("https://tienda.casaperfecta.com.ar/x", False),                        # solo el host de la tienda y su www
+    ("https://www.casaperfecta.com.ar/x", True),
     ("http://www.casaperfecta.com.ar/productos/x/", False),                  # solo https
     ("https://casaperfecta.com.ar.evil.com/productos/x/", False),
     ("https://evil.com/?r=casaperfecta.com.ar", False),
@@ -188,7 +189,7 @@ def test_safe_image_for_a_cdn_resizer_checks_the_inner_url_too():
 
 
 def test_hosts_csv_rejects_broad_or_malformed_domains():
-    assert store_urls.parse_hosts("Gadnic.com.ar, *.bidcom.com.ar ; gadnic.com.ar") == ("gadnic.com.ar", "bidcom.com.ar")
+    assert store_urls.parse_hosts("Gadnic.com.ar, *.bidcom.com.ar ; gadnic.com.ar") == ("gadnic.com.ar", "*.bidcom.com.ar")
     assert store_urls.parse_hosts("com.ar, localhost, 10.0.0.1, a b, cloudfront.net, ok-host.com") == ("ok-host.com",)
     assert store_urls.invalid_hosts("gadnic.com.ar, com.ar, 10.0.0.1") == ["com.ar", "10.0.0.1"]
 
@@ -199,7 +200,7 @@ def test_judge_images_accepts_store_photos_only_for_registered_hosts():
     photo = "https://acdn-us.mitiendanube.com/stores/001/products/a.webp"
     store_urls.set_allowed_image_hosts([])
     assert judge_images.allowed_url(photo) is None                       # sin tiendas activas: nada pasa
-    store_urls.set_allowed_image_hosts(["mitiendanube.com"])
+    store_urls.set_allowed_image_hosts(["acdn*.mitiendanube.com"])
     try:
         assert judge_images.allowed_url(photo) == photo
         assert judge_images.allowed_url("https://evil.com/a.webp") is None

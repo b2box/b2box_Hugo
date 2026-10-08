@@ -15,6 +15,7 @@ Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
@@ -23,10 +24,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app import auth
+from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, MarketStore
 from app.db.session import get_session
 from app.pricing import price_monitor, store_catalog, store_match, store_parse
 
+log = logging.getLogger(__name__)
 router = APIRouter(tags=["stores"])
 
 DB_INT_MAX = 2**31 - 1
@@ -56,11 +59,16 @@ class LabelBody(BaseModel):
     label: str = Field(..., max_length=8)
 
 
-def _clean(body: StoreBody, *, partial: bool) -> dict[str, Any]:
+def _clean(body: StoreBody, *, partial: bool, current: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
-        return store_catalog.clean_store_fields(body.model_dump(exclude_unset=True), partial=partial)
+        return store_catalog.clean_store_fields(body.model_dump(exclude_unset=True), partial=partial, current=current)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+def _actor(request: Request) -> str:
+    """Quién hizo el cambio, para el log: borrar una tienda borra también sus correcciones humanas."""
+    return auth.session_username(request.cookies.get(auth.COOKIE_NAME)) or "?"
 
 
 def _listing(session: Session) -> list[dict[str, Any]]:
@@ -76,8 +84,12 @@ async def list_stores(session: Session = Depends(get_session)) -> dict[str, Any]
 
 
 @router.post("/api/stores", status_code=201)
-async def create_store(body: StoreBody, session: Session = Depends(get_session)) -> dict[str, Any]:
+async def create_store(body: StoreBody, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     fields = _clean(body, partial=False)
+    try:
+        store_catalog.check_conflicts(session, fields, creating=True)
+    except store_catalog.StoreConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     row = MarketStore(**fields)
     session.add(row)
     try:
@@ -87,16 +99,22 @@ async def create_store(body: StoreBody, session: Session = Depends(get_session))
         raise HTTPException(409, "ya hay una tienda con ese nombre") from None
     session.refresh(row)
     store_catalog.refresh_allowed_image_hosts()
+    log.info("tiendas: %s cargó la tienda «%s» (%s, %s)", _actor(request), row.name, row.base_url, row.platform)
     return store_catalog.store_to_dict(row)
 
 
 @router.put("/api/stores/{store_id}")
-async def update_store(body: StoreBody, store_id: int = Path(..., ge=1, le=DB_INT_MAX),
+async def update_store(body: StoreBody, request: Request, store_id: int = Path(..., ge=1, le=DB_INT_MAX),
                        session: Session = Depends(get_session)) -> dict[str, Any]:
     row = session.get(MarketStore, store_id)
     if row is None:
         raise HTTPException(404, "tienda no encontrada")
-    for key, value in _clean(body, partial=True).items():
+    fields = _clean(body, partial=True, current={"base_url": row.base_url, "platform": row.platform})
+    try:
+        store_catalog.check_conflicts(session, fields, exclude_id=store_id)
+    except store_catalog.StoreConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    for key, value in fields.items():
         setattr(row, key, value)
     session.add(row)
     try:
@@ -106,27 +124,40 @@ async def update_store(body: StoreBody, store_id: int = Path(..., ge=1, le=DB_IN
         raise HTTPException(409, "ya hay una tienda con ese nombre") from None
     session.refresh(row)
     store_catalog.refresh_allowed_image_hosts()
+    log.info("tiendas: %s editó la tienda «%s» (%s)", _actor(request), row.name, ", ".join(sorted(fields)) or "sin cambios")
     return store_catalog.store_to_dict(row)
 
 
 @router.delete("/api/stores/{store_id}")
-async def remove_store(store_id: int = Path(..., ge=1, le=DB_INT_MAX)) -> dict[str, bool]:
-    if not store_catalog.delete_store(store_id):
+async def remove_store(request: Request, store_id: int = Path(..., ge=1, le=DB_INT_MAX)) -> dict[str, bool]:
+    info = await asyncio.to_thread(store_catalog.get_store, store_id)
+    if not await asyncio.to_thread(store_catalog.delete_store, store_id):
         raise HTTPException(404, "tienda no encontrada")
     store_catalog.refresh_allowed_image_hosts()
+    log.warning("tiendas: %s BORRÓ la tienda «%s» con su catálogo, coincidencias y correcciones",
+                _actor(request), info.name if info else store_id)
     return {"removed": True}
 
 
 @router.post("/api/stores/{store_id}/index", status_code=202)
-async def index_now(store_id: int = Path(..., ge=1, le=DB_INT_MAX)) -> dict[str, str]:
+async def index_now(request: Request, store_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                    session: Session = Depends(get_session)) -> dict[str, str]:
     """Indexa esa tienda ahora (dentro de su tope diario de páginas y a su ritmo). Tarda:
-    corre en background; el avance se ve en `index` de GET /api/stores."""
+    corre en background; el avance se ve en `index` de GET /api/stores. No se puede repetir en loop:
+    entre dos pasadas manuales pasan `MANUAL_COOLDOWN_MIN` minutos (el sitio es de un tercero)."""
     info = await asyncio.to_thread(store_catalog.get_store, store_id)
     if info is None:
         raise HTTPException(404, "tienda no encontrada")
     lock = store_catalog._locks.get(store_id)
     if lock is not None and lock.locked():
         raise HTTPException(409, "ya hay un indexado de esa tienda en curso")
+    row = session.get(MarketStore, store_id)
+    if row is not None and row.last_indexed_at is not None:
+        wait_s = int(store_catalog.MANUAL_COOLDOWN_MIN * 60 - (utcnow() - row.last_indexed_at).total_seconds())
+        if wait_s > 0:
+            raise HTTPException(429, f"La última pasada de esa tienda terminó hace poco. Probá de nuevo en "
+                                     f"{max(1, round(wait_s / 60))} min.", headers={"Retry-After": str(wait_s)})
+    log.info("tiendas: %s pidió indexar «%s» ahora", _actor(request), info.name)
     task = asyncio.create_task(store_catalog.index_store(store_id))
     _background.add(task)
     task.add_done_callback(_background.discard)

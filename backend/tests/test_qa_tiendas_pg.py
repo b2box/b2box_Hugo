@@ -317,9 +317,6 @@ async def _index_two_pages(pg, rare_page: str):
     return r, got, url, n_url
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (Postgres): `stock` es INTEGER y el parser suma el stock de las variantes sin tope: una tienda con "
-                                       "3 variantes de 999.999.999 (stock «ilimitado») da un DataError que tumba TODA la pasada de la tienda, "
-                                       "y como esa ficha nunca queda marcada como leída, vuelve a ser la primera cada noche")
 async def test_a_huge_stock_in_one_page_does_not_stop_the_rest_of_the_store_on_postgres(pg):
     url = f"{fx.CP}/productos/rara/"
     page = fx.tiendanube_page(url, "Producto raro", [fx.variant(5000, stock=999_999_999, option=str(i)) for i in range(3)])
@@ -328,8 +325,6 @@ async def test_a_huge_stock_in_one_page_does_not_stop_the_rest_of_the_store_on_p
     assert got[url].title and got[n_url].title, "las dos fichas tenían que quedar leídas"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (Postgres): `image_url` es VARCHAR(500) y `safe_image` no limita el largo: una foto de og:image con "
-                                       "más de 500 caracteres da un DataError que tumba toda la pasada de la tienda")
 async def test_a_very_long_photo_url_in_one_page_does_not_stop_the_rest_of_the_store_on_postgres(pg):
     import re
 
@@ -343,9 +338,6 @@ async def test_a_very_long_photo_url_in_one_page_does_not_stop_the_rest_of_the_s
     assert got[url].title and got[n_url].title
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (Postgres): `market_store.base_url` es VARCHAR(200) pero la API acepta hasta 300 y no valida el "
-                                       "largo del dominio: un host de 247 caracteres (válido para DNS, máx. 253) da un DataError (500) "
-                                       "en vez de un 422")
 def test_creating_a_store_with_a_very_long_hostname_is_a_422_not_a_500(pg, client):
     host = ".".join(["b" * 60] * 4) + ".com"                                # 247 caracteres: https:// + host = 255 > 200
     assert len(f"https://{host}") > 200

@@ -113,7 +113,7 @@ async def test_only_product_pages_allowed_by_robots_are_read(store_db):
 
 async def test_gadnic_urls_with_a_query_are_never_requested(store_db):
     gd = fx.GD
-    sid = add_store(name="Gadnic", base_url=gd, platform="jsonld_sitemap", image_hosts="gadnic.com.ar,bidcom.com.ar")
+    sid = add_store(name="Gadnic", base_url=gd, platform="jsonld_sitemap", image_hosts="gadnic.com.ar,*.bidcom.com.ar")
     site = FakeSite()
     site.add(f"{gd}/robots.txt", ROBOTS_GD)
     site.add(f"{gd}/sitemap.xml", fx.sitemap_index(f"{gd}/sitemap/pages.xml", f"{gd}/sitemap/product-pages.xml"))
@@ -131,7 +131,7 @@ async def test_gadnic_urls_with_a_query_are_never_requested(store_db):
 
 async def test_gadnic_doubtful_price_is_saved_with_the_flag(store_db):
     gd = fx.GD
-    sid = add_store(name="Gadnic", base_url=gd, platform="jsonld_sitemap", image_hosts="gadnic.com.ar,bidcom.com.ar")
+    sid = add_store(name="Gadnic", base_url=gd, platform="jsonld_sitemap", image_hosts="gadnic.com.ar,*.bidcom.com.ar")
     url = f"{gd}/mouse-y-teclados/mini-teclado-inalambrico"
     site = FakeSite()
     site.add(f"{gd}/robots.txt", ROBOTS_GD)
@@ -144,7 +144,7 @@ async def test_gadnic_doubtful_price_is_saved_with_the_flag(store_db):
 
 
 async def test_photos_outside_the_allowed_hosts_are_dropped(store_db):
-    sid = add_store(image_hosts="casaperfecta.com.ar")        # sin el CDN de Tiendanube
+    sid = add_store(platform="jsonld_sitemap", image_hosts="casaperfecta.com.ar")        # sin el CDN de Tiendanube
     site = tn_site(["picador-de-ajo"])
     await run_index(sid, site)
     assert items(sid)[f"{fx.CP}/productos/picador-de-ajo/"].image_url is None
@@ -172,7 +172,7 @@ async def test_crawl_delay_from_robots_slows_the_pace(store_db):
 
 
 async def test_daily_cap_and_rotation_of_a_big_catalog(store_db, _clock):
-    sid = add_store(max_pages_per_day=3, refresh_days=2)
+    sid = add_store(max_pages_per_day=3, refresh_days=3)
     slugs = [f"p{i}" for i in range(8)]
     site = tn_site(slugs)
     first = await run_index(sid, site)
@@ -226,8 +226,18 @@ async def test_pass_max_pages_and_max_seconds_limit_a_single_pass(store_db):
 # ─── dead ────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("status", [404, 410, 500, 502])
-async def test_a_page_failing_twice_is_marked_dead_and_not_retried_for_30_days(store_db, _clock, status):
+async def _drive_to_death(sid, site, clock, url, status, *, days_between=2, max_passes=6):
+    """Pasadas separadas hasta que la ficha quede `dead`: devuelve cuántas hicieron falta."""
+    for n in range(1, max_passes + 1):
+        await run_index(sid, site)
+        if items(sid)[url].dead:
+            return n
+        clock["now"] += timedelta(days=days_between)
+    return None
+
+
+@pytest.mark.parametrize("status", [404, 410])
+async def test_a_page_answering_404_or_410_twice_is_dead_and_not_retried_for_30_days(store_db, _clock, status):
     sid = add_store(refresh_days=1)
     site = tn_site(["viva", "muerta"])
     dead_url = tn_product("muerta")[0]
@@ -258,11 +268,61 @@ async def test_a_page_failing_twice_is_marked_dead_and_not_retried_for_30_days(s
     assert dead_url in site.urls and not revived.dead and revived.fails == 0 and revived.title
 
 
+@pytest.mark.parametrize("status", [500, 502, 503])
+async def test_a_5xx_page_is_dead_only_after_days_of_failing_not_after_two_passes(store_db, _clock, status):
+    """Una caída de la tienda no puede marcarlo todo como muerto de golpe: además de dos fallos tienen que
+    pasar `store_dead_min_days_5xx` días desde el primero."""
+    sid = add_store(refresh_days=1)
+    site = tn_site(["viva", "rota"])
+    url = tn_product("rota")[0]
+    site.add(url, "<html>error</html>", status=status, etag='"error-page"')
+    await run_index(sid, site)                                 # día 0: primer fallo
+    assert items(sid)[url].fails == 1 and not items(sid)[url].dead
+    _clock["now"] += timedelta(days=1)                         # se reintenta al día siguiente (backoff de 1 día)
+    await run_index(sid, site)
+    row = items(sid)[url]
+    assert row.fails == 2 and not row.dead, "dos fallos en dos días todavía no son «muerta»"
+    _clock["now"] += timedelta(days=2)                         # backoff de 2 días: ya van 3 desde el primero
+    rep = await run_index(sid, site)
+    row = items(sid)[url]
+    assert row.fails == 3 and row.dead and rep.newly_dead == 1 and row.first_fail_at is not None
+    assert row.etag is None
+
+
+async def test_a_5xx_page_that_recovers_is_never_dead(store_db, _clock):
+    sid = add_store(refresh_days=1)
+    site = tn_site(["rota"])
+    url, body = tn_product("rota")
+    site.add(url, "boom", status=503)
+    await run_index(sid, site)
+    _clock["now"] += timedelta(days=1)
+    await run_index(sid, site)
+    assert items(sid)[url].fails == 2
+    site.add(url, body)                                        # la tienda se recupera
+    _clock["now"] += timedelta(days=2)
+    await run_index(sid, site)
+    row = items(sid)[url]
+    assert row.fails == 0 and not row.dead and row.first_fail_at is None and row.title
+
+
+async def test_failing_pages_are_retried_with_backoff_but_never_later_than_refresh_days(store_db, _clock):
+    sid = add_store(refresh_days=7)
+    site = tn_site(["rota"])
+    url = tn_product("rota")[0]
+    site.add(url, "boom", status=500)
+    await run_index(sid, site)
+    for waited, expected_fails in ((0.5, 1), (1.0, 2), (1.5, 2), (2.0, 3)):
+        _clock["now"] += timedelta(days=waited)
+        site.requests.clear()
+        await run_index(sid, site)
+        assert items(sid)[url].fails == expected_fails, (waited, expected_fails)
+
+
 async def test_a_dead_page_that_keeps_failing_waits_another_30_days(store_db, _clock):
     sid = add_store(refresh_days=1)
     url = tn_product("muerta")[0]
     site = tn_site(["muerta"])
-    site.add(url, "x", status=500)
+    site.add(url, "x", status=404)
     for _ in range(2):
         await run_index(sid, site)
         _clock["now"] += timedelta(days=2)
@@ -543,7 +603,7 @@ def test_default_stores_are_seeded_once_and_never_come_back(store_db):
     assert set(rows) == {"Casa Perfecta", "Gadnic"}
     assert rows["Casa Perfecta"].platform == "tiendanube" and rows["Casa Perfecta"].max_pages_per_day >= 500
     assert rows["Gadnic"].platform == "jsonld_sitemap" and rows["Gadnic"].max_pages_per_day == 2000
-    assert "bidcom.com.ar" in rows["Gadnic"].image_hosts and rows["Gadnic"].house_brand == "Gadnic"
+    assert "*.bidcom.com.ar" in rows["Gadnic"].image_hosts and rows["Gadnic"].house_brand == "Gadnic"
     assert store_catalog.seed_default_stores() == 0
     store_catalog.delete_store(rows["Gadnic"].id)
     assert store_catalog.seed_default_stores() == 0, "una tienda borrada a propósito no reaparece"
@@ -555,9 +615,9 @@ def test_default_stores_are_seeded_once_and_never_come_back(store_db):
 def test_clean_store_fields_validates_what_a_person_types():
     ok = store_catalog.clean_store_fields({"name": "  Mi  Tienda ", "base_url": "https://MiTienda.com.ar/productos/",
                                            "platform": "tiendanube", "refresh_days": "7", "max_pages_per_day": 500,
-                                           "image_hosts": "mitienda.com.ar, *.mitiendanube.com", "house_brand": " Propia "})
+                                           "image_hosts": "mitienda.com.ar, acdn*.mitiendanube.com", "house_brand": " Propia "})
     assert ok["name"] == "Mi Tienda" and ok["base_url"] == "https://mitienda.com.ar"
-    assert ok["image_hosts"] == "mitienda.com.ar,mitiendanube.com" and ok["house_brand"] == "Propia"
+    assert ok["image_hosts"] == "mitienda.com.ar,acdn*.mitiendanube.com" and ok["house_brand"] == "Propia"
     bad = [
         {"name": "", "base_url": "https://x.com", "platform": "tiendanube"},
         {"name": "x", "base_url": "http://x.com", "platform": "tiendanube"},
@@ -584,5 +644,5 @@ def test_a_new_tiendanube_store_is_just_a_row(store_db):
         s.add(MarketStore(**fields))
         s.commit()
     [info] = store_catalog.active_stores()
-    assert info.name == "Otra Tienda" and info.image_hosts == ("otra.com.ar", "mitiendanube.com")
+    assert info.name == "Otra Tienda" and info.image_hosts == ("otra.com.ar", "acdn*.mitiendanube.com")
     assert info.max_pages_per_day == 1000 and info.refresh_days == 7

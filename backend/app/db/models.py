@@ -406,6 +406,9 @@ class MarketStore(SQLModel, table=True):
     # Última pasada del indexador y cómo le fue (para la card de Salud).
     last_indexed_at: datetime | None = Field(default=None)
     last_index_status: str | None = Field(default=None, max_length=300)
+    # ok | degradada (la mitad o más de las fichas dio 5xx en la última pasada) | caida (todas, sin
+    # un solo éxito reciente: la pasada se cortó). Lo muestra Salud.
+    health: str | None = Field(default=None, max_length=12)
 
 
 class StoreCatalogItem(SQLModel, table=True):
@@ -441,6 +444,9 @@ class StoreCatalogItem(SQLModel, table=True):
     dead: bool = Field(default=False)
     dead_since: datetime | None = Field(default=None)
     fails: int = Field(default=0)
+    # Cuándo empezó la racha de fallos actual: un 5xx solo la deja `dead` pasados unos días
+    # (una tienda caída no puede marcarlo todo como muerto de golpe).
+    first_fail_at: datetime | None = Field(default=None)
     fail_reason: str | None = Field(default=None, max_length=100)
     # False = ya no figura en el sitemap: no se lee ni se compara.
     in_sitemap: bool = Field(default=True)
