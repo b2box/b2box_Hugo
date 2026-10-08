@@ -196,15 +196,15 @@ function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
             />
             <Stat label="costo IA (USD)" value={run.llm.cost_usd.toFixed(4)} />
             <div>
-              <div className="flex items-center gap-2 flex-wrap text-xs">
+              <ul className="space-y-0.5 text-xs">
                 {(Object.keys(COLOR_META) as SemaforoColor[]).map((c) => (
-                  <span key={c} className="inline-flex items-center gap-1 num-tabular">
-                    <span className={`w-2 h-2 rounded-full ${COLOR_META[c].dot}`} />
-                    {nfmt(run.colors[c] ?? 0)}
-                  </span>
+                  <li key={c} className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${COLOR_META[c].dot}`} aria-hidden />
+                    <span className="text-foreground">{COLOR_META[c].label}</span>
+                    <span className="num-tabular font-semibold ml-auto">{nfmt(run.colors[c] ?? 0)}</span>
+                  </li>
                 ))}
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">por color</p>
+              </ul>
             </div>
           </div>
           {run.error && <p className="text-xs text-destructive mt-3">Error: {run.error}</p>}

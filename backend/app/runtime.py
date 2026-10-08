@@ -333,8 +333,10 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         key="pm_ml_daily_budget",
         label="Budget diario ML (requests)",
         description=(
-            "Requests a la API de Mercado Libre por día (UTC). Al llegar, los productos que "
-            "faltan quedan `skipped` y la corrida sigue mañana. 1.500 productos ≈ 13.500."
+            "Requests a la API de Mercado Libre por día (UTC). Si se acaba a mitad de corrida, "
+            "lo que falta queda `skipped` (sin dato nuevo) y la corrida termina; la próxima "
+            "empieza por los productos que hace más que no se miden, así todo rota. "
+            "1.500 productos ≈ 13.500 por noche."
         ),
         type="int", parser=int,
         default_attr="pm_ml_daily_budget",
