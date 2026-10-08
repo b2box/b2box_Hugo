@@ -246,6 +246,17 @@ export async function markNotTheSame(snapshotId: number, mlId: string): Promise<
   return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
 }
 
+// Deshacer "No es el mismo": la próxima corrida vuelve a considerar la publicación
+// (el detalle de hoy no se reconstruye).
+export async function undoNotTheSame(productId: string, mlId: string): Promise<void> {
+  await asJson<{ removed: boolean }>(
+    await apiFetch(
+      `/api/price-monitor/products/${encodeURIComponent(productId)}/not-same/${encodeURIComponent(mlId)}`,
+      { method: "DELETE" },
+    ),
+  );
+}
+
 export async function getPriceMonitorSummary(): Promise<PriceMonitorSummary> {
   return asJson<PriceMonitorSummary>(await apiFetch("/api/price-monitor/summary"));
 }

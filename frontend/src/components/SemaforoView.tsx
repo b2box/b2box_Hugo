@@ -6,6 +6,7 @@ import {
   getPriceMonitorSummary,
   markNotTheSame,
   runPriceMonitor,
+  undoNotTheSame,
   type EnabledFilter,
   type MatchFilter,
 } from "../api";
@@ -708,21 +709,44 @@ function verdictText(m: MatchedListing, category: MatchCategory): string {
 function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
+  const [asking, setAsking] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<{ mlId: string; title: string; undone: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const igual = s.matched_listings;
   const similar = s.similar_listings ?? [];
 
-  async function notSame(mlId: string) {
-    setBusy(mlId);
+  async function refresh() {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["pm-snapshots"] }),
+      qc.invalidateQueries({ queryKey: ["pm-history", s.product.id] }),
+      qc.invalidateQueries({ queryKey: ["pm-summary"] }),
+    ]);
+  }
+
+  async function notSame(m: MatchedListing) {
+    setBusy(m.ml_id);
     setError(null);
     try {
-      await markNotTheSame(s.id, mlId);
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["pm-snapshots"] }),
-        qc.invalidateQueries({ queryKey: ["pm-history", s.product.id] }),
-      ]);
+      await markNotTheSame(s.id, m.ml_id);
+      setAsking(null);
+      setRemoved({ mlId: m.ml_id, title: m.title || m.ml_id, undone: false });
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function undo() {
+    if (!removed) return;
+    setBusy(removed.mlId);
+    setError(null);
+    try {
+      await undoNotTheSame(s.product.id, removed.mlId);
+      setRemoved({ ...removed, undone: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo deshacer");
     } finally {
       setBusy(null);
     }
@@ -740,6 +764,24 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
       )}
       {webNote && <p className="text-xs text-muted-foreground">{webNote}</p>}
       {error && <p className="text-xs text-destructive">{error}</p>}
+      {removed && (
+        <p className="flex items-center gap-2 flex-wrap p-2 rounded-md border border-border bg-muted/40 text-xs">
+          {removed.undone ? (
+            <span>
+              Listo: la próxima corrida vuelve a considerar «{removed.title}». Este detalle se actualiza entonces.
+            </span>
+          ) : (
+            <>
+              <span>
+                Se sacó «{removed.title}» y no se va a usar para este producto en las próximas corridas.
+              </span>
+              <Button variant="secondary" size="sm" disabled={busy !== null} onClick={undo}>
+                Deshacer
+              </Button>
+            </>
+          )}
+        </p>
+      )}
 
       <div>
         <h4 className="text-xs font-semibold text-foreground mb-1.5">
@@ -750,7 +792,16 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
         ) : (
           <div className="space-y-1.5">
             {igual.map((m) => (
-              <ListingCard key={m.ml_id} m={m} category="igual" busy={busy === m.ml_id} onNotSame={notSame} />
+              <ListingCard
+                key={m.ml_id}
+                m={m}
+                category="igual"
+                busy={busy === m.ml_id}
+                asking={asking === m.ml_id}
+                onAsk={() => setAsking(m.ml_id)}
+                onCancel={() => setAsking(null)}
+                onConfirm={() => notSame(m)}
+              />
             ))}
           </div>
         )}
@@ -763,7 +814,16 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
           </h4>
           <div className="space-y-1.5">
             {similar.map((m) => (
-              <ListingCard key={m.ml_id} m={m} category="similar" busy={busy === m.ml_id} onNotSame={notSame} />
+              <ListingCard
+                key={m.ml_id}
+                m={m}
+                category="similar"
+                busy={busy === m.ml_id}
+                asking={asking === m.ml_id}
+                onAsk={() => setAsking(m.ml_id)}
+                onCancel={() => setAsking(null)}
+                onConfirm={() => notSame(m)}
+              />
             ))}
           </div>
         </div>
@@ -776,12 +836,18 @@ function ListingCard({
   m,
   category,
   busy,
-  onNotSame,
+  asking,
+  onAsk,
+  onCancel,
+  onConfirm,
 }: {
   m: MatchedListing;
   category: MatchCategory;
   busy: boolean;
-  onNotSame: (mlId: string) => void;
+  asking: boolean;
+  onAsk: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
 }) {
   const isSimilar = category === "similar";
   const img = safeMlImage(m.image_url);
@@ -821,6 +887,9 @@ function ListingCard({
             {m.reason && <span className="italic">{m.reason}</span>}
           </p>
         ) : null}
+        {m.notes && m.notes.length > 0 && (
+          <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>
+        )}
         <p className="text-[11px]">
           {m.brand && <>marca {m.brand} · </>}
           {m.seller && <>vende {m.seller} · </>}
@@ -831,9 +900,25 @@ function ListingCard({
       </div>
       <div className="text-right shrink-0 space-y-1">
         <p className="text-xs num-tabular font-semibold">{fmtArs(price)}</p>
-        <Button variant="secondary" size="sm" disabled={busy} onClick={() => onNotSame(m.ml_id)}>
-          {busy ? "Guardando…" : "No es el mismo"}
-        </Button>
+        {asking ? (
+          <div className="space-y-1 max-w-[210px]">
+            <p className="text-[11px] text-foreground">
+              ¿Seguro? Se saca de este producto y no se usa en las próximas corridas.
+            </p>
+            <div className="flex justify-end gap-1.5">
+              <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
+                Cancelar
+              </Button>
+              <Button size="sm" disabled={busy} onClick={onConfirm}>
+                {busy ? "Guardando…" : "Sí, no es el mismo"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button variant="secondary" size="sm" disabled={busy} onClick={onAsk}>
+            No es el mismo
+          </Button>
+        )}
       </div>
     </div>
   );

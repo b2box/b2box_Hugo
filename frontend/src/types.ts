@@ -237,6 +237,8 @@ export interface MatchedListing {
   category?: MatchCategory;
   reason?: string;
   differences?: string[];
+  // Avisos que no cambian el veredicto (p. ej. "medida dudosa en Vendure").
+  notes?: string[];
   brand?: string | null;
   image_url?: string | null;
   seller?: string | null;
