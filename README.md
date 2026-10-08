@@ -183,14 +183,17 @@ mismo espacio centrado.
 4. Filtro "mismo producto" (`pricing/market_match.py`), igual para las dos
    fuentes: CLIP contra las fotos del producto (escala centrada) + similitud de
    nombre. Vetos, match por imagen fuerte o por imagen+nombre; lo que queda en
-   el medio es la **banda ambigua** (sin juez = no es el mismo producto).
+   el medio es la **banda ambigua** (sin juez, sin cupo o sin respuesta queda como
+   SIMILAR "sin confirmar": se muestra, nunca es idéntico).
    Después, el veredicto **igual / similar / diferente**:
-   - **IGUAL** es lo único que entra a mediana, mínimo, ganancia y color.
-     Pedido de Nico: que cuente SOLO lo idéntico.
-   - **SIMILAR** es el mismo tipo de producto con una diferencia que importa. Se
-     guarda aparte (`similar_listings`) para mostrarlo y **nunca toca el color**
-     (hay un test que compara el snapshot con y sin los similares).
-   - **DIFERENTE** se descarta.
+   - **IGUAL** es lo único que entra a mediana, mínimo, ganancia y color real.
+     Pedido de Nico: el color real cuenta SOLO lo idéntico.
+   - **SIMILAR** es el mismo tipo de producto con una diferencia que importa (o
+     algo parecido en foto y nombre que nadie pudo confirmar: "sin confirmar").
+     Se guarda aparte (`similar_listings`) y **nunca toca el color real**; sin
+     idénticos da un color **estimado** (ver "Siempre trae algo").
+   - **DIFERENTE** (otro producto) **también se guarda** (`other_listings`) con su
+     motivo y su precio, solo para mostrar.
 
    Reglas de Nico (08-oct-2026): marca genérica o inventada = igual; marca
    conocida con valor propio (Stanley, Philips, Samsung…) = similar; pack o
@@ -222,8 +225,58 @@ mismo espacio centrado.
    debajo de `pm_min_seller_sales` y lo que no está en pesos.
 6. Guarda **mediana, mínimo, cantidad de publicaciones y vendedores**, links,
    el **origen** del precio (`api` | `web`), de dónde vino cada match (`clip`,
-   `clip+nombre`, `llm`, `specs`) con sus % de foto y de nombre, y, con nuestro
-   precio, la ganancia y el color.
+   `clip+nombre`, `llm`, `specs`, `manual`, `ambiguo`) con sus % de foto y de
+   nombre, y, con nuestro precio, la ganancia y el color real.
+
+### Siempre trae algo
+
+Pedido de Nico: "en ML no es solo lo idéntico, tiene que buscar similar, idéntico o
+diferente pero traer algo". **Nada de lo que devolvió ML se descarta.** Por producto
+se guardan hasta `pm_ml_keep_listings` (8) publicaciones, **las más parecidas
+primero** (foto y después nombre), en tres listas:
+
+| Lista (columna) | Qué es | Entra al color real |
+|---|---|---|
+| idénticos (`matched_listings`, con precio; `unpriced_listings`, sin precio que cuente) | el mismo producto | **sí** (solo los que tienen precio) |
+| similares (`similar_listings`) | mismo tipo con otra marca, pack, medida o capacidad, o parecido sin confirmar | no; dan el color **estimado** |
+| diferentes (`other_listings`) | otro producto (la foto o el nombre no se parecen, el juez dice que no) | no |
+
+Cada publicación lleva veredicto, **motivo corto** ("difiere en cantidad", "otro
+producto: la foto no se parece", lo que contestó el juez, "una persona la marcó…"),
+% de foto, % de nombre, precio en pesos (si lo tiene), link, origen (ficha API / web)
+y cómo se decidió. Los idénticos nunca se recortan (definen el precio); el tope
+reparte lo que queda entre similares y diferentes. No cuesta requests extra a la API
+de ML: el precio de una ficha de la API solo se conoce si ya se había pedido (el
+juez lo pide); las de la web siempre traen precio.
+
+**Estado de cada producto** (`match_state`):
+
+| Estado | Qué se ve | Color real | Color estimado |
+|---|---|---|---|
+| `igual` | color real, mediana, ganancia | verde / amarillo / rojo | no hay |
+| `igual_sin_precio` | "Idéntico sin precio" (hay idénticos, ninguno con vendedores que cuenten) | sin dato | por similares, si hay |
+| `similar` | "Solo similares" | sin dato | **sí**, si algún similar tiene precio |
+| `diferente` | "Solo diferentes": las más parecidas con su precio | sin dato | no |
+| `ninguno` | "Sin dato": **ML no devolvió ningún resultado** (ni API ni web) | sin dato | no |
+
+Fallar o no poder evaluar (`failed` / `skipped`) sigue siendo aparte y no tiene estado.
+
+**Color estimado.** Sin idéntico pero con similares con precio (en pesos y, en la web,
+con ventas suficientes), se calcula con la **mediana de los similares y la misma
+fórmula de ganancia y los mismos cortes** que el color real. Va en campos aparte
+(`estimated_color`, `estimated_margin_pct`, `estimated_median_cents`,
+`estimated_listing_count`, `estimated_from = 'similar'`): `color`, `est_margin_pct`,
+la mediana real y **los contadores del color real (`n_verde`, `n_sin_dato`…) no
+cambian nunca por esto**; la corrida suma `n_est_verde/amarillo/rojo` y
+`n_solo_diferentes`. En el dashboard se ve con punto hueco, en cursiva y "estimado
+por similares". Hay un test que compara el semáforo real con el de `main` columna por
+columna (web apagada): los campos nuevos son solo aditivos.
+
+**"Es el mismo" / "No es el mismo".** Una persona puede corregir en los dos sentidos
+(ver más abajo): promover un similar o un diferente a idéntico, o pasar un idéntico a
+diferente. La marca se guarda por producto e id de ML (`market_match_feedback.label`,
+0 o 1) y la próxima corrida la respeta, sin que el juez ni el chequeo de medidas la
+cambien.
 
 Ganancia estimada (en % sobre lo que nos paga el revendedor):
 
@@ -388,18 +441,27 @@ prender la fuente en producción conviene que Nico y Gabriel den el OK explícit
 (poner `pm_ml_web_daily_budget` en 0 la apaga sin redeploy). Una IP residencial
 es la única forma de que ML responda; no se intenta evadir captchas.
 
-**"No es el mismo".** En el detalle de cada producto, cada publicación (igual o
-parecida) tiene un botón que **pide confirmación** y, al confirmar, la saca del
-snapshot, **recalcula** mediana, mínimo, ganancia y color con las que quedan y
-rehace los contadores de la corrida (`POST /api/price-monitor/snapshots/{id}/
-not-same`), la guarda en la tabla `market_match_feedback` (con los puntajes, el
-origen que tenía y **quién la marcó**: el usuario de la sesión) y **la excluye
-para ese producto en las próximas corridas**. La exclusión, el snapshot y los
-contadores se guardan en una sola transacción. El panel ofrece "Deshacer"
-(`DELETE /api/price-monitor/products/{id}/not-same/{ml_id}`): la próxima corrida
-vuelve a considerarla; el detalle de hoy no se reconstruye. Esas filas son
-etiquetas negativas para calibrar: `calibrate_market_match export` las saca ya
-etiquetadas con 0.
+**"No es el mismo" y "Es el mismo".** En el detalle de cada producto, cada
+publicación idéntica tiene "No es el mismo" y cada similar o diferente tiene "Es el
+mismo"; los dos **piden confirmación**.
+- *No es el mismo* (`POST /api/price-monitor/snapshots/{id}/not-same`): pasa a la
+  lista de **diferentes** (no se descarta: se ve con su precio y se puede dar
+  vuelta), **recalcula** mediana, mínimo, ganancia y color real con los idénticos que
+  quedan (y el estimado, si ya no queda ninguno) y rehace los contadores de la
+  corrida. Queda como diferente para ese producto en las próximas corridas.
+- *Es el mismo* (`POST /api/price-monitor/snapshots/{id}/same`): pasa a **idéntica**,
+  su precio cuenta, **recalcula el color real** (y el estimado desaparece), rehace los
+  contadores y la próxima corrida la toma como IGUAL aunque el juez o el chequeo de
+  medidas dijeran otra cosa. Si no tenía precio, queda como idéntica sin precio.
+
+Las dos se guardan en la tabla `market_match_feedback` (`label` 0 / 1, con los
+puntajes, el origen que tenía y **quién la marcó**: el usuario de la sesión), en una
+sola transacción con el snapshot y los contadores, y son idempotentes. Una persona
+puede cambiar de opinión (la fila se da vuelta). "Deshacer"
+(`DELETE /api/price-monitor/products/{id}/feedback/{ml_id}`, también sirve el path
+viejo `…/not-same/{ml_id}`) borra la marca: la próxima corrida vuelve a juzgar sola;
+el detalle de hoy no se reconstruye. Esas filas son etiquetas para calibrar:
+`calibrate_market_match export` las saca ya etiquetadas (0 y 1).
 
 **Pendiente (B3, fuera de este PR): CSRF.** Los POST/DELETE del dashboard
 (`run`, `not-same`) se apoyan en la cookie de sesión `SameSite=Lax` y no llevan
@@ -435,6 +497,7 @@ validar `Origin`) para todos los endpoints que escriben, no solo estos.
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
 | `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
+| `pm_ml_keep_listings` | 8 | publicaciones de ML que se guardan por producto (idénticas + similares + diferentes) |
 | `pm_include_disabled` | 1 | también mide los productos deshabilitados (filtro en el dashboard) |
 | `pm_spec_check` | 1 | chequeo de cantidad, capacidad, medidas y peso (IGUAL → SIMILAR) |
 | `pm_dim_tol_pct` / `pm_weight_tol_pct` | 10 / 15 | tolerancia de medidas por lado y de peso, en % |
@@ -599,19 +662,29 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   una corrida en curso y 429 si no queda cupo de ML hoy o si la última
   corrida arrancó hace menos de `pm_manual_cooldown_min` (con `Retry-After`).
 - Endpoints (sesión del dashboard): `GET /api/price-monitor/runs`,
-  `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&enabled=&match=&origin=&page=&page_size=`
-  (`enabled`: `enabled` | `disabled` | `all`; `match`: `igual` | `similar` |
-  `solo_similar`; `origin`: `api` | `web`),
+  `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&enabled=&match=&origin=&estimated=&page=&page_size=`
+  (`enabled`: `enabled` | `disabled` | `all`; `match`, qué devolvió ML: `igual` (tiene
+  idéntico) | `similar` | `solo_similar` | `diferente` | `solo_diferente` | `ninguno`
+  (sin resultados); `origin`: `api` | `web`; `estimated`: `verde` | `amarillo` | `rojo` |
+  `any`, el color estimado por similares; todo por whitelist). Además de `colors` (el
+  real, sin cambios) devuelve `estimated_colors` y `states` (conteos aparte), y cada
+  item suma `other_listings`, `other_count`, `unpriced_listings`, `match_state` y los
+  `estimated_*`, con links, fotos y precios saneados como los demás.
   `GET /api/price-monitor/products/{id}/history`, `GET /api/price-monitor/summary`,
-  `POST /api/price-monitor/snapshots/{id}/not-same` (`{"ml_id": "MLA…"}`) y
-  `DELETE /api/price-monitor/products/{id}/not-same/{ml_id}`.
-- El dashboard (Semáforo) muestra, por cada publicación, el % de similitud de
-  foto y de nombre, el veredicto (igual / similar) con su origen (ficha API /
-  web) y cómo se decidió (foto + nombre, juez IA con su confianza, medidas), las
-  medidas nuestras junto a las de la publicación y el botón "No es el mismo".
-  Filtros: producto (habilitados / deshabilitados / todos), similitud y origen.
-  Los parecidos van en un bloque aparte y en la tabla como un chip gris: no
-  cambian el color.
+  `POST /api/price-monitor/snapshots/{id}/not-same` y `…/same` (`{"ml_id": "MLA…"}`) y
+  `DELETE /api/price-monitor/products/{id}/feedback/{ml_id}`.
+- El dashboard (Semáforo) muestra, en cada producto, **las tres listas** (idénticos /
+  similares / diferentes) con precio, link, % de foto y de nombre, origen (ficha API
+  / web), cómo se decidió (foto + nombre, juez IA con su confianza, medidas, una
+  persona, sin confirmar) y el motivo, más las medidas nuestras junto a las de la
+  publicación y los botones "No es el mismo" / "Es el mismo" (con confirmación y
+  "Deshacer"). El color real es un punto lleno; el **estimado por similares** va con
+  punto hueco, en cursiva y "estimado por similares", con chips aparte (Estimado
+  verde / amarillo / rojo); "Solo diferentes" tiene su etiqueta y "Sin dato" es solo
+  cuando ML no devolvió nada. Filtros: producto (habilitados / deshabilitados /
+  todos), lo que devolvió ML (tiene idéntico / solo similares / solo diferentes / sin
+  resultados, con su conteo) y origen. Las chips del color real y sus conteos no
+  cambian.
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
   su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
 
