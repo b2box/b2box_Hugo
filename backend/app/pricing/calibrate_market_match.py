@@ -50,6 +50,13 @@ CSV_FIELDS = (
     "image_score", "name_score", "verdict", "same_product",
 )
 
+# Celdas que una planilla interpretaría como fórmula (CSV injection): títulos
+# de ML y nombres los escribe cualquiera. Solo columnas de texto; los scores
+# pueden ser negativos (escala centrada) y tienen que seguir siendo números.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_TEXT_FIELDS = ("product_id", "product_code", "our_name", "our_image_url", "ml_id", "ml_title",
+                "ml_permalink", "ml_image_url", "verdict")
+
 _TRUE = {"1", "si", "sí", "s", "yes", "y", "true", "x"}
 _FALSE = {"0", "no", "n", "false"}
 
@@ -82,6 +89,34 @@ class Metrics:
         return self.tp / (self.tp + self.fn) if (self.tp + self.fn) else None
 
 
+def csv_safe(value: object) -> str:
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA_PREFIXES) else text
+
+
+def _unescape(text: str | None) -> str:
+    """Inverso de csv_safe para leer el CSV etiquetado."""
+    text = text or ""
+    return text[1:] if text.startswith("'") and text[1:].startswith(_FORMULA_PREFIXES) else text
+
+
+def export_row(product, decision) -> dict[str, str]:
+    """Una fila del CSV a etiquetar (texto escapado contra fórmulas)."""
+    row = {
+        "product_id": product.id, "product_code": product.product_code or "",
+        "our_name": product.name, "our_image_url": product.featured_image_url or "",
+        "ml_id": decision.candidate.id, "ml_title": decision.candidate.name,
+        "ml_permalink": decision.candidate.permalink,
+        "ml_image_url": (decision.candidate.image_urls or [""])[0],
+        "verdict": decision.verdict,
+    }
+    out = {k: csv_safe(v) for k, v in row.items()}
+    out["image_score"] = "" if decision.image_score is None else f"{decision.image_score:.4f}"
+    out["name_score"] = f"{decision.name_score:.4f}"
+    out["same_product"] = ""
+    return out
+
+
 def parse_label(raw: str | None) -> bool | None:
     v = (raw or "").strip().lower()
     if v in _TRUE:
@@ -108,10 +143,10 @@ def load_labeled(rows: Iterable[dict[str, str]]) -> list[LabeledPair]:
             continue
         name = _float_or_none(row.get("name_score"))
         if name is None:
-            name = market_match.name_score(row.get("our_name") or "", row.get("ml_title") or "")
+            name = market_match.name_score(_unescape(row.get("our_name")), _unescape(row.get("ml_title")))
         out.append(LabeledPair(
-            product_id=(row.get("product_id") or "").strip(),
-            ml_id=(row.get("ml_id") or "").strip(),
+            product_id=_unescape(row.get("product_id")).strip(),
+            ml_id=_unescape(row.get("ml_id")).strip(),
             image_score=_float_or_none(row.get("image_score")),
             name_score=float(name),
             same_product=label,
@@ -242,15 +277,7 @@ async def _export(sample: int, seed: int, out: Path) -> int:
                 print(f"  {product.id}: ML falló ({exc}), sigo")
                 continue
             for d in await market_match.score_candidates(product, candidates, thr):
-                writer.writerow({
-                    "product_id": product.id, "product_code": product.product_code or "",
-                    "our_name": product.name, "our_image_url": product.featured_image_url or "",
-                    "ml_id": d.candidate.id, "ml_title": d.candidate.name,
-                    "ml_permalink": d.candidate.permalink,
-                    "ml_image_url": (d.candidate.image_urls or [""])[0],
-                    "image_score": "" if d.image_score is None else f"{d.image_score:.4f}",
-                    "name_score": f"{d.name_score:.4f}", "verdict": d.verdict, "same_product": "",
-                })
+                writer.writerow(export_row(product, d))
                 rows += 1
             print(f"  {i}/{len(products)} {product.id}: {len(candidates)} fichas")
     print(f"\n{rows} pares en {out}. Completá la columna same_product y corré `evaluate`. "

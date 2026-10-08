@@ -85,3 +85,31 @@ def test_evaluate_cli_without_labels(tmp_path, monkeypatch):
     path = tmp_path / "vacio.csv"
     path.write_text(",".join(cal.CSV_FIELDS) + "\n", encoding="utf-8")
     assert cal.main(["evaluate", str(path)]) == 2
+
+
+# ─── CSV injection (security L7) ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("text", ["=HYPERLINK(\"http://x\")", "+1", "-2+3", "@SUM(A1)", "\tx", "\rx"])
+def test_formula_like_text_is_escaped(text):
+    assert cal.csv_safe(text) == "'" + text
+    assert cal._unescape(cal.csv_safe(text)) == text
+
+
+def test_export_row_escapes_text_but_keeps_scores_numeric():
+    from types import SimpleNamespace
+
+    from app.pricing.market_match import Decision
+    from app.pricing.market_ml import MlCandidate
+
+    product = SimpleNamespace(id="1", product_code="BX1", name="=cmd|' /C calc'!A0",
+                              featured_image_url="https://cdn/1.jpg")
+    decision = Decision(MlCandidate(id="MLA1", name="@SUM(1+1)", image_urls=[], permalink=""),
+                        image_score=-0.05, name_score=0.5, verdict="no")
+    row = cal.export_row(product, decision)
+    assert row["our_name"].startswith("'=") and row["ml_title"].startswith("'@")
+    assert row["image_score"] == "-0.0500" and row["name_score"] == "0.5000"
+    assert row["product_id"] == "1" and row["same_product"] == ""
+    # Y al leerlo etiquetado, el score negativo sigue siendo número.
+    [pair] = cal.load_labeled([{**row, "same_product": "0"}])
+    assert pair.image_score == -0.05
