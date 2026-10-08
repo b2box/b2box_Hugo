@@ -161,10 +161,10 @@ def test_messages_carry_our_photos_and_each_candidate():
 
 
 class FakeClient:
-    def __init__(self, text="", exc: Exception | None = None, usage=(1200, 80)):
+    def __init__(self, text="", exc: Exception | None = None, usage=(1200, 80), reasoning=None):
         self.calls: list[dict] = []
         self.closed = 0
-        self._text, self._exc, self._usage = text, exc, usage
+        self._text, self._exc, self._usage, self._reasoning = text, exc, usage, reasoning
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def close(self):
@@ -176,7 +176,11 @@ class FakeClient:
             raise self._exc
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self._text))],
-            usage=SimpleNamespace(prompt_tokens=self._usage[0], completion_tokens=self._usage[1]),
+            usage=SimpleNamespace(
+                prompt_tokens=self._usage[0], completion_tokens=self._usage[1],
+                completion_tokens_details=(None if self._reasoning is None
+                                           else SimpleNamespace(reasoning_tokens=self._reasoning)),
+            ),
         )
 
 
@@ -375,3 +379,55 @@ async def test_judge_sends_no_extra_body_when_there_is_nothing_to_send(monkeypat
     client = FakeClient(GOOD)
     await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
     assert "extra_body" not in client.calls[0]
+
+
+# ─── respuesta de un modelo que piensa = sin veredicto ────────────────────
+
+
+@pytest.mark.parametrize("text,reasoning", [
+    ("", 700),            # MiMo con el pensamiento prendido: todo max_tokens en reasoning
+    ("", None),           # content vacío sin detalle de tokens
+    ("   \n ", 0),       # solo espacios
+    (GOOD, 350),          # razonó y encima contestó: igual no es lo que costeamos
+])
+async def test_thinking_or_empty_answer_is_no_verdict_but_counts_tokens(
+        monkeypatch, caplog, fresh_warnings, text, reasoning):
+    import logging
+
+    _judge_settings(monkeypatch)
+    client = FakeClient(text, usage=(900, 700), reasoning=reasoning)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        res = await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert res is not None and res.verdicts == {}
+    assert (res.input_tokens, res.output_tokens) == (900, 700)
+    assert "el modelo está pensando, revisá PM_LLM_EXTRA_BODY" in caplog.text
+
+
+async def test_thinking_warning_is_logged_once(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    _judge_settings(monkeypatch)
+    client = FakeClient("", reasoning=700)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert caplog.text.count("el modelo está pensando") == 1
+
+
+async def test_zero_reasoning_tokens_keeps_the_verdicts(monkeypatch):
+    _judge_settings(monkeypatch)
+    client = FakeClient(GOOD, reasoning=0)
+    res = await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert set(res.verdicts) == {"MLA1"}
+
+
+@pytest.mark.parametrize("usage,expected", [
+    (None, 0),
+    (SimpleNamespace(), 0),
+    (SimpleNamespace(completion_tokens_details=None), 0),
+    (SimpleNamespace(completion_tokens_details={"reasoning_tokens": 12}), 12),
+    (SimpleNamespace(completion_tokens_details=SimpleNamespace(reasoning_tokens="7")), 7),
+    (SimpleNamespace(completion_tokens_details=SimpleNamespace(reasoning_tokens="x")), 0),
+])
+def test_reasoning_tokens_reader(usage, expected):
+    assert market_judge._reasoning_tokens(usage) == expected

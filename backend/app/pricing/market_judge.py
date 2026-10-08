@@ -294,6 +294,18 @@ def parse_verdicts(text: str) -> list[JudgeVerdict] | None:
     return out or None
 
 
+def _reasoning_tokens(usage: Any) -> int:
+    """`usage.completion_tokens_details.reasoning_tokens` (forma OpenAI, la
+    que devuelven MiMo, Qwen y OpenRouter). 0 si no viene."""
+    details = getattr(usage, "completion_tokens_details", None)
+    value = details.get("reasoning_tokens") if isinstance(details, dict) else getattr(
+        details, "reasoning_tokens", None)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def make_client():
     """Cliente OpenAI-compatible. Uno por corrida (el llamador lo cierra) y SIN
     reintentos del SDK: cada intento sería una llamada facturada que el tope
@@ -358,6 +370,16 @@ async def judge(
         cost_usd=estimate_cost(in_tok, out_tok, s.pm_llm_price_in_per_m, s.pm_llm_price_out_per_m),
         model=s.pm_llm_model, raw=text[:2000],
     )
+    reasoning = _reasoning_tokens(usage)
+    if reasoning > 0 or not text.strip():
+        # Un modelo que piensa se come max_tokens razonando: el content llega
+        # vacío o cortado. Aunque viniera entero, no es la configuración que
+        # costeamos: sin veredicto, y el aviso dice qué tocar.
+        _warn_once("thinking",
+                   "Juez LLM: respuesta vacía o con razonamiento (reasoning_tokens=%d, %d chars): "
+                   "el modelo está pensando, revisá PM_LLM_EXTRA_BODY. Cuenta como sin veredicto.",
+                   reasoning, len(text))
+        return result  # tokens gastados igual: se contabilizan, sin veredictos
     verdicts = parse_verdicts(text)
     if verdicts is None:
         log.warning("Juez LLM: respuesta ilegible (%d chars), sin veredicto", len(text))
