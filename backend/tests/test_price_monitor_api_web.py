@@ -152,7 +152,7 @@ def test_the_summary_and_runs_carry_the_web_numbers(client, monkeypatch):
     summary = client.get("/api/price-monitor/summary").json()
     assert summary["include_disabled"] is True
     assert set(summary["web"]) == {"used", "budget", "remaining", "off_reason"}
-    assert summary["web"]["budget"] == 2000
+    assert summary["web"]["budget"] == 2500
 
 
 # ─── No es el mismo ───────────────────────────────────────────────────────

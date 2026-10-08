@@ -147,8 +147,6 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
         assert run.started_at.tzinfo is None                                         # utcnow() naive compara bien
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L7: web_bytes es INTEGER de 32 bits y 3,4 GB (sin bloquear scripts) "
-                                       "lo desbordan con NumericValueOutOfRange")
 def test_the_run_byte_counter_takes_a_night_without_blocked_scripts(pg, monkeypatch):
     _old_tables(pg)
     session.init_db()
@@ -157,3 +155,43 @@ def test_the_run_byte_counter_takes_a_night_without_blocked_scripts(pg, monkeypa
     monkeypatch.setattr(price_monitor, "engine", pg)
     for _ in range(4):
         price_monitor._add_usage(1, web_bytes=900_000_000)                           # 3,6 GB en total
+    with pg.connect() as c:
+        assert c.execute(text("SELECT web_bytes FROM price_monitor_run WHERE id = 1")).scalar_one() == 3_600_000_000
+
+
+def test_the_run_byte_column_is_a_bigint_in_postgres(pg):
+    _old_tables(pg)
+    session.init_db()
+    types = {c["name"]: str(c["type"]).upper() for c in inspect(pg).get_columns("price_monitor_run")}
+    assert types["web_bytes"] == "BIGINT"
+    # el contador de un snapshot suelto (1-2 búsquedas) cabe en 32 bits: no hace falta más
+    assert types["web_searches"] == "INTEGER"
+
+
+def test_the_retention_prune_runs_on_postgres(pg, monkeypatch):
+    from datetime import timedelta
+
+    from app.clock import utcnow
+    from app.pricing import price_monitor
+
+    _old_tables(pg)
+    session.init_db()
+    monkeypatch.setattr(price_monitor, "engine", pg)
+    with Session(pg) as s:
+        old = models.PriceMonitorRun(status="ok", started_at=utcnow() - timedelta(days=300))
+        new = models.PriceMonitorRun(status="ok", started_at=utcnow() - timedelta(days=1))
+        s.add(old)
+        s.add(new)
+        s.commit()
+        s.refresh(old)
+        s.refresh(new)
+        for pid, run, days in (("1", old, 290), ("1", new, 1), ("2", old, 290)):
+            s.add(models.MarketPriceSnapshot(run_id=run.id, product_id=pid,
+                                             captured_at=utcnow() - timedelta(days=days)))
+        s.commit()
+        old_id = old.id
+    price_monitor.prune_snapshots(180)                           # se va el viejo del 1; el del 2 es su último
+    with Session(pg) as s:
+        mine = sorted((x.product_id, x.run_id) for x in s.exec(select(models.MarketPriceSnapshot))
+                      if x.product_id in ("1", "2"))
+    assert mine == [("1", old_id + 1), ("2", old_id)]

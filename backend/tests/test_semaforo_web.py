@@ -386,7 +386,7 @@ def test_the_setting_defaults_to_measuring_disabled_products(monkeypatch):
     from app.config import get_settings
 
     assert get_settings().pm_include_disabled == 1
-    assert get_settings().pm_ml_web_daily_budget == 2000
+    assert get_settings().pm_ml_web_daily_budget == 2500
 
 
 # ─── "No es el mismo" ─────────────────────────────────────────────────────

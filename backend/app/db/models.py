@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import Index
+from sqlalchemy import BigInteger, Column, Index
 from sqlmodel import Field, SQLModel
 
 from app.clock import utcnow
@@ -210,7 +210,9 @@ class PriceMonitorRun(SQLModel, table=True):
     # el navegador por el proxy (piso del consumo real: Request.sizes).
     web_status: str | None = Field(default=None)
     web_searches: int = Field(default=0)
-    web_bytes: int = Field(default=0)
+    # 64 bits: una noche sin bloquear scripts son ~3,4 GB y un INTEGER de
+    # Postgres aguanta 2,1 GB (el UPDATE reventaba con NumericValueOutOfRange).
+    web_bytes: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, default=0))
     web_blocked: int = Field(default=0)
     # Productos cuyo precio salió de la web (no de una ficha de la API).
     n_web_ok: int = Field(default=0)

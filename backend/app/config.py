@@ -322,6 +322,11 @@ class Settings(BaseSettings):
     # Retención de snapshots de precio: se borran los PriceHistory más viejos
     # que esto (días). Evita que la tabla crezca sin techo en Supabase. 0 = nunca.
     price_history_retention_days: int = 120
+    # Retención de las tablas del semáforo (`market_price_snapshot` y las corridas
+    # sin snapshots que les queden): snapshots de más de estos días, salvo el
+    # último de cada producto. ~1.800 filas por noche con el JSON de las
+    # publicaciones: sin poda crecería sin techo. 0 = nunca.
+    price_monitor_retention_days: int = 180
 
     # ── Budget diario de calls a OTAPI (RapidAPI) ──────────────
     # Cap defensivo: si llegamos a este número de snapshots 1688_otapi
@@ -388,7 +393,7 @@ class Settings(BaseSettings):
     # Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar con Camoufox +
     # BROWSER_PROXY) para los productos sin ficha de catálogo IGUAL en la API.
     # Ver app/pricing/market_ml_web.py. 0 = apagada.
-    pm_ml_web_daily_budget: int = 2000
+    pm_ml_web_daily_budget: int = 2500
     pm_ml_web_max_results: int = 8
     pm_ml_web_concurrency: int = 1
     pm_ml_web_pause_s: float = 4.0

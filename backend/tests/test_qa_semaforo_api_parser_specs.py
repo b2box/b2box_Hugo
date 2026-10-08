@@ -483,9 +483,6 @@ def test_a_verification_redirect_with_an_empty_state_is_still_a_block():
 # ─── columnas nuevas en Postgres (criterio 8) ──────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L7: price_monitor_run.web_bytes es INTEGER de 32 bits (2,1 GB): con "
-                                       "pm_ml_web_block_scripts=0 (3,4 GB por noche según el README) el UPDATE "
-                                       "revienta en Postgres con NumericValueOutOfRange. Debe ser BigInteger")
 def test_the_run_byte_counter_does_not_overflow_in_postgres():
     col = PriceMonitorRun.__table__.c.web_bytes
     assert isinstance(col.type, BigInteger)

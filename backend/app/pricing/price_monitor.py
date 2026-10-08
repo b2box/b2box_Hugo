@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, update
+from sqlalchemy import delete, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
@@ -1063,6 +1063,40 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
              run.llm_cost_usd, run.web_status, run.web_searches, run.web_bytes / 1_048_576)
     return {"run_id": run_id, "status": status, "counts": counts,
             "ml_requests_used": run.ml_requests_used, "llm_calls": run.llm_calls}
+
+
+# ─── Retención ────────────────────────────────────────────────────
+
+
+def prune_snapshots(retention_days: int) -> tuple[int, int]:
+    """Borra los snapshots de más de `retention_days` días, salvo el ÚLTIMO de cada
+    producto (es el dato vigente: color anterior, última medición), y después las
+    corridas viejas que se quedaron sin snapshots. Una corrida en curso o con
+    snapshots vigentes no se toca. Devuelve (snapshots, corridas) borrados; con
+    0 días no hace nada."""
+    if retention_days <= 0:
+        return 0, 0
+    cutoff = utcnow() - timedelta(days=retention_days)
+    with Session(engine) as s:
+        latest = select(func.max(MarketPriceSnapshot.id)).group_by(MarketPriceSnapshot.product_id)
+        snaps = s.execute(
+            delete(MarketPriceSnapshot).where(
+                MarketPriceSnapshot.captured_at < cutoff,  # type: ignore[arg-type]
+                MarketPriceSnapshot.id.notin_(latest),  # type: ignore[union-attr]
+            )
+        ).rowcount or 0
+        used = select(MarketPriceSnapshot.run_id).distinct()
+        runs = s.execute(
+            delete(PriceMonitorRun).where(
+                PriceMonitorRun.started_at < cutoff,  # type: ignore[arg-type]
+                PriceMonitorRun.status != RUN_RUNNING,
+                PriceMonitorRun.id.notin_(used),  # type: ignore[union-attr]
+            )
+        ).rowcount or 0
+        s.commit()
+    if snaps or runs:
+        log.info("prune: %d snapshots y %d corridas del semáforo de más de %d días", snaps, runs, retention_days)
+    return int(snaps), int(runs)
 
 
 # ─── "No es el mismo" ─────────────────────────────────────────────

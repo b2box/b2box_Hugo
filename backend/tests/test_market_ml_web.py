@@ -338,7 +338,7 @@ def test_with_proxy_and_budget_it_runs(monkeypatch):
     assert web.disabled_reason() is None
     runtime.set_value("pm_ml_web_max_results", 5)
     src = web.from_runtime()
-    assert (src.budget, src.max_results, src.block_streak) == (2000, 5, 5)
+    assert (src.budget, src.max_results, src.block_streak) == (2500, 5, 5)
     assert src._block_scripts is True and src.pause_s == 4.0 and src._sem._value == 1
 
 
