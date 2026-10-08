@@ -5,9 +5,11 @@ import {
   getPriceMonitorSnapshots,
   getPriceMonitorSummary,
   markNotTheSame,
+  markTheSame,
   runPriceMonitor,
-  undoNotTheSame,
+  undoFeedback,
   type EnabledFilter,
+  type EstimatedFilter,
   type MatchFilter,
 } from "../api";
 import { Card } from "@/components/ui/card";
@@ -23,6 +25,7 @@ import type {
   MatchCategory,
   MatchOrigin,
   MatchedListing,
+  MatchState,
   MlStatus,
   OurSpecs,
   PriceMonitorRun,
@@ -37,11 +40,11 @@ import type {
 const PAGE_SIZE = 25;
 const COLOR_ORDER: SemaforoColor[] = ["verde", "amarillo", "rojo", "sin_dato"];
 
-export const COLOR_META: Record<SemaforoColor, { label: string; dot: string; chip: string }> = {
-  verde: { label: "Verde", dot: "bg-success", chip: "border-success/40 text-success" },
-  amarillo: { label: "Amarillo", dot: "bg-warning", chip: "border-warning/40 text-warning" },
-  rojo: { label: "Rojo", dot: "bg-destructive", chip: "border-destructive/40 text-destructive" },
-  sin_dato: { label: "Sin dato", dot: "bg-muted-foreground", chip: "border-border text-muted-foreground" },
+export const COLOR_META: Record<SemaforoColor, { label: string; dot: string; chip: string; ring: string }> = {
+  verde: { label: "Verde", dot: "bg-success", chip: "border-success/40 text-success", ring: "border-success" },
+  amarillo: { label: "Amarillo", dot: "bg-warning", chip: "border-warning/40 text-warning", ring: "border-warning" },
+  rojo: { label: "Rojo", dot: "bg-destructive", chip: "border-destructive/40 text-destructive", ring: "border-destructive" },
+  sin_dato: { label: "Sin dato", dot: "bg-muted-foreground", chip: "border-border text-muted-foreground", ring: "border-muted-foreground" },
 };
 
 const STATUS_LABEL: Record<MlStatus, string> = {
@@ -73,6 +76,8 @@ const SOURCE_LABEL: Record<string, string> = {
   "clip+nombre": "foto + nombre",
   llm: "juez IA",
   specs: "medidas",
+  ambiguo: "sin confirmar",
+  manual: "marcado por una persona",
 };
 const DIFFERENCE_LABEL: Record<string, string> = {
   marca: "marca",
@@ -98,12 +103,24 @@ const ENABLED_OPTIONS: { value: EnabledFilter; label: string }[] = [
   { value: "enabled", label: "Habilitados" },
   { value: "disabled", label: "Deshabilitados" },
 ];
-const MATCH_OPTIONS: { value: MatchFilter | null; label: string }[] = [
+// Qué devolvió ML para el producto. El orden es el de "más a menos parecido".
+const MATCH_OPTIONS: { value: MatchFilter | null; label: string; state?: "igual" | "solo_similar" | "solo_diferente" | "ninguno" }[] = [
   { value: null, label: "Todos" },
-  { value: "igual", label: "Con igual" },
-  { value: "similar", label: "Con parecidos" },
-  { value: "solo_similar", label: "Solo parecidos" },
+  { value: "igual", label: "Tiene idéntico", state: "igual" },
+  { value: "solo_similar", label: "Solo similares", state: "solo_similar" },
+  { value: "solo_diferente", label: "Solo diferentes", state: "solo_diferente" },
+  { value: "ninguno", label: "Sin resultados", state: "ninguno" },
 ];
+const ESTIMATED_COLORS: ("verde" | "amarillo" | "rojo")[] = ["verde", "amarillo", "rojo"];
+
+// El estado de un producto en una frase corta (debajo del color).
+const STATE_LABEL: Record<MatchState, string> = {
+  igual: "con dato",
+  igual_sin_precio: "idéntico, sin precio que cuente",
+  similar: "solo similares",
+  diferente: "solo diferentes",
+  ninguno: "sin dato: ML no devolvió nada",
+};
 const ORIGIN_OPTIONS: { value: MatchOrigin | null; label: string }[] = [
   { value: null, label: "Todos" },
   { value: "api", label: "Ficha API" },
@@ -223,6 +240,7 @@ export default function SemaforoView() {
   const [enabled, setEnabled] = useState<EnabledFilter>("all");
   const [match, setMatch] = useState<MatchFilter | null>(null);
   const [origin, setOrigin] = useState<MatchOrigin | null>(null);
+  const [estimated, setEstimated] = useState<EstimatedFilter | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -240,9 +258,11 @@ export default function SemaforoView() {
   const running = summaryQ.data?.running ?? false;
 
   const snapsQ = useQuery({
-    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin],
+    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin, estimated],
     queryFn: () =>
-      getPriceMonitorSnapshots({ page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin }),
+      getPriceMonitorSnapshots({
+        page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin, estimated,
+      }),
     placeholderData: keepPreviousData,
     // Mientras corre, la tabla de la corrida en curso va creciendo.
     refetchInterval: running ? 20_000 : false,
@@ -253,11 +273,21 @@ export default function SemaforoView() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const colorCounts = data?.colors ?? {};
+  const estimatedCounts = data?.estimated_colors ?? {};
+  const stateCounts = data?.states ?? {};
   const allCount = COLOR_ORDER.reduce((acc, c) => acc + (colorCounts[c] ?? 0), 0);
   const lastRun = summaryQ.data?.last_run ?? null;
 
   function pickColor(c: SemaforoColor | null) {
     setColor(c);
+    setEstimated(null);          // el color real y el estimado son filtros distintos: no se combinan
+    setPage(0);
+    setExpanded(null);
+  }
+
+  function pickEstimated(e: EstimatedFilter | null) {
+    setEstimated(e);
+    setColor(null);
     setPage(0);
     setExpanded(null);
   }
@@ -350,6 +380,20 @@ export default function SemaforoView() {
             {COLOR_META[c].label} <span className="num-tabular">{nfmt(colorCounts[c] ?? 0)}</span>
           </FilterChip>
         ))}
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground ml-1" title="Productos sin idéntico: el color sale de la mediana de los similares. No es el color real.">
+          Estimado
+        </span>
+        {ESTIMATED_COLORS.map((c) => (
+          <FilterChip
+            key={c}
+            active={estimated === c}
+            onClick={() => pickEstimated(estimated === c ? null : c)}
+            className={cn("border-dashed", COLOR_META[c].chip)}
+          >
+            <span className={cn("w-2 h-2 rounded-full border bg-transparent", COLOR_META[c].ring)} />
+            {COLOR_META[c].label} <span className="num-tabular">{nfmt(estimatedCounts[c] ?? 0)}</span>
+          </FilterChip>
+        ))}
         <div className="relative ml-auto w-full sm:w-64">
           <IconSearch className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -372,9 +416,12 @@ export default function SemaforoView() {
           }}
         />
         <FilterGroup
-          label="Similitud"
+          label="ML devolvió"
           value={match}
-          options={MATCH_OPTIONS}
+          options={MATCH_OPTIONS.map((o) => ({
+            value: o.value,
+            label: o.state && stateCounts[o.state] != null ? `${o.label} ${nfmt(stateCounts[o.state] ?? 0)}` : o.label,
+          }))}
           onPick={(v) => {
             setMatch(v);
             resetView();
@@ -501,6 +548,17 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
       <span className="num-tabular">
         {nfmt(run.processed)}/{nfmt(run.total_products)} productos · {nfmt(run.ml_requests_used)} requests ML
       </span>
+      {run.estimated && (run.estimated.verde + run.estimated.amarillo + run.estimated.rojo + (run.solo_diferentes ?? 0)) > 0 && (
+        <span className="block mt-0.5">
+          Sin idéntico, color estimado por similares:{" "}
+          <span className="num-tabular">
+            {nfmt(run.estimated.verde)} verde · {nfmt(run.estimated.amarillo)} amarillo · {nfmt(run.estimated.rojo)} rojo
+          </span>
+          {(run.solo_diferentes ?? 0) > 0 && (
+            <span className="num-tabular"> · {nfmt(run.solo_diferentes ?? 0)} con solo diferentes</span>
+          )}
+        </span>
+      )}
       {run.web && (run.web.searches > 0 || run.web.status) && (
         <span className="block mt-0.5">
           ML web:{" "}
@@ -517,6 +575,58 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
       )}
     </p>
   );
+}
+
+// ¿Se muestra el color ESTIMADO (por similares) en vez del real? Solo sin idéntico.
+function isEstimated(s: PriceMonitorSnapshot): boolean {
+  return s.ml_status !== "ok" && !!s.estimated_color && s.estimated_from === "similar";
+}
+
+function stateOf(s: PriceMonitorSnapshot): MatchState | null {
+  if (s.match_state) return s.match_state;
+  if (s.ml_status === "ok") return "igual";
+  if (s.ml_status === "no_data") {
+    if ((s.similar_count ?? 0) > 0) return "similar";
+    return (s.other_count ?? 0) > 0 ? "diferente" : "ninguno";
+  }
+  return null;
+}
+
+// La frase corta debajo del color: qué devolvió ML (o por qué no se pudo medir).
+function statusText(s: PriceMonitorSnapshot): string {
+  if (isEstimated(s)) return "estimado por similares";
+  const st = stateOf(s);
+  return st ? STATE_LABEL[st] : STATUS_LABEL[s.ml_status];
+}
+
+// Punto HUECO (borde, sin relleno): es el color ESTIMADO, no el real.
+export function EstimatedDot({ color }: { color: SemaforoColor }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground italic"
+      title="Color estimado con la mediana de los similares. No es el color real."
+    >
+      <span className={cn("w-2.5 h-2.5 rounded-full shrink-0 border-2 bg-transparent", COLOR_META[color].ring)} />
+      {COLOR_META[color].label} estimado
+    </span>
+  );
+}
+
+// La celda del color: el REAL (punto lleno) solo con idénticos; sin idénticos y con
+// similares, el ESTIMADO (punto hueco); con solo diferentes, su propio estado; "Sin
+// dato" únicamente cuando ML no devolvió nada (o falló).
+function ColorCell({ s }: { s: PriceMonitorSnapshot }) {
+  if (s.ml_status === "ok") return <ColorDot color={s.color} />;
+  if (isEstimated(s)) return <EstimatedDot color={s.estimated_color!} />;
+  const st = stateOf(s);
+  if (st === "diferente" || st === "similar" || st === "igual_sin_precio") {
+    return (
+      <Badge variant="outline" title="ML devolvió publicaciones, pero ninguna idéntica con precio: no hay color">
+        {st === "diferente" ? "Solo diferentes" : st === "similar" ? "Solo similares" : "Idéntico sin precio"}
+      </Badge>
+    );
+  }
+  return <ColorDot color="sin_dato" />;
 }
 
 function SnapshotRow({
@@ -548,15 +658,26 @@ function SnapshotRow({
         </button>
       </td>
       <td className="px-3 py-2 whitespace-nowrap">
-        <ColorDot color={s.color} />
+        <ColorCell s={s} />
         {s.prev_color && s.prev_color !== s.color && (
           <span className="block text-[11px] text-muted-foreground mt-0.5">antes: {COLOR_META[s.prev_color].label}</span>
         )}
         <span className="block text-[11px] text-muted-foreground mt-0.5" title={s.ml_error ?? undefined}>
-          {STATUS_LABEL[s.ml_status]}
+          {statusText(s)}
         </span>
       </td>
-      <td className="px-3 py-2 text-right num-tabular whitespace-nowrap">{fmtArs(s.ml_median_cents)}</td>
+      <td className="px-3 py-2 text-right num-tabular whitespace-nowrap">
+        {isEstimated(s) ? (
+          <span
+            className="italic text-muted-foreground"
+            title={`Estimado: mediana de ${s.estimated_listing_count} similar(es). No es el precio de un idéntico.`}
+          >
+            ~{fmtArs(s.estimated_median_cents)}
+          </span>
+        ) : (
+          fmtArs(s.ml_median_cents)
+        )}
+      </td>
       <td className="px-3 py-2 text-right num-tabular whitespace-nowrap">{fmtArs(s.ml_min_cents)}</td>
       <td className="px-3 py-2 text-right num-tabular whitespace-nowrap">
         {s.ml_status === "ok" ? (
@@ -564,6 +685,11 @@ function SnapshotRow({
             {s.ml_listing_count}
             <span className="block text-[11px] text-muted-foreground">{s.ml_seller_count} vend.</span>
           </>
+        ) : isEstimated(s) ? (
+          <span className="italic text-muted-foreground">
+            {s.estimated_listing_count}
+            <span className="block text-[11px]">similares</span>
+          </span>
         ) : (
           "—"
         )}
@@ -572,12 +698,24 @@ function SnapshotRow({
         {fmtArs(s.our_price_cents)}
         {s.tier_used && <span className="block text-[11px] text-muted-foreground">{s.tier_used}</span>}
       </td>
-      <td className={cn("px-3 py-2 text-right num-tabular font-semibold whitespace-nowrap", marginClass(s.color))}>
-        {fmtPct(s.est_margin_pct)}
-      </td>
+      {isEstimated(s) ? (
+        <td
+          className={cn("px-3 py-2 text-right num-tabular italic whitespace-nowrap opacity-80", marginClass(s.estimated_color!))}
+          title="Ganancia estimada con la mediana de los similares. No es el color real."
+        >
+          {fmtPct(s.estimated_margin_pct)}
+          <span className="block text-[11px] font-normal text-muted-foreground">estimada</span>
+        </td>
+      ) : (
+        <td className={cn("px-3 py-2 text-right num-tabular font-semibold whitespace-nowrap", marginClass(s.color))}>
+          {fmtPct(s.est_margin_pct)}
+        </td>
+      )}
       <td className="px-3 py-2">
         {s.matched_listings.length === 0 ? (
-          (s.similar_count ?? 0) === 0 && <span className="text-xs text-muted-foreground">—</span>
+          (s.similar_count ?? 0) + (s.other_count ?? 0) + (s.unpriced_listings?.length ?? 0) === 0 && (
+            <span className="text-xs text-muted-foreground">—</span>
+          )
         ) : (
           <div className="space-y-0.5">
             {s.matched_listings.slice(0, 3).map((m) => (
@@ -603,6 +741,7 @@ function SnapshotRow({
           </div>
         )}
         <SimilarChip s={s} />
+        <OtherChip s={s} />
         {s.web_state && s.web_state !== "ok" && s.ml_status !== "ok" && (
           <span className="block text-[11px] text-muted-foreground mt-0.5" title={s.ml_error ?? undefined}>
             {WEB_STATE_LABEL[s.web_state]}
@@ -674,27 +813,43 @@ function FilterGroup<T extends string | null>({
   );
 }
 
-// Chip gris con borde punteado: lo parecido NO usa verde/amarillo/rojo ni porcentaje de
-// ganancia, y no cambia el color del producto.
+// Chip gris con borde punteado: lo similar NO usa el punto lleno de verde/amarillo/rojo
+// (el color real es solo de los idénticos); su color estimado va aparte, con punto hueco.
 function SimilarChip({ s }: { s: PriceMonitorSnapshot }) {
   const n = s.similar_count ?? 0;
   if (n === 0) return null;
   const ref = (s.similar_listings ?? []).map((m) => m.price_cents).filter((p): p is number => p != null);
-  const lead = s.ml_status === "ok" ? "" : "Sin igual · ";
+  const lead = s.ml_status === "ok" ? "" : "Sin idéntico · ";
   return (
     <span
       className="inline-flex mt-1 px-2 py-0.5 rounded-full border border-dashed border-border text-[11px] text-muted-foreground"
-      title="Publicaciones parecidas (otra marca conocida, pack, medidas o capacidad). Sirven de referencia y no cuentan para el color."
+      title="Publicaciones similares (otra marca conocida, pack, medidas o capacidad, o parecidas sin confirmar). Sin idéntico dan el color estimado; nunca el real."
     >
       {lead}
-      {n} {n === 1 ? "parecido" : "parecidos"}
+      {n} {n === 1 ? "similar" : "similares"}
       {ref.length > 0 && ` · ref. ${fmtArs(Math.min(...ref))}`}
     </span>
   );
 }
 
+// Solo diferentes: las publicaciones más parecidas que devolvió ML, con precio de referencia.
+function OtherChip({ s }: { s: PriceMonitorSnapshot }) {
+  const n = s.other_count ?? 0;
+  if (n === 0) return null;
+  const closest = (s.other_listings ?? []).find((m) => m.price_cents != null);
+  return (
+    <span
+      className="inline-flex mt-1 ml-1 px-2 py-0.5 rounded-full border border-dotted border-border text-[11px] text-muted-foreground"
+      title="Publicaciones que devolvió ML pero son otro producto. Se muestran con su precio como referencia y no cuentan para ningún color."
+    >
+      {n} {n === 1 ? "diferente" : "diferentes"}
+      {closest && ` · la más parecida ${fmtArs(closest.price_cents)}`}
+    </span>
+  );
+}
+
 function verdictText(m: MatchedListing, category: MatchCategory): string {
-  const parts = [category === "igual" ? "Igual" : "Similar"];
+  const parts = [category === "igual" ? "Idéntico" : category === "similar" ? "Similar" : "Diferente"];
   if (m.origin) parts.push(ORIGIN_LABEL[m.origin]);
   let via = SOURCE_LABEL[m.source ?? ""] ?? m.source ?? "";
   if (m.source === "llm") via = `juez IA${m.confidence != null ? ` ${pct(m.confidence)}` : ""}`;
@@ -703,17 +858,22 @@ function verdictText(m: MatchedListing, category: MatchCategory): string {
   return parts.join(" · ");
 }
 
-// Qué encontramos en Mercado Libre: lo IGUAL (cuenta para el color) y lo PARECIDO
-// (solo referencia), cada publicación con su % de foto y de nombre, de dónde salió y
-// el botón "No es el mismo".
+type Pending = { mlId: string; title: string; kind: "same" | "not_same"; undone: boolean };
+
+// Qué encontramos en Mercado Libre. Siempre se muestra lo que devolvió ML, en tres
+// listas: idénticos (cuentan para el color real), similares (dan el color estimado) y
+// diferentes (solo referencia). Cada publicación con su % de foto y de nombre, precio,
+// link, de dónde salió y el motivo. "No es el mismo" sobre un idéntico; "Es el mismo"
+// sobre un similar o un diferente: los dos piden confirmación y se pueden deshacer.
 function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [asking, setAsking] = useState<string | null>(null);
-  const [removed, setRemoved] = useState<{ mlId: string; title: string; undone: boolean } | null>(null);
+  const [done, setDone] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const igual = s.matched_listings;
+  const igual = [...s.matched_listings, ...(s.unpriced_listings ?? [])];
   const similar = s.similar_listings ?? [];
+  const other = s.other_listings ?? [];
 
   async function refresh() {
     await Promise.all([
@@ -723,13 +883,13 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
     ]);
   }
 
-  async function notSame(m: MatchedListing) {
+  async function correct(m: MatchedListing, kind: "same" | "not_same") {
     setBusy(m.ml_id);
     setError(null);
     try {
-      await markNotTheSame(s.id, m.ml_id);
+      await (kind === "same" ? markTheSame(s.id, m.ml_id) : markNotTheSame(s.id, m.ml_id));
       setAsking(null);
-      setRemoved({ mlId: m.ml_id, title: m.title || m.ml_id, undone: false });
+      setDone({ mlId: m.ml_id, title: m.title || m.ml_id, kind, undone: false });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
@@ -739,12 +899,12 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
   }
 
   async function undo() {
-    if (!removed) return;
-    setBusy(removed.mlId);
+    if (!done) return;
+    setBusy(done.mlId);
     setError(null);
     try {
-      await undoNotTheSame(s.product.id, removed.mlId);
-      setRemoved({ ...removed, undone: true });
+      await undoFeedback(s.product.id, done.mlId);
+      setDone({ ...done, undone: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo deshacer");
     } finally {
@@ -754,6 +914,22 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
 
   const specsLine = ourDimsText(s.our_specs);
   const webNote = s.web_state && s.web_state !== "ok" && s.ml_error ? s.ml_error : null;
+  const cards = (list: MatchedListing[], category: MatchCategory) => (
+    <div className="space-y-1.5">
+      {list.map((m) => (
+        <ListingCard
+          key={m.ml_id}
+          m={m}
+          category={category}
+          busy={busy === m.ml_id}
+          asking={asking === m.ml_id}
+          onAsk={() => setAsking(m.ml_id)}
+          onCancel={() => setAsking(null)}
+          onConfirm={() => correct(m, category === "igual" ? "not_same" : "same")}
+        />
+      ))}
+    </div>
+  );
 
   return (
     <div className="space-y-3">
@@ -763,17 +939,27 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
         </p>
       )}
       {webNote && <p className="text-xs text-muted-foreground">{webNote}</p>}
+      {isEstimated(s) && (
+        <p className="text-xs text-muted-foreground">
+          No hay idénticos: el color <span className="text-foreground">{COLOR_META[s.estimated_color!].label.toLowerCase()}</span>{" "}
+          es <span className="text-foreground">estimado</span> con la mediana de {s.estimated_listing_count}{" "}
+          similar(es) ({fmtArs(s.estimated_median_cents)}): ganancia estimada{" "}
+          <span className="text-foreground">{fmtPct(s.estimated_margin_pct)}</span>. No es el color real.
+        </p>
+      )}
       {error && <p className="text-xs text-destructive">{error}</p>}
-      {removed && (
+      {done && (
         <p className="flex items-center gap-2 flex-wrap p-2 rounded-md border border-border bg-muted/40 text-xs">
-          {removed.undone ? (
+          {done.undone ? (
             <span>
-              Listo: la próxima corrida vuelve a considerar «{removed.title}». Este detalle se actualiza entonces.
+              Listo: la próxima corrida vuelve a juzgar «{done.title}» sola. Este detalle se actualiza entonces.
             </span>
           ) : (
             <>
               <span>
-                Se sacó «{removed.title}» y no se va a usar para este producto en las próximas corridas.
+                {done.kind === "same"
+                  ? `«${done.title}» pasó a idéntica y cuenta para el color; la próxima corrida la respeta.`
+                  : `«${done.title}» pasó a diferentes y no se va a usar para este producto en las próximas corridas.`}
               </span>
               <Button variant="secondary" size="sm" disabled={busy !== null} onClick={undo}>
                 Deshacer
@@ -785,48 +971,39 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
 
       <div>
         <h4 className="text-xs font-semibold text-foreground mb-1.5">
-          Iguales <span className="font-normal text-muted-foreground">(cuentan para el color)</span>
+          Idénticos <span className="font-normal text-muted-foreground">(cuentan para el color real)</span>
         </h4>
         {igual.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Ninguna publicación igual a lo nuestro.</p>
+          <p className="text-xs text-muted-foreground">Ninguna publicación idéntica a lo nuestro.</p>
         ) : (
-          <div className="space-y-1.5">
-            {igual.map((m) => (
-              <ListingCard
-                key={m.ml_id}
-                m={m}
-                category="igual"
-                busy={busy === m.ml_id}
-                asking={asking === m.ml_id}
-                onAsk={() => setAsking(m.ml_id)}
-                onCancel={() => setAsking(null)}
-                onConfirm={() => notSame(m)}
-              />
-            ))}
-          </div>
+          cards(igual, "igual")
         )}
       </div>
 
-      {similar.length > 0 && (
-        <div>
-          <h4 className="text-xs font-semibold text-muted-foreground mb-1.5">
-            Parecidos <span className="font-normal">(no cuentan para el color; el precio es solo de referencia)</span>
-          </h4>
-          <div className="space-y-1.5">
-            {similar.map((m) => (
-              <ListingCard
-                key={m.ml_id}
-                m={m}
-                category="similar"
-                busy={busy === m.ml_id}
-                asking={asking === m.ml_id}
-                onAsk={() => setAsking(m.ml_id)}
-                onCancel={() => setAsking(null)}
-                onConfirm={() => notSame(m)}
-              />
-            ))}
-          </div>
-        </div>
+      <div>
+        <h4 className="text-xs font-semibold text-muted-foreground mb-1.5">
+          Similares <span className="font-normal">(dan el color estimado; el precio es de referencia)</span>
+        </h4>
+        {similar.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Ninguna publicación similar.</p>
+        ) : (
+          cards(similar, "similar")
+        )}
+      </div>
+
+      <div>
+        <h4 className="text-xs font-semibold text-muted-foreground mb-1.5">
+          Diferentes <span className="font-normal">(otro producto: solo referencia, no cuentan para nada)</span>
+        </h4>
+        {other.length === 0 ? (
+          <p className="text-xs text-muted-foreground">ML no devolvió publicaciones de otro producto.</p>
+        ) : (
+          cards(other, "diferente")
+        )}
+      </div>
+
+      {igual.length + similar.length + other.length === 0 && (
+        <p className="text-xs text-muted-foreground">ML no devolvió ninguna publicación para este producto.</p>
       )}
     </div>
   );
@@ -849,15 +1026,23 @@ function ListingCard({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const isSimilar = category === "similar";
+  const isIgual = category === "igual";
   const img = safeMlImage(m.image_url);
   const theirs = listingSpecsText(m.specs);
-  const price = isSimilar ? m.price_cents : m.median_cents;
+  // Idéntico con precio: la mediana de sus vendedores; el resto, el precio de referencia.
+  const price = isIgual && m.median_cents != null ? m.median_cents : m.price_cents;
+  const showReason = !isIgual || m.source === "manual";
+  const action = isIgual ? "No es el mismo" : "Es el mismo";
+  const confirmText = isIgual
+    ? "¿Seguro? Pasa a diferentes y no se usa en las próximas corridas."
+    : "¿Seguro? Pasa a idéntica, cuenta para el color real y la próxima corrida la respeta.";
   return (
     <div
       className={cn(
         "flex items-start gap-3 rounded-md border px-2.5 py-2",
-        isSimilar ? "border-dashed border-border bg-muted/30 text-muted-foreground" : "border-border bg-background",
+        category === "igual" && "border-border bg-background",
+        category === "similar" && "border-dashed border-border bg-muted/30 text-muted-foreground",
+        category === "diferente" && "border-dotted border-border bg-muted/20 text-muted-foreground",
       )}
     >
       <MiniThumb url={img} alt={m.title} />
@@ -873,11 +1058,11 @@ function ListingCard({
           <span className="truncate">{m.title || m.ml_id}</span>
         </a>
         <p className="text-[11px]">
-          <span className={cn("font-medium", !isSimilar && "text-foreground")}>{verdictText(m, category)}</span>
+          <span className={cn("font-medium", isIgual && "text-foreground")}>{verdictText(m, category)}</span>
           {" · "}foto <span className="num-tabular">{pct(m.image_score)}</span> · nombre{" "}
           <span className="num-tabular">{pct(m.name_score)}</span>
         </p>
-        {isSimilar && (m.differences?.length || m.reason) ? (
+        {showReason && ((m.differences?.length ?? 0) > 0 || m.reason) ? (
           <p className="text-[11px] flex flex-wrap items-center gap-1">
             {(m.differences ?? []).map((d) => (
               <Badge key={d} variant="outline">
@@ -887,36 +1072,32 @@ function ListingCard({
             {m.reason && <span className="italic">{m.reason}</span>}
           </p>
         ) : null}
-        {m.notes && m.notes.length > 0 && (
-          <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>
-        )}
+        {m.notes && m.notes.length > 0 && <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>}
         <p className="text-[11px]">
           {m.brand && <>marca {m.brand} · </>}
           {m.seller && <>vende {m.seller} · </>}
           {m.sold_quantity != null && <>{nfmt(m.sold_quantity)}+ vendidos · </>}
-          {!isSimilar && m.listings > 1 && <>{m.listings} publicaciones · </>}
+          {isIgual && m.listings > 1 && <>{m.listings} publicaciones · </>}
           {theirs && <>medidas de la publicación: {theirs}</>}
         </p>
       </div>
       <div className="text-right shrink-0 space-y-1">
-        <p className="text-xs num-tabular font-semibold">{fmtArs(price)}</p>
+        <p className="text-xs num-tabular font-semibold">{price != null ? fmtArs(price) : "sin precio"}</p>
         {asking ? (
           <div className="space-y-1 max-w-[210px]">
-            <p className="text-[11px] text-foreground">
-              ¿Seguro? Se saca de este producto y no se usa en las próximas corridas.
-            </p>
+            <p className="text-[11px] text-foreground">{confirmText}</p>
             <div className="flex justify-end gap-1.5">
               <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
                 Cancelar
               </Button>
               <Button size="sm" disabled={busy} onClick={onConfirm}>
-                {busy ? "Guardando…" : "Sí, no es el mismo"}
+                {busy ? "Guardando…" : `Sí, ${action.toLowerCase()}`}
               </Button>
             </div>
           </div>
         ) : (
           <Button variant="secondary" size="sm" disabled={busy} onClick={onAsk}>
-            No es el mismo
+            {action}
           </Button>
         )}
       </div>

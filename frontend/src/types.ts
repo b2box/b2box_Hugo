@@ -206,11 +206,17 @@ export interface PriceMonitorRun {
     bytes_per_search: number | null;
   };
   n_con_similares?: number;
+  // Color ESTIMADO por similares (aparte del real) y productos con solo diferentes.
+  estimated?: { verde: number; amarillo: number; rojo: number };
+  solo_diferentes?: number;
 }
 
 // De dónde salió una publicación y cómo se decidió que es (o se parece a) lo nuestro.
 export type MatchOrigin = "api" | "web";
-export type MatchCategory = "igual" | "similar";
+export type MatchCategory = "igual" | "similar" | "diferente";
+// Qué devolvió ML para un producto: idéntico (con o sin precio que cuente), solo
+// similares, solo diferentes, o nada ("sin dato" de verdad).
+export type MatchState = "igual" | "igual_sin_precio" | "similar" | "diferente" | "ninguno";
 export type WebState = "ok" | "empty" | "blocked" | "error" | "budget" | "off";
 
 export interface ListingSpecs {
@@ -280,8 +286,20 @@ export interface PriceMonitorSnapshot {
   ml_seller_count: number;
   ml_currency: string | null;
   matched_listings: MatchedListing[];
+  // Idénticos sin un precio que cuente (se muestran con los idénticos, no suman a la mediana).
+  unpriced_listings?: MatchedListing[];
   similar_count?: number;
   similar_listings?: MatchedListing[];
+  // Publicaciones DIFERENTES: se guardan y se muestran con su precio, no cuentan para nada.
+  other_count?: number;
+  other_listings?: MatchedListing[];
+  match_state?: MatchState | null;
+  // Color ESTIMADO por la mediana de los similares (solo si no hay idéntico). No es el color real.
+  estimated_color?: SemaforoColor | null;
+  estimated_margin_pct?: number | null;
+  estimated_median_cents?: number | null;
+  estimated_listing_count?: number;
+  estimated_from?: "similar" | null;
   match_origin?: MatchOrigin | null;
   web_state?: WebState | null;
   web_searches?: number;
@@ -310,6 +328,9 @@ export interface PriceMonitorSnapshotsResponse {
   page_size: number;
   has_more: boolean;
   colors: Partial<Record<SemaforoColor, number>>;
+  // Aparte del color real: productos con color estimado y cuántos hay en cada estado.
+  estimated_colors?: Partial<Record<"verde" | "amarillo" | "rojo", number>>;
+  states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;
 }
 
 export interface PriceMonitorSummary {

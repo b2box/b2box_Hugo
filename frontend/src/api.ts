@@ -204,13 +204,16 @@ export interface SnapshotQuery {
   runId?: number | null;
   // Productos de Vendure: habilitados / deshabilitados / todos.
   enabled?: EnabledFilter;
-  // Similitud: con IGUAL, con parecidos guardados, o solo parecidos.
+  // Qué devolvió ML: idéntico, solo similares, solo diferentes, sin resultados.
   match?: MatchFilter | null;
   origin?: MatchOrigin | null;
+  // Color estimado por similares.
+  estimated?: EstimatedFilter | null;
 }
 
 export type EnabledFilter = "all" | "enabled" | "disabled";
-export type MatchFilter = "igual" | "similar" | "solo_similar";
+export type MatchFilter = "igual" | "similar" | "solo_similar" | "diferente" | "solo_diferente" | "ninguno";
+export type EstimatedFilter = "verde" | "amarillo" | "rojo" | "any";
 
 export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<PriceMonitorSnapshotsResponse> {
   const params = new URLSearchParams({ page: String(query.page), page_size: String(query.pageSize) });
@@ -220,6 +223,7 @@ export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<Pr
   if (query.enabled && query.enabled !== "all") params.set("enabled", query.enabled);
   if (query.match) params.set("match", query.match);
   if (query.origin) params.set("origin", query.origin);
+  if (query.estimated) params.set("estimated", query.estimated);
   return asJson<PriceMonitorSnapshotsResponse>(await apiFetch("/api/price-monitor/snapshots?" + params));
 }
 
@@ -246,12 +250,23 @@ export async function markNotTheSame(snapshotId: number, mlId: string): Promise<
   return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
 }
 
-// Deshacer "No es el mismo": la próxima corrida vuelve a considerar la publicación
-// (el detalle de hoy no se reconstruye).
-export async function undoNotTheSame(productId: string, mlId: string): Promise<void> {
+// "Es el mismo": una publicación SIMILAR o DIFERENTE pasa a idéntica (recalcula el color
+// real) y la próxima corrida la respeta. Devuelve el snapshot actualizado.
+export async function markTheSame(snapshotId: number, mlId: string): Promise<PriceMonitorSnapshot> {
+  const r = await apiFetch(`/api/price-monitor/snapshots/${snapshotId}/same`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ml_id: mlId }),
+  });
+  return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
+}
+
+// Deshacer "No es el mismo" o "Es el mismo": la próxima corrida vuelve a juzgar la
+// publicación sola (el detalle de hoy no se reconstruye).
+export async function undoFeedback(productId: string, mlId: string): Promise<void> {
   await asJson<{ removed: boolean }>(
     await apiFetch(
-      `/api/price-monitor/products/${encodeURIComponent(productId)}/not-same/${encodeURIComponent(mlId)}`,
+      `/api/price-monitor/products/${encodeURIComponent(productId)}/feedback/${encodeURIComponent(mlId)}`,
       { method: "DELETE" },
     ),
   );
