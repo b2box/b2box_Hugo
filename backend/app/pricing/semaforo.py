@@ -23,7 +23,7 @@ cada corrida, así cambiar el 30 % recolorea la próxima pasada sin redeploy.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 VERDE = "verde"
@@ -129,6 +129,9 @@ class PricedVariant:
     price_with_tax_cents: int | None  # Vendure priceWithTax = IVA del tramo más barato
     currency: str | None
     tiers: tuple[PriceTier, ...] = ()
+    # Medidas de la variante (cm y kg; claves de market_specs.OurSpecs). Vacío si
+    # Vendure no las tiene. No participan del precio.
+    specs: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
