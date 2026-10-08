@@ -10,6 +10,8 @@ import type {
   BulkConfirmResult,
   HealthMetrics,
   HistoryResponse,
+  MatchOrigin,
+  PriceMonitorSnapshot,
   PriceMonitorSnapshotsResponse,
   PriceMonitorSummary,
   SectionsResponse,
@@ -200,13 +202,24 @@ export interface SnapshotQuery {
   color?: SemaforoColor | null;
   q?: string;
   runId?: number | null;
+  // Productos de Vendure: habilitados / deshabilitados / todos.
+  enabled?: EnabledFilter;
+  // Similitud: con IGUAL, con parecidos guardados, o solo parecidos.
+  match?: MatchFilter | null;
+  origin?: MatchOrigin | null;
 }
+
+export type EnabledFilter = "all" | "enabled" | "disabled";
+export type MatchFilter = "igual" | "similar" | "solo_similar";
 
 export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<PriceMonitorSnapshotsResponse> {
   const params = new URLSearchParams({ page: String(query.page), page_size: String(query.pageSize) });
   if (query.color) params.set("color", query.color);
   if (query.q && query.q.trim()) params.set("q", query.q.trim());
   if (query.runId) params.set("run_id", String(query.runId));
+  if (query.enabled && query.enabled !== "all") params.set("enabled", query.enabled);
+  if (query.match) params.set("match", query.match);
+  if (query.origin) params.set("origin", query.origin);
   return asJson<PriceMonitorSnapshotsResponse>(await apiFetch("/api/price-monitor/snapshots?" + params));
 }
 
@@ -220,6 +233,17 @@ export async function getPriceMonitorHistory(
 // para la UI, es un aviso.
 export async function runPriceMonitor(): Promise<Response> {
   return apiFetch("/api/price-monitor/run", { method: "POST" });
+}
+
+// "No es el mismo": saca la publicación del snapshot (que se recalcula) y la excluye
+// para ese producto en las próximas corridas. Devuelve el snapshot actualizado.
+export async function markNotTheSame(snapshotId: number, mlId: string): Promise<PriceMonitorSnapshot> {
+  const r = await apiFetch(`/api/price-monitor/snapshots/${snapshotId}/not-same`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ml_id: mlId }),
+  });
+  return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
 }
 
 export async function getPriceMonitorSummary(): Promise<PriceMonitorSummary> {
