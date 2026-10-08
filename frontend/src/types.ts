@@ -245,6 +245,9 @@ export interface MatchedListing {
   differences?: string[];
   // Avisos que no cambian el veredicto (p. ej. "medida dudosa en Vendure").
   notes?: string[];
+  // Similares: ¿cuenta para el color estimado? Solo los confirmados (juez, medidas o una
+  // persona) sin diferencia de cantidad ni de capacidad y con precio en pesos.
+  in_estimate?: boolean;
   brand?: string | null;
   image_url?: string | null;
   seller?: string | null;

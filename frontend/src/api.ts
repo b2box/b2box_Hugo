@@ -261,10 +261,17 @@ export async function markTheSame(snapshotId: number, mlId: string): Promise<Pri
   return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
 }
 
-// Deshacer "No es el mismo" o "Es el mismo": la próxima corrida vuelve a juzgar la
-// publicación sola (el detalle de hoy no se reconstruye).
-export async function undoFeedback(productId: string, mlId: string): Promise<void> {
-  await asJson<{ removed: boolean }>(
+// Deshacer "No es el mismo" o "Es el mismo". Si la persona había cambiado de opinión
+// vuelve a la marca anterior (`restored`: 0 = "No es el mismo", 1 = "Es el mismo"); si
+// no, borra la marca y la próxima corrida vuelve a juzgar la publicación sola. El detalle
+// de hoy no se reconstruye.
+export interface UndoResult {
+  removed: boolean;
+  restored?: 0 | 1;
+}
+
+export async function undoFeedback(productId: string, mlId: string): Promise<UndoResult> {
+  return asJson<UndoResult>(
     await apiFetch(
       `/api/price-monitor/products/${encodeURIComponent(productId)}/feedback/${encodeURIComponent(mlId)}`,
       { method: "DELETE" },

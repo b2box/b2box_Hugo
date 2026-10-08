@@ -380,7 +380,7 @@ export default function SemaforoView() {
             {COLOR_META[c].label} <span className="num-tabular">{nfmt(colorCounts[c] ?? 0)}</span>
           </FilterChip>
         ))}
-        <span className="text-[11px] uppercase tracking-wide text-muted-foreground ml-1" title="Productos sin idéntico: el color sale de la mediana de los similares. No es el color real.">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground ml-1" title="Productos sin idéntico: el color sale de la mediana de los similares confirmados. No es el color real.">
           Estimado
         </span>
         {ESTIMATED_COLORS.map((c) => (
@@ -604,7 +604,7 @@ export function EstimatedDot({ color }: { color: SemaforoColor }) {
   return (
     <span
       className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground italic"
-      title="Color estimado con la mediana de los similares. No es el color real."
+      title="Color estimado con la mediana de los similares confirmados. No es el color real."
     >
       <span className={cn("w-2.5 h-2.5 rounded-full shrink-0 border-2 bg-transparent", COLOR_META[color].ring)} />
       {COLOR_META[color].label} estimado
@@ -670,7 +670,7 @@ function SnapshotRow({
         {isEstimated(s) ? (
           <span
             className="italic text-muted-foreground"
-            title={`Estimado: mediana de ${s.estimated_listing_count} similar(es). No es el precio de un idéntico.`}
+            title={`Estimado: mediana de ${s.estimated_listing_count} similar(es) confirmado(s). No es el precio de un idéntico.`}
           >
             ~{fmtArs(s.estimated_median_cents)}
           </span>
@@ -688,7 +688,7 @@ function SnapshotRow({
         ) : isEstimated(s) ? (
           <span className="italic text-muted-foreground">
             {s.estimated_listing_count}
-            <span className="block text-[11px]">similares</span>
+            <span className="block text-[11px]">confirmados</span>
           </span>
         ) : (
           "—"
@@ -701,7 +701,7 @@ function SnapshotRow({
       {isEstimated(s) ? (
         <td
           className={cn("px-3 py-2 text-right num-tabular italic whitespace-nowrap opacity-80", marginClass(s.estimated_color!))}
-          title="Ganancia estimada con la mediana de los similares. No es el color real."
+          title="Ganancia estimada con la mediana de los similares confirmados. No es el color real."
         >
           {fmtPct(s.estimated_margin_pct)}
           <span className="block text-[11px] font-normal text-muted-foreground">estimada</span>
@@ -848,6 +848,16 @@ function OtherChip({ s }: { s: PriceMonitorSnapshot }) {
   );
 }
 
+// Un similar muestra si cuenta para el color estimado y, si no, por qué.
+function estimateText(m: MatchedListing): string {
+  if (m.in_estimate) return "cuenta para el color estimado";
+  if (m.source === "ambiguo") return "no cuenta para el estimado: sin confirmar";
+  if (m.differences?.includes("cantidad")) return "no cuenta para el estimado: otro pack (su precio no es comparable)";
+  if (m.differences?.includes("capacidad")) return "no cuenta para el estimado: otra capacidad";
+  if (m.price_cents == null) return "no cuenta para el estimado: sin precio en pesos";
+  return "no cuenta para el estimado";
+}
+
 function verdictText(m: MatchedListing, category: MatchCategory): string {
   const parts = [category === "igual" ? "Idéntico" : category === "similar" ? "Similar" : "Diferente"];
   if (m.origin) parts.push(ORIGIN_LABEL[m.origin]);
@@ -858,7 +868,15 @@ function verdictText(m: MatchedListing, category: MatchCategory): string {
   return parts.join(" · ");
 }
 
-type Pending = { mlId: string; title: string; kind: "same" | "not_same"; undone: boolean };
+type Pending = {
+  mlId: string;
+  title: string;
+  kind: "same" | "not_same";
+  hasPrice: boolean;
+  undone: boolean;
+  // Si "Deshacer" volvió a una marca anterior: 1 = "Es el mismo", 0 = "No es el mismo".
+  restored?: 0 | 1;
+};
 
 // Qué encontramos en Mercado Libre. Siempre se muestra lo que devolvió ML, en tres
 // listas: idénticos (cuentan para el color real), similares (dan el color estimado) y
@@ -889,7 +907,7 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
     try {
       await (kind === "same" ? markTheSame(s.id, m.ml_id) : markNotTheSame(s.id, m.ml_id));
       setAsking(null);
-      setDone({ mlId: m.ml_id, title: m.title || m.ml_id, kind, undone: false });
+      setDone({ mlId: m.ml_id, title: m.title || m.ml_id, kind, hasPrice: m.price_cents != null, undone: false });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
@@ -903,8 +921,8 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
     setBusy(done.mlId);
     setError(null);
     try {
-      await undoFeedback(s.product.id, done.mlId);
-      setDone({ ...done, undone: true });
+      const r = await undoFeedback(s.product.id, done.mlId);
+      setDone({ ...done, undone: true, restored: r.restored });
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo deshacer");
     } finally {
@@ -942,9 +960,11 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
       {isEstimated(s) && (
         <p className="text-xs text-muted-foreground">
           No hay idénticos: el color <span className="text-foreground">{COLOR_META[s.estimated_color!].label.toLowerCase()}</span>{" "}
-          es <span className="text-foreground">estimado</span> con la mediana de {s.estimated_listing_count}{" "}
-          similar(es) ({fmtArs(s.estimated_median_cents)}): ganancia estimada{" "}
-          <span className="text-foreground">{fmtPct(s.estimated_margin_pct)}</span>. No es el color real.
+          es <span className="text-foreground">estimado</span> con {s.estimated_listing_count}{" "}
+          {s.estimated_listing_count === 1 ? "similar confirmado" : "similares confirmados"} (mediana{" "}
+          {fmtArs(s.estimated_median_cents)}): ganancia estimada{" "}
+          <span className="text-foreground">{fmtPct(s.estimated_margin_pct)}</span>. No es el color real. Los similares
+          sin confirmar, de otro pack o de otra capacidad se ven pero no cuentan.
         </p>
       )}
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -952,13 +972,18 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
         <p className="flex items-center gap-2 flex-wrap p-2 rounded-md border border-border bg-muted/40 text-xs">
           {done.undone ? (
             <span>
-              Listo: la próxima corrida vuelve a juzgar «{done.title}» sola. Este detalle se actualiza entonces.
+              {done.restored != null
+                ? `Listo: «${done.title}» volvió a la marca anterior («${done.restored === 1 ? "Es el mismo" : "No es el mismo"}»); la próxima corrida la respeta.`
+                : `Listo: la próxima corrida vuelve a juzgar «${done.title}» sola.`}{" "}
+              Este detalle se actualiza entonces.
             </span>
           ) : (
             <>
               <span>
                 {done.kind === "same"
-                  ? `«${done.title}» pasó a idéntica y cuenta para el color; la próxima corrida la respeta.`
+                  ? done.hasPrice
+                    ? `«${done.title}» pasó a idéntica y cuenta para el color; la próxima corrida la respeta.`
+                    : `«${done.title}» pasó a idéntica; cuenta para el color desde la próxima corrida (hoy no tiene precio).`
                   : `«${done.title}» pasó a diferentes y no se va a usar para este producto en las próximas corridas.`}
               </span>
               <Button variant="secondary" size="sm" disabled={busy !== null} onClick={undo}>
@@ -1035,7 +1060,9 @@ function ListingCard({
   const action = isIgual ? "No es el mismo" : "Es el mismo";
   const confirmText = isIgual
     ? "¿Seguro? Pasa a diferentes y no se usa en las próximas corridas."
-    : "¿Seguro? Pasa a idéntica, cuenta para el color real y la próxima corrida la respeta.";
+    : m.price_cents != null
+      ? "¿Seguro? Pasa a idéntica, cuenta para el color real y la próxima corrida la respeta."
+      : "¿Seguro? Pasa a idéntica; cuenta para el color desde la próxima corrida (hoy no tiene precio).";
   return (
     <div
       className={cn(
@@ -1073,6 +1100,9 @@ function ListingCard({
           </p>
         ) : null}
         {m.notes && m.notes.length > 0 && <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>}
+        {category === "similar" && (
+          <p className="text-[11px] italic">{estimateText(m)}</p>
+        )}
         <p className="text-[11px]">
           {m.brand && <>marca {m.brand} · </>}
           {m.seller && <>vende {m.seller} · </>}

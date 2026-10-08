@@ -244,8 +244,10 @@ primero** (foto y después nombre), en tres listas:
 Cada publicación lleva veredicto, **motivo corto** ("difiere en cantidad", "otro
 producto: la foto no se parece", lo que contestó el juez, "una persona la marcó…"),
 % de foto, % de nombre, precio en pesos (si lo tiene), link, origen (ficha API / web)
-y cómo se decidió. Los idénticos nunca se recortan (definen el precio); el tope
-reparte lo que queda entre similares y diferentes. No cuesta requests extra a la API
+y cómo se decidió. Los idénticos nunca se recortan (definen el precio), ni tampoco lo
+que **una persona marcó** ("Es el mismo" / "No es el mismo": esa card tiene que seguir
+visible para poder darla vuelta); el tope reparte lo que queda entre similares y
+diferentes. No cuesta requests extra a la API
 de ML: el precio de una ficha de la API solo se conoce si ya se había pedido (el
 juez lo pide); las de la web siempre traen precio.
 
@@ -255,15 +257,21 @@ juez lo pide); las de la web siempre traen precio.
 |---|---|---|---|
 | `igual` | color real, mediana, ganancia | verde / amarillo / rojo | no hay |
 | `igual_sin_precio` | "Idéntico sin precio" (hay idénticos, ninguno con vendedores que cuenten) | sin dato | por similares, si hay |
-| `similar` | "Solo similares" | sin dato | **sí**, si algún similar tiene precio |
+| `similar` | "Solo similares" | sin dato | **sí**, si algún similar **confirmado** tiene precio |
 | `diferente` | "Solo diferentes": las más parecidas con su precio | sin dato | no |
 | `ninguno` | "Sin dato": **ML no devolvió ningún resultado** (ni API ni web) | sin dato | no |
 
 Fallar o no poder evaluar (`failed` / `skipped`) sigue siendo aparte y no tiene estado.
 
-**Color estimado.** Sin idéntico pero con similares con precio (en pesos y, en la web,
-con ventas suficientes), se calcula con la **mediana de los similares y la misma
-fórmula de ganancia y los mismos cortes** que el color real. Va en campos aparte
+**Color estimado.** Sin idéntico pero con similares **confirmados** con precio (en
+pesos y, en la web, con ventas suficientes), se calcula con la **mediana de esos
+similares y la misma fórmula de ganancia y los mismos cortes** que el color real. Un
+similar está confirmado si lo decidió el **juez**, el **chequeo de medidas** o **una
+persona**, y su diferencia **no es la cantidad (pack) ni la capacidad** (su precio no
+es comparable con el nuestro). Los "sin confirmar" (banda ambigua sin juez), los de
+otro pack y los de otra capacidad **se siguen mostrando en la lista** con su etiqueta
+("no cuenta para el estimado: …") y su precio, pero no mueven el estimado; si no queda
+ningún similar confirmado no hay color estimado y el producto muestra la lista igual. Va en campos aparte
 (`estimated_color`, `estimated_margin_pct`, `estimated_median_cents`,
 `estimated_listing_count`, `estimated_from = 'similar'`): `color`, `est_margin_pct`,
 la mediana real y **los contadores del color real (`n_verde`, `n_sin_dato`…) no
@@ -457,10 +465,14 @@ mismo"; los dos **piden confirmación**.
 Las dos se guardan en la tabla `market_match_feedback` (`label` 0 / 1, con los
 puntajes, el origen que tenía y **quién la marcó**: el usuario de la sesión), en una
 sola transacción con el snapshot y los contadores, y son idempotentes. Una persona
-puede cambiar de opinión (la fila se da vuelta). "Deshacer"
+puede cambiar de opinión (la fila se da vuelta y guarda la marca anterior en
+`previous_label`). "Deshacer"
 (`DELETE /api/price-monitor/products/{id}/feedback/{ml_id}`, también sirve el path
-viejo `…/not-same/{ml_id}`) borra la marca: la próxima corrida vuelve a juzgar sola;
-el detalle de hoy no se reconstruye. Esas filas son etiquetas para calibrar:
+viejo `…/not-same/{ml_id}`) **vuelve a la marca anterior** si hubo un cambio de opinión
+(`{"removed": false, "restored": 0|1}`) y, si no, borra la marca (`{"removed": true}`):
+la próxima corrida vuelve a juzgar sola; el detalle de hoy no se reconstruye. Un "Es el
+mismo" sobre una publicación sin precio la deja como idéntica sin precio: "cuenta para
+el color desde la próxima corrida". Esas filas son etiquetas para calibrar:
 `calibrate_market_match export` las saca ya etiquetadas (0 y 1).
 
 **Pendiente (B3, fuera de este PR): CSRF.** Los POST/DELETE del dashboard
