@@ -9,6 +9,7 @@ Lista canónica de claves editables: ver SETTINGS_SCHEMA abajo.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -396,6 +397,34 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
 
 _BY_KEY: dict[str, SettingMeta] = {m.key: m for m in SETTINGS_SCHEMA}
 
+# Pares (bajo, alto) que tienen que quedar ordenados. Un setting cruzado no
+# rompe el código (semaforo.color lo tolera) pero deja reglas sin sentido:
+# mejor rechazarlo al guardar, con un mensaje que diga qué choca con qué.
+_ORDERED_PAIRS: tuple[tuple[str, str], ...] = (
+    ("pm_yellow_min_pct", "pm_green_min_pct"),
+    ("pm_image_veto", "pm_image_threshold"),
+    ("pm_image_threshold", "pm_image_strong"),
+    ("pm_name_veto", "pm_name_threshold"),
+)
+
+
+def _check_order(key: str, value: Any) -> None:
+    for low, high in _ORDERED_PAIRS:
+        if key == low:
+            other = get(high)
+            if other is not None and value > other:
+                raise ValueError(
+                    f"«{_BY_KEY[low].label}» ({value}) no puede ser mayor que "
+                    f"«{_BY_KEY[high].label}» ({other}). Bajá este o subí aquel primero."
+                )
+        elif key == high:
+            other = get(low)
+            if other is not None and value < other:
+                raise ValueError(
+                    f"«{_BY_KEY[high].label}» ({value}) no puede ser menor que "
+                    f"«{_BY_KEY[low].label}» ({other}). Subí este o bajá aquel primero."
+                )
+
 
 def _refresh_cache() -> None:
     global _cache, _cache_loaded_at
@@ -466,12 +495,16 @@ def set_value(key: str, value: Any) -> Any:
         raise ValueError(f"'{key}' no es un setting runtime-editable")
     try:
         parsed = meta.parser(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"Valor inválido para {key}: {exc}") from exc
+    # NaN pasa los chequeos de min/max (toda comparación con NaN da False).
+    if isinstance(parsed, float) and not math.isfinite(parsed):
+        raise ValueError(f"{key} tiene que ser un número finito")
     if meta.min is not None and parsed < meta.min:
         raise ValueError(f"{key} debe ser >= {meta.min}")
     if meta.max is not None and parsed > meta.max:
         raise ValueError(f"{key} debe ser <= {meta.max}")
+    _check_order(key, parsed)
 
     with Session(engine) as session:
         existing = session.get(Setting, key)
@@ -489,8 +522,10 @@ def set_value(key: str, value: Any) -> Any:
 
 def reset_to_default(key: str) -> Any:
     """Borra el override de la DB; el setting vuelve al default del .env."""
-    if key not in _BY_KEY:
+    meta = _BY_KEY.get(key)
+    if meta is None:
         raise ValueError(f"'{key}' no existe")
+    _check_order(key, getattr(get_settings(), meta.default_attr))
     with Session(engine) as session:
         existing = session.get(Setting, key)
         if existing:
