@@ -793,20 +793,24 @@ async def test_shadow_run_with_the_real_vendure_client_only_reads_over_http(worl
     _set("pm_mode", 1)
 
     sent: list[dict] = []
-    real_send = httpx.AsyncClient.send
+    # Se intercepta en el transport HTTP del httpx que usa gql (httpx o httpx2,
+    # según lo instalado: ver app/vendure/client.py). ML usa su MockTransport y
+    # no pasa por acá.
+    gx = vendure_client_mod._gql_httpx
+    real_handle = gx.AsyncHTTPTransport.handle_async_request
 
-    async def intercept(self, request, **kw):
+    async def intercept(self, request):
         if request.url.host != "example.invalid":
-            return await real_send(self, request, **kw)  # ML sigue en su MockTransport
+            return await real_handle(self, request)
         body = json.loads(request.content)
         sent.append(body)
         if not body["query"].lstrip().startswith("query"):
-            return httpx.Response(500, json={"errors": [{"message": "escritura en sombra"}]}, request=request)
+            return gx.Response(500, json={"errors": [{"message": "escritura en sombra"}]}, request=request)
         items = [_raw_vendure_product(p) for p in FakeVendure.products]
-        return httpx.Response(200, json={"data": {"products": {"items": items, "totalItems": len(items)}}},
-                              request=request)
+        return gx.Response(200, json={"data": {"products": {"items": items, "totalItems": len(items)}}},
+                           request=request)
 
-    monkeypatch.setattr(httpx.AsyncClient, "send", intercept)
+    monkeypatch.setattr(gx.AsyncHTTPTransport, "handle_async_request", intercept)
     result = await price_monitor.run_price_monitor()
 
     assert result["status"] == "ok"
