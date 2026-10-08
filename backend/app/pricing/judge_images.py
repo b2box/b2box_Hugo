@@ -13,7 +13,8 @@ sigue):
     que resolver a IP pública (net_guard);
   * hasta 5 MB, content-type image/jpeg|png|webp|gif|bmp, y el formato real
     (lo que detecta Pillow) también tiene que ser uno de esos;
-  * timeout por foto (conexión, lectura y un tope total);
+  * timeouts de conexión y lectura por foto y un tope GLOBAL (DEADLINE_S) para
+    todas las fotos de la consulta juntas: lo que no llegó a tiempo se omite;
   * se reduce a 768 px de lado y se re-encodea JPEG: menos tokens.
 
 La descarga es async (httpx) y el decode/resize corre en un thread: nada de
@@ -47,7 +48,10 @@ JPEG_QUALITY = 85
 _MAX_PIXELS = 40_000_000
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # El read timeout de httpx es por chunk: un servidor que gotea bytes podría
-# estirar una foto indefinidamente. Este es el tope de punta a punta.
+# estirar una foto indefinidamente. Este es el tope de punta a punta de TODAS
+# las fotos de una consulta juntas (descarga + decode, contando la espera por
+# un lugar de la concurrencia). Un tope por foto con 4 en paralelo y 8 fotos
+# lentas tardaba 2 x DEADLINE_S.
 DEADLINE_S = 15.0
 _MAX_REDIRECTS = 3
 _CONCURRENCY = 4
@@ -156,27 +160,41 @@ def to_jpeg_data_url(raw: bytes) -> str:
 
 
 async def fetch_inline(http: httpx.AsyncClient, url: str) -> str:
-    raw = await asyncio.wait_for(download(http, url), DEADLINE_S)
+    """Una foto → data URL. Sin tope propio: lo pone `inline_images`."""
+    raw = await download(http, url)
     return await asyncio.to_thread(to_jpeg_data_url, raw)
 
 
 async def inline_images(urls: Sequence[str]) -> dict[str, str]:
     """{url: data URL} de las fotos que se pudieron bajar y procesar. Las que
-    fallan no aparecen (queda una línea INFO con el motivo). Nunca lanza."""
+    fallan o no llegan antes de DEADLINE_S no aparecen (queda una línea INFO
+    con el motivo). Nunca lanza."""
     unique = list(dict.fromkeys(u for u in urls if u))
     if not unique:
         return {}
     sem = asyncio.Semaphore(_CONCURRENCY)
 
-    async def one(http: httpx.AsyncClient, url: str) -> tuple[str, str | None]:
+    async def one(http: httpx.AsyncClient, url: str) -> str:
         async with sem:
-            try:
-                return url, await fetch_inline(http, url)
-            except Exception as exc:  # noqa: BLE001  (una foto rota no tira el veredicto)
-                log.info("Juez LLM: foto omitida %s (%s: %s)",
-                         url[:160], type(exc).__name__, str(exc)[:160])
-                return url, None
+            return await fetch_inline(http, url)
 
+    out: dict[str, str] = {}
     async with make_http_client() as http:
-        pairs = await asyncio.gather(*(one(http, u) for u in unique))
-    return {u: data for u, data in pairs if data}
+        tasks = {asyncio.ensure_future(one(http, u)): u for u in unique}
+        try:
+            # Deadline GLOBAL: lo que terminó, termina; el resto se cancela.
+            await asyncio.wait(tasks, timeout=DEADLINE_S)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+    for task, url in tasks.items():
+        if task.cancelled():
+            log.info("Juez LLM: foto omitida %s (no llegó en %.0f s)", url[:160], DEADLINE_S)
+        elif (exc := task.exception()) is not None:  # una foto rota no tira el veredicto
+            log.info("Juez LLM: foto omitida %s (%s: %s)", url[:160], type(exc).__name__, str(exc)[:160])
+        else:
+            out[url] = task.result()
+    return out

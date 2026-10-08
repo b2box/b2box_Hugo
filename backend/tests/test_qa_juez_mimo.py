@@ -388,9 +388,6 @@ async def test_c4_url_mode_sends_the_same_request_as_before(llm_env, clean_budge
 # ─── 5. tope de tiempo de las 8 fotos ──────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG QA-1: DEADLINE_S es por foto y la concurrencia es 4; con 8 fotos lentas "
-    "la descarga total tarda ~2 x DEADLINE_S (30 s con el default de 15 s)"))
 async def test_c5_eight_hanging_photos_finish_within_the_deadline(monkeypatch):
     deadline = 0.3
     monkeypatch.setattr(judge_images, "DEADLINE_S", deadline)

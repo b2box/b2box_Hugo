@@ -331,7 +331,8 @@ En base64:
 - solo se bajan fotos `https://` de `*.mlstatic.com` y del host de
   `VENDURE_API_URL` (de ahí salen las de nuestro catálogo); cada redirect se
   valida igual y el host tiene que resolver a una IP pública;
-- hasta 5 MB por foto, `image/jpeg|png|webp|gif|bmp`, timeout por foto;
+- hasta 5 MB por foto, `image/jpeg|png|webp|gif|bmp`, y un tope de 15 s para
+  todas las fotos de la consulta juntas (las que no llegan se omiten);
 - se reducen a 768 px de lado y se re-encodean JPEG;
 - una foto que falla se omite y el veredicto sigue; si no se pudo bajar
   ninguna foto nuestra, ese producto queda sin veredicto (no gasta cupo).

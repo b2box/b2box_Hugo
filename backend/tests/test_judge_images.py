@@ -276,6 +276,89 @@ async def test_a_photo_that_times_out_is_skipped(server, monkeypatch):
     assert set(out) == {OURS}
 
 
+def _mlstatic(n):
+    return [f"https://http2.mlstatic.com/D_{i}.jpg" for i in range(n)]
+
+
+async def test_the_deadline_is_global_not_per_photo(server, monkeypatch):
+    """8 fotos de 0,3 s con concurrencia 4 y tope de 0,45 s: terminan 4 (la
+    primera tanda); la segunda tanda se corta a los 0,45 s en vez de llegar a
+    0,6 s (con un tope por foto, las 8 entraban y el total pasaba de lo
+    permitido: 2 x tope en el peor caso)."""
+    monkeypatch.setattr(judge_images, "DEADLINE_S", 0.45)
+
+    async def slowish(request):
+        await asyncio.sleep(0.3)
+        return httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"}, request=request)
+
+    urls = _mlstatic(8)
+    for u in urls:
+        server.routes[u] = slowish
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    out = await judge_images.inline_images(urls)
+    elapsed = loop.time() - t0
+    assert set(out) == set(urls[:4])
+    assert 0.4 <= elapsed < 0.57
+
+
+async def test_what_finished_before_the_deadline_is_kept(server, monkeypatch):
+    monkeypatch.setattr(judge_images, "DEADLINE_S", 0.2)
+
+    async def hangs(request):
+        await asyncio.sleep(30)
+
+    urls = _mlstatic(6)
+    server.add(urls[0])
+    server.add(urls[1], body=image_bytes("PNG"), ctype="image/png")
+    for u in urls[2:]:
+        server.routes[u] = hangs
+    out = await judge_images.inline_images(urls)
+    assert set(out) == set(urls[:2])
+
+
+async def test_the_photos_that_miss_the_deadline_are_cancelled_not_left_running(server, monkeypatch):
+    monkeypatch.setattr(judge_images, "DEADLINE_S", 0.1)
+    started, cancelled = [], []
+
+    async def hangs(request):
+        started.append(1)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+
+    urls = _mlstatic(6)
+    for u in urls:
+        server.routes[u] = hangs
+    assert await judge_images.inline_images(urls) == {}
+    assert len(started) == 4 and len(cancelled) == 4          # la concurrencia; las otras 2 ni arrancaron
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+
+
+async def test_cancelling_the_caller_cancels_the_photos(server):
+    cancelled = []
+
+    async def hangs(request):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+
+    urls = _mlstatic(3)
+    for u in urls:
+        server.routes[u] = hangs
+    job = asyncio.create_task(judge_images.inline_images(urls))
+    await asyncio.sleep(0.05)
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    assert len(cancelled) == 3
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+
+
 async def test_inline_images_without_urls_makes_no_client(monkeypatch):
     monkeypatch.setattr(judge_images, "make_http_client", lambda: pytest.fail("no debería abrir un cliente"))
     assert await judge_images.inline_images([]) == {}
