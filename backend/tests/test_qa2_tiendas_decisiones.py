@@ -361,3 +361,19 @@ async def test_with_a_real_identical_in_ml_a_store_similar_never_makes_an_estima
     s = _snap()
     assert (s.color, s.estimated_color, s.price_basis) == (_expected_color(ML_ONLY), None, "ml")
     assert _items(client, estimated="any") == {}
+
+
+def test_the_defaults_are_the_ones_of_nicos_decisions(store_db, client):
+    """Sin ningún ajuste guardado: las tiendas cuentan para el color, el juez de tiendas tiene su tope propio y la API lo dice."""
+    from app.config import get_settings
+
+    s = get_settings()
+    assert (s.pm_stores_affect_color, s.pm_stores_vision_max_calls) == (1, 500)
+    runtime.invalidate()
+    assert runtime.get("pm_stores_affect_color") == 1 and runtime.get("pm_stores_vision_max_calls") == 500
+    assert client.get("/api/stores").json()["affect_color"] is True
+    assert client.get("/api/price-monitor/summary").json()["stores_affect_color"] is True
+    assert (s.store_dead_min_days_5xx, s.store_dead_retry_days, s.store_user_agent) == (3, 30, "HugoPriceBot/1.0 (+https://b2b.pro)".replace("b2b.pro", "b2box.pro"))
+    from app.pricing import store_catalog
+
+    assert (store_catalog.OUTAGE_STREAK, store_catalog.DEAD_AFTER_FAILS) == (25, 2)

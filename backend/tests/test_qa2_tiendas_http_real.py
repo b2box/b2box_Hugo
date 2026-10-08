@@ -28,7 +28,7 @@ from app.pricing import store_catalog, store_urls  # noqa: E402
 from tests import qa2_http  # noqa: E402
 from tests import store_fixtures as fx  # noqa: E402
 from tests.store_fixtures import store_db  # noqa: E402,F401  (fixture)
-from tests.test_store_catalog import _clock, add_store, items  # noqa: E402,F401
+from tests.test_store_catalog import _clock, add_store, items, run_index, tn_product, tn_site  # noqa: E402,F401
 
 GOLDEN = Path(__file__).parent / "golden"
 UA = "HugoPriceBot/1.0 (+https://b2box.pro)"
@@ -239,3 +239,33 @@ async def test_a_five_hundred_outage_that_lasts_more_than_a_week_ends_up_marking
     assert dead_by_day[5] == 0 and dead_by_day[6] > 0, "las primeras mueren al releerse, con más de 3 días de distancia (día 6)"
     assert dead_by_day[9] > 0, "con 10 días de caída las fichas ya están muertas"
     assert max(dead_by_day.values()) <= 152
+
+
+@pytest.mark.xfail(strict=True, reason="DESVÍO de lo documentado («1, 2 y 4 días»): `last_checked_at` se sella cuando se lee CADA ficha (horas después de "
+                                       "arrancar la pasada, a 2-3 s por página) y `_due_filter` lo compara con el `now` del arranque de la pasada "
+                                       "siguiente: con el cron diario una ficha que falló no vuelve a tocar al día siguiente sino a los 2 días, y las "
+                                       "lecturas caen los días 0, 2 y 5 (no 0, 1 y 3); muere el día 5 y no el 3. Bajo impacto; se arregla comparando "
+                                       "contra el inicio de la pasada anterior o con un margen de una pasada.")
+async def test_failing_pages_are_retried_after_1_then_2_days_even_when_a_real_pass_takes_hours(store_db, _clock, monkeypatch):
+    """Una tienda viva con fichas que dan 500, con un cron diario y una pasada que tarda lo que tarda de verdad."""
+    sid = add_store(refresh_days=7, max_pages_per_day=1000)
+    slugs = ["viva"] + [f"p{i}" for i in range(100)]
+    site = tn_site(slugs)
+    for slug in slugs[1:]:
+        site.add(tn_product(slug)[0], "boom", status=500)
+    start = _clock["now"]
+    tick = {"t": start}
+
+    def now():                                             # cada sello de tiempo del indexador cuesta 3 s de reloj
+        tick["t"] += timedelta(seconds=3)
+        return tick["t"]
+
+    monkeypatch.setattr(store_catalog, "utcnow", now)
+    days_read: list[int] = []
+    for day in range(6):
+        tick["t"] = start + timedelta(days=day)
+        before = len(site.requests)
+        await run_index(sid, site)
+        if any(u.endswith("/productos/p99/") for u, _h in site.requests[before:]):
+            days_read.append(day)
+    assert days_read == [0, 1, 3], f"la última ficha se leyó los días {days_read}"
