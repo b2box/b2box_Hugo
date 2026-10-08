@@ -161,3 +161,52 @@ def test_health_metrics_include_the_monitor_card(client, monkeypatch):
     monkeypatch.setattr(price_monitor, "summary", lambda: {"last_run": None, "mode": 0})
     body = client.get("/api/health-metrics").json()
     assert body["price_monitor"] == {"last_run": None, "mode": 0}
+
+
+# ─── QA: buscador y settings del grupo "monitor" ────────────────────────────
+
+
+def test_search_treats_like_wildcards_literally(client):
+    _, new_id = _seed()
+    with Session(engine) as s:
+        s.add(MarketPriceSnapshot(run_id=new_id, product_id="x1", product_name="Descuento 50% off",
+                                  color="verde", ml_status="ok"))
+        s.add(MarketPriceSnapshot(run_id=new_id, product_id="x2", product_name="Caja_chica",
+                                  color="verde", ml_status="ok"))
+        s.commit()
+
+    def ids(q: str) -> list[str]:
+        body = client.get("/api/price-monitor/snapshots", params={"q": q, "page_size": 200}).json()
+        return sorted(i["product"]["id"] for i in body["items"])
+
+    assert ids("50%") == ["x1"]   # el % del usuario es un % literal
+    assert ids("_") == ["x2"]     # `_` no es "cualquier caracter"
+    assert ids("BX_07") == []     # no matchea BX007
+    assert ids("\\") == []        # la barra del escape tampoco es comodín
+
+
+_MONITOR_KEYS = {
+    "pm_mode", "pm_green_min_pct", "pm_yellow_min_pct", "pm_ml_commission_pct",
+    "pm_ml_shipping_cents", "pm_min_seller_sales", "pm_image_threshold", "pm_name_threshold",
+    "pm_ml_daily_budget", "pm_ml_concurrency", "pm_tier_policy", "pm_vision_max_calls",
+}
+
+
+def test_monitor_settings_are_listed_and_editable_without_redeploy(client):
+    from app import runtime
+
+    for key in _MONITOR_KEYS:  # otros módulos pueden haber dejado overrides en la DB compartida
+        assert client.delete(f"/api/settings/{key}").status_code == 200
+    body = client.get("/api/settings").json()
+    monitor = {s["key"]: s for s in body if s["group"] == "monitor"}
+    assert _MONITOR_KEYS <= set(monitor)
+    assert monitor["pm_mode"]["value"] == 0 and monitor["pm_vision_max_calls"]["value"] == 0
+    assert (monitor["pm_green_min_pct"]["value"], monitor["pm_yellow_min_pct"]["value"]) == (30.0, 10.0)
+
+    assert client.put("/api/settings/pm_green_min_pct", json={"value": 45}).status_code == 200
+    assert runtime.get("pm_green_min_pct") == 45.0
+    assert client.put("/api/settings/pm_mode", json={"value": 2}).status_code == 400  # fuera de rango
+    assert client.delete("/api/settings/pm_green_min_pct").status_code == 200
+    assert runtime.get("pm_green_min_pct") == 30.0
+    anon = TestClient(main_mod.app)
+    assert anon.put("/api/settings/pm_mode", json={"value": 1}).status_code == 401

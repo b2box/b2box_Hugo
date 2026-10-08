@@ -69,3 +69,18 @@ async def test_concurrency_is_capped_at_two(monkeypatch):
     monkeypatch.setattr(VendureClient, "_execute_with_retry", fake_execute)
     await VendureClient().fetch_all_products_priced()
     assert active["max"] <= 2
+
+
+def test_variant_without_tiers_falls_back_to_price_with_tax():
+    """Variantes sin tramos (lista vacía o null) → la política "tramo mínimo"
+    usa priceWithTax y lo dice en tier_used."""
+    from app.pricing.semaforo import TIER_POLICY_MIN, pick_our_price
+
+    items = [
+        {"id": "v1", "name": "", "sku": "S1", "priceWithTax": 12100, "currencyCode": "ARS", "bulkPriceTiers": []},
+        {"id": "v2", "name": "", "sku": "S2", "priceWithTax": 9900, "currencyCode": "ARS", "bulkPriceTiers": None},
+    ]
+    v1, v2 = VendureClient._map_priced_variants(items)
+    assert v1.tiers == () and v2.tiers == ()
+    our = pick_our_price([v1, v2], TIER_POLICY_MIN)
+    assert (our.price_cents, our.variant_id, our.tier_used) == (12100, "v1", "priceWithTax")

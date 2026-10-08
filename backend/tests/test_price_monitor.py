@@ -635,3 +635,121 @@ async def test_job_wrapper_marks_the_clock_only_when_the_run_finished(world):
     FakeVendure.fail_with = RuntimeError("caído")
     await jobs.price_monitor()
     assert jobs._last_job_run(jobs.PRICE_MONITOR_JOB_ID) is None
+
+
+# ─── QA: bordes que faltaban ────────────────────────────────────────────────
+
+# El fixture `world` reemplaza `_execute_with_retry`; para el test de transporte
+# hace falta el método real, capturado al importar (antes de cualquier fixture).
+_REAL_EXECUTE = vendure_client_mod.VendureClient._execute_with_retry
+
+
+def _raw_vendure_product(p: VendureProduct) -> dict:
+    variants = [
+        {"id": v.id, "name": v.name, "sku": v.sku, "priceWithTax": v.price_with_tax_cents,
+         "currencyCode": v.currency, "bulkPriceTiers": []}
+        for v in (p.priced_variants or [])
+    ]
+    return {
+        "id": p.id, "name": p.name, "slug": p.slug, "description": "", "enabled": p.enabled,
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "customFields": {"b2boxProductCode": p.product_code},
+        "featuredAsset": {"preview": p.featured_image_url, "source": p.featured_image_url},
+        "variantList": {"items": variants, "totalItems": len(variants)},
+    }
+
+
+async def test_shadow_run_with_the_real_vendure_client_only_reads_over_http(world, monkeypatch):
+    """Criterio 'cero escrituras' a nivel TRANSPORTE: el job usa el VendureClient
+    real y se intercepta el HTTP hacia Vendure. Lo único que puede viajar es la
+    query de listado; ni una mutation, tampoco con pm_mode=1."""
+    monkeypatch.setattr(price_monitor, "VendureClient", vendure_client_mod.VendureClient)
+    monkeypatch.setattr(vendure_client_mod.VendureClient, "_execute_with_retry", _REAL_EXECUTE)
+    monkeypatch.setattr(vendure_client_mod.VendureClient, "_shared_bearer", "qa-bearer")  # sin login
+    _set("pm_mode", 1)
+
+    sent: list[dict] = []
+    real_send = httpx.AsyncClient.send
+
+    async def intercept(self, request, **kw):
+        if request.url.host != "example.invalid":
+            return await real_send(self, request, **kw)  # ML sigue en su MockTransport
+        body = json.loads(request.content)
+        sent.append(body)
+        if not body["query"].lstrip().startswith("query"):
+            return httpx.Response(500, json={"errors": [{"message": "escritura en sombra"}]}, request=request)
+        items = [_raw_vendure_product(p) for p in FakeVendure.products]
+        return httpx.Response(200, json={"data": {"products": {"items": items, "totalItems": len(items)}}},
+                              request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", intercept)
+    result = await price_monitor.run_price_monitor()
+
+    assert result["status"] == "ok"
+    assert sent, "el job tenía que leer el catálogo por HTTP"
+    for body in sent:
+        q = body["query"]
+        assert q.lstrip().startswith("query") and "mutation" not in q.lower(), q
+        assert "updateProduct" not in q and "bulkPriceTiers" in q
+    snaps = _snaps()
+    assert set(snaps) == {"1", "2", "3", "5", "6"} and snaps["1"].ml_status == "ok"
+
+
+async def test_zero_budget_spends_nothing_and_skips_everything(world):
+    _set("pm_ml_daily_budget", 0)
+    await price_monitor.run_price_monitor()
+    assert world.ml.calls == []
+    snaps = _snaps()
+    assert {s.ml_status for s in snaps.values()} == {"skipped"}
+    assert all("budget" in (s.ml_error or "") for pid, s in snaps.items() if pid != "5")
+    [run] = _runs()
+    assert run.ml_requests_used == 0 and run.n_failed == 0 and run.n_skipped == 5
+    assert daily_budget.used_today(market_ml.ML_COUNTER_KEY) == 0
+
+
+async def test_usd_listings_are_ignored_and_one_listing_is_its_own_median(world):
+    FakeVendure.products = [_product("1", "Organizador cocina")]
+    world.ml.items["MLA1"] = [_listing("I1", "s1", 200.0),
+                              {**_listing("I2", "s1", 5.0), "currency_id": "USD"}]
+    await price_monitor.run_price_monitor()
+    s = _snaps()["1"]
+    assert s.ml_status == "ok"
+    assert (s.ml_median_cents, s.ml_min_cents, s.ml_listing_count, s.ml_seller_count) == (20_000, 20_000, 1, 1)
+    # (20.000 − 13 % de 20.000 − 0 − 10.000) / 10.000 = 74 %: la comisión sale del precio de ML.
+    assert s.est_margin_pct == 74.0 and s.color == "verde"
+
+
+async def test_only_usd_listings_is_no_data(world):
+    FakeVendure.products = [_product("1", "Organizador cocina")]
+    world.ml.items["MLA1"] = [{**_listing("I1", "s1", 5.0), "currency_id": "USD"}]
+    await price_monitor.run_price_monitor()
+    s = _snaps()["1"]
+    assert s.ml_status == "no_data" and s.color == "sin_dato" and s.ml_median_cents is None
+
+
+async def test_ml_200_with_no_sellers_is_no_data_not_failed(world):
+    FakeVendure.products = [_product("1", "Organizador cocina")]
+    world.ml.items["MLA1"] = []  # 200 {"results": []}
+    await price_monitor.run_price_monitor()
+    s = _snaps()["1"]
+    assert s.ml_status == "no_data" and s.color == "sin_dato"
+    assert s.ml_median_cents is None and s.est_margin_pct is None
+
+
+async def test_embed_cache_prune_follows_the_runtime_days(world, monkeypatch):
+    _set("pm_embed_cache_days", 7)
+    now = utcnow()
+    with Session(engine) as s:
+        s.add(ImageEmbedCache(url="https://http2.mlstatic.com/D_10d.jpg", vector_b64="x",
+                              updated_at=now - timedelta(days=10)))
+        s.add(ImageEmbedCache(url="https://http2.mlstatic.com/D_5d.jpg", vector_b64="x",
+                              updated_at=now - timedelta(days=5)))
+        s.add(ImageEmbedCache(url="https://cdn.b2box/propia-vieja.jpg", vector_b64="x",
+                              updated_at=now - timedelta(days=400)))
+        s.commit()
+    # Con la retención de price_history apagada, la poda de fotos de ML corre igual.
+    monkeypatch.setattr(jobs.get_settings(), "price_history_retention_days", 0)
+    await jobs.prune_price_history()
+    with Session(engine) as s:
+        urls = {r.url for r in s.exec(select(ImageEmbedCache))}
+    assert urls == {"https://http2.mlstatic.com/D_5d.jpg", "https://cdn.b2box/propia-vieja.jpg"}
