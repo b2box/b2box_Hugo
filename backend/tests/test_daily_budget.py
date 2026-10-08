@@ -8,12 +8,8 @@ agrega el refactor: claves independientes por consumidor y fail-closed.
 from __future__ import annotations
 
 import os
-import tempfile
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
-_DB_FD, _DB_PATH = tempfile.mkstemp(suffix=".sqlite3")
-os.close(_DB_FD)
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_DB_PATH}")
 
 import pytest  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402

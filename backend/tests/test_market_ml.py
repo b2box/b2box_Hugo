@@ -9,13 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
 from datetime import timedelta
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
-_DB_FD, _DB_PATH = tempfile.mkstemp(suffix=".sqlite3")
-os.close(_DB_FD)
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_DB_PATH}")
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
