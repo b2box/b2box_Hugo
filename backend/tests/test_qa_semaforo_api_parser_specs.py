@@ -484,9 +484,6 @@ def test_a_verification_page_is_a_block_even_with_a_200_and_junk_in_it():
     assert web.page_problem(pg3, web.parse_search(pg3.html, 8))[0] == "blocked"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L6 (endurecimiento): una página de verificación que lleve el estado de "
-                                       "ML con results=[] se clasifica 'empty' (válida, corta la racha) y no "
-                                       "'blocked'; page_problem sale temprano si hubo estado")
 def test_a_verification_redirect_with_an_empty_state_is_still_a_block():
     pg = ListingPage(html=listing_html([]), status=200, bytes=5000,
                      final_url="https://www.mercadolibre.com/jms/mla/lgz/account-verification?go=x")

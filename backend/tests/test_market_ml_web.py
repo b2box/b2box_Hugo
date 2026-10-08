@@ -396,3 +396,42 @@ async def test_error_reasons_never_carry_the_proxy_credentials(monkeypatch):
     res = await src.search("x")
     assert res.kind == "error"
     assert "Cl4veSecreta" not in res.reason and "res.proxy.io" not in res.reason and "usr_b2b" not in res.reason
+
+
+# ─── la página tiene que terminar en ML ───────────────────────────────────
+
+
+@pytest.mark.parametrize("final", [
+    "https://evilmercadolibre.com.ar/organizador",
+    "https://mercadolibre.com.ar.evil.example/organizador",
+    "https://mercadolibre.com.ar@evil.example/organizador",
+    "https://evil.example/organizador",
+    "",
+])
+async def test_a_search_that_ends_outside_mercado_libre_is_a_block_and_is_not_parsed(final, monkeypatch):
+    parsed = []
+    real = web.parse_search
+    monkeypatch.setattr(web, "parse_search", lambda *a, **k: (parsed.append(1), real(*a, **k))[1])
+    src = _source(_fetcher(page(listing_html(POLY), final_url=final)))
+    res = await src.search("organizador")
+    assert res.kind == "blocked" and "otro sitio" in res.reason and res.candidates == []
+    assert parsed == []                                       # ni se mira lo que trae
+    assert (src.blocked, src.bytes) == (1, 400_000)
+
+
+async def test_other_mercado_libre_subdomains_are_fine():
+    src = _source(_fetcher(page(listing_html(POLY), final_url="https://www.mercadolibre.com/jms/mla/x")))
+    assert (await src.search("organizador")).kind == "ok"
+
+
+def test_a_verification_page_that_carries_an_empty_state_is_a_block_not_an_empty_listing():
+    html = listing_html([])
+    pg = page(html, final_url="https://www.mercadolibre.com/jms/mla/lgz/account-verification?go=x")
+    assert web.page_problem(pg, web.parse_search(html, 8))[0] == "blocked"
+    # y un listado vacío de verdad (misma página, URL de búsqueda) sigue siendo vacío
+    assert web.page_problem(page(html), web.parse_search(html, 8)) is None
+
+
+def test_the_url_decides_even_if_there_are_results():
+    pg = page(listing_html(POLY), final_url="https://www.mercadolibre.com/gz/account-verification")
+    assert web.page_problem(pg, web.parse_search(pg.html, 8))[0] == "blocked"

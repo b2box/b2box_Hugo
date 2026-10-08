@@ -322,18 +322,29 @@ class WebSearch:
     source: str = ""
 
 
+# Dominios donde puede terminar una búsqueda de ML (con chequeo de borde).
+ML_PAGE_HOSTS = ("mercadolibre.com.ar", "mercadolibre.com")
+_VERIFICATION_PATHS = ("account-verification",)
+
+
 def page_problem(page: browser_fetch.ListingPage, parsed: ParsedSearch) -> tuple[str, str] | None:
     """(kind, motivo) si la página NO es un listado legible; None si lo es.
-    Un listado válido sin resultados NO es un problema (`parsed.empty`)."""
-    if parsed.source != "none":
-        return None
+    Un listado válido sin resultados NO es un problema (`parsed.empty`).
+
+    Lo que dice la URL final y el status manda aunque la página traiga el estado
+    de ML: una página de verificación puede llevar un `results: []` y no por eso
+    es "ML no tiene nada para ese título". Las marcas de anti-bot en el HTML solo
+    cuentan cuando no se pudo leer ningún resultado."""
     if page.status in (403, 429):
         return "blocked", f"ML bloqueó la búsqueda (HTTP {page.status})"
     final = urlsplit(page.final_url or "")
-    host = (final.hostname or "").lower()
+    if not browser_fetch.url_host_allowed(page.final_url, ML_PAGE_HOSTS) \
+            or any(v in final.path.lower() for v in _VERIFICATION_PATHS):
+        return "blocked", "ML pidió verificación anti-bot (captcha o redirect)"
+    if parsed.source != "none":
+        return None
     head = (page.html or "")[:6000].lower()
-    if (host and not host.endswith("mercadolibre.com.ar")) or "account-verification" in final.path \
-            or any(m in head for m in _ANTIBOT_MARKERS):
+    if any(m in head for m in _ANTIBOT_MARKERS):
         return "blocked", "ML pidió verificación anti-bot (captcha o redirect)"
     if page.status and page.status >= 500:
         return "error", f"ML respondió HTTP {page.status}"
@@ -463,6 +474,14 @@ class MlWebSource:
             return WebSearch("error", reason=f"el browser falló: {browser_fetch.redact(exc)[:160]}")
 
         self.bytes += page.bytes
+        if not browser_fetch.url_host_allowed(page.final_url, ML_PAGE_HOSTS):
+            # Defensa en profundidad: el guard del browser ya solo deja salir a
+            # ML, pero una página que terminó en otro host no se parsea.
+            self._note_failure("blocked")
+            log.warning("ML web: la búsqueda terminó fuera de ML (%s), no se lee",
+                        urlsplit(page.final_url or "").hostname or "sin URL")
+            return WebSearch("blocked", bytes=page.bytes,
+                             reason="ML redirigió la búsqueda a otro sitio")
         parsed = parse_search(page.html, self.max_results)
         problem = page_problem(page, parsed)
         browser_fetch.note_listing_result(url, results=len(parsed.candidates))
