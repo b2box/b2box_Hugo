@@ -122,6 +122,26 @@ def test_snapshots_reject_unknown_filters(client):
     assert client.get("/api/price-monitor/snapshots", params={"status": "raro"}).status_code == 400
 
 
+@pytest.mark.parametrize("params", [
+    {"page": 10**20}, {"page": 10_001}, {"page": -1}, {"run_id": 10**20}, {"run_id": 2**31},
+    {"run_id": 0}, {"page_size": 0}, {"page_size": 201}, {"q": "x" * 121},
+])
+def test_out_of_range_params_are_422_never_500(client, params):
+    _seed()
+    assert client.get("/api/price-monitor/snapshots", params=params).status_code == 422
+
+
+def test_huge_but_valid_page_is_just_empty(client):
+    _seed()
+    body = client.get("/api/price-monitor/snapshots", params={"page": 10_000, "page_size": 200}).json()
+    assert body["items"] == [] and body["has_more"] is False
+
+
+def test_history_rejects_absurd_ids(client):
+    assert client.get("/api/price-monitor/products/" + "9" * 65 + "/history").status_code == 422
+    assert client.get("/api/price-monitor/runs", params={"limit": 10**20}).status_code == 422
+
+
 def test_snapshots_without_runs_is_empty(client):
     body = client.get("/api/price-monitor/snapshots").json()
     assert body["run_id"] is None and body["items"] == []

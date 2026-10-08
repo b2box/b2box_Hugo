@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlmodel import Session, func, select
 
 from app import runtime
@@ -29,6 +29,12 @@ router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
 
 PAGE_SIZE_DEFAULT = 25
 PAGE_SIZE_MAX = 200
+# Topes de los parámetros numéricos: un entero enorme no puede llegar a la DB
+# (OFFSET / id fuera de rango → 500 en Postgres). 10.000 páginas de 200 cubren
+# de sobra cualquier corrida.
+PAGE_MAX = 10_000
+DB_INT_MAX = 2**31 - 1
+PRODUCT_ID_MAX_LEN = 64
 STATUSES = ("ok", "no_data", "failed", "skipped")
 
 # El event loop solo guarda referencias débiles a las tasks: sin esto, una
@@ -116,11 +122,11 @@ def _latest_run_id(session: Session) -> int | None:
 
 @router.get("/snapshots")
 async def list_snapshots(
-    run_id: int | None = Query(None, ge=1),
-    color: str | None = Query(None),
-    status: str | None = Query(None),
+    run_id: int | None = Query(None, ge=1, le=DB_INT_MAX),
+    color: str | None = Query(None, max_length=16),
+    status: str | None = Query(None, max_length=16),
     q: str | None = Query(None, max_length=120),
-    page: int = Query(0, ge=0),
+    page: int = Query(0, ge=0, le=PAGE_MAX),
     page_size: int = Query(PAGE_SIZE_DEFAULT, ge=1, le=PAGE_SIZE_MAX),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -185,7 +191,7 @@ async def list_snapshots(
 
 @router.get("/products/{product_id}/history")
 async def product_history(
-    product_id: str,
+    product_id: str = Path(..., min_length=1, max_length=PRODUCT_ID_MAX_LEN),
     limit: int = Query(60, ge=1, le=365),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
