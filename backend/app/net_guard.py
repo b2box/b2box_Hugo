@@ -158,6 +158,15 @@ async def _read_capped(client: httpx.AsyncClient, url: str, headers: dict[str, s
         if declared.isdigit() and int(declared) > max_bytes:
             # Comprimido o no, nada que pese más que el tope tiene sentido en el cable.
             raise ResponseTooLarge(f"el servidor declara {declared} bytes (tope {max_bytes})")
+        if resp.is_stream_consumed:
+            # Un transporte que entrega el cuerpo ya leído (los de prueba, `httpx.MockTransport`): no hay
+            # nada que cortar en streaming, solo el tope. Los transportes reales nunca llegan acá.
+            body = resp.content
+            if len(body) > max_bytes:
+                raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
+            kept = [(k, v) for k, v in resp.headers.multi_items()
+                    if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+            return httpx.Response(resp.status_code, headers=kept, content=body, request=resp.request)
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS) if gzipped else None
         buf = bytearray()
         raw = 0
