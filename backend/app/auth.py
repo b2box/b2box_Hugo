@@ -230,23 +230,38 @@ def issue_session_token(username: str) -> str:
     return f"{payload_b64}.{_b64url(sig)}"
 
 
-def verify_session_token(token: str | None) -> bool:
-    """Valida firma + expiración del token de sesión en tiempo constante."""
+def _read_session(token: str | None) -> dict | None:
+    """Payload del token de sesión si la firma y la expiración son válidas."""
     if not token or "." not in token:
-        return False
+        return None
     payload_b64, _, sig_b64 = token.partition(".")
     expected = hmac.new(_signing_secret(), payload_b64.encode("ascii"), hashlib.sha256).digest()
     try:
         got = _b64url_decode(sig_b64)
     except Exception:  # noqa: BLE001
-        return False
+        return None
     if not hmac.compare_digest(expected, got):
-        return False
+        return None
     try:
         data = json.loads(_b64url_decode(payload_b64))
     except Exception:  # noqa: BLE001
-        return False
-    return int(data.get("exp", 0)) > int(time.time())
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data if int(data.get("exp", 0)) > int(time.time()) else None
+
+
+def verify_session_token(token: str | None) -> bool:
+    """Valida firma + expiración del token de sesión en tiempo constante."""
+    return _read_session(token) is not None
+
+
+def session_username(token: str | None) -> str | None:
+    """Quién es la sesión (el usuario del .env, o el email con Supabase), o None
+    si el token no es válido. Para dejar anotado quién hizo una acción."""
+    data = _read_session(token)
+    user = data.get("u") if data else None
+    return str(user)[:120] if user else None
 
 
 def check_credentials(username: str, password: str) -> bool:

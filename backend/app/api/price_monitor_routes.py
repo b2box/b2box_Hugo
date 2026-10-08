@@ -18,11 +18,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
-from app import runtime
+from app import auth, runtime
 from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
@@ -258,14 +259,19 @@ class NotSameBody(BaseModel):
 @router.post("/snapshots/{snapshot_id}/not-same")
 async def not_the_same(
     body: NotSameBody,
+    request: Request,
     snapshot_id: int = Path(..., ge=1, le=DB_INT_MAX),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """"No es el mismo": una persona dice que esta publicación de ML no es el
     producto. Se saca del snapshot (que se recalcula si era IGUAL), queda
     excluida para ese producto en las próximas corridas y se guarda como
-    etiqueta negativa para calibrar. No toca Vendure ni el precio nuestro.
-    Apretarlo dos veces no duplica nada."""
+    etiqueta negativa para calibrar, con quién la marcó. Los contadores de la
+    corrida se rehacen. No toca Vendure ni el precio nuestro.
+
+    La corrección, el snapshot y los contadores se guardan en UNA transacción:
+    o quedan los tres o ninguno. Apretarlo dos veces (o desde dos pestañas a la
+    vez) no duplica nada."""
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
     snap = session.get(MarketPriceSnapshot, snapshot_id)
@@ -277,14 +283,23 @@ async def not_the_same(
         if not already:
             raise HTTPException(404, "esa publicación no está en este snapshot")
         return {"snapshot": price_monitor.snapshot_to_dict(snap), "already": True}
-    match_feedback.add_feedback(
-        product_id=snap.product_id, ml_id=body.ml_id, entry=removed,
-        snapshot_id=snapshot_id, product_name=snap.product_name,
+    actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
+    added = match_feedback.add_feedback(
+        product_id=snap.product_id, ml_id=body.ml_id, entry=removed, snapshot_id=snapshot_id,
+        product_name=snap.product_name, actor=actor, session=session,
     )
     session.add(snap)
-    session.commit()
+    price_monitor.recount_run(session, snap.run_id)
+    try:
+        session.commit()
+    except IntegrityError:
+        # Otra pestaña la marcó en este mismo instante: ya está guardada.
+        session.rollback()
+        session.expire_all()
+        fresh = session.get(MarketPriceSnapshot, snapshot_id)
+        return {"snapshot": price_monitor.snapshot_to_dict(fresh), "already": True}  # type: ignore[arg-type]
     session.refresh(snap)
-    return {"snapshot": price_monitor.snapshot_to_dict(snap), "already": False}
+    return {"snapshot": price_monitor.snapshot_to_dict(snap), "already": not added}
 
 
 @router.delete("/products/{product_id}/not-same/{ml_id}")

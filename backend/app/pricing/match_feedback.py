@@ -51,9 +51,14 @@ def load_excluded() -> dict[str, frozenset[str]]:
 
 
 def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
-                 snapshot_id: int | None, product_name: str | None) -> bool:
+                 snapshot_id: int | None, product_name: str | None,
+                 actor: str | None = None, session: Session | None = None) -> bool:
     """Guarda la corrección. False si ya estaba (idempotente: apretar dos veces
-    no duplica). `entry` es la publicación tal como estaba en el snapshot."""
+    no duplica). `entry` es la publicación tal como estaba en el snapshot.
+
+    Con `session` el alta va en la sesión del llamador y NO se commitea: así la
+    corrección y el snapshot recalculado se guardan juntos o no se guarda nada.
+    Sin `session` abre la suya y commitea."""
     entry = entry or {}
     row = MarketMatchFeedback(
         product_id=product_id[:64], ml_id=ml_id,
@@ -65,7 +70,16 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
         title=(str(entry.get("title"))[:200] if entry.get("title") else None),
         permalink=(str(entry.get("permalink"))[:300] if entry.get("permalink") else None),
         snapshot_id=snapshot_id, product_name=(product_name or "")[:200] or None,
+        actor=(actor or "")[:120] or None,
     )
+    if session is not None:
+        exists = session.exec(select(MarketMatchFeedback.id).where(
+            MarketMatchFeedback.product_id == row.product_id,
+            MarketMatchFeedback.ml_id == ml_id)).first()
+        if exists is not None:
+            return False
+        session.add(row)
+        return True
     with Session(engine) as s:
         s.add(row)
         try:

@@ -293,6 +293,50 @@ def _persist(snap: MarketPriceSnapshot, run_id: int) -> None:
     _save_snapshot(snap)
 
 
+def _recount(s: Session, run: PriceMonitorRun) -> None:
+    """Contadores de la corrida (estados, colores, web, similares) a partir de
+    sus snapshots."""
+    run_id = run.id
+    by_status = dict(s.exec(
+        select(MarketPriceSnapshot.ml_status, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id)
+        .group_by(MarketPriceSnapshot.ml_status)
+    ).all())
+    by_color = dict(s.exec(
+        select(MarketPriceSnapshot.color, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id)
+        .group_by(MarketPriceSnapshot.color)
+    ).all())
+    run.n_ok = int(by_status.get(OK, 0))
+    run.n_no_data = int(by_status.get(NO_DATA, 0))
+    run.n_failed = int(by_status.get(FAILED, 0))
+    run.n_skipped = int(by_status.get(SKIPPED, 0))
+    run.n_verde = int(by_color.get(semaforo.VERDE, 0))
+    run.n_amarillo = int(by_color.get(semaforo.AMARILLO, 0))
+    run.n_rojo = int(by_color.get(semaforo.ROJO, 0))
+    run.n_sin_dato = int(by_color.get(semaforo.SIN_DATO, 0))
+    run.n_web_ok = int(s.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
+               MarketPriceSnapshot.match_origin == ORIGIN_WEB)
+    ).one() or 0)
+    run.n_con_similares = int(s.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.similar_count > 0)
+    ).one() or 0)
+    run.processed = sum(by_status.values())
+
+
+def recount_run(session: Session, run_id: int) -> None:
+    """Rehace los contadores de una corrida después de corregir un snapshot
+    ("No es el mismo" puede cambiar su color y su estado). Usa la sesión del
+    llamador y no commitea."""
+    run = session.get(PriceMonitorRun, run_id)
+    if run is not None:
+        _recount(session, run)
+        session.add(run)
+
+
 def _finalize_run(run_id: int, *, error: str | None = None, force_status: str | None = None,
                   web_status: str | None = None) -> str:
     """Cierra la corrida con los conteos calculados desde los snapshots. El
@@ -301,34 +345,7 @@ def _finalize_run(run_id: int, *, error: str | None = None, force_status: str | 
         run = s.get(PriceMonitorRun, run_id)
         if run is None:
             return RUN_FAILED
-        by_status = dict(s.exec(
-            select(MarketPriceSnapshot.ml_status, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
-            .where(MarketPriceSnapshot.run_id == run_id)
-            .group_by(MarketPriceSnapshot.ml_status)
-        ).all())
-        by_color = dict(s.exec(
-            select(MarketPriceSnapshot.color, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
-            .where(MarketPriceSnapshot.run_id == run_id)
-            .group_by(MarketPriceSnapshot.color)
-        ).all())
-        run.n_ok = int(by_status.get(OK, 0))
-        run.n_no_data = int(by_status.get(NO_DATA, 0))
-        run.n_failed = int(by_status.get(FAILED, 0))
-        run.n_skipped = int(by_status.get(SKIPPED, 0))
-        run.processed = sum(by_status.values())
-        run.n_verde = int(by_color.get(semaforo.VERDE, 0))
-        run.n_amarillo = int(by_color.get(semaforo.AMARILLO, 0))
-        run.n_rojo = int(by_color.get(semaforo.ROJO, 0))
-        run.n_sin_dato = int(by_color.get(semaforo.SIN_DATO, 0))
-        run.n_web_ok = int(s.exec(
-            select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
-            .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
-                   MarketPriceSnapshot.match_origin == ORIGIN_WEB)
-        ).one() or 0)
-        run.n_con_similares = int(s.exec(
-            select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
-            .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.similar_count > 0)
-        ).one() or 0)
+        _recount(s, run)
         if web_status is not None:
             run.web_status = web_status[:200]
         if force_status:
@@ -1059,6 +1076,18 @@ def _json_list(raw: str | None) -> list[dict[str, Any]]:
     return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
 
 
+def _approx_prices(entry: dict[str, Any]) -> list[Any]:
+    """Los precios de una publicación guardada ANTES de que se guardara la lista
+    (`prices_cents`): el mínimo real una vez y el resto en la mediana. Así sacar
+    otra publicación no hace perder el mínimo (con la mediana repetida
+    `listings` veces el mínimo subía)."""
+    n = max(1, int(entry.get("listings") or 1))
+    low, mid = entry.get("min_cents"), entry.get("median_cents")
+    if n == 1 or not isinstance(low, (int, float)) or low <= 0:
+        return [mid if isinstance(mid, (int, float)) and mid > 0 else low] * n
+    return [low] + [mid] * (n - 1)
+
+
 def drop_listing(snap: MarketPriceSnapshot, ml_id: str) -> dict[str, Any] | None:
     """Saca una publicación (IGUAL o SIMILAR) del snapshot y, si era IGUAL,
     recalcula mediana, mínimo, ganancia y color con las que quedan. Devuelve la
@@ -1089,7 +1118,7 @@ def drop_listing(snap: MarketPriceSnapshot, ml_id: str) -> dict[str, Any] | None
     for m in matched:
         listed = m.get("prices_cents")
         if not (isinstance(listed, list) and listed):
-            listed = [m.get("median_cents")] * int(m.get("listings") or 1)
+            listed = _approx_prices(m)
         prices.extend(int(p) for p in listed if isinstance(p, (int, float)) and p > 0)
         sellers.update(str(x) for x in (m.get("sellers") or []))
     if not prices:

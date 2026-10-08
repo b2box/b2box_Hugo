@@ -241,8 +241,6 @@ def test_the_exclusion_survives_a_snapshot_that_no_longer_lists_the_id(client):
     assert again.status_code == 200 and again.json()["already"] is True
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L1: en una fila vieja (sin prices_cents, la que dejó main) el mínimo "
-                                       "recalculado sale de la mediana repetida y pierde min_cents")
 def test_old_rows_keep_their_real_minimum_after_not_the_same(client):
     old_a = {"ml_id": "MLA1001", "title": "A", "permalink": "https://www.mercadolibre.com.ar/p/MLA1", "listings": 2,
              "min_cents": 20_000, "median_cents": 21_000, "source": "clip", "image_score": 0.9, "name_score": 1.0,
@@ -253,8 +251,6 @@ def test_old_rows_keep_their_real_minimum_after_not_the_same(client):
     assert snap["ml_min_cents"] == 20_000
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L2: tras «No es el mismo» los contadores por color de la CORRIDA "
-                                       "(n_verde, n_rojo…) quedan viejos; los chips del snapshot sí se recalculan")
 def test_run_color_counters_follow_the_recalculated_snapshot(client):
     sid = _put("2", [_entry("MLA1001", 9_000), _entry("MLA1002", 15_000, sellers=("b",)),
                      _entry("MLA1003", 16_000, sellers=("c",))])

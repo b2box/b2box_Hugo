@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
 from app import main as main_mod  # noqa: E402
+from app.api import price_monitor_routes  # noqa: E402
 from app.db.models import MarketMatchFeedback, MarketPriceSnapshot, PriceMonitorRun  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
@@ -245,3 +246,110 @@ def test_undoing_the_exclusion(client):
     assert client.delete("/api/price-monitor/products/2/not-same/MLA901").status_code == 404
     with Session(engine) as s:
         assert s.exec(select(MarketMatchFeedback)).all() == []
+
+
+# ─── quién, una sola transacción y los contadores de la corrida ───────────
+
+
+def test_the_feedback_records_who_marked_it(client):
+    _seed()
+    client.post(f"/api/price-monitor/snapshots/{_snap_id('2')}/not-same", json={"ml_id": "MLA901"})
+    with Session(engine) as s:
+        assert s.exec(select(MarketMatchFeedback)).one().actor == "admin"
+
+
+def test_the_actor_is_the_session_user_not_something_the_client_sends(client):
+    _seed()
+    from app import auth
+
+    client.cookies.set(auth.COOKIE_NAME, auth.issue_session_token("pao@b2box.pro"))
+    client.post(f"/api/price-monitor/snapshots/{_snap_id('2')}/not-same",
+                json={"ml_id": "MLA901", "actor": "otro@evil.com"})
+    with Session(engine) as s:
+        assert s.exec(select(MarketMatchFeedback)).one().actor == "pao@b2box.pro"
+
+
+def test_session_username_needs_a_valid_token():
+    from app import auth
+
+    assert auth.session_username(auth.issue_session_token("pao@b2box.pro")) == "pao@b2box.pro"
+    assert auth.session_username(None) is None and auth.session_username("basura") is None
+    token = auth.issue_session_token("pao@b2box.pro")
+    assert auth.session_username(token[:-3] + "AAA") is None            # firma rota
+
+
+def test_if_the_snapshot_cannot_be_saved_the_feedback_is_not_saved_either(client, monkeypatch):
+    """Antes el feedback se commiteaba en su propia sesión y el snapshot en otra:
+    un fallo en el medio dejaba la exclusión sin el recálculo."""
+    from app import auth
+
+    _seed()
+    sid = _snap_id("2")
+
+    def boom(session, run_id):
+        raise RuntimeError("se cayó la base")
+
+    monkeypatch.setattr(price_monitor_routes.price_monitor, "recount_run", boom)
+    quiet = TestClient(main_mod.app, raise_server_exceptions=False)
+    quiet.cookies.set(auth.COOKIE_NAME, auth.issue_session_token("admin"))
+    assert quiet.post(f"/api/price-monitor/snapshots/{sid}/not-same", json={"ml_id": "MLA901"}).status_code == 500
+    with Session(engine) as s:
+        assert s.exec(select(MarketMatchFeedback)).all() == []              # la exclusión no quedó sola
+        snap = s.get(MarketPriceSnapshot, sid)
+        assert snap.ml_status == "ok" and "MLA901" in snap.matched_listings   # y el snapshot sigue como estaba
+
+
+def test_a_simultaneous_click_from_another_tab_is_already_saved(client, monkeypatch):
+    """Dos pestañas: la otra guardó la exclusión entre que se leyó el snapshot y el commit."""
+    _seed()
+    sid = _snap_id("2")
+    real_add = price_monitor_routes.match_feedback.add_feedback
+
+    def other_tab_first(**kw):
+        real_add(**{k: v for k, v in kw.items() if k != "session"})        # la otra pestaña, ya commiteada
+        return real_add(**kw)                                              # y la mía: ya existía
+
+    monkeypatch.setattr(price_monitor_routes.match_feedback, "add_feedback", other_tab_first)
+    r = client.post(f"/api/price-monitor/snapshots/{sid}/not-same", json={"ml_id": "MLA901"})
+    assert r.status_code == 200 and r.json()["already"] is True
+    with Session(engine) as s:
+        assert len(s.exec(select(MarketMatchFeedback)).all()) == 1
+        assert s.get(MarketPriceSnapshot, sid).color == "sin_dato"         # igual quedó recalculado
+
+
+def test_the_run_counters_follow_the_recalculated_snapshot(client):
+    run_id = _seed()
+    with Session(engine) as s:
+        run = s.get(PriceMonitorRun, run_id)
+        run.n_amarillo, run.n_ok, run.n_no_data, run.n_con_similares, run.n_web_ok = 9, 9, 9, 9, 9    # viejos
+        s.add(run)
+        s.commit()
+    client.post(f"/api/price-monitor/snapshots/{_snap_id('2')}/not-same", json={"ml_id": "MLA901"})
+    with Session(engine) as s:
+        run = s.get(PriceMonitorRun, run_id)
+        # 1 verde (api), 1 rojo (deshabilitado), 3 sin dato (el web quedó sin dato, y los dos sin dato)
+        assert (run.n_verde, run.n_amarillo, run.n_rojo, run.n_sin_dato) == (1, 0, 1, 3)
+        assert (run.n_ok, run.n_no_data) == (2, 3)
+        assert run.n_web_ok == 0 and run.n_con_similares == 2
+        assert run.processed == 5 and run.status == "ok"                  # lo demás no se toca
+    items = client.get("/api/price-monitor/runs").json()["items"][0]
+    assert items["colors"] == {"verde": 1, "amarillo": 0, "rojo": 1, "sin_dato": 3}
+
+
+def test_old_rows_without_a_price_list_keep_their_real_minimum(client):
+    _seed()
+    old = lambda ml, listings, mn, med: {  # noqa: E731
+        "ml_id": ml, "title": "x", "permalink": "https://www.mercadolibre.com.ar/p/" + ml, "listings": listings,
+        "min_cents": mn, "median_cents": med, "source": "clip", "image_score": 0.9, "name_score": 1.0,
+        "confidence": None}
+    with Session(engine) as s:
+        snap = s.exec(select(MarketPriceSnapshot).where(MarketPriceSnapshot.product_id == "2")).one()
+        snap.matched_listings = json.dumps([old("MLA1001", 3, 20_000, 24_000), old("MLA1002", 1, 30_000, 30_000),
+                                            old("MLA1003", 2, 15_000, 26_000)])
+        s.add(snap)
+        s.commit()
+        sid = snap.id
+    out = client.post(f"/api/price-monitor/snapshots/{sid}/not-same", json={"ml_id": "MLA1003"}).json()["snapshot"]
+    assert out["ml_min_cents"] == 20_000                                  # el 15.000 salió, el 20.000 sigue
+    out = client.post(f"/api/price-monitor/snapshots/{sid}/not-same", json={"ml_id": "MLA1001"}).json()["snapshot"]
+    assert out["ml_min_cents"] == 30_000 and out["ml_listing_count"] == 1

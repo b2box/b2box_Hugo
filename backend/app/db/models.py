@@ -318,6 +318,8 @@ class MarketMatchFeedback(SQLModel, table=True):
     permalink: str | None = Field(default=None)
     snapshot_id: int | None = Field(default=None)
     product_name: str | None = Field(default=None)
+    # Quién lo marcó (el usuario de la sesión del dashboard, un email con Supabase).
+    actor: str | None = Field(default=None, max_length=120)
 
 
 class MlSellerCache(SQLModel, table=True):
