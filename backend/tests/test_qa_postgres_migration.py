@@ -110,7 +110,7 @@ def test_an_old_postgres_gets_the_new_columns_the_new_table_and_naive_dates(pg):
                                     "web_status FROM price_monitor_run")).one()) == ("ok", 0, 0, 0, 0, 0, None)
 
 
-def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg):
+def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
     _old_tables(pg)
     session.init_db()
     import json
@@ -120,7 +120,7 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg):
 
     # lo de la rama usa su propio `engine` importado: se apunta también ahí
     for mod in (match_feedback, price_monitor):
-        mod.engine = pg
+        monkeypatch.setattr(mod, "engine", pg)
     entry = {"ml_id": "MLA901", "title": "x", "origin": "web", "category": "igual", "source": "clip",
              "prices_cents": [25_000, 30_000], "median_cents": 27_500, "listings": 2, "sellers": ["a", "b"]}
     with Session(pg) as s:
@@ -149,11 +149,11 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg):
 
 @pytest.mark.xfail(strict=True, reason="BUG-L7: web_bytes es INTEGER de 32 bits y 3,4 GB (sin bloquear scripts) "
                                        "lo desbordan con NumericValueOutOfRange")
-def test_the_run_byte_counter_takes_a_night_without_blocked_scripts(pg):
+def test_the_run_byte_counter_takes_a_night_without_blocked_scripts(pg, monkeypatch):
     _old_tables(pg)
     session.init_db()
     from app.pricing import price_monitor
 
-    price_monitor.engine = pg
+    monkeypatch.setattr(price_monitor, "engine", pg)
     for _ in range(4):
         price_monitor._add_usage(1, web_bytes=900_000_000)                           # 3,6 GB en total

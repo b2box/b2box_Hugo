@@ -57,6 +57,11 @@ def _clean(_env):
         s.commit()
     runtime.invalidate()
     yield
+    with Session(engine) as s:
+        for model in (MarketMatchFeedback, Setting):
+            for row in s.exec(select(model)).all():
+                s.delete(row)
+        s.commit()
     runtime.invalidate()
 
 

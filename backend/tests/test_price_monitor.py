@@ -36,6 +36,7 @@ from app import runtime  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.db.models import (  # noqa: E402
     ImageEmbedCache,
+    MarketMatchFeedback,
     MarketPriceSnapshot,
     MlSellerCache,
     PriceHistory,
@@ -147,7 +148,7 @@ def world(monkeypatch):
     init_db()
     with Session(engine) as s:
         for model in (MarketPriceSnapshot, PriceMonitorRun, MlSellerCache, Setting,
-                      ImageEmbedCache, PriceHistory):
+                      ImageEmbedCache, PriceHistory, MarketMatchFeedback):
             for row in s.exec(select(model)).all():
                 s.delete(row)
         s.commit()
@@ -220,7 +221,13 @@ def world(monkeypatch):
     w = World()
     w.ml, w.image_scores, w.sleeps, w.graphql_calls = ml, image_scores, sleeps, graphql_calls
     yield w
-    runtime.reset_to_default("pm_include_disabled")   # que no le pise el default a otros módulos
+    # Que no le pise el default a otros módulos. Se borra la fila a mano: reset_to_default()
+    # llama a get_settings() y, con PM_LLM_* seteado por otro test, dejaba su cache pegado.
+    with Session(engine) as s:
+        row = s.get(Setting, "pm_include_disabled")
+        if row is not None:
+            s.delete(row)
+            s.commit()
     runtime.invalidate()
 
 
