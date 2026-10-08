@@ -28,7 +28,7 @@ import itertools
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 DIFF_QUANTITY = "cantidad"
 DIFF_CAPACITY = "capacidad"
@@ -88,18 +88,23 @@ _QTY_AFTER_X_UNITS = re.compile(
 
 
 def extract_quantity(text: str) -> int | None:
-    """Cantidad por pack declarada en el título, o None si no dice."""
+    """Cantidad por pack declarada en el título, o None si no dice.
+
+    "x 3" es una cantidad salvo que sea el separador de una medida real
+    ("30 x 40 cm"): eso se decide con las medidas ya reconocidas (`_DIMS`), no
+    mirando si antes hay un dígito, porque "E27 x 3" o "talle 42 x 2" terminan en
+    dígito y son un pack."""
     t = _norm(text)
     if re.search(r"\bdocena\b", t):
         return 12
     m = _QTY_KEYWORD.search(t)
     if m:
         return int(m.group(1))
+    spans = [span for span, _ in _dims_matches(t)]
     for m in _QTY_X.finditer(t):
-        before = t[:m.start()].rstrip()
-        if before[-1:].isdigit():          # "30 x 40": es una medida, no un pack
+        if any(a <= m.start() < b for a, b in spans):    # el "x" de "30 x 40": es una medida
             continue
-        if _QTY_AFTER_X_UNITS.match(t, m.end()):  # "x 500 ml": capacidad
+        if _QTY_AFTER_X_UNITS.match(t, m.end()):          # "x 500 ml": capacidad
             continue
         return int(m.group(1))
     m = _QTY_UNITS.search(t)
@@ -129,10 +134,11 @@ _SINGLE_DIM = re.compile(rf"(?<![\d.,x*]){_NUM}\s*(cm|cms|mm|mts|metros|metro|m)
 _TO_CM = {"cm": 1.0, "cms": 1.0, "mm": 0.1, "m": 100.0, "mts": 100.0, "metro": 100.0, "metros": 100.0}
 
 
-def extract_dims_cm(text: str) -> tuple[tuple[float, ...], ...]:
-    t = _norm(text)
-    groups: list[tuple[float, ...]] = []
-    spans: list[tuple[int, int]] = []
+def _dims_matches(t: str) -> list[tuple[tuple[int, int], tuple[float, ...]]]:
+    """[(span, lados en cm)] de las medidas "N x M (x K) [unidad]" reconocidas en
+    un texto YA normalizado. Una medida sin unidad solo vale si todos sus lados
+    son plausibles en cm (3 a 400): "1920x1080" o "42 x 2" no son medidas."""
+    out: list[tuple[tuple[int, int], tuple[float, ...]]] = []
     for m in _DIMS.finditer(t):
         values = [m.group(i) for i in (1, 3, 5) if m.group(i)]
         units = [u for u in (m.group(2), m.group(4), m.group(6)) if u]
@@ -146,8 +152,15 @@ def extract_dims_cm(text: str) -> tuple[tuple[float, ...], ...]:
             cm = tuple(nums)  # type: ignore[arg-type]
         else:
             continue
-        groups.append(cm)
-        spans.append(m.span())
+        out.append((m.span(), cm))
+    return out
+
+
+def extract_dims_cm(text: str) -> tuple[tuple[float, ...], ...]:
+    t = _norm(text)
+    found = _dims_matches(t)
+    groups: list[tuple[float, ...]] = [cm for _, cm in found]
+    spans = [span for span, _ in found]
     for m in _SINGLE_DIM.finditer(t):
         if any(a <= m.start() < b for a, b in spans):
             continue
@@ -179,18 +192,36 @@ def extract(text: str) -> Measures:
     )
 
 
+_PRODUCT_ATTR_SUFFIXES = ("LENGTH", "WIDTH", "HEIGHT")
+
+
+def _is_package_attribute(key: str) -> bool:
+    """PACKAGE_*, SELLER_PACKAGE_*, BOX_*: son las medidas de la caja de envío,
+    no las del producto, y no se comparan con las nuestras."""
+    return "PACKAGE" in key or "BOX" in key or key.startswith("SELLER_")
+
+
 def measures_from_attributes(attrs: Mapping[str, str] | None) -> Measures:
-    """Medidas que trae una ficha de la API en sus atributos ("30 cm", "1,2 kg").
-    Mejor esfuerzo: lo que no se entiende se ignora."""
-    dims: list[tuple[float, ...]] = []
+    """Medidas del PRODUCTO que trae una ficha de la API en sus atributos
+    ("30 cm", "1,2 kg"). Mejor esfuerzo: lo que no se entiende se ignora.
+
+    Largo, ancho y alto se juntan en UN solo grupo de lados (ordenados por valor,
+    no por el orden del dict: el resultado no puede depender de cómo vino el JSON) y las medidas
+    de la caja se descartan."""
+    sides: list[float] = []
     weights: list[float] = []
-    for key, value in (attrs or {}).items():
-        k = key.upper()
-        if k.endswith(("LENGTH", "WIDTH", "HEIGHT")):
-            dims.extend(extract_dims_cm(value))
+    for key in sorted((attrs or {}), key=str):
+        value = (attrs or {})[key]
+        k = str(key).upper()
+        if _is_package_attribute(k):
+            continue
+        if k.endswith(_PRODUCT_ATTR_SUFFIXES):
+            first = next(iter(extract_dims_cm(value)), ())
+            if first:
+                sides.append(first[0])
         elif k.endswith("WEIGHT"):
-            weights.extend(extract_weight_kg(value))
-    return Measures(dims_cm=tuple(dims), weight_kg=tuple(weights))
+            weights.extend(extract_weight_kg(value)[:1])
+    return Measures(dims_cm=(tuple(sorted(sides)),) if sides else (), weight_kg=tuple(sorted(weights)))
 
 
 # ─── Lo nuestro ───────────────────────────────────────────────────
@@ -273,6 +304,96 @@ def _capacity_conflict(ours: Iterable[float], theirs: Iterable[float]) -> bool:
     return not any(_within(a, b, _CAPACITY_TOL) for a in ours for b in theirs)
 
 
+# Tope de cordura de lo que dice Vendure (cm y kg). Una medida fuera de esto, o a
+# más de un orden de magnitud de la de la publicación (mm cargados como cm, gramos
+# como kilos), es casi seguro un error de carga: no decide nada.
+_SANE_SIDE_CM = (0.1, 300.0)
+_SANE_WEIGHT_KG = (0.001, 200.0)
+_MAGNITUDE_RATIO = 10.0
+NOTE_DOUBTFUL_SIZE = "medida dudosa en Vendure"
+NOTE_DOUBTFUL_WEIGHT = "peso dudoso en Vendure"
+
+
+@dataclass(frozen=True, slots=True)
+class SpecCheck:
+    differences: list[str] = field(default_factory=list)
+    # Avisos que no cambian el veredicto ("medida dudosa en Vendure").
+    notes: list[str] = field(default_factory=list)
+
+
+def _out_of_range(value: float, bounds: tuple[float, float]) -> bool:
+    return not (bounds[0] <= value <= bounds[1])
+
+
+def _far_apart(a: float, b: float) -> bool:
+    lo, hi = sorted((a, b))
+    return lo <= 0 or hi / lo > _MAGNITUDE_RATIO
+
+
+def _dims_doubtful(theirs: tuple[float, ...], ours: tuple[float, ...]) -> bool:
+    return any(_out_of_range(v, _SANE_SIDE_CM) for v in ours) or _far_apart(max(theirs), max(ours))
+
+
+def _best_title_group(groups: list[tuple[float, ...]]) -> tuple[float, ...] | None:
+    """El grupo de medidas más completo del título (más lados, y a igual cantidad
+    el de lado mayor): la elección es determinística."""
+    return max(groups, key=lambda g: (len(g), max(g))) if groups else None
+
+
+def check(
+    our_name: str,
+    our_specs: OurSpecs | None,
+    their_title: str,
+    their_attrs: Mapping[str, str] | None = None,
+    *,
+    dim_tol_pct: float = 10.0,
+    weight_tol_pct: float = 15.0,
+) -> SpecCheck:
+    """Qué cambia entre nuestro producto y la publicación, con vocabulario
+    cerrado (cantidad, capacidad, medida, peso), y los avisos sobre datos dudosos
+    de Vendure. Sin diferencias = no se encontró ninguna (que no es lo mismo que
+    "se verificó todo")."""
+    ours = extract(our_name)
+    theirs = extract(their_title)
+    from_attrs = measures_from_attributes(their_attrs)
+    diffs: list[str] = []
+    notes: list[str] = []
+
+    if (ours.quantity or 1) != (theirs.quantity or 1):
+        diffs.append(DIFF_QUANTITY)
+    if _capacity_conflict(ours.capacity_ml, theirs.capacity_ml):
+        diffs.append(DIFF_CAPACITY)
+
+    dim_tol = max(0.0, dim_tol_pct) / 100.0
+    vendure_dims = our_specs.dims_cm if our_specs and our_specs.dims_cm else ()
+    our_dims = vendure_dims or (max(ours.dims_cm, key=len) if ours.dims_cm else ())
+    # La publicación puede traer medidas en el título y en los atributos de la
+    # ficha: se miran las dos, cada una por separado.
+    groups = [g for g in (_best_title_group(list(theirs.dims_cm)),
+                          from_attrs.dims_cm[0] if from_attrs.dims_cm else None) if g]
+    if our_dims:
+        for group in groups:
+            if vendure_dims and _dims_doubtful(group, our_dims):
+                if NOTE_DOUBTFUL_SIZE not in notes:
+                    notes.append(NOTE_DOUBTFUL_SIZE)
+                continue
+            if dims_conflict(group, our_dims, dim_tol):
+                diffs.append(DIFF_SIZE)
+                break
+
+    weight_tol = max(0.0, weight_tol_pct) / 100.0
+    vendure_weight = our_specs.weight if our_specs and our_specs.weight else None
+    our_weights = (vendure_weight,) if vendure_weight else ours.weight_kg
+    their_weights = (*theirs.weight_kg, *from_attrs.weight_kg)
+    if our_weights and their_weights:
+        if vendure_weight and (_out_of_range(vendure_weight, _SANE_WEIGHT_KG)
+                               or all(_far_apart(vendure_weight, w) for w in their_weights)):
+            notes.append(NOTE_DOUBTFUL_WEIGHT)
+        elif not any(_within(w, o, weight_tol) for w in their_weights for o in our_weights):
+            diffs.append(DIFF_WEIGHT)
+    return SpecCheck(diffs, notes)
+
+
 def differences(
     our_name: str,
     our_specs: OurSpecs | None,
@@ -282,32 +403,6 @@ def differences(
     dim_tol_pct: float = 10.0,
     weight_tol_pct: float = 15.0,
 ) -> list[str]:
-    """Qué cambia entre nuestro producto y la publicación, con vocabulario
-    cerrado: cantidad, capacidad, medida, peso. Lista vacía = no se encontró
-    ninguna diferencia (que no es lo mismo que "se verificó todo")."""
-    ours = extract(our_name)
-    theirs = extract(their_title)
-    from_attrs = measures_from_attributes(their_attrs)
-    diffs: list[str] = []
-
-    if (ours.quantity or 1) != (theirs.quantity or 1):
-        diffs.append(DIFF_QUANTITY)
-    if _capacity_conflict(ours.capacity_ml, theirs.capacity_ml):
-        diffs.append(DIFF_CAPACITY)
-
-    dim_tol = max(0.0, dim_tol_pct) / 100.0
-    our_dims = our_specs.dims_cm if our_specs and our_specs.dims_cm else (
-        max(ours.dims_cm, key=len) if ours.dims_cm else ())
-    their_groups = [g for g in (*theirs.dims_cm, *from_attrs.dims_cm) if g]
-    if our_dims and their_groups:
-        biggest = max(their_groups, key=len)
-        if dims_conflict(biggest, our_dims, dim_tol):
-            diffs.append(DIFF_SIZE)
-
-    weight_tol = max(0.0, weight_tol_pct) / 100.0
-    our_weights = (our_specs.weight,) if our_specs and our_specs.weight else ours.weight_kg
-    their_weights = (*theirs.weight_kg, *from_attrs.weight_kg)
-    if our_weights and their_weights and not any(
-            _within(w, o, weight_tol) for w in their_weights for o in our_weights):
-        diffs.append(DIFF_WEIGHT)
-    return diffs
+    """Solo las diferencias de `check` (ver ahí)."""
+    return check(our_name, our_specs, their_title, their_attrs,
+                 dim_tol_pct=dim_tol_pct, weight_tol_pct=weight_tol_pct).differences

@@ -112,6 +112,8 @@ class Decision:
     differences: list[str] = field(default_factory=list)
     # El juez opinó sobre esta publicación (aunque no haya cambiado el veredicto).
     judged: bool = False
+    # Avisos que no cambian el veredicto ("medida dudosa en Vendure").
+    notes: list[str] = field(default_factory=list)
 
 
 def classify(image_score: float | None, name_score: float, thr: Thresholds) -> tuple[str, str | None]:
@@ -201,15 +203,16 @@ def apply_specs(
     peso de la publicación difieren de los nuestros (ver market_specs)."""
     if d.verdict != MATCH:
         return
-    diffs = market_specs.differences(
+    result = market_specs.check(
         our_name, our_specs, d.candidate.name, d.candidate.attributes,
         dim_tol_pct=dim_tol_pct, weight_tol_pct=weight_tol_pct,
     )
-    if diffs:
+    d.notes = list(result.notes)
+    if result.differences:
         d.verdict = SIMILAR
         d.source = SOURCE_SPECS
-        d.differences = sorted({*d.differences, *diffs})
-        d.reason = d.reason or "difiere en " + ", ".join(diffs)
+        d.differences = sorted({*d.differences, *result.differences})
+        d.reason = d.reason or "difiere en " + ", ".join(result.differences)
 
 
 ImageScorer = Callable[[VendureProduct, Sequence[str]], Awaitable[float | None]]

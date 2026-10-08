@@ -531,6 +531,7 @@ def _listing_entry(d: market_match.Decision, category: str) -> dict[str, Any]:
         "confidence": d.confidence,
         "reason": (d.reason or "")[:300],
         "differences": list(d.differences),
+        "notes": list(d.notes),
         "brand": c.brand[:40] or None,
         "image_url": (c.image_urls or [None])[0],
         "specs": market_specs.extract(c.name).as_dict(),

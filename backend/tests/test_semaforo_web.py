@@ -483,3 +483,19 @@ async def test_errors_saved_in_the_run_and_the_snapshot_do_not_carry_the_proxy(w
     snap = price_monitor._mark(price_monitor.MarketPriceSnapshot(run_id=1, product_id="1"), "failed",
                                "tunnel res.proxy.io rechazó a usr_b2b")
     assert "res.proxy.io" not in snap.ml_error and "usr_b2b" not in snap.ml_error
+
+
+async def test_an_absurd_vendure_measure_does_not_demote_and_is_noted_on_the_listing(webw):
+    from app.pricing.semaforo import PricedVariant
+
+    prod = _product("3", "Producto raro")
+    prod.priced_variants = [PricedVariant(id="v3", name="", sku="", price_with_tax_cents=10_000, currency="ARS",
+                                          specs={"length": 400.0, "width": 300.0, "height": 100.0})]
+    FakeVendure.products = [prod]
+    webw.web.pages["producto-raro"] = _web_page(_card("MLA901", "Producto Raro 40 x 30 x 10 cm", 250.0))
+    _score(webw, "MLA901", 0.91)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.ml_status == "ok" and s.similar_count == 0
+    [m] = json.loads(s.matched_listings)
+    assert m["notes"] == ["medida dudosa en Vendure"] and m["differences"] == []

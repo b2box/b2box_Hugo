@@ -144,3 +144,97 @@ def test_our_specs_from_vendure_custom_fields():
     specs = ms.our_specs_from_custom_fields({"length": 40.0, "width": 30, "weight": 0.5, "boxLength": 80})
     assert specs.dims_cm == (40.0, 30.0) and specs.box_length == 80
     assert OurSpecs.from_dict(specs.as_dict()) == specs
+
+
+# ─── un "x 3" después de un código de modelo es un pack (BUG-L3) ──────────
+
+
+@pytest.mark.parametrize("text, qty", [
+    ("Foco LED 9W E27 x 3", 3), ("Zapatilla talle 42 x 2", 2), ("Cuaderno A4 x 3", 3),
+    ("Batería AA x 4", 4), ("Lámpara E14 x 6 unidades", 6), ("Filtro N95 x 10", 10),
+    # esto NO es un pack: es una medida
+    ("Alfombra 30 x 40", None), ("Mesa 120 x 60 x 75 cm", None), ("Cinta 30cm x 40cm", None),
+    ("Estante 15 x 15 x 15", None), ("Notebook 1920x1080", None),
+])
+def test_x_after_a_model_code_is_a_pack_but_a_real_measure_is_not(text, qty):
+    assert ms.extract_quantity(text) == qty
+
+
+def test_pack_after_a_model_code_is_a_different_quantity():
+    assert differences("Foco LED 9W E27", None, "Foco LED 9W E27 x 3") == ["cantidad"]
+    assert differences("Foco LED 9W E27 x 3", None, "Foco LED 9W E27 x 3") == []
+
+
+# ─── atributos de una ficha: solo del producto, sin depender del orden (BUG-L8) ──
+
+
+def test_package_attributes_are_the_shipping_box_and_never_compared():
+    ours = OurSpecs(length=20, width=15, height=5, weight=0.4)
+    attrs = {"PACKAGE_LENGTH": "30 cm", "PACKAGE_WIDTH": "25 cm", "PACKAGE_HEIGHT": "10 cm",
+             "PACKAGE_WEIGHT": "600 g", "SELLER_PACKAGE_WEIGHT": "900 g",
+             "LENGTH": "20 cm", "WEIGHT": "400 g"}
+    assert differences("Producto", ours, "Producto", attrs) == []
+    assert differences("Producto", ours, "Producto", dict(reversed(attrs.items()))) == []
+    m = ms.measures_from_attributes(attrs)
+    assert m.dims_cm == ((20.0,),) and m.weight_kg == (0.4,)
+
+
+def test_the_catalog_card_dims_are_one_group_whatever_the_order():
+    a = {"LENGTH": "80 cm", "WIDTH": "60 cm", "HEIGHT": "10 cm"}
+    b = dict(reversed(a.items()))
+    assert ms.measures_from_attributes(a).dims_cm == ms.measures_from_attributes(b).dims_cm == ((10.0, 60.0, 80.0),)
+    ours = OurSpecs(length=40, width=30, height=10)
+    assert differences("P", ours, "P", a) == differences("P", ours, "P", b) == ["medida"]
+
+
+def test_title_and_catalog_card_dims_are_both_checked():
+    ours = OurSpecs(length=40, width=30, height=10)
+    attrs = {"LENGTH": "80 cm", "WIDTH": "60 cm"}
+    assert differences("P", ours, "P 40x30 cm", attrs) == ["medida"]          # el título coincide, la ficha no
+    assert differences("P", ours, "P 80x60 cm", {"LENGTH": "40 cm", "WIDTH": "30 cm"}) == ["medida"]
+    assert differences("P", ours, "P 40x30 cm", {"LENGTH": "40 cm", "WIDTH": "30 cm"}) == []
+
+
+def test_the_choice_between_title_groups_is_deterministic():
+    ours = OurSpecs(length=40, width=30, height=10)
+    one = differences("P", ours, "P 30x40 cm con base de 12 x 12 cm")
+    two = differences("P", ours, "P con base de 12 x 12 cm de 30x40 cm")
+    assert one == two
+
+
+def test_bare_x_values_without_units_keep_working():
+    assert ms.extract_dims_cm("Alfombra 40x60") == ((40.0, 60.0),)
+
+
+# ─── tope de cordura de lo que dice Vendure ───────────────────────────────
+
+
+def test_an_absurd_vendure_dimension_does_not_decide_and_is_noted():
+    mm_as_cm = OurSpecs(length=400, width=300, height=100)          # mm cargados como cm
+    result = ms.check("Org", mm_as_cm, "Org 40x30x10 cm")
+    assert result.differences == [] and result.notes == [ms.NOTE_DOUBTFUL_SIZE]
+    assert differences("Org", mm_as_cm, "Org 40x30x10 cm") == []
+
+
+def test_a_vendure_dimension_far_beyond_the_publication_is_doubtful_not_a_difference():
+    result = ms.check("Org", OurSpecs(length=250, width=200), "Org 20x15 cm")      # >10x
+    assert result.differences == [] and result.notes == [ms.NOTE_DOUBTFUL_SIZE]
+    tiny = ms.check("Org", OurSpecs(length=2, width=1.5), "Org 40x30 cm")            # <0,1x
+    assert tiny.differences == [] and tiny.notes == [ms.NOTE_DOUBTFUL_SIZE]
+
+
+def test_a_plausible_mismatch_still_decides_without_a_note():
+    result = ms.check("Org", OurSpecs(length=40, width=30), "Org 80x60 cm")          # 2x: es otro producto
+    assert result.differences == ["medida"] and result.notes == []
+
+
+def test_an_absurd_vendure_weight_does_not_decide():
+    grams_as_kg = OurSpecs(length=40, width=30, weight=500)         # 500 "kg" de un producto de 500 g
+    result = ms.check("Org", grams_as_kg, "Org 500 g")
+    assert result.differences == [] and result.notes == [ms.NOTE_DOUBTFUL_WEIGHT]
+    assert ms.check("Org", OurSpecs(weight=0.4), "Org 900 g").differences == ["peso"]   # 2,25x: decide
+
+
+def test_the_name_measures_are_not_subject_to_the_vendure_sanity_check():
+    result = ms.check("Org 400x300 cm", None, "Org 40x30 cm")       # lo dice el nombre, no Vendure
+    assert result.notes == []

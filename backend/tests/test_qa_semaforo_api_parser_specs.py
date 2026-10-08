@@ -326,8 +326,6 @@ def test_title_pairs(ours, theirs, want):
     assert differences(ours, None, theirs) == want
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L3: «x 3» después de un token que termina en dígito (E27, 42) se toma "
-                                       "por una medida «N x M» y no cuenta como pack")
 @pytest.mark.parametrize("ours, theirs", [
     ("Foco LED 9W E27", "Foco LED 9W E27 x 3"),
     ("Zapatilla talle 42", "Zapatilla talle 42 x 2"),
@@ -497,9 +495,6 @@ def test_the_run_byte_counter_does_not_overflow_in_postgres():
     assert isinstance(col.type, BigInteger)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-L8: de una ficha de la API se comparan también PACKAGE_LENGTH/WIDTH/HEIGHT/"
-                                       "WEIGHT (la CAJA de envío) contra las medidas del PRODUCTO, y se mira un solo "
-                                       "grupo (el primero): da 'medida'/'peso' falsos y depende del orden del dict")
 def test_package_attributes_of_a_catalog_card_do_not_decide():
     ours = OurSpecs(length=20, width=15, height=5, weight=0.4)
     attrs = {"PACKAGE_LENGTH": "30 cm", "PACKAGE_WEIGHT": "600 g", "LENGTH": "20 cm", "WEIGHT": "400 g"}
