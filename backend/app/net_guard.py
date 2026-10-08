@@ -33,12 +33,31 @@ class SsrfBlocked(ValueError):
     """La URL apunta (directa o vía redirect/DNS) a una red no pública."""
 
 
+# NAT64 (RFC 6052): un gateway NAT64 traduce 64:ff9b::a.b.c.d a la IPv4
+# a.b.c.d, incluidas las privadas. Hugo no corre detrás de uno: se bloquea todo.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _ip_is_public(ip: str) -> bool:
+    """True solo para una IP de internet pública.
+
+    `is_global` deja afuera el rango compartido 100.64.0.0/10 (CGNAT, también
+    la metadata de Alibaba en 100.100.100.200), pero NO el multicast ni el
+    site-local fec0::/10, y una IPv6 "mapeada" (::ffff:10.0.0.1) hay que
+    juzgarla por la IPv4 que lleva adentro, no como IPv6.
+    """
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return not (
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return _ip_is_public(str(addr.ipv4_mapped))
+        if addr in _NAT64 or addr.is_site_local:
+            return False
+        if addr.sixtofour is not None and not _ip_is_public(str(addr.sixtofour)):
+            return False
+    return addr.is_global and not (
         addr.is_private
         or addr.is_loopback
         or addr.is_link_local
