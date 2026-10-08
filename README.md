@@ -488,11 +488,22 @@ Para cada producto y cada tienda Hugo trae hasta 6 candidatos, **siempre** (aunq
 parezca) y los clasifica igual que a ML: **idéntico / similar / diferente**, con precio, link,
 % de foto, % de nombre y motivo.
 
-**Las tiendas son referencia: no cambian el color.** El color y la ganancia siguen saliendo de
-Mercado Libre. Si Nico quiere que cuenten, el ajuste `pm_stores_affect_color` (default 0) hace que
-el color use la **mediana de los idénticos de ML y de las tiendas** (los similares confirmados de las
-tiendas también suman al color *estimado*, con el mismo criterio de ML: `in_estimate`). Un precio
-marcado «dudoso» nunca cuenta.
+**Un idéntico de tienda cambia el color real, igual que uno de ML** (decisión de Nico, 08-oct-2026;
+ajuste `pm_stores_affect_color`, default 1; en 0 las tiendas son solo referencia). El color usa la
+**mediana de los idénticos de ML y de las tiendas**. Para que el precio de un idéntico de tienda
+cuente tiene que cumplir TODO esto:
+
+- estar confirmado por la **foto + el nombre**, por el **chequeo de medidas** o por **una persona**
+  («Es el mismo»). El juez IA solo no alcanza: se ve como idéntico, pero su precio no mueve el color
+  (el título y la foto de una tienda son texto de terceros y el modelo los lee);
+- tener **stock**: lo agotado se muestra con la etiqueta «sin stock» (celda, detalle y «Más barato
+  afuera»), pero no cuenta para «Más barato afuera» ni para la mediana del color, real o estimado. Si
+  lo único idéntico de afuera está agotado, «Más barato afuera» lo muestra marcado como dato;
+- tener un **precio creíble** (no «dudoso»).
+
+Los similares de tienda dan el color *estimado* con las reglas de ML (`in_estimate`: confirmados por
+juez, medidas o una persona, sin diferencia de pack ni de capacidad, y con stock). La marca «Gadnic»
+es de importador, como la nuestra: cuenta como genérica (idéntico), no como marca conocida.
 
 En el dashboard (Semáforo): una columna por fuente (**Mercado Libre | Gadnic | Casa Perfecta**) con el
 mejor resultado de cada una (el precio del idéntico; si no hay, el del similar marcado «similar»; si
@@ -519,28 +530,41 @@ diferentes o nada, y el estado del índice de cada tienda.
 4. **Matching** (`pricing/store_match.py`): por producto y tienda, prefiltro por nombre (rapidfuzz
    sobre todos los títulos indexados, K = 6) → CLIP con la foto del candidato (embedding cacheado) →
    el mismo veredicto de tres valores que ML: reglas por foto + nombre, juez IA solo para la banda
-   ambigua y para las marcas conocidas, y chequeo de medidas/cantidad/capacidad. La marca propia de la
-   tienda (Gadnic) se trata como genérica (regla de Nico: genérica = idéntico, conocida = similar). Los
-   6 candidatos quedan en `store_match`, también los diferentes.
+   ambigua y para las marcas conocidas, y chequeo de medidas/cantidad/capacidad. Lo dudoso que nadie
+   confirma (sin juez, sin cupo) queda **similar «sin confirmar»**, igual que en ML. La marca propia de
+   la tienda (Gadnic) se trata como genérica (regla de Nico: genérica = idéntico, conocida = similar).
+   Los 6 candidatos quedan en `store_match`, también los diferentes. Lo que una persona marca «No es
+   el mismo» sigue visible al día siguiente como diferente (sin volver a bajar su foto) y se puede
+   dar vuelta; lo que marca «Es el mismo» entra como idéntico.
 
 #### Respeto por las tiendas
 
 - **robots.txt**: se baja y se parsea (con comodines `*` y `$`: `urllib.robotparser` no los entiende)
   y se respeta para el sitemap y para **cada** página. Gadnic prohíbe las URLs con `?` (no se usa su
   buscador); Casa Perfecta prohíbe `/search/` (el sitemap de Tiendanube trae `/ar/search/?q=…`: se
-  descartan). Si el robots.txt no se puede bajar (5xx), no se rastrea nada; si no existe (404), todo
-  permitido. Un `Crawl-delay` del robots alarga la pausa.
-- **Ritmo**: una página cada 2-3 segundos **por tienda** y el tope diario. `net_guard.safe_get`
-  (httpx, sin navegador y sin proxy, anti-SSRF, cada redirect validado y tope de bytes: 3 MB por
-  página, 25 MB por sitemap, ya descomprimido).
+  descartan). Si el robots.txt no se puede bajar (5xx, 429, 401 o 403), no se rastrea nada; si no
+  existe (404), todo permitido. Un `Crawl-delay` del robots alarga la pausa. El patrón se compara sin
+  regex (un robots hostil no puede colgar el proceso).
+- **Ritmo**: una página cada 2-3 segundos **por tienda**, el tope diario (se mira ANTES de bajar
+  robots o sitemaps) y un tope de tiempo por pedido (robots 30 s, ficha 60 s, sitemap 180 s).
+  `net_guard.safe_get` (httpx, sin navegador y sin proxy, anti-SSRF, tope de bytes: 3 MB por página,
+  25 MB por sitemap, ya descomprimido; solo se acepta sin comprimir o con UNA capa de gzip). Cada
+  redirect se valida contra el sitio de la tienda y contra robots.txt. «Indexar ahora» tiene 10
+  minutos de descanso entre pasadas.
 - **User-Agent honesto**: `HugoPriceBot/1.0 (+https://b2box.pro)` (`STORE_USER_AGENT`), sin
   disfrazarse de navegador y sin cookies.
 - **GET condicional**: se manda `If-None-Match` / `If-Modified-Since` con lo que dio la tienda. (Hoy
   ninguna de las dos lo aprovecha: Casa Perfecta no manda validadores y el ETag de Gadnic cambia en
   cada respuesta, así que contestan 200. Queda listo por si lo arreglan.)
-- **404/500 dos veces → `dead`**: no se reintenta por 30 días (`STORE_DEAD_RETRY_DAYS`). Un 429 corta
-  la pasada de esa tienda por hoy; tres 403 seguidos o cinco errores de red seguidos, también. Nada de
-  eso tira el job ni a las otras tiendas.
+- **`dead`**: un 404/410 (o una página que ya no es un producto) dos veces la deja muerta por 30
+  días (`STORE_DEAD_RETRY_DAYS`). Un **5xx** puede ser una caída de la tienda: se reintenta a 1, 2 y 4
+  días y recién queda `dead` con dos fallos y 3 días desde el primero (`STORE_DEAD_MIN_DAYS_5XX`).
+  Si TODAS las fichas dan 5xx (25 seguidas) y no hubo una bien en la última semana, la pasada se corta
+  («caída») y no se marca nada muerto; en Gadnic, que tiene muchas muertas sueltas pero siempre alguna
+  viva, no se corta. Salud muestra por tienda las fichas fallando, cuántas con 5xx y la salud
+  (ok / degradada / caída). Un 429 corta la pasada de esa tienda por hoy; tres 403 o cinco errores de
+  red seguidos, también. Nada de eso tira el job ni a las otras tiendas. Si borrás o apagás una
+  tienda mientras se la lee, la pasada se corta en la página siguiente.
 
 #### Precios dudosos
 
@@ -563,11 +587,15 @@ para el color.
 Dashboard → **Configuración → Tiendas de comparación → Agregar tienda**: nombre, dirección
 (`https://…`) y plataforma. **Tiendanube** sirve para cualquier tienda hecha con Tiendanube (sitemap
 con `/productos/…`, `data-variants`, fotos en `mitiendanube.com`); **Sitio propio** lee el sitemap y
-el JSON-LD `Product` de cualquier otro sitio. Opcionales: sitemap, dominios de las fotos (vacío = la
-tienda y, si es Tiendanube, `mitiendanube.com`; solo se aceptan fotos de ahí), marca propia, días de
-relectura y páginas por día. «Indexar ahora» arranca la primera pasada sin esperar a la madrugada.
-No hace falta deploy. Apagar una tienda la saca de la tabla y de la comparación; borrarla borra también
-lo que se leyó de ella.
+el JSON-LD `Product` de cualquier otro sitio. La dirección tiene que ser un dominio común (nada de
+IPs, `localhost`, sufijos como `com.ar` ni plataformas como `github.io`) y hay una tienda por sitio.
+Opcionales: sitemap (del mismo sitio), dominios de las fotos, marca propia, días de relectura y páginas
+por día. **Fotos**: solo se aceptan de la tienda misma (su host y su `www.`) y de su plataforma
+(Tiendanube: `acdn*.mitiendanube.com`). Un dominio extra (el CDN de Gadnic es `*.bidcom.com.ar`) lo tiene
+que autorizar un administrador con `STORE_TRUSTED_IMAGE_HOSTS`: quien carga la tienda no puede sumar
+cualquier dominio (le abriría las fotos al juez a medio internet). «Indexar ahora» arranca la primera
+pasada sin esperar a la madrugada. No hace falta deploy. Apagar una tienda la saca de la tabla y de la
+comparación; borrarla borra también lo que se leyó de ella (y quién la borró queda en el log).
 
 #### Costos y tiempos
 
@@ -582,8 +610,9 @@ lo que se leyó de ella.
 Sin proxy ni navegador: no gasta Decodo ni Camoufox. El job de madrugada tiene que terminar antes de
 las 06:00 UTC; con Gadnic en 2.000 páginas termina cerca de las 05:10 UTC. La primera noche, CLIP baja
 las fotos de los candidatos (unas 1,8 por segundo; después quedan en el cache y se podan a los
-`pm_embed_cache_days`). El juez IA comparte el tope `pm_vision_max_calls` con ML: cada producto puede
-sumar una consulta por tienda (hasta 2 más por noche y producto).
+`pm_embed_cache_days`). El juez IA de las tiendas tiene su **propio tope diario**
+(`pm_stores_vision_max_calls`, 500) y solo corre si el juez de ML está prendido: comparar tiendas no le
+saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 
 ### Qué NO hace todavía
 
@@ -624,7 +653,8 @@ sumar una consulta por tienda (hasta 2 más por noche y producto).
 | `pm_ml_web_pause_s` | 4 | pausa entre búsquedas web, en segundos |
 | `pm_ml_web_block_streak` | 5 | fallos seguidos que cortan la web por esa noche |
 | `pm_ml_web_block_scripts` | 1 | no bajar scripts ni estilos (~0,2 MB en vez de ~1,7 MB por búsqueda) |
-| `pm_stores_affect_color` | 0 | 1 = el color usa la mediana de los idénticos de ML y de las tiendas; 0 = las tiendas son solo referencia |
+| `pm_stores_affect_color` | 1 | 1 = el color usa la mediana de los idénticos de ML y de las tiendas (con stock, precio creíble y confirmados por foto + nombre, medidas o una persona); 0 = solo referencia |
+| `pm_stores_vision_max_calls` | 500 | tope diario del juez IA de las tiendas (contador propio; 0 = sin juez) |
 | `pm_stores_topup_minutes` | 15 | minutos para refrescar el índice viejo de las tiendas al empezar la corrida; 0 = solo el job de la madrugada |
 
 Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
@@ -1171,7 +1201,9 @@ Ver `.env.example`. Las críticas:
 - `PRICE_DRIFT_THRESHOLD` — % mínimo de variación que dispara alerta.
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
 - `STORE_INDEX_CRON_UTC` (default `20 3 * * *`), `STORE_USER_AGENT`, `STORE_REQUEST_DELAY_MIN_S` /
-  `STORE_REQUEST_DELAY_MAX_S` (2 / 3), `STORE_DEAD_RETRY_DAYS` (30) — indexado de las tiendas.
+  `STORE_REQUEST_DELAY_MAX_S` (2 / 3), `STORE_DEAD_RETRY_DAYS` (30), `STORE_DEAD_MIN_DAYS_5XX` (3),
+  `STORE_MAX_STORES` (20), `STORE_TRUSTED_IMAGE_HOSTS` (`*.bidcom.com.ar`; dominios de fotos extra que un
+  administrador autoriza) — indexado de las tiendas.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
