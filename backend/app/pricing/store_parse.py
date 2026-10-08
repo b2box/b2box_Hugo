@@ -35,6 +35,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
 
+from lxml import etree
+
 log = logging.getLogger(__name__)
 
 PLATFORM_TIENDANUBE = "tiendanube"
@@ -49,6 +51,8 @@ _MAX_LD_BLOCKS = 60
 _MAX_LD_BLOCK_CHARS = 400_000
 _MAX_URL_LEN = 500
 TITLE_MAX = 300
+# Lo que cabe en las columnas (INTEGER en Postgres): una tienda no puede romper el INSERT con un número.
+MAX_STOCK = 10_000_000
 # Nada de lo que vende una tienda razonable cuesta menos que esto, en pesos de hoy.
 MIN_PLAUSIBLE_PRICE_CENTS = 100_000          # ARS 1.000
 MAX_PLAUSIBLE_PRICE_CENTS = 100_000_000_000  # ARS 1.000 millones: más es basura
@@ -136,9 +140,6 @@ def _normalize_url(url: object) -> str:
 
 # ─── Sitemap ─────────────────────────────────────────────────────────────────
 
-_LOC = re.compile(r"<loc>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*</loc>", re.I | re.S)
-
-
 @dataclass(slots=True)
 class Sitemap:
     is_index: bool
@@ -160,19 +161,40 @@ def decode_sitemap_body(body: bytes, limit: int = MAX_SITEMAP_BYTES) -> str:
     return body[:limit].decode("utf-8", errors="replace")
 
 
-def parse_sitemap(text: str) -> Sitemap:
-    """`<urlset>` o `<sitemapindex>` → las URLs de sus `<loc>`. Regex y no un parser
-    XML: es tolerante a XML roto y no resuelve entidades externas."""
+def _loc_text(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("<![CDATA["):                 # CDATA es literal: no se desescapa
+        raw = raw[len("<![CDATA["):]
+        return (raw[:-3] if raw.endswith("]]>") else raw).strip()
+    return html_lib.unescape(raw).strip()
+
+
+def parse_sitemap(text: str, max_urls: int | None = None) -> Sitemap:
+    """`<urlset>` o `<sitemapindex>` → las URLs de sus `<loc>`. Un barrido con `str.find`: ni un
+    parser XML (no resuelve entidades externas ni se rompe con XML roto) ni una regex (un sitemap
+    con 20.000 `<loc>` sin cerrar tardaba segundos en el event loop). Es lineal en el tamaño."""
     if not isinstance(text, str):
         return Sitemap(False, [])
-    is_index = bool(re.search(r"<sitemapindex\b", text[:4000], re.I))
+    limit = MAX_SITEMAP_URLS if max_urls is None else max_urls
+    is_index = "<sitemapindex" in text[:4000].lower()
     locs: list[str] = []
     truncated = False
-    for m in _LOC.finditer(text):
-        loc = html_lib.unescape(m.group(1)).strip()
+    pos = 0
+    while True:
+        start = text.find("<loc>", pos)
+        if start < 0:
+            break
+        start += len("<loc>")
+        end = text.find("</loc>", start)
+        if end < 0:
+            break
+        pos = end + len("</loc>")
+        if end - start > _MAX_URL_LEN + 64:       # un «<loc>» sin cerrar que abarca medio archivo
+            continue
+        loc = _loc_text(text[start:end])
         if not loc or len(loc) > _MAX_URL_LEN or any(ord(c) <= 0x20 for c in loc):
             continue
-        if len(locs) >= MAX_SITEMAP_URLS:
+        if len(locs) >= limit:
             truncated = True
             break
         locs.append(loc)
@@ -181,17 +203,29 @@ def parse_sitemap(text: str) -> Sitemap:
 
 # ─── JSON-LD ────────────────────────────────────────────────────────────────
 
-_LD_BLOCK = re.compile(
-    r"<script\b[^>]*\btype\s*=\s*[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
+def parse_html(page: str) -> "etree._Element | None":
+    """La página como árbol, con libxml2 (C, lineal, tolerante a HTML roto). Las regex sobre el
+    HTML de un tercero eran cuadráticas con una ficha hecha a propósito (`<meta ` ×20.000 sin
+    cerrar tardaba segundos). Sin red ni entidades externas."""
+    try:
+        parser = etree.HTMLParser(recover=True, no_network=True, remove_comments=True,
+                                  remove_pis=True, huge_tree=False, encoding="utf-8")
+        return etree.fromstring(page.encode("utf-8", "replace"), parser)
+    except Exception:  # noqa: BLE001  (libxml2 rechaza lo que no puede leer)
+        return None
 
 
-def iter_json_ld(page: str) -> list[Any]:
+def iter_json_ld(doc: "etree._Element | None") -> list[Any]:
     """Los bloques JSON-LD de la página que se pueden leer. Un bloque roto se saltea."""
     out: list[Any] = []
-    for m in _LD_BLOCK.finditer(page):
+    if doc is None:
+        return out
+    for el in doc.iter("script"):
         if len(out) >= _MAX_LD_BLOCKS:
             break
-        body = m.group(1).strip()
+        if (el.get("type") or "").strip().lower() != "application/ld+json":
+            continue
+        body = (el.text or "").strip()
         if not body or len(body) > _MAX_LD_BLOCK_CHARS:
             continue
         try:
@@ -288,10 +322,13 @@ def _ld_availability_stock(prod: dict) -> int | None:
     return None
 
 
-def _meta(page: str, prop: str) -> str:
-    m = re.search(r"<meta\b[^>]*\bproperty\s*=\s*[\"']%s[\"'][^>]*\bcontent\s*=\s*[\"']([^\"']*)[\"']"
-                  % re.escape(prop), page, re.I)
-    return html_lib.unescape(m.group(1)).strip() if m else ""
+def _meta(doc: "etree._Element | None", prop: str) -> str:
+    if doc is None:
+        return ""
+    for el in doc.iter("meta"):
+        if (el.get("property") or "").strip().lower() == prop:
+            return (el.get("content") or "").strip()
+    return ""
 
 
 def _plausibility(price: int, doubtful: bool, note: str) -> tuple[bool, str]:
@@ -303,21 +340,19 @@ def _plausibility(price: int, doubtful: bool, note: str) -> tuple[bool, str]:
 
 # ─── Tiendanube ──────────────────────────────────────────────────────────────
 
-_SINGLE_PRODUCT_TAG = re.compile(r"<[a-z]+\b[^>]*\bid\s*=\s*[\"']single-product[\"'][^>]*>", re.I | re.S)
-_DATA_VARIANTS = re.compile(r"\bdata-variants\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", re.I | re.S)
-
-
-def _tiendanube_variants(page: str) -> list[dict]:
+def _tiendanube_variants(doc: "etree._Element | None") -> list[dict]:
     """`data-variants` del bloque `#single-product` (el producto de ESTA página; los
     demás `data-variants` de la página son los del carrusel de relacionados)."""
-    tag = _SINGLE_PRODUCT_TAG.search(page)
-    if tag is None:
+    if doc is None:
         return []
-    attr = _DATA_VARIANTS.search(tag.group(0))
-    if attr is None:
+    for el in doc.iter():
+        if el.get("id") == "single-product":
+            raw = el.get("data-variants") or ""
+            break
+    else:
         return []
     try:
-        data = json.loads(html_lib.unescape(attr.group(1) or attr.group(2) or ""), strict=False)
+        data = json.loads(raw, strict=False)
     except ValueError:
         return []
     return [v for v in data if isinstance(v, dict)][:100] if isinstance(data, list) else []
@@ -346,17 +381,17 @@ def _tiendanube_price(variants: list[dict]) -> tuple[int | None, int | None, set
     if any(s is None for s in stocks):
         stock = None                                  # sin tope declarado
     else:
-        stock = int(sum(s for s in stocks if isinstance(s, (int, float)) and s > 0))
+        stock = min(MAX_STOCK, int(sum(s for s in stocks if isinstance(s, (int, float)) and s > 0)))
     return price, stock, compare
 
 
-def parse_tiendanube(page: str, urls: list[str]) -> ParsedItem | None:
-    prod = pick_product(iter_json_ld(page), urls)
+def parse_tiendanube(doc: "etree._Element | None", urls: list[str]) -> ParsedItem | None:
+    prod = pick_product(iter_json_ld(doc), urls)
     title = one_line(prod.get("name"), TITLE_MAX) if prod else ""
-    title = title or one_line(_meta(page, "og:title"), TITLE_MAX)
+    title = title or one_line(_meta(doc, "og:title"), TITLE_MAX)
     if not title:
         return None
-    variants = _tiendanube_variants(page)
+    variants = _tiendanube_variants(doc)
     price, stock, compare_at = _tiendanube_price(variants)
     ld_price, ld_note = _ld_price_cents(prod) if prod else (None, "")
     doubtful, note = False, ""
@@ -376,7 +411,7 @@ def parse_tiendanube(page: str, urls: list[str]) -> ParsedItem | None:
     if not sku:
         sku = one_line(next((v.get("sku") for v in variants if v.get("sku")), ""), 80)
     images = _ld_images(prod) if prod else []
-    for extra in (_meta(page, "og:image:secure_url"), _meta(page, "og:image"),
+    for extra in (_meta(doc, "og:image:secure_url"), _meta(doc, "og:image"),
                   next((v.get("image_url") for v in variants if isinstance(v.get("image_url"), str)), "")):
         if extra and extra not in images:
             images.append(extra)
@@ -391,16 +426,26 @@ def parse_tiendanube(page: str, urls: list[str]) -> ParsedItem | None:
 # ─── JSON-LD + estado de Next.js (Gadnic) ───────────────────────────────────
 
 _FLIGHT_WINDOW = 8000
+# `: {"sku": "<sku>"` justo después de la palabra «product» (tramo de 160 caracteres como mucho).
+_PRODUCT_HEAD = re.compile(r'\s{0,8}:\s{0,8}\{\s{0,8}"sku"\s{0,8}:\s{0,8}"([^"]{0,80})"')
 
 
 def _flight_product(page: str, sku: str) -> str:
     """El tramo del estado de Next.js (`self.__next_f.push`) que describe ESTE producto:
     desde `"product":{"sku":"<sku>"`. Los `listPrice` / `finalPrice` que vienen
-    después son los de los productos relacionados."""
+    después son los de los productos relacionados. Se busca con `str.find` y se mira solo un
+    tramo corto después de cada `"product"`: nada de regex sobre toda la página."""
     flat = page.replace('\\"', '"')
-    sku_pattern = re.escape(sku) if sku else '[^"]*'
-    m = re.search(r'"product"\s*:\s*\{\s*"sku"\s*:\s*"%s"' % sku_pattern, flat)
-    return flat[m.start():m.start() + _FLIGHT_WINDOW] if m else ""
+    pos = 0
+    while True:
+        at = flat.find('"product"', pos)
+        if at < 0:
+            return ""
+        pos = at + len('"product"')
+        head = flat[pos:pos + 160]
+        m = _PRODUCT_HEAD.match(head)
+        if m and (not sku or m.group(1) == sku):
+            return flat[at:at + _FLIGHT_WINDOW]
 
 
 def _first_number(window: str, key: str) -> str | None:
@@ -408,11 +453,11 @@ def _first_number(window: str, key: str) -> str | None:
     return m.group(1) if m else None
 
 
-def parse_jsonld(page: str, urls: list[str]) -> ParsedItem | None:
-    prod = pick_product(iter_json_ld(page), urls)
+def parse_jsonld(doc: "etree._Element | None", page: str, urls: list[str]) -> ParsedItem | None:
+    prod = pick_product(iter_json_ld(doc), urls)
     if prod is None:
         return None
-    title = one_line(prod.get("name"), TITLE_MAX) or one_line(_meta(page, "og:title"), TITLE_MAX)
+    title = one_line(prod.get("name"), TITLE_MAX) or one_line(_meta(doc, "og:title"), TITLE_MAX)
     if not title:
         return None
     sku = one_line(prod.get("sku"), 80)
@@ -432,13 +477,13 @@ def parse_jsonld(page: str, urls: list[str]) -> ParsedItem | None:
     stock = _ld_availability_stock(prod)
     max_qty = _first_number(window, "maxQuantity") if window else None
     if stock is None and max_qty is not None and max_qty.isdigit():
-        stock = int(max_qty) or None
+        stock = min(MAX_STOCK, int(max_qty)) or None
     images: list[str] = []
     gallery = re.search(r'"gallery"\s*:\s*\[\s*("[^"]+"(?:\s*,\s*"[^"]+")*)', window) if window else None
     if gallery:
         images += [u for u in re.findall(r'"([^"]+)"', gallery.group(1))[:2] if len(u) <= _MAX_URL_LEN]
     images += [u for u in _ld_images(prod) if u not in images]
-    for extra in (_meta(page, "og:image"),):
+    for extra in (_meta(doc, "og:image"),):
         if extra and extra not in images:
             images.append(extra)
     brand = _ld_text(prod.get("brand"), 80)
@@ -452,13 +497,13 @@ def parse_jsonld(page: str, urls: list[str]) -> ParsedItem | None:
 def parse_product_page(platform: str, page: str, urls: list[str]) -> ParsedItem | None:
     """Ficha de producto → datos, o None si la página no es un producto legible.
     `urls` son las URLs con que se pidió y a las que terminó respondiendo."""
-    if not isinstance(page, str) or not page:
+    if not isinstance(page, str) or not page or platform not in PLATFORMS:
         return None
     try:
+        doc = parse_html(page)
         if platform == PLATFORM_TIENDANUBE:
-            return parse_tiendanube(page, urls)
-        if platform == PLATFORM_JSONLD:
-            return parse_jsonld(page, urls)
+            return parse_tiendanube(doc, urls)
+        return parse_jsonld(doc, page, urls)
     except Exception:  # noqa: BLE001  (un parser no puede tumbar el indexado)
         log.warning("parser de %s reventó en %s", platform, (urls[0] if urls else "?")[:120], exc_info=True)
     return None

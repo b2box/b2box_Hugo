@@ -363,8 +363,6 @@ async def test_conditional_get_works_with_only_last_modified_and_a_304_never_rew
 # ─── bugs confirmados ───────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: un 429 en robots.txt se toma como «no existe, todo permitido» (4xx) y la pasada sigue "
-                                       "pidiendo sitemap y fichas; el README dice que un 429 corta la pasada de esa tienda")
 async def test_a_429_on_robots_txt_stops_the_pass(store_db):
     sid = add_store()
     site = tn_site(["a", "b", "c"])

@@ -35,11 +35,33 @@ MAX_CRAWL_DELAY_S = 30.0
 class Rule:
     allow: bool
     pattern: str
-    regex: re.Pattern[str]
+    # El patrón partido por `*` (sin el `$` final) y si exigía terminar ahí. Se compara con
+    # `str.startswith` / `str.find`, nunca con una regex: `/*a*a*a*a*b` contra una URL larga
+    # tardaba segundos en el event loop (cada `*` era un `.*` y el motor retrocede sin fin).
+    parts: tuple[str, ...]
+    anchored: bool
 
     @property
     def length(self) -> int:
         return len(self.pattern)
+
+    def matches(self, target: str) -> bool:
+        """¿El path (con su query) cae bajo esta regla? Anclado al inicio; con `$`, también al final."""
+        parts = self.parts
+        if len(parts) == 1:
+            return target == parts[0] if self.anchored else target.startswith(parts[0])
+        if not target.startswith(parts[0]):
+            return False
+        pos = len(parts[0])
+        for middle in parts[1:-1]:
+            at = target.find(middle, pos)
+            if at < 0:
+                return False
+            pos = at + len(middle)
+        last = parts[-1]
+        if self.anchored:
+            return len(target) - len(last) >= pos and target.endswith(last)
+        return target.find(last, pos) >= 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +79,7 @@ class Robots:
         target = _path_and_query(url_or_path)
         best: Rule | None = None
         for rule in self.rules:
-            if not rule.regex.match(target):
+            if not rule.matches(target):
                 continue
             if best is None or rule.length > best.length or (rule.length == best.length and rule.allow):
                 best = rule
@@ -72,11 +94,10 @@ def _path_and_query(url_or_path: str) -> str:
     return raw if raw.startswith("/") else "/" + raw
 
 
-def _compile(pattern: str) -> re.Pattern[str]:
+def _compile(allow: bool, pattern: str) -> Rule:
     anchored = pattern.endswith("$")
     body = pattern[:-1] if anchored else pattern
-    regex = ".*".join(re.escape(piece) for piece in body.split("*"))
-    return re.compile(regex + (r"\Z" if anchored else ""))
+    return Rule(allow, pattern, tuple(body.split("*")), anchored)
 
 
 def allow_all() -> Robots:
@@ -87,22 +108,27 @@ def disallow_all() -> Robots:
     return Robots(blocked_all=True)
 
 
+# 401/403 (no nos dejan leerlo) y 429 (nos pidieron frenar) no son «no existe»: no se rastrea.
+_NO_CRAWL_STATUSES = frozenset({401, 403, 429})
+
+
 def from_status(status: int | None, text: str = "", agent: str = "HugoPriceBot") -> Robots:
-    """Qué hacer con la respuesta de `/robots.txt` (RFC 9309): 2xx se parsea; 4xx
-    (no existe) = sin restricciones; 5xx o sin respuesta = no se rastrea nada."""
+    """Qué hacer con la respuesta de `/robots.txt` (RFC 9309): 2xx se parsea; 404 y demás 4xx
+    (no existe) = sin restricciones; 401/403/429, 5xx o sin respuesta = no se rastrea nada."""
     if status is not None and 200 <= status < 300:
         return parse(text, agent)
-    if status is not None and 400 <= status < 500:
+    if status is not None and 400 <= status < 500 and status not in _NO_CRAWL_STATUSES:
         return allow_all()
     return disallow_all()
 
 
 def _agent_matches(declared: str, token: str) -> int:
-    """Especificidad del grupo para nosotros: 0 = no aplica, 1 = `*`, 2 = nuestro token."""
+    """Especificidad del grupo para nosotros: 0 = no aplica, 1 = `*`, 2 = nuestro token. Igualdad
+    (sin distinguir mayúsculas), no «contiene»: `User-agent: o` no es nuestro."""
     declared = declared.strip().lower()
     if declared == "*":
         return 1
-    return 2 if declared and declared in token else 0
+    return 2 if declared and declared == token else 0
 
 
 def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
@@ -153,7 +179,7 @@ def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
                 chosen_delays += group_delays
 
     compiled = tuple(
-        Rule(allow, pattern, _compile(pattern))
+        _compile(allow, pattern)
         for allow, pattern in chosen_rules
         if pattern  # `Disallow:` vacío = nada prohibido; `Allow:` vacío no dice nada
     )
