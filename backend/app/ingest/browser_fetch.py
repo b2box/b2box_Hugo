@@ -30,6 +30,17 @@ httpx: sigue redirects solo, carga subrecursos, ejecuta JS que puede hacer fetch
     si apunta a una red interna. Es el control que hace segura la navegación,
     no el chequeo de entrada.
   - Sin `file://`, sin `data:` de navegación, sin descargas.
+
+## Dos formas de usarlo
+
+  - `render(url)`: UNA ficha, browser nuevo por llamada (lo que usan /verify y
+    /app/lookup mientras un cliente espera).
+  - `ListingBrowser`: UN browser para MUCHAS páginas de listado seguidas (el
+    semáforo busca ~1.000 títulos por noche en la web de ML). Mismo lanzamiento
+    (`_launch_kwargs`: headless, humanize, geoip, BROWSER_PROXY), mismo guard
+    anti-SSRF (`_install_guard`) y mismo `available()`; suma bloqueo de
+    imágenes/fuentes/media y el conteo de bytes, porque cada byte pasa por un
+    proxy residencial que se paga por GB.
 """
 
 from __future__ import annotations
@@ -137,6 +148,28 @@ def _proxy_config() -> dict[str, str] | None:
     return cfg
 
 
+def _launch_kwargs() -> dict:
+    """Argumentos de lanzamiento de Camoufox, los MISMOS para toda la app.
+
+    humanize: mueve el mouse con curvas realistas. geoip: alinea timezone,
+    locale y coordenadas con la IP de salida — un fingerprint que se contradice
+    con la IP es justamente lo que detectan los anti-bot. proxy: salida por una
+    IP residencial cuando está configurado (ML bloquea las de datacenter).
+    """
+    kwargs: dict = {"headless": True, "humanize": True, "geoip": True}
+    proxy = _proxy_config()
+    if proxy:
+        kwargs["proxy"] = proxy
+        log.info("browser_fetch: usando proxy %s", proxy["server"])
+    return kwargs
+
+
+def proxy_configured() -> bool:
+    """¿Hay BROWSER_PROXY válido? Lo usan las fuentes que NO deben salir desde
+    la IP del datacenter (ML la bloquea): sin proxy, ni lo intentan."""
+    return _proxy_config() is not None
+
+
 def available() -> bool:
     """True si se puede renderizar con browser. Nunca tira."""
     s = get_settings()
@@ -222,6 +255,31 @@ async def _guard_route(route, request, blocked: list[str]) -> None:
         except Exception as abort_exc:  # noqa: BLE001
             # El request ya se resolvió o la página se cerró: no hay nada que abortar.
             log.debug("browser_fetch: abort falló para %s: %s", url[:120], abort_exc)
+
+
+# Tipos de recurso que NO hacen falta para leer el estado embebido de un
+# listado: imágenes, fuentes y media. Son la mayor parte de los bytes de una
+# página de ML y se pagan por GB de proxy.
+HEAVY_RESOURCE_TYPES = frozenset({"image", "imageset", "font", "media"})
+
+
+async def _guard_and_slim_route(route, request, blocked: list[str]) -> None:
+    """`_guard_route` + aborta imágenes/fuentes/media (sin contarlas como
+    "bloqueadas por el guard": no son un intento de SSRF sino ahorro)."""
+    if getattr(request, "resource_type", "") in HEAVY_RESOURCE_TYPES:
+        try:
+            await route.abort()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("browser_fetch: abort falló para %s: %s", request.url[:120], exc)
+        return
+    await _guard_route(route, request, blocked)
+
+
+async def _install_guard(target, blocked: list[str], *, slim: bool = False) -> None:
+    """Instala el guard anti-SSRF en una página o en un contexto (`target.route`).
+    `slim=True` además corta imágenes, fuentes y media."""
+    handler = _guard_and_slim_route if slim else _guard_route
+    await target.route("**/*", lambda route, request: handler(route, request, blocked))
 
 
 # JS que corre en la página ya renderizada. Junta las fotos del producto en
@@ -335,20 +393,9 @@ async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
     page_data = RenderedPage()
     blocked: list[str] = []
 
-    # humanize: mueve el mouse con curvas realistas. geoip: alinea timezone,
-    # locale y coordenadas con la IP de salida — un fingerprint que se contradice
-    # con la IP es justamente lo que detectan los anti-bot. proxy: salida por una
-    # IP residencial cuando está configurado (ML bloquea las de datacenter).
-    proxy = _proxy_config()
-    launch_kwargs: dict = {"headless": True, "humanize": True, "geoip": True}
-    if proxy:
-        launch_kwargs["proxy"] = proxy
-        log.info("browser_fetch: usando proxy %s", proxy["server"])
-    async with AsyncCamoufox(**launch_kwargs) as browser:
+    async with AsyncCamoufox(**_launch_kwargs()) as browser:
         page = await browser.new_page()
-        await page.route(
-            "**/*", lambda route, request: _guard_route(route, request, blocked)
-        )
+        await _install_guard(page, blocked)
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
@@ -398,4 +445,197 @@ async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
     return page_data
 
 
-__all__ = ["BrowserUnavailable", "RenderedPage", "SsrfBlocked", "available", "render"]
+# ─── Listados: un browser para muchas búsquedas ────────────────────
+
+
+@dataclass(slots=True)
+class ListingPage:
+    """Una página de listado ya cargada (el HTML trae el estado embebido)."""
+    html: str = ""
+    final_url: str = ""
+    # Status HTTP del documento principal (None si el browser no lo informó).
+    status: int | None = None
+    # Bytes que bajó la página por el proxy: cabeceras + cuerpo de las
+    # respuestas COMPLETADAS (Request.sizes). Lo que se cortó al cerrar la
+    # página no está, así que es un piso del consumo real.
+    bytes: int = 0
+    # Requests que el guard anti-SSRF abortó mientras se cargaba.
+    blocked: int = 0
+    elapsed_s: float = 0.0
+
+
+class CircuitOpen(BrowserUnavailable):
+    """El host viene fallando y está en descanso (ver `circuit_open_for`)."""
+
+
+# Cada cuántas páginas se relanza Firefox: una sesión de horas acumula memoria
+# y el container (3 GB) la comparte con CLIP.
+LISTING_RECYCLE_AFTER = 150
+# Tope para levantar Firefox (con geoip por proxy ronda los 10-50 s).
+_LAUNCH_TIMEOUT_S = 90.0
+# Margen sobre el timeout del goto para el resto de la operación.
+_PAGE_MARGIN_S = 15.0
+
+
+class ListingBrowser:
+    """UN Camoufox para MUCHAS páginas de listado seguidas.
+
+    `render()` abre un browser por llamada (~50 s de reloj): para 1.000
+    búsquedas por noche eso son 14 horas. Acá se lanza una vez (mismos
+    argumentos y mismo proxy que `render()`), todas las páginas comparten un
+    contexto —y con él la cache: los scripts y estilos de ML se bajan una sola
+    vez— y se relanza cada `LISTING_RECYCLE_AFTER` páginas.
+
+    Seguridad: el contexto lleva el mismo guard que `render()` (cada request,
+    redirects y subrecursos incluidos, se valida contra red pública) y además
+    corta imágenes, fuentes y media.
+
+    Uso:
+        async with ListingBrowser() as lb:
+            page = await lb.fetch("https://listado.mercadolibre.com.ar/...")
+    """
+
+    def __init__(self, *, recycle_after: int = LISTING_RECYCLE_AFTER) -> None:
+        self._recycle_after = max(1, recycle_after)
+        self._lock = asyncio.Lock()
+        self._cm = None
+        self._context = None
+        self._blocked: list[str] = []
+        self._active = 0
+        self._pages = 0
+        self._broken = False
+        self.launches = 0
+
+    async def __aenter__(self) -> "ListingBrowser":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.close()
+
+    async def _launch(self) -> None:
+        AsyncCamoufox = _camoufox()
+        cm = AsyncCamoufox(**_launch_kwargs())
+        try:
+            browser = await asyncio.wait_for(cm.__aenter__(), timeout=_LAUNCH_TIMEOUT_S)
+            context = await browser.new_context()
+            await _install_guard(context, self._blocked, slim=True)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                await cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            raise BrowserUnavailable(
+                f"No se pudo lanzar el browser: {type(exc).__name__}: {exc}"
+            ) from exc
+        self._cm, self._context = cm, context
+        self._pages = 0
+        self._broken = False
+        self.launches += 1
+
+    async def _shutdown(self) -> None:
+        cm, self._cm, self._context = self._cm, None, None
+        if cm is not None:
+            try:
+                await cm.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("browser_fetch: cierre del listing browser falló: %s", exc)
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._shutdown()
+
+    async def _acquire(self):
+        async with self._lock:
+            idle = self._active == 0
+            if self._context is not None and idle and (
+                self._broken or self._pages >= self._recycle_after
+            ):
+                await self._shutdown()
+            if self._context is None:
+                await self._launch()
+            self._active += 1
+            self._pages += 1
+            return self._context
+
+    async def fetch(self, url: str) -> ListingPage:
+        """Carga `url` y devuelve el HTML (el estado embebido viene en el SSR,
+        no hace falta scrollear ni esperar al JS). Lanza BrowserUnavailable si
+        el browser no está, no arranca o la página no cargó; CircuitOpen si el
+        host está en descanso; SsrfBlocked si la URL apunta a una red interna."""
+        if not available():
+            raise BrowserUnavailable("camoufox no está instalado o BROWSER_FETCH_ENABLED=false")
+        if circuit_open_for(url):
+            raise CircuitOpen(f"{_host_of(url)} viene fallando, en descanso")
+        assert_public_url(url)
+
+        s = get_settings()
+        timeout_ms = s.browser_fetch_timeout_ms
+        started = time.monotonic()
+        context = await self._acquire()
+        try:
+            return await asyncio.wait_for(
+                self._load(context, url, timeout_ms, started),
+                timeout=timeout_ms / 1000 + _PAGE_MARGIN_S,
+            )
+        except BrowserUnavailable:
+            raise
+        except asyncio.TimeoutError as exc:
+            self._broken = True
+            raise BrowserUnavailable(
+                f"La página no cargó en {timeout_ms / 1000 + _PAGE_MARGIN_S:.0f} s"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            self._broken = True
+            raise BrowserUnavailable(
+                f"El browser no pudo cargar la página: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            self._active -= 1
+
+    async def _load(self, context, url: str, timeout_ms: int, started: float) -> ListingPage:
+        page = await context.new_page()
+        total = 0
+        pending: list[asyncio.Future] = []
+
+        async def _size(request) -> None:
+            nonlocal total
+            try:
+                sizes = await request.sizes()
+                total += sum(int(sizes.get(k) or 0) for k in (
+                    "requestHeadersSize", "requestBodySize",
+                    "responseHeadersSize", "responseBodySize"))
+            except Exception:  # noqa: BLE001  (la medición nunca rompe la carga)
+                pass
+
+        page.on("requestfinished", lambda r: pending.append(asyncio.ensure_future(_size(r))))
+        blocked_before = len(self._blocked)
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            html = await page.content()
+            final_url = page.url
+            status = response.status if response is not None else None
+            if pending:
+                await asyncio.wait(pending, timeout=2.0)
+        finally:
+            try:
+                await page.close()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("browser_fetch: no se pudo cerrar la página: %s", exc)
+        return ListingPage(
+            html=html, final_url=final_url, status=status, bytes=total,
+            blocked=len(self._blocked) - blocked_before,
+            elapsed_s=time.monotonic() - started,
+        )
+
+
+def note_listing_result(url: str, *, results: int) -> None:
+    """Le avisa al corta-circuitos por host cómo le fue a un listado (la
+    cantidad de resultados leídos hace de "fotos encontradas")."""
+    note_render_result(url, images_found=results)
+
+
+__all__ = [
+    "BrowserUnavailable", "CircuitOpen", "ListingBrowser", "ListingPage", "RenderedPage",
+    "SsrfBlocked", "available", "circuit_open_for", "note_listing_result",
+    "proxy_configured", "render",
+]
