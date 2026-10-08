@@ -36,6 +36,7 @@ from app import runtime  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.db.models import (  # noqa: E402
     ImageEmbedCache,
+    MarketMatchFeedback,
     MarketPriceSnapshot,
     MlSellerCache,
     PriceHistory,
@@ -147,11 +148,14 @@ def world(monkeypatch):
     init_db()
     with Session(engine) as s:
         for model in (MarketPriceSnapshot, PriceMonitorRun, MlSellerCache, Setting,
-                      ImageEmbedCache, PriceHistory):
+                      ImageEmbedCache, PriceHistory, MarketMatchFeedback):
             for row in s.exec(select(model)).all():
                 s.delete(row)
         s.commit()
     runtime.invalidate()
+    # Estos tests describen la sombra de siempre (solo habilitados); los
+    # deshabilitados tienen sus propios tests en test_semaforo_web.py.
+    runtime.set_value("pm_include_disabled", 0)
 
     FakeVendure.products = [
         _product("1", "Organizador cocina"),
@@ -217,6 +221,13 @@ def world(monkeypatch):
     w = World()
     w.ml, w.image_scores, w.sleeps, w.graphql_calls = ml, image_scores, sleeps, graphql_calls
     yield w
+    # Que no le pise el default a otros módulos. Se borra la fila a mano: reset_to_default()
+    # llama a get_settings() y, con PM_LLM_* seteado por otro test, dejaba su cache pegado.
+    with Session(engine) as s:
+        row = s.get(Setting, "pm_include_disabled")
+        if row is not None:
+            s.delete(row)
+            s.commit()
     runtime.invalidate()
 
 
@@ -1004,3 +1015,82 @@ def test_our_photos_is_one_version_of_the_featured_photo():
     assert pm._our_photos(http_preview) == ["https://cdn.b2box/assets/source/1.jpg"]
     assert pm._our_photos(replace(p, featured_image_url=None, image_urls=[])) == []
     assert pm._our_photos(replace(p, featured_image_url="http://x/1.jpg", image_urls=["ftp://x/1.jpg"])) == []
+
+
+# ─── retención del historial del semáforo ───────────────────────────────────
+
+
+def _ago(days):
+    return utcnow() - timedelta(days=days)
+
+
+def _history(s):
+    runs = {name: PriceMonitorRun(status=status, started_at=_ago(days)) for name, status, days in (
+        ("a", "ok", 300), ("b", "ok", 250), ("c", "ok", 200), ("new", "ok", 2), ("live", "running", 260))}
+    for r in runs.values():
+        s.add(r)
+    s.commit()
+    for r in runs.values():
+        s.refresh(r)
+    snaps = [
+        # producto 1: tres snapshots, el último es de hace 200 días (vigente, no se borra)
+        MarketPriceSnapshot(run_id=runs["a"].id, product_id="1", captured_at=_ago(300)),
+        MarketPriceSnapshot(run_id=runs["b"].id, product_id="1", captured_at=_ago(250)),
+        MarketPriceSnapshot(run_id=runs["c"].id, product_id="1", captured_at=_ago(200)),
+        # producto 2: viejo y nuevo: el viejo se va
+        MarketPriceSnapshot(run_id=runs["a"].id, product_id="2", captured_at=_ago(299)),
+        MarketPriceSnapshot(run_id=runs["new"].id, product_id="2", captured_at=_ago(2)),
+        # producto 3: dentro de la retención
+        MarketPriceSnapshot(run_id=runs["new"].id, product_id="3", captured_at=_ago(179)),
+    ]
+    for sn in snaps:
+        s.add(sn)
+    s.commit()
+    return {k: r.id for k, r in runs.items()}
+
+
+def test_prune_keeps_the_last_snapshot_of_each_product_and_drops_the_old_rest(world):
+    with Session(engine) as s:
+        ids = _history(s)
+    # se van: los 2 primeros del producto 1 y el viejo del 2; y las corridas a y b (sin snapshots)
+    assert price_monitor.prune_snapshots(180) == (3, 2)
+    with Session(engine) as s:
+        kept = sorted((x.product_id, x.run_id) for x in s.exec(select(MarketPriceSnapshot)))
+        assert kept == [("1", ids["c"]), ("2", ids["new"]), ("3", ids["new"])]
+        runs = {r.id for r in s.exec(select(PriceMonitorRun))}
+    # la que sostiene un snapshot vigente, la nueva y la en curso (aunque vieja) no se tocan
+    assert runs == {ids["c"], ids["new"], ids["live"]}
+
+
+def test_prune_is_idempotent_and_zero_days_disables_it(world):
+    with Session(engine) as s:
+        _history(s)
+    assert price_monitor.prune_snapshots(0) == (0, 0)
+    assert price_monitor.prune_snapshots(180) == (3, 2)
+    assert price_monitor.prune_snapshots(180) == (0, 0)
+
+
+async def test_the_prune_job_runs_the_monitor_retention_and_survives_its_failure(world, monkeypatch, caplog):
+    import logging
+
+    with Session(engine) as s:
+        _history(s)
+    monkeypatch.setattr(jobs.get_settings(), "price_monitor_retention_days", 180)
+    monkeypatch.setattr(jobs.get_settings(), "price_history_retention_days", 0)     # esa otra poda, apagada
+    await jobs.prune_price_history()
+    with Session(engine) as s:
+        assert len(s.exec(select(MarketPriceSnapshot)).all()) == 3
+
+    def boom(days):
+        raise RuntimeError("base caída")
+
+    monkeypatch.setattr(price_monitor, "prune_snapshots", boom)
+    with caplog.at_level(logging.WARNING, logger="app.scheduler.jobs"):
+        await jobs.prune_price_history()                                       # no tira
+    assert "historial del semáforo falló" in caplog.text
+
+
+def test_the_retention_default_is_180_days():
+    from app.config import get_settings
+
+    assert get_settings().price_monitor_retention_days == 180

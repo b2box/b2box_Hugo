@@ -72,9 +72,10 @@ _RETRY_AFTER_CAP_S = 60.0
 # se acepta solo lo que tiene la forma esperada.
 _LINK_DOMAINS = ("mercadolibre.com.ar", "mercadolibre.com")
 _IMAGE_DOMAIN = "mlstatic.com"
-_PRODUCT_ID = re.compile(r"^MLA\d+$")    # fichas de catálogo e items
-_USER_ID = re.compile(r"^\d+$")
-_CATEGORY_ID = re.compile(r"^MLA\d+$")
+# re.ASCII: \d de Python acepta dígitos de otros alfabetos ("MLA١٢٣"), que no son ids de ML.
+_PRODUCT_ID = re.compile(r"^MLA\d+$", re.ASCII)    # fichas de catálogo e items
+_USER_ID = re.compile(r"^\d+$", re.ASCII)
+_CATEGORY_ID = re.compile(r"^MLA\d+$", re.ASCII)
 
 
 def _host_in(host: str, domain: str) -> bool:
@@ -109,7 +110,23 @@ def safe_permalink(url: object) -> str:
     parts = _clean_https_parts(url)
     if parts is None or not any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS):
         return ""
+    if _looks_like_click_tracker(parts):
+        return ""
     return parts.geturl()
+
+
+def _looks_like_click_tracker(parts) -> bool:
+    """Click-trackers de publicidad (click1.mercadolibre.com.ar/mclics/…): un
+    link que no lleva a la publicación y que además contaría un clic al
+    anunciante cada vez que una persona lo abre."""
+    return parts.hostname.lower().split(".")[0].startswith("click") or "/mclics/" in parts.path.lower()
+
+
+def is_click_tracker(url: object) -> bool:
+    """¿Es un link de ML, pero de un click-tracker publicitario?"""
+    parts = _clean_https_parts(url if not isinstance(url, str) or "://" in url else "https://" + url.lstrip("/"))
+    return (parts is not None and any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS)
+            and _looks_like_click_tracker(parts))
 
 
 def safe_image_url(url: object) -> str | None:
@@ -142,14 +159,34 @@ class MlUnavailable(meli.MeliError):
     """ML siguió en 429/5xx después de todos los reintentos."""
 
 
+# Origen de un candidato: la API de fichas de catálogo o la búsqueda web.
+ORIGIN_API = "api"
+ORIGIN_WEB = "web"
+
+
 @dataclass(slots=True)
 class MlCandidate:
-    """Una ficha de catálogo de ML que devolvió la búsqueda por título."""
+    """Una publicación de ML que devolvió una búsqueda por título: una ficha de
+    catálogo (API) o un resultado de la web de ML. Lo de abajo de `domain_id` lo
+    trae solo la web (precio, vendedor) o los atributos de la ficha."""
     id: str
     name: str
     image_urls: list[str] = field(default_factory=list)
     permalink: str = ""
     domain_id: str = ""
+    origin: str = ORIGIN_API
+    # Web: el precio ya viene en el resultado (no hace falta pedir vendedores).
+    price_cents: int | None = None
+    currency: str | None = None
+    brand: str = ""
+    seller: str = ""
+    # Web: ventas del ítem (ML las publica en baldes: 100, 1000, 5000…).
+    sold_quantity: int | None = None
+    # Id de la ficha de catálogo a la que pertenece (web), si tiene.
+    catalog_id: str = ""
+    # API: atributos de la ficha que sirven para comparar (marca, medidas),
+    # {id: value_name} de una lista blanca.
+    attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -184,13 +221,37 @@ def parse_candidates(raw: dict) -> list[MlCandidate]:
         if not isinstance(r, dict) or not valid_product_id(str(r.get("id") or "")):
             continue
         images = [u for u in (safe_image_url(x) for x in meli._pictures_from(r)) if u]
+        attrs = _useful_attributes(r.get("attributes"))
         out.append(MlCandidate(
             id=str(r["id"]),
             name=str(r.get("name") or r.get("title") or ""),
             image_urls=images,
             permalink=safe_permalink(r.get("permalink")),
             domain_id=str(r.get("domain_id") or ""),
+            brand=attrs.get("BRAND", ""),
+            attributes=attrs,
         ))
+    return out
+
+
+# Atributos de la ficha que se guardan: marca y medidas del producto o del
+# paquete. El resto no se usa y es texto de terceros.
+_ATTRIBUTE_IDS = frozenset({
+    "BRAND", "MODEL", "LENGTH", "WIDTH", "HEIGHT", "WEIGHT",
+    "PACKAGE_LENGTH", "PACKAGE_WIDTH", "PACKAGE_HEIGHT", "PACKAGE_WEIGHT",
+    "ITEM_LENGTH", "ITEM_WIDTH", "ITEM_HEIGHT", "ITEM_WEIGHT",
+})
+
+
+def _useful_attributes(raw) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for a in raw if isinstance(raw, list) else []:
+        if not isinstance(a, dict):
+            continue
+        key = str(a.get("id") or "").upper()
+        value = a.get("value_name")
+        if key in _ATTRIBUTE_IDS and isinstance(value, str) and value.strip():
+            out.setdefault(key, " ".join(value.split())[:60])
     return out
 
 

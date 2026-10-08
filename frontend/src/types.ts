@@ -198,8 +198,38 @@ export interface PriceMonitorRun {
   llm: { calls: number; input_tokens: number; output_tokens: number; cost_usd: number };
   resumed_count: number;
   error: string | null;
+  // Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar). Corridas viejas: sin campo.
+  web?: {
+    status: string | null;
+    searches: number;
+    bytes: number;
+    blocked: number;
+    n_ok: number;
+    bytes_per_search: number | null;
+  };
+  n_con_similares?: number;
+  // Color ESTIMADO por similares (aparte del real) y productos con solo diferentes.
+  estimated?: { verde: number; amarillo: number; rojo: number };
+  solo_diferentes?: number;
 }
 
+// De dónde salió una publicación y cómo se decidió que es (o se parece a) lo nuestro.
+export type MatchOrigin = "api" | "web";
+export type MatchCategory = "igual" | "similar" | "diferente";
+// Qué devolvió ML para un producto: idéntico (con o sin precio que cuente), solo
+// similares, solo diferentes, o nada ("sin dato" de verdad).
+export type MatchState = "igual" | "igual_sin_precio" | "similar" | "diferente" | "ninguno";
+export type WebState = "ok" | "empty" | "blocked" | "error" | "budget" | "off";
+
+export interface ListingSpecs {
+  quantity?: number;
+  capacity_ml?: number[];
+  dims_cm?: number[][];
+  weight_kg?: number[];
+}
+
+// Una publicación de ML: IGUAL (cuenta para el color) o SIMILAR (solo se muestra).
+// Los campos nuevos faltan en las corridas anteriores.
 export interface MatchedListing {
   ml_id: string;
   title: string;
@@ -211,12 +241,46 @@ export interface MatchedListing {
   image_score: number | null;
   name_score: number | null;
   confidence: number | null;
+  origin?: MatchOrigin;
+  category?: MatchCategory;
+  reason?: string;
+  differences?: string[];
+  // Avisos que no cambian el veredicto (p. ej. "medida dudosa en Vendure").
+  notes?: string[];
+  // Similares: ¿cuenta para el color estimado? Solo los confirmados (juez, medidas o una
+  // persona) sin diferencia de cantidad ni de capacidad y con precio en pesos.
+  in_estimate?: boolean;
+  brand?: string | null;
+  image_url?: string | null;
+  seller?: string | null;
+  sold_quantity?: number | null;
+  price_cents?: number | null;
+  specs?: ListingSpecs;
+}
+
+// Medidas nuestras de Vendure (cm y kg).
+export interface OurSpecs {
+  length?: number;
+  width?: number;
+  height?: number;
+  weight?: number;
+  box_length?: number;
+  box_width?: number;
+  box_height?: number;
+  box_weight?: number;
 }
 
 export interface PriceMonitorSnapshot {
   id: number;
   run_id: number;
-  product: { id: string; name: string | null; code: string | null; image_url: string | null; slug: string | null };
+  product: {
+    id: string;
+    name: string | null;
+    code: string | null;
+    image_url: string | null;
+    slug: string | null;
+    enabled?: boolean;
+  };
   variant_id: string | null;
   captured_at: string | null;
   ml_status: MlStatus;
@@ -227,6 +291,25 @@ export interface PriceMonitorSnapshot {
   ml_seller_count: number;
   ml_currency: string | null;
   matched_listings: MatchedListing[];
+  // Idénticos sin un precio que cuente (se muestran con los idénticos, no suman a la mediana).
+  unpriced_listings?: MatchedListing[];
+  similar_count?: number;
+  similar_listings?: MatchedListing[];
+  // Publicaciones DIFERENTES: se guardan y se muestran con su precio, no cuentan para nada.
+  other_count?: number;
+  other_listings?: MatchedListing[];
+  match_state?: MatchState | null;
+  // Color ESTIMADO por la mediana de los similares (solo si no hay idéntico). No es el color real.
+  estimated_color?: SemaforoColor | null;
+  estimated_margin_pct?: number | null;
+  estimated_median_cents?: number | null;
+  estimated_listing_count?: number;
+  estimated_from?: "similar" | null;
+  match_origin?: MatchOrigin | null;
+  web_state?: WebState | null;
+  web_searches?: number;
+  web_bytes?: number;
+  our_specs?: OurSpecs | null;
   match_source: string | null;
   match_confidence: number | null;
   image_score_max: number | null;
@@ -250,6 +333,9 @@ export interface PriceMonitorSnapshotsResponse {
   page_size: number;
   has_more: boolean;
   colors: Partial<Record<SemaforoColor, number>>;
+  // Aparte del color real: productos con color estimado y cuántos hay en cada estado.
+  estimated_colors?: Partial<Record<"verde" | "amarillo" | "rojo", number>>;
+  states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;
 }
 
 export interface PriceMonitorSummary {
@@ -259,4 +345,7 @@ export interface PriceMonitorSummary {
   ml_budget: { used: number; budget: number; remaining: number };
   judge_enabled: boolean;
   cron_utc: string;
+  include_disabled?: boolean;
+  // Cupo del día de la búsqueda web y, si hoy no corre, por qué (p. ej. falta BROWSER_PROXY).
+  web?: { used: number; budget: number; remaining: number; off_reason: string | null };
 }

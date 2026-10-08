@@ -729,14 +729,18 @@ async def prune_price_history() -> None:
     Evita que la tabla `price_history` crezca sin techo en Supabase (storage $ +
     queries más lentas). Con 0 días, la retención queda deshabilitada.
 
-    Solo toca `price_history` (y el cache de fotos de ML, abajo). Las tablas
-    del semáforo (`market_price_snapshot`, `price_monitor_run`) son el
-    historial de tendencias y NO se podan acá.
+    También poda el cache de fotos de ML y el historial del semáforo
+    (`market_price_snapshot` y `price_monitor_run`, `price_monitor_retention_days`,
+    180 por default): se conserva el último snapshot de cada producto.
     """
     try:
         _prune_ml_embed_cache()
     except Exception as exc:  # noqa: BLE001
         log.warning("prune del cache de fotos de ML falló: %s", exc)
+    try:
+        price_monitor_mod.prune_snapshots(get_settings().price_monitor_retention_days)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prune del historial del semáforo falló: %s", exc)
     days = get_settings().price_history_retention_days
     if days <= 0:
         return

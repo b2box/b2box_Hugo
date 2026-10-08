@@ -281,6 +281,11 @@ class Settings(BaseSettings):
     browser_fetch_cooldown_seconds: int = Field(
         default=900, description="Cuánto se saltea un host que viene dando 0 fotos"
     )
+    # Cada cuántas páginas de listado (búsquedas del semáforo) se relanza Firefox
+    # para no acumular memoria: el container es de 3 GB y lo comparte CLIP.
+    browser_listing_recycle_after: int = Field(
+        default=75, ge=1, description="Páginas de listado antes de relanzar el browser"
+    )
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")
@@ -317,6 +322,11 @@ class Settings(BaseSettings):
     # Retención de snapshots de precio: se borran los PriceHistory más viejos
     # que esto (días). Evita que la tabla crezca sin techo en Supabase. 0 = nunca.
     price_history_retention_days: int = 120
+    # Retención de las tablas del semáforo (`market_price_snapshot` y las corridas
+    # sin snapshots que les queden): snapshots de más de estos días, salvo el
+    # último de cada producto. ~1.800 filas por noche con el JSON de las
+    # publicaciones: sin poda crecería sin techo. 0 = nunca.
+    price_monitor_retention_days: int = 180
 
     # ── Budget diario de calls a OTAPI (RapidAPI) ──────────────
     # Cap defensivo: si llegamos a este número de snapshots 1688_otapi
@@ -371,6 +381,32 @@ class Settings(BaseSettings):
     # Minutos mínimos entre el arranque de una corrida y un disparo manual
     # desde el dashboard: un botón apretado varias veces no quema el budget.
     pm_manual_cooldown_min: int = 30
+    # Productos DESHABILITADOS de Vendure: 1 = también se miden (marcados como
+    # tales en el snapshot y la API); 0 = solo los habilitados. En ningún caso
+    # el job escribe en Vendure: sigue siendo sombra.
+    pm_include_disabled: int = 1
+    # Chequeo de medidas/cantidad/capacidad: una publicación que coincide en foto
+    # y nombre pero difiere acá pasa de IGUAL a SIMILAR (no cuenta para el precio).
+    pm_spec_check: int = 1
+    pm_dim_tol_pct: float = 10.0
+    pm_weight_tol_pct: float = 15.0
+    # Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar con Camoufox +
+    # BROWSER_PROXY) para los productos sin ficha de catálogo IGUAL en la API.
+    # Ver app/pricing/market_ml_web.py. 0 = apagada.
+    pm_ml_web_daily_budget: int = 2500
+    pm_ml_web_max_results: int = 8
+    pm_ml_web_concurrency: int = 1
+    pm_ml_web_pause_s: float = 4.0
+    # Fallos seguidos (bloqueo, captcha, proxy caído) que cortan la fuente web
+    # por esa noche.
+    pm_ml_web_block_streak: int = 5
+    # Cuántas publicaciones de ML se guardan por producto (idénticas + similares +
+    # diferentes, las más parecidas primero): siempre se trae algo para mostrar.
+    pm_ml_keep_listings: int = 8
+    # 1 = el navegador no baja scripts ni estilos de ML (la búsqueda se lee del
+    # HTML): ~0,2 MB por búsqueda en vez de ~1,7 MB. Si ML empezara a bloquear
+    # por eso, ponerlo en 0 desde el dashboard.
+    pm_ml_web_block_scripts: int = 1
 
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.

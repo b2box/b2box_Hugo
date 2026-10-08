@@ -25,6 +25,7 @@ from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
 
 from app.config import get_settings
+from app.pricing.market_specs import our_specs_from_custom_fields
 from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
@@ -101,6 +102,11 @@ _AUTH_ERROR_HINTS = (
 
 class VendureClient:
     """Wrapper async sobre la Admin API de Vendure con auto-renovación del bearer."""
+
+    # ¿El schema de Vendure tiene los custom fields de medidas de la variante?
+    # Si una query de precios revienta por un campo que no existe, se apaga y el
+    # semáforo sigue sin medidas en vez de quedarse sin precios.
+    _dims_supported: bool = True
 
     # Último bearer renovado, compartido entre TODAS las instancias del proceso.
     # Sin esto, cada VendureClient() nuevo pagaba un login completo.
@@ -241,9 +247,13 @@ class VendureClient:
         `pricing` trae además los tramos de cantidad (bulkPriceTiers) de cada
         variante: es lo que necesita el semáforo para saber nuestro precio."""
         if pricing:
+            # Medidas de la variante (cm y kg) para comparar con la publicación de
+            # ML. Son columnas de la misma fila: no suman queries del lado de Vendure.
+            dims = (" customFields { length width height weight boxLength boxWidth boxHeight boxWeight }"
+                    if VendureClient._dims_supported else "")
             variant_block = (
-                "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode "
-                "bulkPriceTiers { position enabled minQuantity maxQuantity salePrice } } totalItems }"
+                "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode"
+                f"{dims} bulkPriceTiers {{ position enabled minQuantity maxQuantity salePrice }} }} totalItems }}"
             )
         elif with_variants:
             variant_block = (
@@ -315,6 +325,7 @@ class VendureClient:
                 if isinstance(t, dict)
             ]
             tiers.sort(key=lambda t: t.position)
+            specs = our_specs_from_custom_fields(v.get("customFields"))
             out.append(PricedVariant(
                 id=str(v.get("id")),
                 name=v.get("name") or "",
@@ -322,6 +333,7 @@ class VendureClient:
                 price_with_tax_cents=_safe_int(v.get("priceWithTax")),
                 currency=v.get("currencyCode"),
                 tiers=tuple(tiers),
+                specs=specs.as_dict() if specs else {},
             ))
         return out
 
@@ -444,9 +456,19 @@ class VendureClient:
         app/vendure/catalog.py puede tener el precio hasta 12 h viejo. Misma
         concurrencia baja que el full refresh (2): cada página sigue siendo un
         N+1 de variantList del lado de Vendure."""
-        return await self.fetch_all_products(
-            with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
-        )
+        try:
+            return await self.fetch_all_products(
+                with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
+            )
+        except TransportQueryError as exc:
+            if not VendureClient._dims_supported or "Cannot query field" not in str(exc):
+                raise
+            log.warning("Vendure no tiene los custom fields de medidas de la variante: "
+                        "se piden los precios sin medidas (%s)", str(exc)[:160])
+            VendureClient._dims_supported = False
+            return await self.fetch_all_products(
+                with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
+            )
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
         query = gql(
