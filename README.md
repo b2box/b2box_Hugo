@@ -431,6 +431,9 @@ backend/
 │   └── db/
 │       ├── models.py        # SQLModel: PriceHistory, AuditLog
 │       └── session.py
+├── scripts/
+│   └── check_lock.sh        # verifica que uv.lock esté al día con pyproject.toml
+├── uv.lock                  # versiones exactas de producción (ver "Dependencias y lock")
 └── tests/
     ├── test_dedup_orchestrator.py
     └── test_pricing_diff.py
@@ -440,18 +443,76 @@ backend/
 
 ```bash
 cd backend
-python -m venv .venv
+uv sync --locked --extra dev      # crea .venv con las versiones EXACTAS de uv.lock
 source .venv/bin/activate
-pip install -e .
 cp ../.env.example ../.env
 # editar .env con credenciales reales
 uvicorn app.main:app --reload
 ```
 
+(Sin `uv`: `python -m venv .venv && pip install -e ".[dev]"` anda, pero resuelve
+las últimas versiones y no las del lock; ver [Dependencias y lock](#dependencias-y-lock).)
+
 Tests: `pytest` desde `backend/` o desde la raíz del repo (hay un `pytest.ini`
 que apunta a `backend/tests` con `asyncio_mode=auto`). Solo necesitan
 `VENDURE_API_URL` en el entorno (alcanza `https://example.invalid/admin-api`) o
 un `backend/.env`; no tocan red ni Vendure.
+
+## Dependencias y lock
+
+`backend/pyproject.toml` dice qué rangos acepta la app; `backend/uv.lock` fija la
+versión exacta (y el sha256) de cada paquete, incluidas las transitivas. **El
+build de Docker instala solo desde el lock**: `uv export --locked` genera la
+lista, `pip install --no-deps --require-hashes` la instala. Sin lock, cada
+rebuild resolvía las últimas versiones y el 08-oct-2026 eso rompió producción
+dos veces (sqlmodel 0.0.48 con las fechas naive, gql 4.4 + httpx2 con Vendure).
+
+- El build **falla** si `uv.lock` no coincide con `pyproject.toml`
+  (`The lockfile at uv.lock needs to be updated`). Se arregla con `uv lock`.
+- Versiones clave fijadas hoy: gql 4.4.0, anthropic 1.12.1, openai 3.26.1,
+  httpx 0.28.1, httpx2 2.13.1, sqlmodel 0.0.44, camoufox 0.5.6.
+- Los topes de `pyproject.toml` (`sqlmodel<0.0.45`, `camoufox<0.5.7`) siguen
+  valiendo: el lock los respeta, no los reemplaza.
+- `uv` se instala solo en el stage de build, desde `ghcr.io/astral-sh/uv` con
+  versión y digest fijos (ARG en el Dockerfile; para subirla se cambian los dos).
+
+### Actualizar dependencias
+
+Requiere [uv](https://docs.astral.sh/uv/). Todo desde `backend/`:
+
+```bash
+# 1) Subir UN paquete (o varios) y re-resolver solo lo necesario
+uv lock --upgrade-package gql            # a la última que permita pyproject
+uv lock --upgrade-package "gql==4.4.0"   # a una versión puntual
+
+#    Agregar o cambiar un rango: editar pyproject.toml (o `uv add paquete`) y
+#    después `uv lock`. Subir TODO de golpe (`uv lock --upgrade`) casi nunca
+#    conviene: es justo lo que rompió el 08-oct.
+
+# 2) Instalar lo nuevo y correr la suite completa
+uv sync --locked --extra dev
+VENDURE_API_URL=https://example.invalid/admin-api pytest -q
+
+# 3) Chequear que el lock quedó al día (es la misma verificación que hace el build)
+scripts/check_lock.sh
+
+# 4) Commitear pyproject.toml y uv.lock JUNTOS, PR, merge a main, redeploy
+git add pyproject.toml uv.lock
+```
+
+Revisá el diff de `uv.lock` en el PR: un `--upgrade-package` de un paquete que
+mueve diez más (por ejemplo `anthropic` arrastrando `httpx2`) es la señal para
+probar con más cuidado.
+
+Para probar el build como lo haría Coolify, sin el extra de Camoufox (más
+rápido): `docker build -f backend/Dockerfile -t hugo-test .` desde la raíz; con
+Camoufox, agregar `--build-arg INSTALL_BROWSER=true`.
+
+Lo que **todavía no** está fijado: la imagen base (`python:3.11-slim`), los
+paquetes de apt, el `npm install` del frontend (hay `package-lock.json`, pero el
+Dockerfile no usa `npm ci`), el binario de Firefox que baja `camoufox fetch` y
+el `hatchling` que empaqueta el proyecto. Ninguno cambia las versiones de las
+deps de Python.
 
 ## Run con Docker (recomendado para producción)
 
