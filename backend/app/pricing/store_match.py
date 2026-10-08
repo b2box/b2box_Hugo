@@ -282,7 +282,8 @@ async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: Ven
     labels = run.feedback.get((product.id, store.info.id), {})
     excluded = frozenset(i for i, lab in labels.items() if lab == LABEL_NO)
     confirmed = frozenset(i for i, lab in labels.items() if lab == LABEL_YES)
-    entries = store.prefilter(query, CANDIDATES_PER_STORE, exclude=excluded, force=confirmed)
+    # ~20 ms con 11.000 títulos: al thread, para no frenar el event loop (la API del dashboard comparte proceso).
+    entries = await asyncio.to_thread(store.prefilter, query, CANDIDATES_PER_STORE, exclude=excluded, force=confirmed)
     if not entries:
         return []
     candidates = [_candidate(store.info, e) for e in entries]
