@@ -51,6 +51,8 @@ from app.vendure import client as vendure_client_mod  # noqa: E402
 from app.vendure.client import VendureProduct  # noqa: E402
 
 ML_IMG = "https://http2.mlstatic.com/D_NQ_{}.jpg"
+# Las reales, antes de que el fixture `world` las reemplace.
+_REAL_INDEXED = market_match.indexed
 
 
 # ─── dobles ─────────────────────────────────────────────────────────────────
@@ -892,3 +894,94 @@ async def test_embed_cache_prune_follows_the_runtime_days(world, monkeypatch):
     with Session(engine) as s:
         urls = {r.url for r in s.exec(select(ImageEmbedCache))}
     assert urls == {"https://http2.mlstatic.com/D_5d.jpg", "https://cdn.b2box/propia-vieja.jpg"}
+
+
+# ─── QA: productos que no se pueden puntuar, duplicados, rotación, cache ─────
+
+
+async def test_product_with_photos_but_no_vectors_spends_no_ml_requests(world, monkeypatch):
+    """QA bug 2: estar en el índice con foto no alcanza; tiene que haber vector."""
+    import numpy as np
+
+    from app.dedup import catalog_index, image_embed
+
+    st = catalog_index._state
+    saved = (st.matrix, st.product_ids, st.products, st.vector_ids)
+    try:
+        st.matrix = np.ones((1, image_embed.EMBED_DIM), dtype=np.float32)
+        st.product_ids = ["99"]
+        st.products = {"1": _product("1", "Organizador cocina"), "99": _product("99", "Otro")}
+        st.vector_ids = frozenset({"99"})
+        monkeypatch.setattr(image_embed, "available", lambda: True)
+        monkeypatch.setattr(market_match, "indexed", _REAL_INDEXED)
+        FakeVendure.products = [_product("1", "Organizador cocina")]
+        await price_monitor.run_price_monitor()
+    finally:
+        st.matrix, st.product_ids, st.products, st.vector_ids = saved
+    s = _snaps()["1"]
+    assert s.ml_status == "skipped" and "índice CLIP" in s.ml_error
+    assert world.ml.calls == []
+
+
+async def test_a_product_listed_twice_is_evaluated_once(world):
+    FakeVendure.products = [_product("1", "Organizador cocina"), _product("1", "Organizador cocina")]
+    await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert run.total_products == 1 and run.processed == 1
+    assert world.ml.calls.count("search:Organizador cocina") == 1
+
+
+async def test_color_is_decided_on_the_exact_margin(world):
+    # Mediana 1.299,96 sin comisión contra nuestro 1.000: 29,996 % → amarillo,
+    # aunque guardado/mostrado sea 30,0.
+    _set("pm_ml_commission_pct", 0)
+    FakeVendure.products = [_product("1", "Organizador cocina", price=100_000)]
+    world.ml.items["MLA1"] = [_listing("I1", "101", 1299.96)]
+    await price_monitor.run_price_monitor()
+    s = _snaps()["1"]
+    assert s.est_margin_pct == 30.0 and s.color == "amarillo"
+
+
+async def test_least_recently_measured_products_go_first(world):
+    """Con budget corto, la corrida empieza por lo que hace más que no se mide
+    (ok o no_data), y lo nunca medido primero: así todo rota."""
+    FakeVendure.products = [_product("1", "Organizador cocina"), _product("3", "Producto raro"),
+                            _product("6", "Taza ceramica")]
+    with Session(engine) as s:
+        old = PriceMonitorRun(status="ok", started_at=utcnow() - timedelta(days=3))
+        s.add(old)
+        s.commit()
+        s.refresh(old)
+        s.add(MarketPriceSnapshot(run_id=old.id, product_id="1", ml_status="ok",
+                                  captured_at=utcnow() - timedelta(days=1)))
+        s.add(MarketPriceSnapshot(run_id=old.id, product_id="3", ml_status="no_data",
+                                  captured_at=utcnow() - timedelta(days=2)))
+        # Un failed no cuenta como medido.
+        s.add(MarketPriceSnapshot(run_id=old.id, product_id="6", ml_status="failed",
+                                  captured_at=utcnow() - timedelta(hours=1)))
+        s.commit()
+    _set("pm_ml_concurrency", 1)
+    await price_monitor.run_price_monitor()
+    searches = [c for c in world.ml.calls if c.startswith("search:")]
+    assert searches == ["search:Taza ceramica", "search:Producto raro", "search:Organizador cocina"]
+
+
+def test_an_embedding_cache_hit_keeps_the_row_alive():
+    """Una foto de ML que se usa todas las noches no se poda ni se re-embebe."""
+    import numpy as np
+
+    from app.dedup import image_embed
+
+    url = "https://http2.mlstatic.com/D_usada.jpg"
+    vec = np.ones(image_embed.EMBED_DIM, dtype=np.float32)
+    vec /= np.linalg.norm(vec)
+    with Session(engine) as s:
+        s.add(ImageEmbedCache(url=url, vector_b64=image_embed.encode_vector(vec),
+                              updated_at=utcnow() - timedelta(days=59)))
+        s.commit()
+    assert image_embed._db_get(url) is not None
+    with Session(engine) as s:
+        row = s.get(ImageEmbedCache, url)
+        assert row.updated_at > utcnow() - timedelta(minutes=1)
+        s.delete(row)
+        s.commit()

@@ -368,3 +368,17 @@ def test_budget_status_for_the_dashboard(monkeypatch):
     monkeypatch.setattr(runtime, "get", lambda key: 10 if key == "pm_ml_daily_budget" else None)
     daily_budget.reserve(market_ml.ML_COUNTER_KEY, 10)
     assert market_ml.ml_budget_status() == {"used": 1, "budget": 10, "remaining": 9}
+
+
+async def test_listing_prices_probe_is_not_marked_done_when_it_could_not_be_sent():
+    # QA bug 3: sin cupo (o ML caído) la sonda quedaba "hecha" y no se repetía.
+    rec = Recorder(lambda r: httpx.Response(429))
+    async with rec.market(budget=0) as ml:
+        payload = await ml.probe_listing_prices("MLA5725")
+    assert payload["status"] is None and rec.paths == []
+    assert market_ml.probe_recorded(market_ml.PROBE_LISTING_PRICES_KEY) is False
+
+    async with rec.market(budget=100) as ml:
+        payload = await ml.probe_listing_prices("MLA5725")
+    assert payload["status"] is None and len(rec.paths) == market_ml._MAX_ATTEMPTS
+    assert market_ml.probe_recorded(market_ml.PROBE_LISTING_PRICES_KEY) is False

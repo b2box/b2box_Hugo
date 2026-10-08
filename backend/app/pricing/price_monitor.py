@@ -35,7 +35,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import update
@@ -171,6 +171,21 @@ def _update_run(run_id: int, **fields: Any) -> None:
             setattr(run, k, v)
         s.add(run)
         s.commit()
+
+
+def _last_measured(product_ids: set[str]) -> dict[str, Any]:
+    """Último snapshot en que ML contestó algo (ok o no_data) por producto.
+    Con budget corto, la corrida empieza por los que hace más que no se miden
+    (o nunca): así todo el catálogo rota en vez de medirse siempre los mismos."""
+    if not product_ids:
+        return {}
+    with Session(engine) as s:
+        rows = s.exec(
+            select(MarketPriceSnapshot.product_id, func.max(MarketPriceSnapshot.captured_at))
+            .where(MarketPriceSnapshot.ml_status.in_([OK, NO_DATA]))  # type: ignore[attr-defined]
+            .group_by(MarketPriceSnapshot.product_id)
+        ).all()
+    return {pid: at for pid, at in rows if pid in product_ids}
 
 
 def _done_product_ids(run_id: int) -> set[str]:
@@ -516,12 +531,14 @@ async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPr
     snap.ml_min_cents = min(prices)
     snap.ml_listing_count = len(prices)
     snap.ml_seller_count = len(sellers)
-    snap.est_margin_pct = semaforo.estimated_margin_pct(
-        snap.ml_median_cents, snap.our_price_cents, ctx.commission_pct, ctx.shipping_cents,
+    margin = semaforo.estimated_margin_pct(
+        snap.ml_median_cents, snap.our_price_cents, ctx.commission_pct, ctx.shipping_cents, digits=None,
     )
+    # El color con el margen exacto; redondeado solo para guardar/mostrar.
     snap.color = semaforo.color(
-        snap.est_margin_pct, snap.our_price_cents, snap.ml_median_cents, ctx.green_min, ctx.yellow_min,
+        margin, snap.our_price_cents, snap.ml_median_cents, ctx.green_min, ctx.yellow_min,
     )
+    snap.est_margin_pct = None if margin is None else round(margin, 2)
     return snap
 
 
@@ -637,9 +654,18 @@ async def _run(trigger: str) -> dict[str, Any] | None:
 
 
 async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendureProduct]) -> dict[str, Any]:
-    enabled = [p for p in products if p.enabled]
+    # Un id repetido en el listado de Vendure (paginado que se corre mientras
+    # se lee) se evalúa una sola vez (QA bug 5).
+    unique: dict[str, VendureProduct] = {}
+    for p in products:
+        if p.enabled:
+            unique.setdefault(p.id, p)
+    enabled = list(unique.values())
     done = _done_product_ids(run_id)
     pending = [p for p in enabled if p.id not in done]
+    last = _last_measured({p.id for p in pending})
+    never = datetime.min
+    pending.sort(key=lambda p: last.get(p.id) or never)
     _update_run(run_id, total_products=len(enabled), processed=len(done))
     log.info("price_monitor #%s (%s): %d habilitados, %d ya hechos, %d pendientes",
              run_id, trigger, len(enabled), len(done), len(pending))

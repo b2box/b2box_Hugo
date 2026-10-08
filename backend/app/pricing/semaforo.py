@@ -60,17 +60,22 @@ def estimated_margin_pct(
     our_price_cents: int | None,
     commission_pct: float,
     shipping_cents: int,
+    digits: int | None = 2,
 ) -> float | None:
     """Ganancia estimada del revendedor en %, o None si falta un lado.
 
     None también cuando nuestro precio es 0 o negativo: dividir por eso no
     significa nada y arriba se trata como `skipped`.
+
+    `digits=None` devuelve el valor sin redondear: es el que hay que pasarle a
+    `color()`. Redondeado antes, un 29,996 % daba 30,0 y salía verde.
     """
     if ml_median_cents is None or our_price_cents is None or our_price_cents <= 0:
         return None
     commission = ml_median_cents * (max(0.0, float(commission_pct)) / 100.0)
     net = ml_median_cents - commission - max(0, int(shipping_cents)) - our_price_cents
-    return round(net / our_price_cents * 100.0, 2)
+    margin = net / our_price_cents * 100.0
+    return margin if digits is None else round(margin, digits)
 
 
 def color(

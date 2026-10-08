@@ -448,11 +448,13 @@ class MlMarket:
         path = f"/sites/{SITE}/listing_prices?price=10000&category_id={quote(category_id, safe='')}"
         try:
             resp = await self.request(path)
-            payload = {"status": resp.status_code, "category_id": category_id,
-                       "sample": resp.text[:300]}
         except (BudgetExhausted, meli.MeliError) as exc:
-            payload = {"status": None, "category_id": category_id, "error": str(exc)[:200]}
-        record_probe(PROBE_LISTING_PRICES_KEY, payload)
+            # No se pudo preguntar (sin cupo, ML caído): NO se marca como hecha,
+            # así la próxima corrida lo vuelve a intentar.
+            log.info("Sonda listing_prices no enviada: %s", exc)
+            return {"status": None, "category_id": category_id, "error": str(exc)[:200]}
+        payload = {"status": resp.status_code, "category_id": category_id, "sample": resp.text[:300]}
+        await asyncio.to_thread(record_probe, PROBE_LISTING_PRICES_KEY, payload)
         return payload
 
 

@@ -83,6 +83,9 @@ class _State:
     product_ids: list[str] = []
     image_urls: list[str] = []
     products: dict[str, VendureProduct] = {}
+    # Productos con AL MENOS un vector en la matriz. `products` incluye también
+    # a los que tenían foto pero cuyo embedding falló: esos no se pueden puntuar.
+    vector_ids: frozenset[str] = frozenset()
     built_at: float = 0.0
     building: bool = False
     progress_done: int = 0
@@ -155,10 +158,10 @@ def is_ready() -> bool:
 
 
 def has_product(product_id: str) -> bool:
-    """¿El producto tiene fotos en el índice? (habilitado y con imagen al
-    construirlo). Sirve para no gastar una búsqueda externa en algo que después
-    no se va a poder comparar por imagen."""
-    return product_id in _state.products
+    """¿El producto tiene al menos un vector en el índice? Sirve para no gastar
+    una búsqueda externa en algo que después no se va a poder comparar por
+    imagen. Ojo: estar en `products` no alcanza (el embedding pudo fallar)."""
+    return product_id in _state.vector_ids
 
 
 def is_stale() -> bool:
@@ -289,6 +292,7 @@ async def build(force: bool = False) -> dict:
             )
             _state.matrix, _state.mean = _center(raw)
             _state.product_ids = product_ids
+            _state.vector_ids = frozenset(product_ids)
             _state.image_urls = image_urls
             _state.products = {p.id: p for p, _ in targets}
             _state.built_at = time.monotonic()

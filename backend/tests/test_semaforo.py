@@ -58,6 +58,14 @@ def test_margin_without_both_sides_is_none(median, ours):
     assert estimated_margin_pct(median, ours, 13.0, 0) is None
 
 
+def test_color_uses_the_unrounded_margin():
+    # QA bug 6: 29,996 % redondeado daba 30,0 y salía verde.
+    raw = estimated_margin_pct(129_996, 100_000, 0.0, 0, digits=None)
+    assert raw == pytest.approx(29.996)
+    assert color(raw, 100_000, 129_996, GREEN, YELLOW) == AMARILLO
+    assert estimated_margin_pct(129_996, 100_000, 0.0, 0) == 30.0  # para mostrar
+
+
 def test_negative_commission_or_shipping_are_ignored():
     assert estimated_margin_pct(2_000, 1_000, -50.0, -999) == 100.0
 
