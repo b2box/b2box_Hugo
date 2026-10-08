@@ -113,3 +113,16 @@ def test_export_row_escapes_text_but_keeps_scores_numeric():
     # Y al leerlo etiquetado, el score negativo sigue siendo número.
     [pair] = cal.load_labeled([{**row, "same_product": "0"}])
     assert pair.image_score == -0.05
+
+
+def test_export_row_marks_known_negatives_from_the_dashboard():
+    from types import SimpleNamespace
+
+    from app.pricing.market_match import MATCH, Decision
+    from app.pricing.market_ml import MlCandidate
+
+    product = SimpleNamespace(id="1", product_code="BX1", name="Taza", featured_image_url="")
+    decision = Decision(MlCandidate(id="MLA5", name="Taza x6"), 0.7, 0.8, MATCH, "clip")
+    assert cal.export_row(product, decision)["same_product"] == ""
+    assert cal.export_row(product, decision, known_negative=True)["same_product"] == "0"
+    assert cal.parse_label(cal.export_row(product, decision, known_negative=True)["same_product"]) is False

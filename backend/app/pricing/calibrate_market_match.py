@@ -26,6 +26,9 @@ Dos pasos:
        python -m app.pricing.calibrate_market_match evaluate pares.csv --grid
        python -m app.pricing.calibrate_market_match evaluate pares.csv --image 0.62 --name 0.55
 
+Los pares que una persona marcó "No es el mismo" en el dashboard
+(`market_match_feedback`) salen en el CSV ya etiquetados con 0.
+
 La banda ambigua se cuenta como "no es el mismo producto" (así se comporta el
 job con el juez LLM apagado) y se informa aparte cuántos positivos cayeron ahí:
 es lo que el juez podría rescatar.
@@ -100,8 +103,10 @@ def _unescape(text: str | None) -> str:
     return text[1:] if text.startswith("'") and text[1:].startswith(_FORMULA_PREFIXES) else text
 
 
-def export_row(product, decision) -> dict[str, str]:
-    """Una fila del CSV a etiquetar (texto escapado contra fórmulas)."""
+def export_row(product, decision, *, known_negative: bool = False) -> dict[str, str]:
+    """Una fila del CSV a etiquetar (texto escapado contra fórmulas).
+    `known_negative`: alguien ya marcó "No es el mismo" en el dashboard; la fila
+    sale etiquetada 0 (se puede corregir en la planilla)."""
     row = {
         "product_id": product.id, "product_code": product.product_code or "",
         "our_name": product.name, "our_image_url": product.featured_image_url or "",
@@ -113,7 +118,7 @@ def export_row(product, decision) -> dict[str, str]:
     out = {k: csv_safe(v) for k, v in row.items()}
     out["image_score"] = "" if decision.image_score is None else f"{decision.image_score:.4f}"
     out["name_score"] = f"{decision.name_score:.4f}"
-    out["same_product"] = ""
+    out["same_product"] = "0" if known_negative else ""
     return out
 
 
@@ -248,7 +253,7 @@ async def _export(sample: int, seed: int, out: Path) -> int:
     """Corre búsqueda + puntaje como el job, sin juez y sin guardar snapshots."""
     from app import runtime
     from app.ingest import meli
-    from app.pricing import price_monitor
+    from app.pricing import match_feedback, price_monitor
     from app.pricing.market_ml import BudgetExhausted, MlMarket
     from app.vendure import catalog as vendure_catalog
 
@@ -260,6 +265,8 @@ async def _export(sample: int, seed: int, out: Path) -> int:
     random.Random(seed).shuffle(products)
     products = products[:sample]
     thr = market_match.Thresholds.from_runtime()
+    # Lo que una persona ya descartó con "No es el mismo" sale etiquetado 0.
+    negatives = match_feedback.feedback_pairs()
     rows = 0
     async with MlMarket(budget=int(runtime.get("pm_ml_daily_budget"))) as ml, \
             open(out, "w", newline="", encoding="utf-8") as fh:
@@ -277,7 +284,8 @@ async def _export(sample: int, seed: int, out: Path) -> int:
                 print(f"  {product.id}: ML falló ({exc}), sigo")
                 continue
             for d in await market_match.score_candidates(product, candidates, thr):
-                writer.writerow(export_row(product, d))
+                writer.writerow(export_row(
+                    product, d, known_negative=(product.id, d.candidate.id) in negatives))
                 rows += 1
             print(f"  {i}/{len(products)} {product.id}: {len(candidates)} fichas")
     print(f"\n{rows} pares en {out}. Completá la columna same_product y corré `evaluate`. "
