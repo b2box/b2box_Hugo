@@ -6,8 +6,14 @@
 #
 # Stages:
 #   1. frontend-builder → compila el React a estáticos (dist/)
-#   2. builder          → compila las wheels de Python (Pillow, lxml, …)
+#   2. builder          → instala las deps de Python EXACTAMENTE como dice
+#                         backend/uv.lock (Pillow, lxml, …)
 #   3. runtime          → imagen final: Python + deps + código + dist/ de React
+#
+# Las deps de Python salen de backend/uv.lock, nunca de un `pip install .` suelto:
+# el 08-oct-2026 un build sin lock trajo sqlmodel 0.0.48 y gql 4.4 + httpx2 y
+# rompió producción dos veces. Para cambiar una versión: ver README, sección
+# "Actualizar dependencias".
 # ────────────────────────────────────────────────────────────────
 
 # ─── Stage 1: frontend-builder ──────────────────────────────────
@@ -23,12 +29,20 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
+# ─── Stage 2a: uv (solo el binario, para exportar el lock) ──────
+# Versión Y digest fijos: el tag solo puede reapuntarse. Para subirla: cambiar
+# los dos juntos (`docker buildx imagetools inspect ghcr.io/astral-sh/uv:X.Y.Z`
+# da el digest). uv NO queda en la imagen final.
+FROM ghcr.io/astral-sh/uv:0.11.8@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347 AS uv
+
 # ─── Stage 2: builder (Python wheels) ───────────────────────────
 FROM python:3.11-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_NO_PROGRESS=1
 
 # Dependencias de sistema necesarias para compilar Pillow + lxml
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,9 +54,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=uv /uv /usr/local/bin/uv
+
 WORKDIR /build
-COPY backend/pyproject.toml ./
-COPY backend/app ./app
+
+# Solo pyproject + lock: la capa de deps queda cacheada mientras no cambien
+# (un cambio de código ya no reinstala nada).
+COPY backend/pyproject.toml backend/uv.lock ./
 
 # `browser` = Camoufox, para renderizar las fichas que bloquean el fetch plano
 # (ver app/ingest/browser_fetch.py). Off por defecto: suma Playwright acá y
@@ -50,12 +68,29 @@ COPY backend/app ./app
 #     docker build --build-arg INSTALL_BROWSER=true ...
 ARG INSTALL_BROWSER=false
 
-# Instalamos en un prefix aislado que después copiamos al stage final
-RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
-        pip install --prefix=/install ".[browser]"; \
-    else \
-        pip install --prefix=/install .; \
-    fi
+# 1) uv.lock → requirements.lock (versiones + hashes, sin resolver nada).
+#    --locked hace FALLAR el build si uv.lock no coincide con pyproject.toml
+#    (alguien tocó las deps y no regeneró el lock): mejor sin imagen que con
+#    versiones que nadie probó. Se arregla con `uv lock` (ver README).
+RUN set -eu; \
+    extra=""; \
+    if [ "$INSTALL_BROWSER" = "true" ]; then extra="--extra browser"; fi; \
+    uv export --locked --no-emit-project --format requirements-txt $extra \
+        -o requirements.lock
+
+# 2) Deps exactas, en un prefix aislado que después copiamos al stage final.
+#    --no-deps: el lock ya trae todo el árbol, pip no resuelve nada.
+#    --require-hashes: cada archivo tiene que coincidir con el sha256 del lock.
+RUN pip install --prefix=/install --no-deps --require-hashes -r requirements.lock
+
+# 3) El proyecto en sí (sin deps: ya están). Va después para que un cambio de
+#    código no invalide la capa de arriba.
+COPY backend/app ./app
+RUN pip install --prefix=/install --no-deps .
+
+# Si algo quedó incoherente (una dep que pide otra versión de la que fija el
+# lock), que reviente acá y no en runtime.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages pip check
 
 # ─── Stage 2b: modelo CLIP (torre visual, ONNX) ─────────────────
 # Lo bajamos en build y lo bakeamos en la imagen: sin volumen que montar y sin
