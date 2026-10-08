@@ -511,7 +511,7 @@ export default function SemaforoView() {
                     <tr className="bg-muted/40">
                       <td colSpan={columns} className="px-3 py-3 space-y-4">
                         <ListingsPanel s={s} />
-                        <StoresPanel s={s} />
+                        <StoresPanel s={s} affectColor={data?.stores_affect_color ?? false} />
                         <ProductHistory productId={s.product.id} />
                       </td>
                     </tr>
@@ -649,7 +649,8 @@ export function EstimatedDot({ color }: { color: SemaforoColor }) {
 // similares, el ESTIMADO (punto hueco); con solo diferentes, su propio estado; "Sin
 // dato" únicamente cuando ML no devolvió nada (o falló).
 function ColorCell({ s }: { s: PriceMonitorSnapshot }) {
-  if (s.ml_status === "ok") return <ColorDot color={s.color} />;
+  // Color real: de ML o, si las tiendas cuentan y no hay idéntico en ML, de las tiendas.
+  if (s.ml_status === "ok" || s.price_basis === "tiendas") return <ColorDot color={s.color} />;
   if (isEstimated(s)) return <EstimatedDot color={s.estimated_color!} />;
   const st = stateOf(s);
   if (st === "diferente" || st === "similar" || st === "igual_sin_precio") {

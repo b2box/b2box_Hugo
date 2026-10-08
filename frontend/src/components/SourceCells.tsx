@@ -248,11 +248,17 @@ export function SourceFilters({
 
 // ─── El detalle de un producto: un bloque por tienda ────────────────
 
-export function StoresPanel({ s }: { s: PriceMonitorSnapshot }) {
+export function StoresPanel({ s, affectColor = false }: { s: PriceMonitorSnapshot; affectColor?: boolean }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<number | null>(null);
   const [asking, setAsking] = useState<number | null>(null);
-  const [done, setDone] = useState<{ id: number; title: string; label: "es" | "no_es"; undone: boolean } | null>(null);
+  const [done, setDone] = useState<{
+    id: number;
+    title: string;
+    label: "es" | "no_es";
+    undone: boolean;
+    restored?: "es" | "no_es" | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const stores = Object.entries(s.stores ?? {});
   if (stores.length === 0) return null;
@@ -284,8 +290,9 @@ export function StoresPanel({ s }: { s: PriceMonitorSnapshot }) {
     setBusy(done.id);
     setError(null);
     try {
-      await unlabelStoreMatch(done.id);
-      setDone({ ...done, undone: true });
+      const res = await unlabelStoreMatch(done.id);
+      // Si había cambiado de opinión, «Deshacer» vuelve a su marca anterior.
+      setDone({ ...done, undone: true, restored: res.match?.human_label ?? null });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo deshacer");
@@ -307,7 +314,14 @@ export function StoresPanel({ s }: { s: PriceMonitorSnapshot }) {
       {done && (
         <p className="flex items-center gap-2 flex-wrap p-2 rounded-md border border-border bg-muted/40 text-xs">
           {done.undone ? (
-            <span>Listo: «{done.title}» vuelve a lo que decidió Hugo.</span>
+            <span>
+              Listo: «{done.title}»{" "}
+              {done.restored === "es"
+                ? "vuelve a idéntico (tu marca anterior)."
+                : done.restored === "no_es"
+                  ? "vuelve a diferente (tu marca anterior)."
+                  : "vuelve a lo que decidió Hugo."}
+            </span>
           ) : (
             <>
               <span>
@@ -341,6 +355,7 @@ export function StoresPanel({ s }: { s: PriceMonitorSnapshot }) {
                   <StoreMatchCard
                     key={m.id}
                     m={m}
+                    affectColor={affectColor}
                     busy={busy === m.id}
                     asking={asking === m.id}
                     onAsk={() => setAsking(m.id)}
@@ -359,6 +374,7 @@ export function StoresPanel({ s }: { s: PriceMonitorSnapshot }) {
 
 function StoreMatchCard({
   m,
+  affectColor,
   busy,
   asking,
   onAsk,
@@ -366,6 +382,7 @@ function StoreMatchCard({
   onConfirm,
 }: {
   m: StoreMatchRow;
+  affectColor: boolean;
   busy: boolean;
   asking: boolean;
   onAsk: () => void;
@@ -435,6 +452,11 @@ function StoreMatchCard({
         {m.price_doubtful && (
           <Badge variant="warning" title={m.price_note ?? "El precio no es creíble: no cuenta para nada"}>
             precio dudoso
+          </Badge>
+        )}
+        {affectColor && m.in_estimate && (
+          <Badge variant="outline" title="Similar confirmado, sin diferencia de pack ni capacidad: suma al color estimado">
+            entra al estimado
           </Badge>
         )}
         {asking ? (

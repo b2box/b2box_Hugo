@@ -202,6 +202,7 @@ async def test_capacity_difference_makes_the_store_item_similar(stores_world):
     await price_monitor.run_price_monitor()
     frasco = _by_title(_rows("7", "Casa Perfecta"))["Frasco hermetico 1 litro"]
     assert frasco.category == "similar" and frasco.source == "specs"
+    assert frasco.auto_category == "similar", "«Deshacer» vuelve a la opinión FINAL de Hugo, no a la de las reglas de foto"
     assert "capacidad" in json.loads(frasco.differences)
 
 
@@ -512,3 +513,127 @@ def test_match_to_dict_sanitizes_everything_that_comes_from_a_store(store_db):
                     url=f"{fx.CP}/productos/x/", image_url=f"{TN}/x.webp")
     d = store_match.match_to_dict(ok, info)
     assert d["url"] == f"{fx.CP}/productos/x/" and d["image_url"] == f"{TN}/x.webp"
+
+
+# ─── «Deshacer» vuelve a la marca anterior (igual que en ML) ───────────────────────────────
+
+
+async def test_undo_after_changing_your_mind_goes_back_to_the_previous_label(stores_world):
+    await price_monitor.run_price_monitor()
+    org = _by_title(_rows("1", "Casa Perfecta"))["Organizador de cocina"]            # Hugo: igual
+    with Session(engine) as s:
+        store_match.set_label(s, org.id, "no_es", None)
+        s.commit()
+        m = store_match.set_label(s, org.id, "es", None)                              # cambió de opinión
+        s.commit()
+        fb = s.exec(select(StoreMatchFeedback)).one()
+        assert (fb.label, fb.previous_label, m.category, m.human_label) == ("es", "no_es", "igual", "es")
+
+        m = store_match.clear_label(s, org.id)                                        # deshacer: vuelve a «no es»
+        s.commit()
+        fb = s.exec(select(StoreMatchFeedback)).one()
+        assert (fb.label, fb.previous_label, m.category, m.human_label) == ("no_es", None, "diferente", "no_es")
+
+        m = store_match.clear_label(s, org.id)                                        # deshacer otra vez: vuelve a Hugo
+        s.commit()
+        assert s.exec(select(StoreMatchFeedback)).all() == [] and (m.category, m.human_label) == ("igual", None)
+
+
+async def test_pressing_the_same_label_twice_changes_nothing(stores_world):
+    await price_monitor.run_price_monitor()
+    org = _by_title(_rows("1", "Casa Perfecta"))["Organizador de cocina"]
+    with Session(engine) as s:
+        store_match.set_label(s, org.id, "no_es", None)
+        store_match.set_label(s, org.id, "no_es", None)
+        s.commit()
+        fb = s.exec(select(StoreMatchFeedback)).one()
+        assert (fb.label, fb.previous_label) == ("no_es", None)
+
+
+# ─── in_estimate: los similares confirmados de las tiendas alimentan el color estimado ───────
+
+
+def _sized(world):
+    from app.pricing.semaforo import PricedVariant
+
+    prod = _product("3", "Producto raro")
+    prod.priced_variants = [PricedVariant(id="v3", name="", sku="", price_with_tax_cents=10_000, currency="ARS",
+                                          specs={"length": 40.0, "width": 30.0})]
+    FakeVendure.products = [prod]
+    for key in ("cp_raro", "gd_raro"):
+        with Session(engine) as s:
+            it = s.get(StoreCatalogItem, world.ids[key])
+            it.title = "Producto raro 60x80 cm" if key == "cp_raro" else "Producto raro 70x90 cm"
+            it.price_cents = 9_000 if key == "cp_raro" else 12_000
+            s.add(it)
+            s.commit()
+    for img in list(STORE_SCORES):
+        if img[1].endswith(("cp-raro.webp", "gd-raro.jpg")):
+            STORE_SCORES[("3", img[1])] = 0.92
+
+
+async def test_confirmed_similars_of_the_stores_feed_the_estimate_only_when_stores_count(stores_world):
+    _sized(stores_world)
+    runtime.set_value("pm_stores_affect_color", 1)
+    await price_monitor.run_price_monitor()
+    rows = _by_title(_rows("3"))
+    cp, gd = rows["Producto raro 60x80 cm"], rows["Producto raro 70x90 cm"]
+    assert (cp.category, cp.source) == ("similar", "specs") and (gd.category, gd.source) == ("similar", "specs")
+    assert store_match.feeds_estimate(cp) and store_match.feeds_estimate(gd)
+    s3 = _snap("3")
+    assert s3.color == "sin_dato" and s3.price_basis == "ml", "el color real no cambia: no hay ningún idéntico"
+    assert s3.estimated_color == "rojo" and s3.estimated_listing_count == 2 and s3.estimated_median_cents == 10_500
+    assert s3.estimated_from == "similar"
+
+
+async def test_store_similars_do_not_feed_the_estimate_when_stores_are_reference_only(stores_world):
+    _sized(stores_world)
+    await price_monitor.run_price_monitor()                           # pm_stores_affect_color = 0
+    s3 = _snap("3")
+    assert s3.estimated_color is None and s3.estimated_listing_count == 0 and s3.price_basis == "ml"
+    assert [r.category for r in _rows("3", "Casa Perfecta")][0] == "similar", "igual se muestran"
+
+
+async def test_a_pack_or_capacity_difference_or_a_doubtful_price_never_feeds_the_estimate(stores_world):
+    await price_monitor.run_price_monitor()
+    frasco = _by_title(_rows("7", "Casa Perfecta"))["Frasco hermetico 1 litro"]
+    assert frasco.category == "similar" and not store_match.feeds_estimate(frasco), "otra capacidad: precio no comparable"
+    ok = StoreMatch(run_id=1, product_id="1", store_id=1, item_id=1, category="similar", auto_category="similar",
+                    source="specs", price_cents=5_000, differences=json.dumps(["medida"]))
+    assert store_match.feeds_estimate(ok)
+    for change in ({"source": "none"}, {"source": "clip"}, {"differences": json.dumps(["cantidad"])},
+                   {"price_doubtful": True}, {"price_cents": None}, {"category": "igual"}):
+        assert not store_match.feeds_estimate(StoreMatch(**{**ok.__dict__, **change}))
+
+
+async def test_in_estimate_is_served_to_the_dashboard(stores_world):
+    _sized(stores_world)
+    await price_monitor.run_price_monitor()
+    with Session(engine) as s:
+        info = store_catalog.get_store(_store_id("Casa Perfecta"))
+        flags = {m.title: store_match.match_to_dict(m, info)["in_estimate"] for m in _rows("3", "Casa Perfecta")}
+    assert flags["Producto raro 60x80 cm"] is True and flags["Cortina de baño impermeable"] is False
+
+
+async def test_real_color_from_the_stores_clears_the_estimate(stores_world):
+    runtime.set_value("pm_stores_affect_color", 1)
+    await price_monitor.run_price_monitor()
+    snap = _snap("3")
+    assert snap.price_basis == "tiendas" and snap.color == "rojo"
+    assert snap.estimated_color is None and snap.estimated_from is None and snap.estimated_listing_count == 0
+
+
+async def test_labeling_rebuilds_the_estimate_with_the_stores(stores_world):
+    _sized(stores_world)
+    runtime.set_value("pm_stores_affect_color", 1)
+    await price_monitor.run_price_monitor()
+    cp = _by_title(_rows("3", "Casa Perfecta"))["Producto raro 60x80 cm"]
+    with Session(engine) as s:
+        store_match.set_label(s, cp.id, "no_es", None)                # se cae uno de los dos similares
+        s.commit()
+    s3 = _snap("3")
+    assert s3.estimated_listing_count == 1 and s3.estimated_median_cents == 12_000
+    with Session(engine) as s:
+        store_match.clear_label(s, cp.id)
+        s.commit()
+    assert _snap("3").estimated_listing_count == 2

@@ -303,6 +303,7 @@ async def list_snapshots(
         "run_id": run_id,
         "items": store_match.decorate_items(session, run_id, [price_monitor.snapshot_to_dict(r) for r in rows]),
         "sources": store_match.sources_meta(session),
+        "stores_affect_color": store_match.affect_color_enabled(),
         "total": total,
         "page": page,
         "page_size": page_size,

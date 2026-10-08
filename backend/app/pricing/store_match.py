@@ -289,8 +289,8 @@ async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: Ven
     decisions = await market_match.score_candidates(
         product, candidates, ctx.thresholds, scorer=_store_scorer, max_candidates=len(candidates))
     human = {c.id for c, e in zip(candidates, entries) if e.id in confirmed}
-    # Lo que habría dicho Hugo por reglas (sirve para deshacer la corrección humana).
-    auto = {d.candidate.id: _category(d) for d in decisions}
+    # Lo que dijo Hugo por reglas de lo que una persona confirmó (sirve para deshacer su corrección).
+    pre_human = {d.candidate.id: _category(d) for d in decisions if d.candidate.id in human}
     for d in decisions:
         if d.candidate.id in human:
             d.verdict, d.source, d.confidence, d.reason = market_match.MATCH, "humano", 1.0, "marcado a mano"
@@ -306,11 +306,13 @@ async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: Ven
     for d in decisions:
         entry = store.by_id[_entry_id(d.candidate)]
         category = _category(d)
+        # La opinión final de Hugo (con juez y medidas): a ella vuelve «Deshacer».
+        auto = pre_human.get(d.candidate.id, category)
         doubtful, note = _doubt(entry.price_cents, entry.price_doubtful, entry.price_note, our_price)
         reason = _why_different(d, ctx.thresholds) if category == DIFERENTE else (d.reason or "")
         rows.append(StoreMatch(
             run_id=ctx.run_id, product_id=product.id, store_id=store.info.id, item_id=entry.id,
-            category=category, auto_category=auto[d.candidate.id],
+            category=category, auto_category=auto,
             source=(d.source or ("veto" if d.verdict == market_match.NO and d.image_score is not None else "none"))[:16],
             title=store_parse.one_line(entry.title, 300), url=entry.url, image_url=entry.image_url,
             brand=store_parse.one_line(entry.brand, 80) or None,
@@ -364,8 +366,9 @@ async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *
         for store in run.stores:
             rows += await _match_store(run, store, ctx, product, query, specs, snap.our_price_cents, judge, brand_of)
         await asyncio.to_thread(save_matches, ctx.run_id, product.id, rows)
-        if run.affect_color:
-            apply_color(snap, rows, green_min=ctx.green_min, yellow_min=ctx.yellow_min)
+        if run.affect_color and not apply_color(snap, rows, green_min=ctx.green_min, yellow_min=ctx.yellow_min):
+            # Sin idénticos de tienda que valgan: sus similares confirmados suman al estimado.
+            set_estimate(snap, rows, green_min=ctx.green_min, yellow_min=ctx.yellow_min, with_stores=True)
     except Exception:  # noqa: BLE001
         log.warning("tiendas: %s no se pudo comparar", product.id, exc_info=True)
     return snap
@@ -418,7 +421,54 @@ def apply_color(snap: MarketPriceSnapshot, rows: list[StoreMatch], *, green_min:
     ml = ml_prices(snap)
     _recolor(snap, ml + store, green_min=green_min, yellow_min=yellow_min)
     snap.price_basis = "ml+tiendas" if ml else "tiendas"
+    # Con un color real no hay color estimado (el estimado es solo para cuando no hay idéntico).
+    snap.estimated_color = snap.estimated_margin_pct = snap.estimated_median_cents = snap.estimated_from = None
+    snap.estimated_listing_count = 0
     return True
+
+
+# Mismo criterio que el estimado de ML (price_monitor._feeds_estimate): un similar solo alimenta el color
+# ESTIMADO si está confirmado (juez, medidas o una persona) y no difiere en cantidad ni capacidad (su precio
+# no es comparable con el nuestro).
+_CONFIRMED_SOURCES = frozenset({"llm", "specs", "humano"})
+_NOT_COMPARABLE = frozenset({market_specs.DIFF_QUANTITY, market_specs.DIFF_CAPACITY})
+
+
+def _diff_list(raw: str | None) -> list[str]:
+    try:
+        data = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return [d for d in data if isinstance(d, str)] if isinstance(data, list) else []
+
+
+def feeds_estimate(m: StoreMatch) -> bool:
+    """¿Este similar de tienda puede entrar al color estimado (`in_estimate`)? Confirmado, sin
+    diferencia de cantidad ni capacidad y con un precio creíble."""
+    return (m.category == SIMILAR and m.source in _CONFIRMED_SOURCES and bool(m.price_cents and m.price_cents > 0)
+            and not m.price_doubtful and not (set(_diff_list(m.differences)) & _NOT_COMPARABLE))
+
+
+def _price_monitor():
+    from app.pricing import price_monitor   # lazy: price_monitor importa este módulo
+
+    return price_monitor
+
+
+def _ml_similars(snap: MarketPriceSnapshot) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(snap.similar_listings) if snap.similar_listings else []
+    except ValueError:
+        return []
+    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+
+
+def set_estimate(snap: MarketPriceSnapshot, rows: list[StoreMatch], *, green_min: float, yellow_min: float,
+                 with_stores: bool) -> None:
+    """Rehace el color ESTIMADO del snapshot: los similares confirmados de ML y, si las tiendas
+    cuentan, los de las tiendas. Solo existe sin idéntico (la regla es la de ML)."""
+    extra = [{"est_ok": True, "price_cents": r.price_cents} for r in rows if with_stores and feeds_estimate(r)]
+    _price_monitor()._set_estimate(snap, [*_ml_similars(snap), *extra], green_min=green_min, yellow_min=yellow_min)
 
 
 def affect_color_enabled() -> bool:
@@ -426,25 +476,29 @@ def affect_color_enabled() -> bool:
 
 
 def reapply_color(session: Session, snap: MarketPriceSnapshot) -> None:
-    """Recalcula el color de un snapshot ya guardado después de que una persona corrigió
-    una coincidencia (de ML o de una tienda). No hace nada si las tiendas no cuentan y el
+    """Recalcula el color (y el estimado) de un snapshot ya guardado después de que una persona
+    corrigió una coincidencia (de ML o de una tienda). No hace nada si las tiendas no cuentan y el
     snapshot nunca las usó."""
     enabled = affect_color_enabled()
     if not enabled and snap.price_basis == "ml":
         return
+    if not snap.our_price_cents:
+        return
+    green, yellow = float(runtime.get("pm_green_min_pct")), float(runtime.get("pm_yellow_min_pct"))
     rows = list(session.exec(select(StoreMatch).where(
         StoreMatch.run_id == snap.run_id, StoreMatch.product_id == snap.product_id)).all())
     store = counting_prices(rows) if enabled else []
     ml = ml_prices(snap)
-    prices = ml + store
-    if not snap.our_price_cents:
+    if store:
+        apply_color(snap, rows, green_min=green, yellow_min=yellow)
         return
-    if prices:
-        _recolor(snap, prices, green_min=float(runtime.get("pm_green_min_pct")),
-                 yellow_min=float(runtime.get("pm_yellow_min_pct")))
+    # Las tiendas ya no aportan precio: vuelve a lo de ML (real si lo hay; si no, sin dato + estimado).
+    if ml:
+        _recolor(snap, ml, green_min=green, yellow_min=yellow)
     else:
         snap.color, snap.est_margin_pct = semaforo.SIN_DATO, None
-    snap.price_basis = ("ml+tiendas" if ml else "tiendas") if store else "ml"
+    snap.price_basis = "ml"
+    set_estimate(snap, rows, green_min=green, yellow_min=yellow, with_stores=enabled)
 
 
 # ─── Contadores por fuente (card de Salud) ──────────────────────────────────
@@ -543,6 +597,8 @@ def match_to_dict(m: StoreMatch, info: store_catalog.StoreInfo) -> dict[str, Any
         "reason": store_parse.one_line(m.reason, 300) or None,
         "notes": store_parse.one_line(m.notes, 300) or None,
         "human_label": m.human_label if m.human_label in LABELS else None,
+        # ¿Este similar entra al color ESTIMADO (cuando las tiendas cuentan)? Mismo criterio que en ML.
+        "in_estimate": feeds_estimate(m),
     }
 
 
@@ -666,11 +722,18 @@ def filter_conditions(source: str | None, igual_in: list[str]) -> list[Any]:
 # ─── "No es el mismo" / "Es el mismo" ───────────────────────────────────────
 
 
+def _apply_human(m: StoreMatch, label: str | None) -> None:
+    """La categoría de la coincidencia según la marca de una persona (None = la de Hugo)."""
+    m.human_label = label
+    m.category = m.auto_category if label is None else (IGUAL if label == LABEL_YES else DIFERENTE)
+
+
 def set_label(session: Session, match_id: int, label: str, actor: str | None = None) -> StoreMatch | None:
     """Una persona dice que este candidato SÍ o NO es el mismo producto. Cambia su categoría
     en esta corrida, recuerda la corrección para las próximas y rehace el color si hace falta.
-    No commitea: lo hace el llamador, junto con los contadores de la corrida
-    (`price_monitor.recount_run`)."""
+    Apretar dos veces lo mismo no hace nada; si cambia de opinión se guarda la marca anterior
+    para que «Deshacer» vuelva a ella (igual que en Mercado Libre). No commitea: lo hace el
+    llamador, junto con los contadores de la corrida (`price_monitor.recount_run`)."""
     if label not in LABELS:
         raise ValueError("label inválido")
     m = session.get(StoreMatch, match_id)
@@ -686,25 +749,33 @@ def set_label(session: Session, match_id: int, label: str, actor: str | None = N
             product_id=m.product_id, store_id=m.store_id, item_id=m.item_id, label=label,
             auto_category=m.auto_category, image_score=m.image_score, name_score=m.name_score,
             title=m.title[:300], product_name=(product_name or "")[:200] or None, actor=(actor or "")[:120] or None)
-    else:
-        fb.label, fb.actor = label, (actor or "")[:120] or fb.actor
+    elif fb.label != label:
+        fb.previous_label, fb.label = fb.label, label
+        fb.actor = (actor or "")[:120] or fb.actor
     session.add(fb)
-    m.human_label = label
-    m.category = IGUAL if label == LABEL_YES else DIFERENTE
+    _apply_human(m, label)
     session.add(m)
     _after_label(session, m)
     return m
 
 
 def clear_label(session: Session, match_id: int) -> StoreMatch | None:
-    """Deshace la corrección: el candidato vuelve a la categoría que dijo Hugo."""
+    """«Deshacer»: si la persona había cambiado de opinión vuelve a su marca anterior; si no,
+    el candidato vuelve a la categoría que dijo Hugo y se olvida la corrección."""
     m = session.get(StoreMatch, match_id)
     if m is None:
         return None
-    session.execute(delete(StoreMatchFeedback).where(
+    fb = session.exec(select(StoreMatchFeedback).where(
         StoreMatchFeedback.product_id == m.product_id, StoreMatchFeedback.store_id == m.store_id,
-        StoreMatchFeedback.item_id == m.item_id))
-    m.human_label, m.category = None, m.auto_category
+        StoreMatchFeedback.item_id == m.item_id)).first()
+    if fb is not None and fb.previous_label in LABELS:
+        fb.label, fb.previous_label = fb.previous_label, None
+        session.add(fb)
+        _apply_human(m, fb.label)
+    else:
+        if fb is not None:
+            session.delete(fb)
+        _apply_human(m, None)
     session.add(m)
     _after_label(session, m)
     return m

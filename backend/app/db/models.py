@@ -505,6 +505,8 @@ class StoreMatchFeedback(SQLModel, table=True):
     store_id: int
     item_id: int
     label: str = Field(max_length=8)                 # es | no_es
+    # Si la persona cambió de opinión, la marca anterior: «Deshacer» vuelve a ella (como en ML).
+    previous_label: str | None = Field(default=None, max_length=8)
     created_at: datetime = Field(default_factory=utcnow)
     actor: str | None = Field(default=None, max_length=120)
     # Lo que Hugo había dicho (para calibrar).

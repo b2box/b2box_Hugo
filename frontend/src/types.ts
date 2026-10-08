@@ -347,6 +347,8 @@ export interface PriceMonitorSnapshotsResponse {
   states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;
   // Las columnas de fuente de la tabla: Mercado Libre y las tiendas activas.
   sources?: SourceMeta[];
+  // ¿Las tiendas cuentan para el color? (ajuste «Tiendas cuentan para el color»)
+  stores_affect_color?: boolean;
 }
 
 export interface PriceMonitorSummary {
@@ -421,6 +423,9 @@ export interface StoreMatchRow {
   reason: string | null;
   notes: string | null;
   human_label: "es" | "no_es" | null;
+  // ¿Este similar entra al color ESTIMADO (cuando las tiendas cuentan)? Confirmado, sin diferencia de
+  // cantidad ni capacidad y con precio creíble: el mismo criterio que en Mercado Libre.
+  in_estimate?: boolean;
 }
 
 export interface SourceStats {
