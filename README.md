@@ -321,7 +321,9 @@ Sin bloquear scripts serían ~3,4 GB por noche (USD 280 a 410 por mes).
   `pm_ml_web_pause_s` (4 s, ±30 % al azar) después de cada búsqueda. La carga
   tardó 2 a 4 s medida sin proxy (con proxy residencial será más); con la pausa
   son unos 7 a 10 s por búsqueda (estimación): 1.700 búsquedas son ~3 a 5 horas,
-  que se suman a lo que ya tardaba la corrida.
+  que se suman a lo que ya tardaba la corrida. Además, hasta 8 fotos de
+  `mlstatic.com` por producto para CLIP (directo desde Hugo, sin proxy; quedan
+  en el cache de embeddings, así que pesan sobre todo la primera noche).
 - **Sin `BROWSER_PROXY` la fuente queda apagada** (no se intenta desde la IP del
   datacenter: ML la bloquea). También si el navegador no está disponible
   (`BROWSER_FETCH_ENABLED`, Camoufox) o el cupo es 0. Queda un aviso en el log,
