@@ -317,13 +317,15 @@ def _mark(snap: MarketPriceSnapshot, status: str, reason: str) -> MarketPriceSna
 
 
 def _our_photos(product: VendureProduct) -> list[str]:
-    """Fotos de catálogo del producto, solo https (son las que pueden salir
-    hacia el juez)."""
-    urls: list[str] = []
+    """La foto destacada del producto, solo https (es la que puede salir hacia
+    el juez). UNA sola versión: Vendure expone la misma foto como `preview`
+    (achicada) y como `source` (original) y mandar las dos gastaba tokens, una
+    descarga y un decode de más, con una "segunda foto" que era la primera.
+    Va la preview; si no hay, el source."""
     for u in [product.featured_image_url, *(product.image_urls or [])]:
-        if u and u.startswith("https://") and u not in urls:
-            urls.append(u)
-    return urls
+        if u and u.startswith("https://"):
+            return [u]
+    return []
 
 
 Listings = tuple[list[MlListing], dict]

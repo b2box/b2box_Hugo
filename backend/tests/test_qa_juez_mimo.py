@@ -354,8 +354,10 @@ async def test_c4_base64_through_the_run_spends_one_call_per_product(world, monk
     assert (run.llm_calls, run.llm_input_tokens, run.llm_output_tokens) == (1, 1_000, 60)
     assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1
     [body] = provider.bodies
-    assert len(_sent_images(body)) == 3            # preview + source nuestras + la de MLA8
+    assert len(_sent_images(body)) == 2            # la preview nuestra (una sola versión) + la de MLA8
     assert all(u.startswith("data:image/jpeg;base64,") for u in _sent_images(body))
+    assert f"{OUR_HOST}/assets/preview/8.jpg" in photos.requested
+    assert f"{OUR_HOST}/assets/source/8.jpg" not in photos.requested     # el source es la misma foto
 
 
 async def test_c4_base64_with_our_photos_off_the_vendure_host_spends_nothing(world, monkeypatch, llm_env,  # noqa: F811
