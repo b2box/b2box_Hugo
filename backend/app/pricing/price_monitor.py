@@ -49,7 +49,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import engine
 from app.dedup import catalog_index, image_embed
 from app.ingest import meli
-from app.pricing import market_judge, market_match, semaforo
+from app.pricing import market_judge, market_match, market_ml, semaforo
 from app.pricing.market_ml import (
     PROBE_LISTING_PRICES_KEY,
     PROBE_SOLD_QUANTITY_KEY,
@@ -296,9 +296,11 @@ def _mark(snap: MarketPriceSnapshot, status: str, reason: str) -> MarketPriceSna
 
 
 def _our_photos(product: VendureProduct) -> list[str]:
+    """Fotos de catálogo del producto, solo https (son las que pueden salir
+    hacia el juez)."""
     urls: list[str] = []
     for u in [product.featured_image_url, *(product.image_urls or [])]:
-        if u and u not in urls:
+        if u and u.startswith("https://") and u not in urls:
             urls.append(u)
     return urls
 
@@ -353,7 +355,7 @@ async def _accepted_prices(ctx: RunContext, listings: list[MlListing]) -> list[t
             continue
         if item.currency and item.currency.upper() != CURRENCY:
             continue
-        if ctx.first_category_id is None and item.category_id:
+        if ctx.first_category_id is None and market_ml.valid_category_id(item.category_id):
             ctx.first_category_id = item.category_id
         sales = item.sold_quantity
         if sales is None:

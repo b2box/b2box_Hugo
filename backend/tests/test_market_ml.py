@@ -68,7 +68,7 @@ class Recorder:
 
 def _search_payload() -> dict:
     return {"results": [
-        {"id": "MLA1", "name": "Organizador de cocina", "permalink": "https://ml/p/MLA1",
+        {"id": "MLA1", "name": "Organizador de cocina", "permalink": "https://www.mercadolibre.com.ar/p/MLA1",
          "domain_id": "MLA-ORG", "pictures": [{"url": "http://http2.mlstatic.com/a.jpg",
                                                 "secure_url": "https://http2.mlstatic.com/a.jpg"}]},
         {"name": "sin id: se descarta"},
@@ -96,7 +96,7 @@ def test_parse_candidates_keeps_only_rows_with_id():
     cands = market_ml.parse_candidates(_search_payload())
     assert [c.id for c in cands] == ["MLA1", "MLA2"]
     assert cands[0].image_urls == ["https://http2.mlstatic.com/a.jpg"]
-    assert cands[0].permalink == "https://ml/p/MLA1"
+    assert cands[0].permalink == "https://www.mercadolibre.com.ar/p/MLA1"
 
 
 def test_parse_listings_converts_to_cents_and_drops_zero_prices():
@@ -126,6 +126,77 @@ def test_retry_delay_is_exponential_capped_and_respects_retry_after():
     assert market_ml.retry_delay(1, "7") == 7.0
     assert market_ml.retry_delay(1, "3600") == 60.0  # acotado
     assert market_ml.retry_delay(2, "mañana") == 2.0  # header roto → exponencial
+
+
+# ─── lo que viene de ML no llega crudo al dashboard ni a CLIP (security M1) ──
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:alert(1)",
+    "JavaScript:alert(document.domain)",
+    "data:text/html,<script>alert(1)</script>",
+    "http://www.mercadolibre.com.ar/p/MLA1",             # sin https
+    "https://evil.com/p/MLA1",                            # host ajeno
+    "https://mercadolibre.com.ar.evil.com/p/MLA1",        # sufijo engañoso
+    "https://www.mercadolibre.com.ar@evil.com/p/MLA1",    # userinfo
+    "https://evil.com\\@www.mercadolibre.com.ar/p",       # backslash
+    "https://www.mercadolibre.com.ar:8443/p/MLA1",        # puerto raro
+    "//www.mercadolibre.com.ar/p/MLA1",                   # sin esquema
+    " https://www.mercadolibre.com.ar/p/MLA1\n<script>",  # controles
+    None, 42, "",
+])
+def test_unsafe_permalinks_are_dropped(url):
+    assert market_ml.safe_permalink(url) == ""
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.mercadolibre.com.ar/organizador/p/MLA123",
+    "https://articulo.mercadolibre.com.ar/MLA-123-x",
+    "https://mercadolibre.com/p/MLA1",
+])
+def test_ml_permalinks_survive(url):
+    assert market_ml.safe_permalink(url) == url
+
+
+def test_image_urls_only_from_mlstatic_and_always_https():
+    assert market_ml.safe_image_url("https://http2.mlstatic.com/D_1.jpg") == "https://http2.mlstatic.com/D_1.jpg"
+    assert market_ml.safe_image_url("http://http2.mlstatic.com/D_1.jpg") == "https://http2.mlstatic.com/D_1.jpg"
+    for bad in ("javascript:alert(1)", "https://evil.com/a.jpg", "https://mlstatic.com.evil.com/a.jpg",
+                "file:///etc/passwd", "http://169.254.169.254/latest/meta-data", "ftp://http2.mlstatic.com/a"):
+        assert market_ml.safe_image_url(bad) is None, bad
+
+
+def test_parse_candidates_sanitizes_links_photos_and_ids():
+    cands = market_ml.parse_candidates({"results": [
+        {"id": "MLA9", "name": "x", "permalink": "javascript:alert(1)",
+         "pictures": [{"url": "https://evil.com/a.jpg"}, {"url": "http://http2.mlstatic.com/b.jpg"}]},
+        {"id": "../../users/1", "name": "id raro"},
+        {"id": "MLA9?x=1", "name": "id con query"},
+    ]})
+    assert [c.id for c in cands] == ["MLA9"]
+    assert cands[0].permalink == ""
+    assert cands[0].image_urls == ["https://http2.mlstatic.com/b.jpg"]
+
+
+async def test_invalid_ids_never_reach_a_path():
+    rec = Recorder(lambda r: httpx.Response(200, json={"results": []}))
+    async with rec.market() as ml:
+        for bad in ("../users/1", "MLA1/../../x", "MLA1?a=b", "123"):
+            with pytest.raises(meli.MeliError):
+                await ml.listings(bad)
+        for bad in ("1/../2", "abc", "", "1 2"):
+            assert await ml.seller_sales(bad) is None
+        payload = await ml.probe_listing_prices("MLA1&price=0")
+    assert rec.paths == [] and ml.requests_used == 0
+    assert payload["status"] is None
+    assert market_ml.probe_recorded(market_ml.PROBE_LISTING_PRICES_KEY) is False
+
+
+async def test_valid_ids_are_quoted_into_the_path():
+    rec = Recorder(lambda r: httpx.Response(200, json={"results": []}))
+    async with rec.market() as ml:
+        await ml.listings("MLA123")
+    assert rec.paths == ["/products/MLA123/items"]
 
 
 # ─── backoff ───────────────────────────────────────────────────────────────

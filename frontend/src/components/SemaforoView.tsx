@@ -74,6 +74,27 @@ function MiniThumb({ url, alt }: { url: string | null; alt: string }) {
   );
 }
 
+const ML_LINK_DOMAINS = ["mercadolibre.com.ar", "mercadolibre.com"];
+
+// Link a una ficha de ML apto para un href. El backend ya lo sanea, pero esto
+// es lo último antes del navegador (y cubre filas viejas): solo https y hosts
+// de Mercado Libre, parseado con el mismo URL() que va a usar el navegador.
+export function safeMlHref(permalink: string | null | undefined, mlId: string): string {
+  const fallback = `https://www.mercadolibre.com.ar/p/${encodeURIComponent(mlId)}`;
+  if (!permalink) return fallback;
+  try {
+    const u = new URL(permalink);
+    const host = u.hostname.toLowerCase();
+    const okHost = ML_LINK_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
+    if (u.protocol !== "https:" || !okHost || u.username || u.password || (u.port && u.port !== "443")) {
+      return fallback;
+    }
+    return u.href;
+  } catch {
+    return fallback;
+  }
+}
+
 function marginClass(color: SemaforoColor): string {
   if (color === "verde") return "text-success";
   if (color === "amarillo") return "text-warning";
@@ -386,7 +407,7 @@ function SnapshotRow({
             {s.matched_listings.slice(0, 3).map((m) => (
               <a
                 key={m.ml_id}
-                href={m.permalink || `https://www.mercadolibre.com.ar/p/${m.ml_id}`}
+                href={safeMlHref(m.permalink, m.ml_id)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-xs text-primary hover:underline max-w-[220px]"

@@ -178,9 +178,9 @@ def world(monkeypatch):
         "Producto raro": [],
         "Taza ceramica": [_candidate("MLA6", "Taza de ceramica")],
     }
-    ml.items = {"MLA1": [_listing("I1", "s1", 200.0), _listing("I2", "s2", 240.0),
-                         _listing("I3", "s3", 220.0)]}
-    ml.users = {"s1": 1_000, "s2": 10}  # s3 sin reputación → cuenta igual
+    ml.items = {"MLA1": [_listing("I1", "101", 200.0), _listing("I2", "102", 240.0),
+                         _listing("I3", "103", 220.0)]}
+    ml.users = {"101": 1_000, "102": 10}  # 103 sin reputación → cuenta igual
     image_scores = {ML_IMG.format("MLA1"): 0.90, ML_IMG.format("MLA6"): 0.30}
 
     sleeps: list[float] = []
@@ -481,8 +481,8 @@ async def test_our_price_in_another_currency_is_skipped(world):
 
 
 async def test_sold_quantity_in_the_payload_skips_the_users_endpoint(world):
-    world.ml.items["MLA1"] = [_listing("I1", "s1", 200.0, sold_quantity=500),
-                              _listing("I2", "s2", 240.0, sold_quantity=3)]
+    world.ml.items["MLA1"] = [_listing("I1", "101", 200.0, sold_quantity=500),
+                              _listing("I2", "102", 240.0, sold_quantity=3)]
     await price_monitor.run_price_monitor()
     s = _snaps()["1"]
     assert (s.ml_listing_count, s.ml_median_cents) == (1, 20_000)
@@ -508,7 +508,7 @@ async def test_first_run_records_the_two_probes_once(world):
 def _ambiguous_world(world):
     FakeVendure.products = [_product("8", "Soporte celular auto")]
     world.ml.search["Soporte celular auto"] = [_candidate("MLA8", "Soporte celular para auto")]
-    world.ml.items["MLA8"] = [_listing("I8", "s1", 300.0)]
+    world.ml.items["MLA8"] = [_listing("I8", "101", 300.0)]
     world.image_scores[ML_IMG.format("MLA8")] = 0.62  # entre veto y umbral: ambiguo
 
 
@@ -740,8 +740,8 @@ async def test_zero_budget_spends_nothing_and_skips_everything(world):
 
 async def test_usd_listings_are_ignored_and_one_listing_is_its_own_median(world):
     FakeVendure.products = [_product("1", "Organizador cocina")]
-    world.ml.items["MLA1"] = [_listing("I1", "s1", 200.0),
-                              {**_listing("I2", "s1", 5.0), "currency_id": "USD"}]
+    world.ml.items["MLA1"] = [_listing("I1", "101", 200.0),
+                              {**_listing("I2", "101", 5.0), "currency_id": "USD"}]
     await price_monitor.run_price_monitor()
     s = _snaps()["1"]
     assert s.ml_status == "ok"
@@ -752,7 +752,7 @@ async def test_usd_listings_are_ignored_and_one_listing_is_its_own_median(world)
 
 async def test_only_usd_listings_is_no_data(world):
     FakeVendure.products = [_product("1", "Organizador cocina")]
-    world.ml.items["MLA1"] = [{**_listing("I1", "s1", 5.0), "currency_id": "USD"}]
+    world.ml.items["MLA1"] = [{**_listing("I1", "101", 5.0), "currency_id": "USD"}]
     await price_monitor.run_price_monitor()
     s = _snaps()["1"]
     assert s.ml_status == "no_data" and s.color == "sin_dato" and s.ml_median_cents is None

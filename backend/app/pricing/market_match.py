@@ -37,7 +37,7 @@ from dataclasses import dataclass
 
 from app import runtime
 from app.dedup import catalog_index, fuzzy_text, image_embed
-from app.pricing.market_ml import MlCandidate
+from app.pricing.market_ml import MlCandidate, safe_image_url
 from app.vendure.client import VendureProduct
 
 log = logging.getLogger(__name__)
@@ -150,9 +150,10 @@ async def clip_index_scorer(our: VendureProduct, urls: Sequence[str]) -> float |
     None cuando no se puede comparar: CLIP apagado, índice sin construir,
     producto sin foto en el índice, o ninguna foto de ML se pudo embeber.
     """
-    if not urls or not image_embed.available() or not catalog_index.is_ready():
+    safe = [u for u in (safe_image_url(x) for x in urls) if u]
+    if not safe or not image_embed.available() or not catalog_index.is_ready():
         return None
-    vecs = await image_embed.embed_urls_aligned(list(urls)[:PHOTOS_PER_CANDIDATE], concurrency=2)
+    vecs = await image_embed.embed_urls_aligned(safe[:PHOTOS_PER_CANDIDATE], concurrency=2)
     best: float | None = None
     for vec in vecs:
         if vec is None:

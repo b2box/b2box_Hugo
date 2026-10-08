@@ -30,10 +30,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from sqlmodel import Session
@@ -65,6 +66,72 @@ _BACKOFF_MAX_S = 30.0
 # Si ML manda Retry-After lo respetamos, pero acotado: una noche no puede
 # quedar colgada esperando un header que diga "volvé en una hora".
 _RETRY_AFTER_CAP_S = 60.0
+
+
+# Lo que viene de ML termina en el dashboard (href) y en el juez/CLIP (fotos):
+# se acepta solo lo que tiene la forma esperada.
+_LINK_DOMAINS = ("mercadolibre.com.ar", "mercadolibre.com")
+_IMAGE_DOMAIN = "mlstatic.com"
+_PRODUCT_ID = re.compile(r"^MLA\d+$")    # fichas de catálogo e items
+_USER_ID = re.compile(r"^\d+$")
+_CATEGORY_ID = re.compile(r"^MLA\d+$")
+
+
+def _host_in(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _clean_https_parts(url: object, *, allow_http: bool = False):
+    """urlsplit de una URL "limpia" o None. Rechaza lo que un navegador podría
+    leer distinto que Python: backslash, espacios/controles y userinfo
+    (`https://mercadolibre.com.ar@evil.com`)."""
+    if not isinstance(url, str):
+        return None
+    raw = url.strip()
+    if not raw or "\\" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in raw):
+        return None
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None
+    schemes = ("https", "http") if allow_http else ("https",)
+    if parts.scheme.lower() not in schemes or not parts.hostname:
+        return None
+    if parts.username is not None or parts.password is not None or port not in (None, 443):
+        return None
+    return parts
+
+
+def safe_permalink(url: object) -> str:
+    """Link a una ficha de ML apto para un href: https y host de Mercado Libre
+    (o subdominio). Cualquier otra cosa ("javascript:", http, host ajeno) → ""."""
+    parts = _clean_https_parts(url)
+    if parts is None or not any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS):
+        return ""
+    return parts.geturl()
+
+
+def safe_image_url(url: object) -> str | None:
+    """Foto de ML apta para descargar (CLIP) o mandar al juez: host *.mlstatic.com
+    por https. Las `http://` de mlstatic (las fichas de catálogo a veces vienen
+    así) se suben a https; cualquier otro host o esquema → None."""
+    parts = _clean_https_parts(url, allow_http=True)
+    if parts is None or not _host_in(parts.hostname.lower(), _IMAGE_DOMAIN):
+        return None
+    return parts._replace(scheme="https").geturl()
+
+
+def valid_product_id(value: object) -> bool:
+    return isinstance(value, str) and bool(_PRODUCT_ID.fullmatch(value))
+
+
+def valid_user_id(value: object) -> bool:
+    return isinstance(value, str) and bool(_USER_ID.fullmatch(value))
+
+
+def valid_category_id(value: object) -> bool:
+    return isinstance(value, str) and bool(_CATEGORY_ID.fullmatch(value))
 
 
 class BudgetExhausted(RuntimeError):
@@ -110,15 +177,18 @@ def _int_or_none(value) -> int | None:
 
 
 def parse_candidates(raw: dict) -> list[MlCandidate]:
+    """Fichas de la búsqueda. Se descartan las de id raro (se interpola en
+    paths) y se sanean links y fotos: nada de ML llega crudo al dashboard."""
     out: list[MlCandidate] = []
     for r in (raw.get("results") or []):
-        if not isinstance(r, dict) or not r.get("id"):
+        if not isinstance(r, dict) or not valid_product_id(str(r.get("id") or "")):
             continue
+        images = [u for u in (safe_image_url(x) for x in meli._pictures_from(r)) if u]
         out.append(MlCandidate(
             id=str(r["id"]),
             name=str(r.get("name") or r.get("title") or ""),
-            image_urls=meli._pictures_from(r),
-            permalink=str(r.get("permalink") or ""),
+            image_urls=images,
+            permalink=safe_permalink(r.get("permalink")),
             domain_id=str(r.get("domain_id") or ""),
         ))
     return out
@@ -341,26 +411,28 @@ class MlMarket:
         if not query:
             return []
         raw = await self.get_json(
-            f"/products/search?status=active&site_id={site}&q={quote(query)}&limit={_SEARCH_LIMIT}"
+            f"/products/search?status=active&site_id={site}&q={quote(query, safe='')}&limit={_SEARCH_LIMIT}"
         )
         return parse_candidates(raw)
 
     async def listings(self, product_id: str) -> tuple[list[MlListing], dict]:
         """Vendedores de la ficha con su precio. Devuelve también el payload
         crudo para la sonda de `sold_quantity`."""
-        raw = await self.get_json(f"/products/{quote(product_id)}/items?limit={_ITEMS_LIMIT}")
+        if not valid_product_id(product_id):
+            raise meli.MeliError(f"id de ficha inválido: {product_id[:40]!r}")
+        raw = await self.get_json(f"/products/{quote(product_id, safe='')}/items?limit={_ITEMS_LIMIT}")
         return parse_listings(raw), raw
 
     async def seller_sales(self, seller_id: str) -> int | None:
         """Ventas concretadas del vendedor, con cache de 30 días. None = ML no
         lo dice (o el request falló): el llamador decide qué hacer con eso."""
-        if not seller_id:
-            return None
+        if not valid_user_id(seller_id):
+            return None  # sin dato: cuenta como vendedor desconocido
         fresh, cached = await asyncio.to_thread(_seller_cache_get, seller_id)
         if fresh:
             return cached
         try:
-            raw = await self.get_json(f"/users/{quote(seller_id)}")
+            raw = await self.get_json(f"/users/{quote(seller_id, safe='')}")
         except meli.MeliError as exc:
             log.info("Sin reputación para el vendedor %s: %s", seller_id, exc)
             return None
@@ -371,7 +443,9 @@ class MlMarket:
     async def probe_listing_prices(self, category_id: str) -> dict:
         """Sonda: ¿`/sites/MLA/listing_prices` contesta con el token de app?
         Solo guarda el status y un recorte del body; no se usa todavía."""
-        path = f"/sites/{SITE}/listing_prices?price=10000&category_id={quote(category_id)}"
+        if not valid_category_id(category_id):
+            return {"status": None, "category_id": None, "error": "categoría inválida"}
+        path = f"/sites/{SITE}/listing_prices?price=10000&category_id={quote(category_id, safe='')}"
         try:
             resp = await self.request(path)
             payload = {"status": resp.status_code, "category_id": category_id,
