@@ -33,6 +33,8 @@ export interface AuditEvent {
   icon: string;
   tone: Tone;
   dismissed: boolean;
+  // Consulta dedup_only: Hugo no mandó a Paco (lo hace quien consultó); sin "Reintentar".
+  dedup_only?: boolean;
   product: ProductRef;
   related_product: ProductRef | null;
   detail: string | null;
