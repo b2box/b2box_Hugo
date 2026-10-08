@@ -236,3 +236,14 @@ async def test_illegible_answer_keeps_the_tokens_but_has_no_verdicts(monkeypatch
     client = FakeClient("no puedo ver las imágenes")
     res = await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
     assert res.verdicts == {} and res.input_tokens == 1200
+
+
+@pytest.mark.parametrize("over", [{"pm_llm_base_url": ""}, {"pm_llm_api_key": ""},
+                                  {"pm_llm_base_url": "", "pm_llm_api_key": ""}])
+async def test_judge_without_base_url_or_key_sends_nothing_and_spends_no_quota(monkeypatch, over):
+    _judge_settings(monkeypatch, **over)
+    client = FakeClient(GOOD)
+    assert market_judge.enabled() is False
+    assert await market_judge.judge("x", [], CANDS, max_calls=10, client=client) is None
+    assert client.calls == []
+    assert market_judge.daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 0  # ni reserva cupo
