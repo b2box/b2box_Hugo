@@ -9,6 +9,8 @@ import os
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
+import asyncio  # noqa: E402
+
 import pytest  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -53,6 +55,14 @@ class _Page:
     async def goto(self, url, wait_until, timeout):
         self.w.visits.append(url)
         self.w.goto_args.append((wait_until, timeout))
+        self.w.in_flight += 1
+        try:
+            if self.w.goto_gate is not None:
+                await self.w.goto_gate.wait()
+        finally:
+            self.w.in_flight -= 1
+        if self.w.closed_while_in_flight:
+            raise RuntimeError("Target closed")
         if self.w.goto_error:
             raise self.w.goto_error
         self.url = self.w.final_url or url
@@ -70,6 +80,8 @@ class _Page:
         return self.w.html
 
     async def close(self):
+        if self.w.page_close_hangs:
+            await asyncio.sleep(3600)
         self.closed = True
 
 
@@ -111,6 +123,14 @@ class _World:
         ]
         self.html, self.status, self.final_url, self.goto_error = "<html>ok</html>", 200, None, None
         self.launch_error = None
+        # Ganchos para los tests de ciclo de vida.
+        self.goto_gate = None
+        self.in_flight = 0
+        self.open_now = 0
+        self.max_open = 0
+        self.closed_while_in_flight = False
+        self.page_close_hangs = False
+        self.exit_hangs = False
 
 
 @pytest.fixture
@@ -125,9 +145,16 @@ def world(monkeypatch):
             if w.launch_error:
                 raise w.launch_error
             w.launches.append(self.kwargs)
+            w.open_now += 1
+            w.max_open = max(w.max_open, w.open_now)
             return _Browser(w)
 
         async def __aexit__(self, *exc):
+            if w.exit_hangs:
+                await asyncio.sleep(3600)
+            if w.in_flight:
+                w.closed_while_in_flight = True
+            w.open_now -= 1
             w.closed += 1
 
     async def public(host):  # noqa: ARG001
@@ -139,8 +166,10 @@ def world(monkeypatch):
     monkeypatch.setattr(browser_fetch, "_host_is_public", public)
     monkeypatch.setattr(get_settings(), "browser_proxy", "http://usr:pwd@res.proxy.io:8080", raising=False)
     browser_fetch.reset_circuit()
+    browser_fetch.reset_dns_cache()
     yield w
     browser_fetch.reset_circuit()
+    browser_fetch.reset_dns_cache()
 
 
 async def test_one_browser_serves_many_pages_through_one_context(world):
@@ -229,16 +258,14 @@ async def test_scripts_can_be_let_through(world):
     assert page.bytes == (100 + 400 + 300_000) + (100 + 400 + 150_000)
 
 
-async def test_the_ssrf_guard_still_applies_to_every_request(world):
+async def test_the_ssrf_guard_still_applies_to_every_request(world, monkeypatch):
     world.subrequests = [_Req("http://169.254.169.254/latest/meta-data/", "xhr"),
                          _Req("https://listado.mercadolibre.com.ar/x", "document")]
 
     async def real_dns(host):  # noqa: ARG001
         return not host.startswith("169.")
 
-    browser_fetch._host_ok.clear()
-    import app.ingest.browser_fetch as bf
-    bf._host_is_public = real_dns            # restaurado por monkeypatch al salir del fixture
+    monkeypatch.setattr(browser_fetch, "_host_is_public", real_dns)
     async with browser_fetch.ListingBrowser() as lb:
         page = await lb.fetch(URL)
     blocked = [(u, r.aborted) for u, _, r in world.routed if "169.254" in u]
@@ -323,3 +350,314 @@ def test_proxy_configured_reflects_browser_proxy(monkeypatch):
     assert browser_fetch.proxy_configured() is False
     monkeypatch.setattr(s, "browser_proxy", "http://u:p@h:1", raising=False)
     assert browser_fetch.proxy_configured() is True
+
+
+# ─── solo habla con ML ────────────────────────────────────────────────────
+
+
+async def test_the_listing_browser_only_talks_to_mercado_libre(world):
+    world.subrequests = [
+        _Req(URL, "document"),
+        _Req("https://www.mercadolibre.com/jms/mla/lgz/account-verification", "document"),
+        _Req("https://http2.mlstatic.com/frontend-assets/x.js", "xhr"),
+        _Req("https://accounts.google.com/gsi/client", "xhr"),
+        _Req("https://static.hotjar.com/c/hotjar.js", "xhr"),
+        _Req("https://evilmercadolibre.com.ar/x", "xhr"),
+        _Req("https://mercadolibre.com.ar.evil.example/x", "xhr"),
+        _Req("https://mercadolibre.com.ar@evil.example/x", "xhr"),
+    ]
+    async with browser_fetch.ListingBrowser() as lb:
+        page = await lb.fetch(URL)
+    followed = {u for u, _, r in world.routed if r.continued}
+    assert followed == {URL, "https://www.mercadolibre.com/jms/mla/lgz/account-verification",
+                        "https://http2.mlstatic.com/frontend-assets/x.js"}
+    assert page.blocked == 5
+
+
+async def test_the_allowed_hosts_can_be_changed_by_the_caller(world):
+    world.subrequests = [_Req("https://otro.example/x", "document"), _Req(URL, "document")]
+    async with browser_fetch.ListingBrowser(allow_hosts=("otro.example",)) as lb:
+        await lb.fetch(URL)
+    assert {u for u, _, r in world.routed if r.continued} == {"https://otro.example/x"}
+
+
+@pytest.mark.parametrize("host, ok", [
+    ("mercadolibre.com.ar", True), ("listado.mercadolibre.com.ar", True), ("WWW.MercadoLibre.com", True),
+    ("http2.mlstatic.com", True), ("mercadolibre.com.ar.", True),
+    ("evilmercadolibre.com.ar", False), ("mercadolibre.com.ar.evil.com", False), ("xmlstatic.com", False),
+    ("", False), ("com.ar", False),
+])
+def test_host_matches_has_a_boundary_check(host, ok):
+    assert browser_fetch.host_matches(host, browser_fetch.ML_ALLOWED_HOSTS) is ok
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://www.mercadolibre.com.ar/x", True),
+    ("https://mercadolibre.com.ar@evil.example/x", False),       # userinfo: el host real es evil.example
+    ("https://evilmercadolibre.com.ar/x", False),
+    ("", False), (None, False), ("not a url", False), ("https://[::1/", False),
+])
+def test_url_host_allowed_is_fail_closed(url, ok):
+    assert browser_fetch.url_host_allowed(url, ("mercadolibre.com.ar", "mercadolibre.com")) is ok
+
+
+# ─── la cache DNS del guard ───────────────────────────────────────────────
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+@pytest.fixture
+def dns(monkeypatch):
+    """getaddrinfo con respuestas programadas y un reloj a mano."""
+    import socket as _socket
+
+    clock = _Clock()
+    answers: dict[str, object] = {}
+    calls: list[str] = []
+
+    def fake_getaddrinfo(host, *a, **k):
+        calls.append(host)
+        result = answers[host]
+        if isinstance(result, Exception):
+            raise result
+        return [(2, 1, 6, "", (result, 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(browser_fetch.time, "monotonic", clock.monotonic)
+    browser_fetch.reset_dns_cache()
+    yield answers, calls, clock
+    browser_fetch.reset_dns_cache()
+
+
+async def test_a_public_answer_is_cached_for_five_minutes(dns):
+    answers, calls, clock = dns
+    answers["a.example"] = "93.184.216.34"
+    assert await browser_fetch._host_is_public("a.example") is True
+    clock.now += 299
+    assert await browser_fetch._host_is_public("a.example") is True
+    assert calls == ["a.example"]
+    clock.now += 2                                   # pasaron 301 s
+    assert await browser_fetch._host_is_public("a.example") is True
+    assert calls == ["a.example", "a.example"]
+
+
+async def test_a_private_answer_is_cached_only_thirty_seconds(dns):
+    answers, calls, clock = dns
+    answers["b.example"] = "10.0.0.5"
+    assert await browser_fetch._host_is_public("b.example") is False
+    clock.now += 29
+    assert await browser_fetch._host_is_public("b.example") is False and calls == ["b.example"]
+    answers["b.example"] = "93.184.216.34"            # lo arreglaron (o un rebinding al revés)
+    clock.now += 2
+    assert await browser_fetch._host_is_public("b.example") is True
+    assert calls == ["b.example", "b.example"]
+
+
+async def test_a_dns_failure_is_not_cached(dns):
+    answers, calls, clock = dns
+    answers["c.example"] = OSError("timeout de resolución")
+    assert await browser_fetch._host_is_public("c.example") is False        # fail-closed
+    answers["c.example"] = "93.184.216.34"
+    assert await browser_fetch._host_is_public("c.example") is True         # sin esperar 30 s
+    assert calls == ["c.example", "c.example"]
+
+
+async def test_the_dns_cache_has_a_size_cap_and_drops_the_oldest(dns, monkeypatch):
+    answers, calls, clock = dns
+    monkeypatch.setattr(browser_fetch, "DNS_CACHE_MAX", 5)
+    for i in range(8):
+        answers[f"h{i}.example"] = "93.184.216.34"
+        await browser_fetch._host_is_public(f"h{i}.example")
+        clock.now += 1
+    assert len(browser_fetch._host_cache) == 5
+    assert "h0.example" not in browser_fetch._host_cache and "h7.example" in browser_fetch._host_cache
+
+
+async def test_the_dns_cache_prefers_dropping_expired_entries(dns, monkeypatch):
+    answers, calls, clock = dns
+    monkeypatch.setattr(browser_fetch, "DNS_CACHE_MAX", 3)
+    for host in ("old1.example", "old2.example"):
+        answers[host] = "10.0.0.1"                    # negativas: vencen a los 30 s
+        await browser_fetch._host_is_public(host)
+    answers["fresh.example"] = "93.184.216.34"
+    await browser_fetch._host_is_public("fresh.example")
+    clock.now += 60
+    answers["new.example"] = "93.184.216.34"
+    await browser_fetch._host_is_public("new.example")
+    assert set(browser_fetch._host_cache) == {"fresh.example", "new.example"}
+
+
+async def test_the_input_url_is_resolved_off_the_event_loop(world, monkeypatch):
+    import threading
+
+    seen = []
+    monkeypatch.setattr(browser_fetch, "assert_public_url", lambda url: seen.append(threading.current_thread()))
+    async with browser_fetch.ListingBrowser() as lb:
+        await lb.fetch(URL)
+    assert seen and all(t is not threading.main_thread() for t in seen)
+
+
+# ─── cerrar no puede colgar la corrida ────────────────────────────────────
+
+
+async def test_a_page_that_never_closes_does_not_hang_the_run(world, monkeypatch):
+    monkeypatch.setattr(browser_fetch, "_CLOSE_PAGE_TIMEOUT_S", 0.05)
+    world.page_close_hangs = True
+    async with browser_fetch.ListingBrowser() as lb:
+        page = await asyncio.wait_for(lb.fetch(URL), 2)
+        assert page.html == "<html>ok</html>" and lb._broken is True
+        world.page_close_hangs = False
+        await lb.fetch(URL)                                   # y el siguiente relanza
+        assert lb.launches == 2
+
+
+async def test_a_browser_that_never_exits_does_not_hang_close(world, monkeypatch):
+    monkeypatch.setattr(browser_fetch, "_CLOSE_BROWSER_TIMEOUT_S", 0.05)
+    lb = browser_fetch.ListingBrowser()
+    await lb.fetch(URL)
+    world.exit_hangs = True
+    await asyncio.wait_for(lb.close(), 2)
+    assert lb._context is None and not browser_fetch.slot_busy()      # soltó el lugar igual
+
+
+# ─── relanzar con concurrencia 2 ──────────────────────────────────────────
+
+
+async def test_recycling_waits_for_the_pages_in_flight(world):
+    """Con 2 páginas a la vez, la que cumple el tope no le cierra el browser a la otra."""
+    async with browser_fetch.ListingBrowser(recycle_after=2) as lb:
+        await lb.fetch(URL)                                    # página 1 de 2
+        world.goto_gate = asyncio.Event()
+        a = asyncio.ensure_future(lb.fetch(URL))               # página 2 (en vuelo, trabada)
+        await asyncio.sleep(0.01)
+        b = asyncio.ensure_future(lb.fetch(URL))               # tope cumplido: tiene que esperar
+        await asyncio.sleep(0.05)
+        assert world.in_flight == 1 and lb.launches == 1 and not b.done()
+        assert world.closed == 0                               # NADIE cerró el browser de la página en vuelo
+        world.goto_gate.set()
+        pa, pb = await asyncio.gather(a, b)
+        assert pa.html and pb.html
+        assert lb.launches == 2 and not world.closed_while_in_flight
+
+
+async def test_pages_arriving_while_draining_wait_and_use_the_new_browser(world):
+    async with browser_fetch.ListingBrowser(recycle_after=1) as lb:
+        world.goto_gate = asyncio.Event()
+        first = asyncio.ensure_future(lb.fetch(URL))
+        await asyncio.sleep(0.01)
+        others = [asyncio.ensure_future(lb.fetch(URL)) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        assert not any(t.done() for t in others) and lb.launches == 1
+        world.goto_gate.set()
+        await asyncio.gather(first, *others)
+        assert lb.launches == 4 and world.max_open == 1 and not world.closed_while_in_flight
+
+
+def test_the_recycle_limit_defaults_to_75_and_is_configurable(monkeypatch):
+    assert get_settings().browser_listing_recycle_after == 75
+    assert browser_fetch.ListingBrowser()._recycle_after == 75
+    monkeypatch.setattr(get_settings(), "browser_listing_recycle_after", 20, raising=False)
+    assert browser_fetch.ListingBrowser()._recycle_after == 20
+    assert browser_fetch.ListingBrowser(recycle_after=3)._recycle_after == 3
+
+
+# ─── un solo Firefox a la vez ─────────────────────────────────────────────
+
+
+def _render_ready(world, monkeypatch):
+    """Que render() corra contra el mismo Camoufox de mentira (cuenta cuántos hay abiertos)."""
+    class RPage:
+        url = "https://articulo.mercadolibre.com.ar/MLA-1"
+
+        async def route(self, *a):
+            return None
+
+        async def goto(self, *a, **k):
+            await asyncio.sleep(0.05)
+
+        async def evaluate(self, *a):
+            return []
+
+        async def wait_for_timeout(self, *a):
+            return None
+
+        async def wait_for_load_state(self, *a, **k):
+            return None
+
+        async def title(self):
+            return ""
+
+        async def content(self):
+            return ""
+
+    original = browser_fetch._camoufox()
+
+    class RBrowser(_Browser):
+        async def new_page(self):
+            return RPage()
+
+    class RCam(original):
+        async def __aenter__(self):
+            await super().__aenter__()
+            return RBrowser(world)
+
+    monkeypatch.setattr(browser_fetch, "_camoufox", lambda: RCam)
+
+
+async def test_a_render_with_a_client_waiting_takes_the_slot_from_an_idle_listing(world, monkeypatch):
+    _render_ready(world, monkeypatch)
+    async with browser_fetch.ListingBrowser() as lb:
+        await lb.fetch(URL)                                    # el listado tiene Firefox (y el lugar)
+        assert world.open_now == 1 and browser_fetch.slot_busy()
+        page = await asyncio.wait_for(browser_fetch.render("https://articulo.mercadolibre.com.ar/MLA-1"), 5)
+        assert page.final_url                                  # el render salió
+        assert world.max_open == 1                             # NUNCA dos Firefox a la vez
+        await lb.fetch(URL)                                    # el listado se relanza solo
+        assert lb.launches == 2 and world.max_open == 1
+
+
+async def test_a_render_waits_for_a_busy_listing_page_to_finish(world, monkeypatch):
+    _render_ready(world, monkeypatch)
+    async with browser_fetch.ListingBrowser() as lb:
+        world.goto_gate = asyncio.Event()
+        busy = asyncio.ensure_future(lb.fetch(URL))
+        await asyncio.sleep(0.01)
+        rendered = asyncio.ensure_future(browser_fetch.render("https://articulo.mercadolibre.com.ar/MLA-1"))
+        await asyncio.sleep(0.05)
+        assert not rendered.done() and world.open_now == 1     # espera: no abre un segundo Firefox
+        world.goto_gate.set()
+        await busy                                             # la página en vuelo termina entera
+        await asyncio.wait_for(rendered, 5)
+        assert world.max_open == 1 and not world.closed_while_in_flight
+
+
+async def test_two_renders_never_run_two_firefox_at_once(world, monkeypatch):
+    _render_ready(world, monkeypatch)
+    results = await asyncio.gather(
+        *(browser_fetch.render("https://articulo.mercadolibre.com.ar/MLA-1") for _ in range(3)))
+    assert len(results) == 3 and world.max_open == 1 and world.launches.__len__() == 3
+
+
+async def test_a_render_gives_up_if_the_slot_never_frees(world, monkeypatch):
+    monkeypatch.setattr(browser_fetch, "_SLOT_WAIT_RENDER_S", 0.05)
+    await browser_fetch._take_slot(None, interactive=False)    # alguien tiene el lugar y no lo suelta
+    try:
+        with pytest.raises(browser_fetch.BrowserUnavailable, match="otro navegador"):
+            await browser_fetch.render("https://articulo.mercadolibre.com.ar/MLA-1")
+    finally:
+        browser_fetch._give_slot()
+    assert world.launches == []
+
+
+async def test_the_slot_is_released_when_render_fails(world, monkeypatch):
+    _render_ready(world, monkeypatch)
+    world.launch_error = RuntimeError("no hay firefox")
+    with pytest.raises(browser_fetch.BrowserUnavailable, match="no hay firefox"):
+        await browser_fetch.render("https://articulo.mercadolibre.com.ar/MLA-1")
+    assert not browser_fetch.slot_busy()

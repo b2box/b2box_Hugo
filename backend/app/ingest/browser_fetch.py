@@ -47,9 +47,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import socket
 import time
+import weakref
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote, urlparse
 
@@ -66,9 +67,40 @@ _ALLOWED_SCHEMES = {"http", "https"}
 _PASSTHROUGH_SCHEMES = {"about", "blob", "data"}
 
 # Cache de resolución DNS por host, para no pagar un getaddrinfo por subrecurso
-# (una ficha de ML dispara 100+ requests a 4-5 hosts).
-_host_ok: dict[str, bool] = {}
-_host_ok_lock = asyncio.Lock()
+# (una ficha de ML dispara 100+ requests a 4-5 hosts). Con vencimiento: un host
+# que hoy resuelve a una IP pública puede dejar de hacerlo (rebinding), y uno que
+# dio una IP privada puede arreglarse. Positivos 5 min, negativos 30 s, tope de
+# tamaño, y un fallo de DNS NO se cachea (es transitorio: no hay que castigar
+# 30 s a un host por un timeout de resolución).
+DNS_TTL_PUBLIC_S = 300.0
+DNS_TTL_PRIVATE_S = 30.0
+DNS_CACHE_MAX = 512
+_host_cache: dict[str, tuple[bool, float]] = {}
+
+
+def _dns_cached(host: str) -> bool | None:
+    entry = _host_cache.get(host)
+    if entry is None:
+        return None
+    ok, expires = entry
+    if time.monotonic() >= expires:
+        _host_cache.pop(host, None)
+        return None
+    return ok
+
+
+def _dns_store(host: str, ok: bool) -> None:
+    if len(_host_cache) >= DNS_CACHE_MAX:
+        now = time.monotonic()
+        for h in [h for h, (_, exp) in _host_cache.items() if exp <= now]:
+            _host_cache.pop(h, None)
+        while len(_host_cache) >= DNS_CACHE_MAX:
+            _host_cache.pop(next(iter(_host_cache)))    # el más viejo (el dict conserva el orden)
+    _host_cache[host] = (ok, time.monotonic() + (DNS_TTL_PUBLIC_S if ok else DNS_TTL_PRIVATE_S))
+
+
+def reset_dns_cache() -> None:
+    _host_cache.clear()
 
 
 @dataclass(slots=True)
@@ -246,30 +278,55 @@ def available() -> bool:
 
 async def _host_is_public(host: str) -> bool:
     """Resuelve el host y exige que TODAS sus IPs sean públicas. Fail-closed."""
-    async with _host_ok_lock:
-        cached = _host_ok.get(host)
+    cached = _dns_cached(host)
     if cached is not None:
         return cached
-
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(
             host, None, proto=socket.IPPROTO_TCP
         )
-        ok = bool(infos) and all(_ip_is_public(i[4][0]) for i in infos)
     except Exception:  # noqa: BLE001
-        ok = False  # DNS falla → no pasa
-
-    async with _host_ok_lock:
-        _host_ok[host] = ok
+        return False  # DNS falla → no pasa, pero NO se cachea (transitorio)
+    if not infos:
+        return False
+    ok = all(_ip_is_public(i[4][0]) for i in infos)
+    _dns_store(host, ok)
     return ok
 
 
-async def _guard_route(route, request, blocked: list[str]) -> None:
+# Hosts a los que puede ir un listado de ML: la web, sus subdominios y el CDN de
+# fotos. Cualquier otro (trackers, google, un redirect raro) se aborta.
+ML_ALLOWED_HOSTS = ("mercadolibre.com.ar", "mercadolibre.com", "mlstatic.com")
+
+
+def host_matches(host: str, domains: Iterable[str]) -> bool:
+    """¿`host` es uno de `domains` o un subdominio suyo? Con chequeo de borde:
+    `evilmercadolibre.com.ar` NO es `mercadolibre.com.ar`."""
+    h = (host or "").strip().lower().rstrip(".")
+    return bool(h) and any(h == d or h.endswith("." + d) for d in domains)
+
+
+def url_host_allowed(url: object, domains: Iterable[str]) -> bool:
+    """¿El host de la URL es uno de `domains` (o un subdominio)? Fail-closed:
+    sin URL, sin host o URL ilegible → False."""
+    if not isinstance(url, str) or not url.strip():
+        return False
+    try:
+        return host_matches(urlparse(url.strip()).hostname or "", domains)
+    except ValueError:
+        return False
+
+
+async def _guard_route(route, request, blocked: list[str],
+                       allow_hosts: Iterable[str] | None = None) -> None:
     """Handler de `page.route`: valida cada request del browser contra el guard.
 
     Sin esto, el browser seguiría un redirect a 169.254.169.254 o cargaría un
     <img src="http://10.0.0.5/..."> sin que `assert_public_url` se entere: ese
     chequeo solo vio la URL de entrada.
+
+    `allow_hosts`: si viene, además solo pasan esos dominios (y subdominios): un
+    listado de ML no tiene por qué hablar con ningún otro sitio.
 
     Nunca propaga: un handler que tira deja el request colgado hasta el timeout.
     Ante cualquier error, aborta (fail-closed).
@@ -287,6 +344,11 @@ async def _guard_route(route, request, blocked: list[str]) -> None:
             return
 
         host = urlparse(url).hostname or ""
+        if allow_hosts is not None and not host_matches(host, allow_hosts):
+            blocked.append(url)
+            log.info("browser_fetch: request fuera de los hosts permitidos: %s", url[:200])
+            await route.abort()
+            return
         if not host or not await _host_is_public(host):
             blocked.append(url)
             log.warning("browser_fetch: request bloqueado por el guard: %s", url[:200])
@@ -315,7 +377,8 @@ HEAVY_RESOURCE_TYPES = frozenset({"image", "imageset", "font", "media"})
 LEAN_RESOURCE_TYPES = HEAVY_RESOURCE_TYPES | {"script", "stylesheet"}
 
 
-async def _guard_and_slim_route(route, request, blocked: list[str], skip: frozenset[str]) -> None:
+async def _guard_and_slim_route(route, request, blocked: list[str], skip: frozenset[str],
+                                allow_hosts: Iterable[str] | None = None) -> None:
     """`_guard_route` + aborta los tipos de recurso de `skip` (sin contarlos como
     "bloqueados por el guard": no son un intento de SSRF sino ahorro)."""
     if getattr(request, "resource_type", "") in skip:
@@ -324,16 +387,21 @@ async def _guard_and_slim_route(route, request, blocked: list[str], skip: frozen
         except Exception as exc:  # noqa: BLE001
             log.debug("browser_fetch: abort falló para %s: %s", request.url[:120], exc)
         return
-    await _guard_route(route, request, blocked)
+    await _guard_route(route, request, blocked, allow_hosts)
 
 
-async def _install_guard(target, blocked: list[str], *, skip: frozenset[str] = frozenset()) -> None:
+async def _install_guard(target, blocked: list[str], *, skip: frozenset[str] = frozenset(),
+                         allow_hosts: Iterable[str] | None = None) -> None:
     """Instala el guard anti-SSRF en una página o en un contexto (`target.route`).
-    `skip` son los tipos de recurso que además se cortan sin bajarlos."""
+    `skip` son los tipos de recurso que además se cortan sin bajarlos y
+    `allow_hosts` limita los dominios a los que puede salir el browser. Es la
+    pieza reutilizable: cualquier lanzador de Camoufox pasa por acá."""
+    hosts = tuple(allow_hosts) if allow_hosts is not None else None
     if skip:
-        await target.route("**/*", lambda route, request: _guard_and_slim_route(route, request, blocked, skip))
+        await target.route(
+            "**/*", lambda route, request: _guard_and_slim_route(route, request, blocked, skip, hosts))
     else:
-        await target.route("**/*", lambda route, request: _guard_route(route, request, blocked))
+        await target.route("**/*", lambda route, request: _guard_route(route, request, blocked, hosts))
 
 
 # JS que corre en la página ya renderizada. Junta las fotos del producto en
@@ -428,11 +496,71 @@ def reset_circuit() -> None:
     _skip_until.clear()
 
 
+# ─── Un solo Firefox a la vez ──────────────────────────────────────
+#
+# El container es de 3 GB y lo comparte CLIP: dos Firefox al mismo tiempo (una
+# ficha del app y la búsqueda nocturna del semáforo) son un OOM. Todo
+# lanzamiento pasa por este lugar único. Un `render()` (hay un cliente
+# esperando) tiene prioridad: pide a los ListingBrowser que suelten su Firefox y
+# el listado se relanza después, en vez de dejar al cliente horas esperando.
+
+_slot_lock: asyncio.Lock | None = None
+_slot_loop: asyncio.AbstractEventLoop | None = None
+_slot_waiting = 0
+# Cuánto espera un render() por el lugar antes de rendirse (el llamador ya tiene
+# su propio techo de reloj) y un listado, que puede esperar a que termine un render.
+_SLOT_WAIT_RENDER_S = 30.0
+_SLOT_WAIT_LISTING_S = 180.0
+_listing_browsers: "weakref.WeakSet[ListingBrowser]" = weakref.WeakSet()
+
+
+def _slot() -> asyncio.Lock:
+    """El lock del lugar, atado al loop en uso (los tests cambian de loop)."""
+    global _slot_lock, _slot_loop
+    loop = asyncio.get_running_loop()
+    if _slot_lock is None or _slot_loop is not loop:
+        _slot_lock, _slot_loop = asyncio.Lock(), loop
+    return _slot_lock
+
+
+async def _take_slot(timeout: float | None, *, interactive: bool) -> None:
+    """Espera el único lugar de Firefox. `interactive=True` (un render con un
+    cliente esperando) hace que los listados lo suelten."""
+    global _slot_waiting
+    lock = _slot()
+    if interactive:
+        _slot_waiting += 1
+        for lb in list(_listing_browsers):
+            lb._request_yield()
+    try:
+        if timeout is None:
+            await lock.acquire()
+        else:
+            await asyncio.wait_for(lock.acquire(), timeout)
+    except asyncio.TimeoutError as exc:
+        raise BrowserUnavailable("hay otro navegador en uso (un solo Firefox a la vez)") from exc
+    finally:
+        if interactive:
+            _slot_waiting -= 1
+
+
+def _give_slot() -> None:
+    lock = _slot()
+    if lock.locked():
+        lock.release()
+
+
+def slot_busy() -> bool:
+    """¿Hay un Firefox corriendo ahora? (para diagnóstico y tests)"""
+    return _slot_lock is not None and _slot_lock.locked()
+
+
 async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
     """Abre `url` en Camoufox, deja correr el JS y devuelve HTML + fotos del DOM.
 
-    Lanza BrowserUnavailable si no se puede usar el browser, SsrfBlocked si la
-    URL apunta a una red no pública.
+    Lanza BrowserUnavailable si no se puede usar el browser (o hay otro Firefox
+    en uso y no se liberó a tiempo), SsrfBlocked si la URL apunta a una red no
+    pública.
     """
     if not available():
         raise BrowserUnavailable("camoufox no está instalado o BROWSER_FETCH_ENABLED=false")
@@ -441,43 +569,53 @@ async def render(url: str, *, max_images: int | None = None) -> RenderedPage:
     limit = max_images or s.browser_fetch_max_images
     timeout = s.browser_fetch_timeout_ms
 
-    assert_public_url(url)  # falla temprano y barato; el route guard hace el resto
+    # falla temprano y barato; el route guard hace el resto. getaddrinfo bloquea:
+    # va a un thread.
+    await asyncio.to_thread(assert_public_url, url)
 
     AsyncCamoufox = _camoufox()
     page_data = RenderedPage()
     blocked: list[str] = []
 
-    async with AsyncCamoufox(**_launch_kwargs()) as browser:
-        page = await browser.new_page()
-        await _install_guard(page, blocked)
+    await _take_slot(_SLOT_WAIT_RENDER_S, interactive=True)
+    try:
+        async with AsyncCamoufox(**_launch_kwargs()) as browser:
+            page = await browser.new_page()
+            await _install_guard(page, blocked)
 
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            # La galería carga lazy con el scroll. Con JS y no con mouse.wheel:
-            # la ruta de input nativo de Firefox es donde Camoufox segfaultea.
-            #
-            # Esperas generosas a propósito: por un proxy (necesario para saltear
-            # el anti-bot de ML por IP) la latencia sube y con 3×600ms solo
-            # cargaba la foto principal — 1 de 10. Con 6×900ms + un networkidle
-            # best-effort entra la galería entera, con o sin proxy.
-            for _ in range(6):
-                await page.evaluate("window.scrollBy(0, 1400)")
-                await page.wait_for_timeout(900)
             try:
-                await page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:  # noqa: BLE001
-                # Trackers/websockets colgados nunca dejan la red "idle"; la
-                # galería ya cargó con el scroll, así que no bloqueamos por eso.
-                pass
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                # La galería carga lazy con el scroll. Con JS y no con mouse.wheel:
+                # la ruta de input nativo de Firefox es donde Camoufox segfaultea.
+                #
+                # Esperas generosas a propósito: por un proxy (necesario para saltear
+                # el anti-bot de ML por IP) la latencia sube y con 3×600ms solo
+                # cargaba la foto principal — 1 de 10. Con 6×900ms + un networkidle
+                # best-effort entra la galería entera, con o sin proxy.
+                for _ in range(6):
+                    await page.evaluate("window.scrollBy(0, 1400)")
+                    await page.wait_for_timeout(900)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:  # noqa: BLE001
+                    # Trackers/websockets colgados nunca dejan la red "idle"; la
+                    # galería ya cargó con el scroll, así que no bloqueamos por eso.
+                    pass
 
-            page_data.final_url = page.url
-            page_data.title = (await page.title()) or ""
-            page_data.html = await page.content()
-            raw_images = await page.evaluate(_COLLECT_JS)
-        except Exception as exc:  # noqa: BLE001
-            raise BrowserUnavailable(
-                f"El browser no pudo renderizar la página: {type(exc).__name__}: {exc}"
-            ) from exc
+                page_data.final_url = page.url
+                page_data.title = (await page.title()) or ""
+                page_data.html = await page.content()
+                raw_images = await page.evaluate(_COLLECT_JS)
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserUnavailable(
+                    f"El browser no pudo renderizar la página: {type(exc).__name__}: {exc}"
+                ) from exc
+    except (BrowserUnavailable, SsrfBlocked):
+        raise
+    except Exception as exc:  # noqa: BLE001  (el lanzamiento: Firefox, geoip, proxy)
+        raise BrowserUnavailable(f"No se pudo lanzar el browser: {type(exc).__name__}: {exc}") from exc
+    finally:
+        _give_slot()
 
     seen: set[str] = set()
     images: list[str] = []
@@ -522,13 +660,14 @@ class CircuitOpen(BrowserUnavailable):
     """El host viene fallando y está en descanso (ver `circuit_open_for`)."""
 
 
-# Cada cuántas páginas se relanza Firefox: una sesión de horas acumula memoria
-# y el container (3 GB) la comparte con CLIP.
-LISTING_RECYCLE_AFTER = 150
 # Tope para levantar Firefox (con geoip por proxy ronda los 10-50 s).
 _LAUNCH_TIMEOUT_S = 90.0
 # Margen sobre el timeout del goto para el resto de la operación.
 _PAGE_MARGIN_S = 15.0
+# Cerrar una página o el navegador no puede colgar la corrida: si Firefox no
+# contesta se sigue y el browser se da por roto (se relanza).
+_CLOSE_PAGE_TIMEOUT_S = 10.0
+_CLOSE_BROWSER_TIMEOUT_S = 15.0
 
 
 class ListingBrowser:
@@ -537,32 +676,45 @@ class ListingBrowser:
     `render()` abre un browser por llamada (~50 s de reloj): para 1.000
     búsquedas por noche eso son 14 horas. Acá se lanza una vez (mismos
     argumentos y mismo proxy que `render()`), todas las páginas comparten un
-    contexto (cookies y sesión) y se relanza cada `LISTING_RECYCLE_AFTER`
-    páginas para no acumular memoria.
+    contexto (cookies y sesión) y se relanza cada `browser_listing_recycle_after`
+    páginas (75) para no acumular memoria.
 
     Seguridad: el contexto lleva el mismo guard que `render()` (cada request,
-    redirects y subrecursos incluidos, se valida contra red pública).
+    redirects y subrecursos incluidos, se valida contra red pública) y solo puede
+    hablar con `allow_hosts` (por default los de ML).
 
     Ahorro: corta imágenes, fuentes y media y, con `block_scripts` (default),
     también scripts y estilos: el estado de la búsqueda viene en el HTML. Sin
     eso cada búsqueda baja ~1,7 MB por el proxy en vez de ~0,2 MB.
+
+    Memoria: hay un solo Firefox a la vez en todo el proceso (`_take_slot`). Un
+    `render()` con un cliente esperando le pide a este browser que lo suelte; se
+    relanza en la próxima búsqueda.
 
     Uso:
         async with ListingBrowser() as lb:
             page = await lb.fetch("https://listado.mercadolibre.com.ar/...")
     """
 
-    def __init__(self, *, recycle_after: int = LISTING_RECYCLE_AFTER, block_scripts: bool = True) -> None:
-        self._recycle_after = max(1, recycle_after)
+    def __init__(self, *, recycle_after: int | None = None, block_scripts: bool = True,
+                 allow_hosts: Iterable[str] | None = ML_ALLOWED_HOSTS) -> None:
+        self._recycle_after = max(1, int(recycle_after or get_settings().browser_listing_recycle_after))
         self._skip = LEAN_RESOURCE_TYPES if block_scripts else HEAVY_RESOURCE_TYPES
-        self._lock = asyncio.Lock()
+        self._allow_hosts = tuple(allow_hosts) if allow_hosts is not None else None
+        self._cond = asyncio.Condition()
         self._cm = None
         self._context = None
         self._blocked: list[str] = []
         self._active = 0
         self._pages = 0
         self._broken = False
+        # Se están esperando las páginas en vuelo para relanzar: no arrancan más.
+        self._draining = False
+        self._holds_slot = False
+        self._yield_requested = False
+        self._tasks: set[asyncio.Future] = set()
         self.launches = 0
+        _listing_browsers.add(self)
 
     async def __aenter__(self) -> "ListingBrowser":
         return self
@@ -570,18 +722,20 @@ class ListingBrowser:
     async def __aexit__(self, *exc) -> None:
         await self.close()
 
+    # -- ciclo de vida -------------------------------------------------------
+
     async def _launch(self) -> None:
+        await _take_slot(_SLOT_WAIT_LISTING_S, interactive=False)
+        self._holds_slot = True
         AsyncCamoufox = _camoufox()
         cm = AsyncCamoufox(**_launch_kwargs())
         try:
             browser = await asyncio.wait_for(cm.__aenter__(), timeout=_LAUNCH_TIMEOUT_S)
             context = await browser.new_context()
-            await _install_guard(context, self._blocked, skip=self._skip)
+            await _install_guard(context, self._blocked, skip=self._skip, allow_hosts=self._allow_hosts)
         except Exception as exc:  # noqa: BLE001
-            try:
-                await cm.__aexit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
+            await self._close_cm(cm)
+            self._release_slot()
             raise BrowserUnavailable(
                 f"No se pudo lanzar el browser: {type(exc).__name__}: {exc}"
             ) from exc
@@ -590,30 +744,78 @@ class ListingBrowser:
         self._broken = False
         self.launches += 1
 
+    async def _close_cm(self, cm) -> None:
+        """Cierra Camoufox sin colgarse: si no contesta a tiempo se sigue."""
+        try:
+            await asyncio.wait_for(cm.__aexit__(None, None, None), _CLOSE_BROWSER_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("browser_fetch: Firefox no cerró en %.0f s, sigo igual", _CLOSE_BROWSER_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("browser_fetch: cierre del listing browser falló: %s", redact(exc))
+
+    def _release_slot(self) -> None:
+        if self._holds_slot:
+            self._holds_slot = False
+            _give_slot()
+
     async def _shutdown(self) -> None:
         cm, self._cm, self._context = self._cm, None, None
-        if cm is not None:
-            try:
-                await cm.__aexit__(None, None, None)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("browser_fetch: cierre del listing browser falló: %s", exc)
+        try:
+            if cm is not None:
+                await self._close_cm(cm)
+        finally:
+            self._release_slot()
 
     async def close(self) -> None:
-        async with self._lock:
+        async with self._cond:
             await self._shutdown()
+            self._cond.notify_all()
+
+    def _request_yield(self) -> None:
+        """Un render() con un cliente esperando necesita el lugar: si no hay
+        páginas en vuelo se suelta ya; si las hay, apenas terminen."""
+        self._yield_requested = True
+        self._spawn(self._after_release())
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _after_release(self) -> None:
+        async with self._cond:
+            self._cond.notify_all()
+            if self._yield_requested and self._active == 0 and self._context is not None:
+                self._yield_requested = False
+                log.info("browser_fetch: el listado suelta Firefox para un render con un cliente esperando")
+                await self._shutdown()
 
     async def _acquire(self):
-        async with self._lock:
-            idle = self._active == 0
-            if self._context is not None and idle and (
-                self._broken or self._pages >= self._recycle_after
-            ):
-                await self._shutdown()
+        """Un lugar para una página. Si hace falta relanzar (páginas cumplidas o
+        browser roto) no arranca ninguna nueva hasta que terminen las en vuelo:
+        con concurrencia 2 nadie le cierra el browser a otra página."""
+        async with self._cond:
+            await self._cond.wait_for(lambda: not self._draining)
+            if self._context is not None and (self._broken or self._pages >= self._recycle_after):
+                self._draining = True
+                try:
+                    await self._cond.wait_for(lambda: self._active == 0)
+                    await self._shutdown()
+                finally:
+                    self._draining = False
+                    self._cond.notify_all()
             if self._context is None:
                 await self._launch()
             self._active += 1
             self._pages += 1
             return self._context
+
+    def _release(self) -> None:
+        # Sincrónico: una cancelación no puede dejar la cuenta torcida.
+        self._active -= 1
+        self._spawn(self._after_release())
+
+    # -- una página ----------------------------------------------------------
 
     async def fetch(self, url: str) -> ListingPage:
         """Carga `url` y devuelve el HTML (el estado embebido viene en el SSR,
@@ -624,7 +826,7 @@ class ListingBrowser:
             raise BrowserUnavailable("camoufox no está instalado o BROWSER_FETCH_ENABLED=false")
         if circuit_open_for(url):
             raise CircuitOpen(f"{_host_of(url)} viene fallando, en descanso")
-        assert_public_url(url)
+        await asyncio.to_thread(assert_public_url, url)
 
         s = get_settings()
         timeout_ms = s.browser_fetch_timeout_ms
@@ -648,7 +850,7 @@ class ListingBrowser:
                 f"El browser no pudo cargar la página: {type(exc).__name__}: {exc}"
             ) from exc
         finally:
-            self._active -= 1
+            self._release()
 
     async def _load(self, context, url: str, timeout_ms: int, started: float) -> ListingPage:
         page = await context.new_page()
@@ -676,9 +878,11 @@ class ListingBrowser:
                 await asyncio.wait(pending, timeout=2.0)
         finally:
             try:
-                await page.close()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("browser_fetch: no se pudo cerrar la página: %s", exc)
+                await asyncio.wait_for(page.close(), _CLOSE_PAGE_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001  (incluye el timeout: Firefox colgado)
+                self._broken = True
+                log.warning("browser_fetch: no se pudo cerrar la página (%s): se relanza el browser",
+                            type(exc).__name__)
         return ListingPage(
             html=html, final_url=final_url, status=status, bytes=total,
             blocked=len(self._blocked) - blocked_before,
@@ -693,7 +897,8 @@ def note_listing_result(url: str, *, results: int) -> None:
 
 
 __all__ = [
-    "BrowserUnavailable", "CircuitOpen", "ListingBrowser", "ListingPage", "RenderedPage",
-    "SsrfBlocked", "available", "circuit_open_for", "note_listing_result",
-    "proxy_configured", "render",
+    "BrowserUnavailable", "CircuitOpen", "ListingBrowser", "ListingPage", "ML_ALLOWED_HOSTS",
+    "RenderedPage", "SsrfBlocked", "available", "circuit_open_for", "host_matches",
+    "note_listing_result", "proxy_configured", "proxy_problem", "redact", "render",
+    "url_host_allowed",
 ]

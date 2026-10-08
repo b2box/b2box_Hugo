@@ -281,6 +281,11 @@ class Settings(BaseSettings):
     browser_fetch_cooldown_seconds: int = Field(
         default=900, description="Cuánto se saltea un host que viene dando 0 fotos"
     )
+    # Cada cuántas páginas de listado (búsquedas del semáforo) se relanza Firefox
+    # para no acumular memoria: el container es de 3 GB y lo comparte CLIP.
+    browser_listing_recycle_after: int = Field(
+        default=75, ge=1, description="Páginas de listado antes de relanzar el browser"
+    )
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")
