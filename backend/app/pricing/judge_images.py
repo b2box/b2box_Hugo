@@ -46,6 +46,7 @@ from PIL import Image
 from app import net_guard
 from app.config import get_settings
 from app.dedup.image_hash import _IMAGE_HEADERS  # mlstatic corta a "python-httpx"
+from app.pricing import store_urls
 from app.pricing.market_ml import _clean_https_parts, safe_image_url
 
 log = logging.getLogger(__name__)
@@ -100,11 +101,17 @@ def allowed_url(url: object) -> str | None:
     """URL https limpia de un host permitido, o None.
 
     ML: `market_ml.safe_image_url` (*.mlstatic.com; una http:// de mlstatic se
-    sube a https). Nuestras fotos: exactamente el host de VENDURE_API_URL.
+    sube a https). Tiendas: los hosts de foto de las tiendas activas. Nuestras
+    fotos: exactamente el host de VENDURE_API_URL.
     """
     ml = safe_image_url(url)
     if ml:
         return ml
+    # Fotos de las tiendas activas (Casa Perfecta, Gadnic…): su lista de hosts la
+    # carga el semáforo y vale solo para ellas (ver store_urls).
+    store = store_urls.allowed_store_image(url)
+    if store:
+        return store
     parts = _clean_https_parts(url)
     host = _vendure_host()
     if parts is None or not host or parts.hostname.lower() != host:
