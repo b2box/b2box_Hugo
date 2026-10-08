@@ -188,10 +188,17 @@ def decode_vector(b64: str) -> np.ndarray | None:
     return arr.astype(np.float32)
 
 
+# Un hit en L2 renueva `updated_at` (a lo sumo una vez por día y URL): la poda
+# de fotos de ML (pm_embed_cache_days) borra lo que no se USA, no lo viejo. Sin
+# esto, una foto que el semáforo mira todas las noches se re-embebía cada 60 días.
+_TOUCH_AFTER_S = 24 * 3600
+
+
 def _db_get(url: str) -> np.ndarray | None:
     if len(url) > _MAX_URL_LEN:
         return None
     try:
+        from app.clock import utcnow
         from app.db.models import ImageEmbedCache
         from app.db.session import engine
 
@@ -199,7 +206,14 @@ def _db_get(url: str) -> np.ndarray | None:
             row = session.get(ImageEmbedCache, url)
             if row is None or row.model != MODEL_NAME:
                 return None
-            return decode_vector(row.vector_b64)
+            vec = decode_vector(row.vector_b64)
+            now = utcnow()
+            if vec is not None and (row.updated_at is None
+                                    or (now - row.updated_at).total_seconds() > _TOUCH_AFTER_S):
+                row.updated_at = now
+                session.add(row)
+                session.commit()
+            return vec
     except Exception:  # noqa: BLE001
         return None
 

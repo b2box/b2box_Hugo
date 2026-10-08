@@ -280,6 +280,17 @@ export function IconSearch({ className }: IconProps) {
 // Mapa de icono por clave de sección (usado por Sidebar y título de sección).
 import type { ComponentType } from "react";
 
+export function IconTrafficLight({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <rect width="10" height="20" x="7" y="2" rx="3" />
+      <circle cx="12" cy="7" r="1.5" />
+      <circle cx="12" cy="12" r="1.5" />
+      <circle cx="12" cy="17" r="1.5" />
+    </svg>
+  );
+}
+
 export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   inbox_luis: IconInbox,
   inbox_orders: IconReceipt,
@@ -297,4 +308,5 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   all: IconLayers,
   settings: IconSettings,
   salud: IconActivity,
+  semaforo: IconTrafficLight,
 };

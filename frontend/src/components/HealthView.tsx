@@ -2,7 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { getHealthMetrics } from "../api";
 import { Card } from "@/components/ui/card";
 import { IconActivity } from "../icons";
-import { fmtTime, nfmt } from "../lib/format";
+import { fmtPct, fmtTime, nfmt } from "../lib/format";
+import { COLOR_META, RUN_STATUS_LABEL } from "./SemaforoView";
+import type { PriceMonitorSummary, SemaforoColor } from "../types";
 
 // Página de salud del sistema: budget OTAPI, tasa Paco, últimas auditorías, cache.
 export default function HealthView() {
@@ -109,6 +111,9 @@ export default function HealthView() {
             </div>
           </Card>
 
+          {/* Semáforo de precios contra ML */}
+          {m.price_monitor && <PriceMonitorCard pm={m.price_monitor} />}
+
           {/* Pendientes + últimas auditorías */}
           <Card className="p-5 shadow-sm sm:col-span-2">
             <h3 className="text-sm font-semibold text-foreground uppercase tracking-wide mb-3">
@@ -139,5 +144,72 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-lg font-bold text-foreground num-tabular">{value}</p>
       <p className="text-xs text-muted-foreground">{label}</p>
     </div>
+  );
+}
+
+const RUN_STATUS_CLASS: Record<string, string> = {
+  ok: "text-success",
+  running: "text-primary",
+  degraded: "text-warning",
+  failed: "text-destructive",
+  skipped: "text-warning",
+};
+
+// Card de Salud del semáforo: si la corrida de anoche anduvo, cuánto de ML
+// usó y cuánto quedó sin dato o falló. En sombra, lo que importa medir.
+function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
+  const run = pm.last_run;
+  return (
+    <Card className="p-5 shadow-sm sm:col-span-2">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h3 className="text-sm font-semibold text-foreground uppercase tracking-wide">
+          Semáforo de precios (ML){pm.mode === 0 ? " · sombra" : ""}
+        </h3>
+        <span className="text-xs text-muted-foreground">cron {pm.cron_utc} UTC</span>
+      </div>
+      {!run ? (
+        <p className="text-sm text-muted-foreground">Todavía no corrió ninguna vez.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div>
+              <p className={`text-lg font-bold ${RUN_STATUS_CLASS[run.status] ?? "text-foreground"}`}>
+                {RUN_STATUS_LABEL[run.status] ?? run.status}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                #{run.id} · {fmtTime(run.finished_at ?? run.started_at)}
+              </p>
+            </div>
+            <Stat
+              label={`requests ML (hoy ${nfmt(pm.ml_budget.used)}/${nfmt(pm.ml_budget.budget)})`}
+              value={nfmt(run.ml_requests_used)}
+            />
+            <Stat label="sin dato" value={fmtPct(run.pct_no_data)} />
+            <Stat label="ML falló" value={fmtPct(run.pct_failed)} />
+            <Stat
+              label={`productos (${nfmt(run.counts.skipped)} no evaluados)`}
+              value={`${nfmt(run.processed)}/${nfmt(run.total_products)}`}
+            />
+            <Stat
+              label={pm.judge_enabled ? "llamadas juez IA" : "juez IA apagado"}
+              value={nfmt(run.llm.calls)}
+            />
+            <Stat label="costo IA (USD)" value={run.llm.cost_usd.toFixed(4)} />
+            <div>
+              <ul className="space-y-0.5 text-xs">
+                {(Object.keys(COLOR_META) as SemaforoColor[]).map((c) => (
+                  <li key={c} className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${COLOR_META[c].dot}`} aria-hidden />
+                    <span className="text-foreground">{COLOR_META[c].label}</span>
+                    <span className="num-tabular font-semibold ml-auto">{nfmt(run.colors[c] ?? 0)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          {run.error && <p className="text-xs text-destructive mt-3">Error: {run.error}</p>}
+        </>
+      )}
+    </Card>
   );
 }

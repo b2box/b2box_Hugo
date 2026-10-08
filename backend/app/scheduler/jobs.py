@@ -1,9 +1,10 @@
 """Tareas programadas de Hugo.
 
-Tres jobs:
+Jobs:
   1. audit_duplicates    → recorre Vendure y deshabilita duplicados.
   2. audit_source_prices → snapshot de precios fuente + alerta cuando cambian.
   3. daily_digest        → email/webhook con el resumen de las últimas 24h.
+  4. price_monitor       → semáforo de precios contra Mercado Libre (sombra).
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -24,15 +25,17 @@ from typing import AsyncIterator
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import AuditLog, PriceHistory
+from app.db.models import AuditLog, ImageEmbedCache, PriceHistory
 from app.db.session import engine
 from app.dedup.orchestrator import find_duplicate_pairs
 from app.dedup.url_match import normalize_url
 from app.notifier.dispatcher import notify, notify_digest
+from app.pricing import price_monitor as price_monitor_mod
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
 from app.vendure.client import VendureClient, VendureProduct, VendureVariant
@@ -693,12 +696,47 @@ async def refresh_catalog() -> None:
         log.warning("refresh_catalog falló: %s", exc)
 
 
+def _prune_ml_embed_cache() -> int:
+    """Poda del cache L2 de CLIP para fotos de Mercado Libre (mlstatic) más
+    viejas que `pm_embed_cache_days`. El semáforo embebe miles de fotos de ML
+    por noche y la mayoría no se vuelve a ver; las del catálogo propio (otro
+    host) se quedan. Devuelve cuántas borró."""
+    from app import runtime
+
+    days = int(runtime.get("pm_embed_cache_days") or 0)
+    if days <= 0:
+        return 0
+    cutoff = utcnow() - timedelta(days=days)
+    # DELETE en bloque: el semáforo deja miles de filas por noche y traerlas a
+    # memoria para borrarlas de a una sería la parte cara de la poda.
+    with Session(engine) as session:
+        result = session.execute(
+            delete(ImageEmbedCache).where(
+                ImageEmbedCache.updated_at < cutoff,  # type: ignore[arg-type]
+                ImageEmbedCache.url.like("%mlstatic.com/%"),  # type: ignore[attr-defined]
+            )
+        )
+        session.commit()
+    deleted = int(result.rowcount or 0)
+    if deleted:
+        log.info("prune: %d embeddings de mlstatic más viejos que %d días", deleted, days)
+    return deleted
+
+
 async def prune_price_history() -> None:
     """Borra snapshots de precio más viejos que `price_history_retention_days`.
 
     Evita que la tabla `price_history` crezca sin techo en Supabase (storage $ +
     queries más lentas). Con 0 días, la retención queda deshabilitada.
+
+    Solo toca `price_history` (y el cache de fotos de ML, abajo). Las tablas
+    del semáforo (`market_price_snapshot`, `price_monitor_run`) son el
+    historial de tendencias y NO se podan acá.
     """
+    try:
+        _prune_ml_embed_cache()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prune del cache de fotos de ML falló: %s", exc)
     days = get_settings().price_history_retention_days
     if days <= 0:
         return
@@ -712,6 +750,45 @@ async def prune_price_history() -> None:
             session.delete(r)
         session.commit()
     log.info("prune_price_history: borrados %d snapshots < %s", len(rows), cutoff.date())
+
+
+# ─── Job 7: semáforo de precios contra Mercado Libre ──────────────
+
+PRICE_MONITOR_JOB_ID = price_monitor_mod.JOB_ID
+_PRICE_MONITOR_DEFAULT_CRON = "0 6 * * *"
+
+
+async def price_monitor(trigger: str = "cron") -> dict | None:
+    """Corre el semáforo (ver app/pricing/price_monitor.py) y, si terminó,
+    deja el marcador de última corrida. Una corrida `failed` no lo mueve: así
+    el próximo arranque la ve pendiente. Lo usan el cron y el botón del
+    dashboard (POST /api/price-monitor/run)."""
+    result = await price_monitor_mod.run_price_monitor(trigger=trigger)
+    if result and result.get("status") in (price_monitor_mod.RUN_OK, price_monitor_mod.RUN_DEGRADED):
+        _mark_job_run(PRICE_MONITOR_JOB_ID)
+    return result
+
+
+def _price_monitor_trigger(expr: str) -> CronTrigger:
+    try:
+        return CronTrigger.from_crontab(expr, timezone="UTC")
+    except ValueError as exc:
+        log.error("PRICE_MONITOR_CRON_UTC=%r inválido (%s); uso %r", expr, exc, _PRICE_MONITOR_DEFAULT_CRON)
+        return CronTrigger.from_crontab(_PRICE_MONITOR_DEFAULT_CRON, timezone="UTC")
+
+
+def _cron_missed(trigger: CronTrigger, last_run: datetime | None, now: datetime) -> bool:
+    """¿El cron tenía que disparar entre la última corrida terminada y ahora?
+
+    Es el reloj persistente de un job con CronTrigger: si el proceso estaba
+    caído (o redeployando) justo a las 06:00, APScheduler no la recupera sola.
+    Sin marcador (primera vez) NO se recupera nada y se espera al cron: no
+    queremos que un deploy a media tarde lance una corrida de horas.
+    """
+    if last_run is None or last_run >= now:
+        return False
+    due = trigger.get_next_fire_time(None, last_run + timedelta(seconds=1))
+    return due is not None and due <= now
 
 
 async def daily_digest() -> None:
@@ -773,6 +850,28 @@ def register_jobs() -> None:
         CronTrigger(hour=4, minute=30),
         id="prune_price_history",
         replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # Semáforo de precios: cron nocturno (UTC). Si quedó una corrida a medias
+    # (el proceso se reinició mientras recorría el catálogo), se retoma apenas
+    # termine de levantar en vez de esperar a la próxima noche.
+    # Si en cambio el cron no disparó porque el proceso estaba caído a esa
+    # hora, también se recupera al arrancar (reloj persistente).
+    pm_trigger = _price_monitor_trigger(
+        getattr(s, "price_monitor_cron_utc", None) or _PRICE_MONITOR_DEFAULT_CRON
+    )
+    pm_kwargs: dict = {}
+    if price_monitor_mod.has_unfinished_run():
+        pm_kwargs["next_run_time"] = now + _STARTUP_GRACE
+        log.info("price_monitor: hay una corrida sin terminar → se retoma en %s", _STARTUP_GRACE)
+    elif _cron_missed(pm_trigger, _last_job_run(PRICE_MONITOR_JOB_ID), now):
+        pm_kwargs["next_run_time"] = now + _STARTUP_GRACE
+        log.info("price_monitor: se perdió la corrida programada → corre en %s", _STARTUP_GRACE)
+    scheduler.add_job(
+        price_monitor,
+        pm_trigger,
+        id=PRICE_MONITOR_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+        **pm_kwargs,
     )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:

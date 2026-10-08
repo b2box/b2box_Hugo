@@ -191,3 +191,18 @@ def test_effective_threshold_respects_overrides_without_centering(monkeypatch):
     _fake_index(_biased_catalog(40))
     assert not catalog_index.is_centered()
     assert catalog_index.effective_threshold("embed_match_threshold", 0.88) == 0.88
+
+
+
+def test_has_product_needs_a_real_vector():
+    """QA bug 2: un producto con foto cuyo embedding falló está en `products`
+    pero no tiene vector: no se puede puntuar."""
+    st = catalog_index._state
+    saved = (st.products, st.vector_ids)
+    try:
+        st.products = {"1": object(), "2": object()}
+        st.vector_ids = frozenset({"2"})
+        assert catalog_index.has_product("1") is False
+        assert catalog_index.has_product("2") is True
+    finally:
+        st.products, st.vector_ids = saved

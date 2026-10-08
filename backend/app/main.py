@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from app import auth, security
 from app.api.app_routes import router as app_router
+from app.api.price_monitor_routes import router as price_monitor_router
 from app.api.routes import router
 from app.config import get_settings
 from app.db.session import init_db
@@ -232,6 +233,7 @@ async def logout() -> JSONResponse:
 
 app.include_router(router)
 app.include_router(app_router)
+app.include_router(price_monitor_router)
 
 
 # ─── Dashboard estático ────────────────────────────────────────────

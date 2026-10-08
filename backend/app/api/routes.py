@@ -1667,6 +1667,7 @@ async def health_metrics(
     """Salud del sistema: budget OTAPI, tasa de éxito con Paco, últimas auditorías,
     tamaño del cache de imágenes. Para ver el estado de un vistazo."""
     from app.db.models import ImageHashCache, Setting
+    from app.pricing import price_monitor
     from app.pricing.source_check import otapi_budget_status
 
     def _count(*where) -> int:
@@ -1713,6 +1714,7 @@ async def health_metrics(
         "image_hash_cache": {"in_memory": len(_HASH_CACHE), "persisted": image_hashes_db},
         "last_price_snapshot": (last_price.isoformat() + "Z") if last_price else None,
         "last_dedup_marker": dedup_marker.value if dedup_marker else None,
+        "price_monitor": price_monitor.summary(),
     }
 
 

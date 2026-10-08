@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +25,6 @@ from typing import ClassVar
 
 import httpx
 from bs4 import BeautifulSoup
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
 from app import runtime as runtime_settings
@@ -34,6 +32,7 @@ from app.config import get_settings
 from app.db.models import PriceHistory
 from app.db.session import engine
 from app.net_guard import safe_get
+from app.pricing import daily_budget
 
 log = logging.getLogger(__name__)
 
@@ -50,28 +49,15 @@ log = logging.getLogger(__name__)
 # RapidAPI factura. Vive en una sola fila de `settings` con formato
 # "YYYY-MM-DD:N": se resetea sola al cambiar el día UTC y no deja basura.
 _OTAPI_COUNTER_KEY = "_meta:otapi_calls_today"
-_otapi_counter_lock = threading.Lock()
 
 
 def _otapi_day() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return daily_budget.today_utc()
 
 
 def _parse_day_counter(raw: str | None, today: str) -> int:
-    """"YYYY-MM-DD:N" → N si la fila es de hoy; 0 si es de otro día o está rota.
-
-    Fail-safe hacia 0: un valor corrupto hace que se vuelva a contar desde cero,
-    nunca que el budget quede bloqueado para siempre.
-    """
-    if not raw:
-        return 0
-    day, _, count = str(raw).partition(":")
-    if day != today:
-        return 0
-    try:
-        return max(0, int(count))
-    except (TypeError, ValueError):
-        return 0
+    """Ver app.pricing.daily_budget.parse_day_counter (acá queda el nombre histórico)."""
+    return daily_budget.parse_day_counter(raw, today)
 
 
 def _snapshots_today() -> int:
@@ -97,97 +83,19 @@ def _snapshots_today() -> int:
 
 def _otapi_calls_today() -> int:
     """Requests a OTAPI facturados hoy (UTC), exitosos o no."""
-    today = _otapi_day()
-    try:
-        from app.db.models import Setting
-
-        with Session(engine) as s:
-            row = s.get(Setting, _OTAPI_COUNTER_KEY)
-            counted = _parse_day_counter(row.value if row else None, today)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("No se pudo leer contador OTAPI: %s", exc)
-        return _snapshots_today()
-    if counted:
-        # Contador vivo para hoy: es la fuente de verdad. Ya viene sembrado con
-        # el piso de snapshots (ver _reserve_otapi_call), así que no hace falta
-        # el COUNT(*) acá — con ~850 productos y 10 fetchers en paralelo, esa
-        # consulta por llamada sería carga de DB al pedo.
-        return counted
-    # Todavía no se contó nada hoy: el piso son los snapshots del día.
-    return _snapshots_today()
+    return daily_budget.used_today(_OTAPI_COUNTER_KEY, floor=_snapshots_today)
 
 
 def _reserve_otapi_call(budget: int) -> int | None:
     """Reserva cupo para UN request contra el budget del día.
 
     Devuelve el total del día (ya incluyendo este request) si había lugar, o
-    None si el budget está agotado o no se pudo reservar.
-
-    Reservar y chequear tienen que pasar JUNTOS. Antes esto eran dos pasos —
-    `_otapi_calls_today()` y después incrementar— con varios statements en el
-    medio: los 10 fetchers en paralelo de `audit_source_prices` leían todos el
-    mismo "todavía hay lugar" antes de que ninguno incrementara y se pasaban
-    juntos del tope.
-
-    Adentro es compare-and-swap sobre la fila: se lee el valor y se escribe
-    condicionado a que siga siendo el mismo. Si otro proceso lo movió en el
-    medio, se reintenta. El lock de threading ordena a los fetchers de ESTE
-    proceso; el CAS cubre el caso multi-worker, donde el lock no llega.
-
-    FAIL-CLOSED: si la DB no contesta, devuelve None y el request no se manda.
-    Un contador que no se puede leer significa presupuesto desconocido, y
-    desconocido no puede querer decir "gastá tranquilo" — con la DB degradada y
-    reintentos en loop era justo cuando más falta hacía el freno.
+    None si el budget está agotado o no se pudo reservar (fail-closed). La
+    mecánica (CAS sobre la fila de `settings`, lock de proceso, reintentos) vive
+    en app.pricing.daily_budget porque la comparten OTAPI, Mercado Libre y el
+    juez LLM del semáforo. El piso de snapshots es lo único específico de acá.
     """
-    from sqlalchemy import update
-
-    from app.db.models import Setting
-
-    today = _otapi_day()
-    try:
-        with _otapi_counter_lock, Session(engine) as s:
-            for _ in range(5):  # reintentos del CAS ante carrera entre procesos
-                row = s.get(Setting, _OTAPI_COUNTER_KEY)
-                if row is not None:
-                    s.refresh(row)
-                previous = row.value if row is not None else None
-                base = _parse_day_counter(previous, today)
-                if base == 0:
-                    # Primer request del día: se siembra con los snapshots que
-                    # ya haya de hoy. Importa el día que se despliega esto sobre
-                    # una jornada ya empezada — sin el piso, el budget arrancaría
-                    # de cero y el día podría gastar el doble. Un solo COUNT(*)
-                    # por día; del segundo request en adelante manda el contador.
-                    base = _snapshots_today()
-                if base >= budget:
-                    return None  # sin cupo: no se reserva ni se incrementa
-                total = base + 1
-                value = f"{today}:{total}"
-                if row is None:
-                    s.add(Setting(key=_OTAPI_COUNTER_KEY, value=value))
-                    try:
-                        s.commit()
-                    except IntegrityError:
-                        # Otro worker creó la fila primero: se reintenta el CAS.
-                        s.rollback()
-                        continue
-                    return total
-                done = s.execute(
-                    update(Setting)
-                    .where(Setting.key == _OTAPI_COUNTER_KEY,
-                           Setting.value == previous)
-                    .values(value=value, updated_at=datetime.now(timezone.utc))
-                )
-                s.commit()
-                if done.rowcount == 1:
-                    return total
-                # rowcount 0 = alguien más escribió entre la lectura y el UPDATE.
-                s.expire_all()
-            log.warning("No se pudo reservar cupo OTAPI tras 5 intentos — no mando el request")
-            return None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("No se pudo reservar cupo OTAPI (%s) — no mando el request", exc)
-        return None
+    return daily_budget.reserve(_OTAPI_COUNTER_KEY, budget, floor=_snapshots_today)
 
 
 def otapi_budget_status() -> dict:
@@ -195,6 +103,7 @@ def otapi_budget_status() -> dict:
     used = _otapi_calls_today()
     budget = int(runtime_settings.get("otapi_daily_budget") or get_settings().otapi_daily_budget)
     return {"used": used, "budget": budget, "remaining": max(0, budget - used)}
+
 
 _HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _USER_AGENT = (

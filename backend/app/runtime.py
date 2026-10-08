@@ -9,6 +9,7 @@ Lista canónica de claves editables: ver SETTINGS_SCHEMA abajo.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -222,9 +223,209 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="otapi_daily_budget",
         min=0, max=5000, step=10, group="scheduler",
     ),
+    # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
+    SettingMeta(
+        key="pm_mode",
+        label="Modo del semáforo (0 sombra / 1 activo)",
+        description=(
+            "0 = sombra: calcula y guarda, no toca Vendure. 1 = activo: pasar rojos a "
+            "inactivo y bandeja de revisión — TODAVÍA NO IMPLEMENTADO (PR 2); con 1 el job "
+            "solo lo loguea y sigue en sombra."
+        ),
+        type="int", parser=int,
+        default_attr="pm_mode",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_green_min_pct",
+        label="Verde desde (% de ganancia)",
+        description="Ganancia estimada mínima del revendedor para que el producto quede VERDE.",
+        type="float", parser=float,
+        default_attr="pm_green_min_pct",
+        min=0.0, max=200.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_yellow_min_pct",
+        label="Amarillo desde (% de ganancia)",
+        description="Entre este valor y el verde el producto queda AMARILLO; por debajo, ROJO.",
+        type="float", parser=float,
+        default_attr="pm_yellow_min_pct",
+        min=0.0, max=200.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_commission_pct",
+        label="Comisión de ML (%)",
+        description=(
+            "Porcentaje de la mediana de ML que se le resta como comisión de venta. "
+            "Lo fija Gabriel; 13 % es la Clásica típica de MLA."
+        ),
+        type="float", parser=float,
+        default_attr="pm_ml_commission_pct",
+        min=0.0, max=40.0, step=0.5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_shipping_cents",
+        label="Envío de ML (centavos ARS)",
+        description=(
+            "Monto fijo que se le resta a la mediana como costo de envío. 0 hasta que se "
+            "mida con la sonda de /sites/MLA/listing_prices. 100000 = ARS 1.000."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_shipping_cents",
+        min=0, max=5000000, step=10000, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_min_seller_sales",
+        label="Ventas mínimas del vendedor",
+        description=(
+            "Publicaciones de vendedores con menos ventas concretadas que esto no cuentan "
+            "para la mediana ni el mínimo. Vendedores sin dato en ML sí cuentan."
+        ),
+        type="int", parser=int,
+        default_attr="pm_min_seller_sales",
+        min=0, max=5000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_image_threshold",
+        label="Umbral de imagen (mismo producto)",
+        description=(
+            "Coseno CLIP mínimo (escala CENTRADA del índice, igual que el match del app) "
+            "para que una ficha de ML sea el mismo producto JUNTO con el nombre. "
+            "Recalibrar con app.pricing.calibrate_market_match."
+        ),
+        type="float", parser=float,
+        default_attr="pm_image_threshold",
+        min=0.2, max=1.0, step=0.01, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_name_threshold",
+        label="Umbral de nombre (mismo producto)",
+        description="Similitud mínima entre nuestro nombre y el título de la ficha, junto con la imagen.",
+        type="float", parser=float,
+        default_attr="pm_name_threshold",
+        min=0.2, max=1.0, step=0.01, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_image_strong",
+        label="Imagen que alcanza sola",
+        description="Por encima de esto la foto decide sola (match 'clip') si el nombre no está vetado.",
+        type="float", parser=float,
+        default_attr="pm_image_strong",
+        min=0.3, max=1.0, step=0.01, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_image_veto",
+        label="Veto por imagen",
+        description="Por debajo de esto la ficha se descarta sin más (ni el juez la mira).",
+        type="float", parser=float,
+        default_attr="pm_image_veto",
+        min=0.0, max=1.0, step=0.01, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_name_veto",
+        label="Veto por nombre",
+        description="Por debajo de esto el título no tiene nada que ver y la ficha se descarta.",
+        type="float", parser=float,
+        default_attr="pm_name_veto",
+        min=0.0, max=1.0, step=0.01, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_daily_budget",
+        label="Budget diario ML (requests)",
+        description=(
+            "Requests a la API de Mercado Libre por día (UTC). Si se acaba a mitad de corrida, "
+            "lo que falta queda `skipped` (sin dato nuevo) y la corrida termina; la próxima "
+            "empieza por los productos que hace más que no se miden, así todo rota. "
+            "1.500 productos ≈ 13.500 por noche."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_daily_budget",
+        min=0, max=60000, step=500, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_concurrency",
+        label="Productos en paralelo contra ML",
+        description="Cuántos productos se consultan a la vez. Más = más rápido y más riesgo de 429.",
+        type="int", parser=int,
+        default_attr="pm_ml_concurrency",
+        min=1, max=8, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_tier_policy",
+        label="Tramo propio a comparar (0 mínimo / 1 más barato)",
+        description=(
+            "0 = tramo mínimo (el más caro por unidad, lo que paga quien compra lo justo). "
+            "1 = tramo más barato (= priceWithTax, lo que Hugo leía hasta ahora)."
+        ),
+        type="int", parser=int,
+        default_attr="pm_tier_policy",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_vision_max_calls",
+        label="Juez LLM: llamadas por día",
+        description=(
+            "Tope diario de consultas al juez multimodal para la banda ambigua de "
+            "'¿es el mismo producto?'. 0 = apagado (sombra sin IA). Necesita "
+            "PM_LLM_BASE_URL y PM_LLM_API_KEY."
+        ),
+        type="int", parser=int,
+        default_attr="pm_vision_max_calls",
+        min=0, max=3000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_manual_cooldown_min",
+        label="Espera entre corridas manuales (min)",
+        description=(
+            "\"Correr ahora\" se rechaza si la última corrida arrancó hace menos que esto. "
+            "Evita gastar el budget de ML apretando el botón varias veces."
+        ),
+        type="int", parser=int,
+        default_attr="pm_manual_cooldown_min",
+        min=0, max=1440, step=5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_embed_cache_days",
+        label="Días de cache de fotos de ML",
+        description=(
+            "Los embeddings de fotos de mlstatic más viejos que esto se podan del cache "
+            "(job de las 04:30 UTC). Las fotos del catálogo propio no se tocan."
+        ),
+        type="int", parser=int,
+        default_attr="pm_embed_cache_days",
+        min=7, max=365, step=1, group="monitor",
+    ),
 ]
 
 _BY_KEY: dict[str, SettingMeta] = {m.key: m for m in SETTINGS_SCHEMA}
+
+# Pares (bajo, alto) que tienen que quedar ordenados. Un setting cruzado no
+# rompe el código (semaforo.color lo tolera) pero deja reglas sin sentido:
+# mejor rechazarlo al guardar, con un mensaje que diga qué choca con qué.
+_ORDERED_PAIRS: tuple[tuple[str, str], ...] = (
+    ("pm_yellow_min_pct", "pm_green_min_pct"),
+    ("pm_image_veto", "pm_image_threshold"),
+    ("pm_image_threshold", "pm_image_strong"),
+    ("pm_name_veto", "pm_name_threshold"),
+)
+
+
+def _check_order(key: str, value: Any) -> None:
+    for low, high in _ORDERED_PAIRS:
+        if key == low:
+            other = get(high)
+            if other is not None and value > other:
+                raise ValueError(
+                    f"«{_BY_KEY[low].label}» ({value}) no puede ser mayor que "
+                    f"«{_BY_KEY[high].label}» ({other}). Bajá este o subí aquel primero."
+                )
+        elif key == high:
+            other = get(low)
+            if other is not None and value < other:
+                raise ValueError(
+                    f"«{_BY_KEY[high].label}» ({value}) no puede ser menor que "
+                    f"«{_BY_KEY[low].label}» ({other}). Subí este o bajá aquel primero."
+                )
 
 
 def _refresh_cache() -> None:
@@ -296,12 +497,16 @@ def set_value(key: str, value: Any) -> Any:
         raise ValueError(f"'{key}' no es un setting runtime-editable")
     try:
         parsed = meta.parser(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"Valor inválido para {key}: {exc}") from exc
+    # NaN pasa los chequeos de min/max (toda comparación con NaN da False).
+    if isinstance(parsed, float) and not math.isfinite(parsed):
+        raise ValueError(f"{key} tiene que ser un número finito")
     if meta.min is not None and parsed < meta.min:
         raise ValueError(f"{key} debe ser >= {meta.min}")
     if meta.max is not None and parsed > meta.max:
         raise ValueError(f"{key} debe ser <= {meta.max}")
+    _check_order(key, parsed)
 
     with Session(engine) as session:
         existing = session.get(Setting, key)
@@ -319,8 +524,10 @@ def set_value(key: str, value: Any) -> Any:
 
 def reset_to_default(key: str) -> Any:
     """Borra el override de la DB; el setting vuelve al default del .env."""
-    if key not in _BY_KEY:
+    meta = _BY_KEY.get(key)
+    if meta is None:
         raise ValueError(f"'{key}' no existe")
+    _check_order(key, getattr(get_settings(), meta.default_attr))
     with Session(engine) as session:
         existing = session.get(Setting, key)
         if existing:

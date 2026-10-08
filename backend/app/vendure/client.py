@@ -24,6 +24,7 @@ from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
 
 from app.config import get_settings
+from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ class VendureProduct:
     variant_count: int  # cuántas variantes tiene
     variants: list[VendureVariant] | None = None  # solo se llena con list_products_with_variants
     updated_at: str | None = None  # ISO8601 (Vendure updatedAt) — para dedup incremental
+    # Variantes con priceWithTax + tramos (bulkPriceTiers). Solo las llena
+    # fetch_all_products_priced(): es lo que compara el semáforo contra ML.
+    priced_variants: list[PricedVariant] | None = None
 
 
 # ─── Cliente ───────────────────────────────────────────────────────
@@ -217,14 +221,22 @@ class VendureClient:
     # refresh razonable sin ahogar al resto del admin.
     FETCH_CONCURRENCY = 2
 
-    def _product_fields(self, with_variants: bool) -> str:
+    def _product_fields(self, with_variants: bool, pricing: bool = False) -> str:
         """Campos de un producto en los listados. Con variantes trae id/name/sku
-        de cada variante; sin variantes trae solo la 1ra (para precio) — más liviano."""
-        variant_block = (
-            "variantList(options: { take: 100 }) { items { id name sku priceWithTax } totalItems }"
-            if with_variants
-            else "variantList(options: { take: 1 }) { items { priceWithTax } totalItems }"
-        )
+        de cada variante; sin variantes trae solo la 1ra (para precio) — más liviano.
+        `pricing` trae además los tramos de cantidad (bulkPriceTiers) de cada
+        variante: es lo que necesita el semáforo para saber nuestro precio."""
+        if pricing:
+            variant_block = (
+                "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode "
+                "bulkPriceTiers { position enabled minQuantity maxQuantity salePrice } } totalItems }"
+            )
+        elif with_variants:
+            variant_block = (
+                "variantList(options: { take: 100 }) { items { id name sku priceWithTax } totalItems }"
+            )
+        else:
+            variant_block = "variantList(options: { take: 1 }) { items { priceWithTax } totalItems }"
         return f"""
                   id
                   name
@@ -237,13 +249,13 @@ class VendureClient:
                   {variant_block}
         """
 
-    def _products_query(self, with_variants: bool):
+    def _products_query(self, with_variants: bool, pricing: bool = False):
         """Query de listado paginado completo."""
         return gql(
             f"""
             query Products($skip: Int!, $take: Int!) {{
               products(options: {{ skip: $skip, take: $take }}) {{
-                items {{ {self._product_fields(with_variants)} }}
+                items {{ {self._product_fields(with_variants, pricing)} }}
                 totalItems
               }}
             }}
@@ -269,30 +281,64 @@ class VendureClient:
             """
         )
 
-    def _map_page(self, raw_items: list[dict[str, Any]], with_variants: bool) -> list[VendureProduct]:
+    @staticmethod
+    def _map_priced_variants(variant_items: list[dict[str, Any]]) -> list[PricedVariant]:
+        """variantList.items (con bulkPriceTiers) → PricedVariant. Los tramos
+        quedan ordenados por `position`; Money de Vendure ya viene en centavos."""
+        out: list[PricedVariant] = []
+        for v in variant_items:
+            if not isinstance(v, dict):
+                continue
+            tiers = [
+                PriceTier(
+                    position=_safe_int(t.get("position")) or 0,
+                    min_quantity=_safe_int(t.get("minQuantity")),
+                    max_quantity=_safe_int(t.get("maxQuantity")),
+                    sale_price_cents=_safe_int(t.get("salePrice")),
+                    enabled=bool(t.get("enabled", True)),
+                )
+                for t in (v.get("bulkPriceTiers") or [])
+                if isinstance(t, dict)
+            ]
+            tiers.sort(key=lambda t: t.position)
+            out.append(PricedVariant(
+                id=str(v.get("id")),
+                name=v.get("name") or "",
+                sku=v.get("sku") or "",
+                price_with_tax_cents=_safe_int(v.get("priceWithTax")),
+                currency=v.get("currencyCode"),
+                tiers=tuple(tiers),
+            ))
+        return out
+
+    def _map_page(
+        self, raw_items: list[dict[str, Any]], with_variants: bool, pricing: bool = False,
+    ) -> list[VendureProduct]:
         out: list[VendureProduct] = []
         for raw in raw_items:
             prod = self._map_product(raw)
+            variant_items = (raw.get("variantList") or {}).get("items") or []
             if with_variants:
-                variant_items = (raw.get("variantList") or {}).get("items") or []
                 prod.variants = [
                     VendureVariant(id=str(v["id"]), name=v.get("name", ""), sku=v.get("sku", ""))
                     for v in variant_items
                 ]
+            if pricing:
+                prod.priced_variants = self._map_priced_variants(variant_items)
             out.append(prod)
         return out
 
     async def _fetch_page(
-        self, skip: int, take: int, with_variants: bool,
+        self, skip: int, take: int, with_variants: bool, pricing: bool = False,
     ) -> tuple[list[VendureProduct], int]:
         """Trae una página y devuelve (productos, totalItems)."""
         data = await self._execute_with_retry(
-            self._products_query(with_variants),
+            self._products_query(with_variants, pricing),
             {"skip": skip, "take": take},
-            what=f"products(skip={skip}, take={take}, variants={with_variants})",
+            what=f"products(skip={skip}, take={take}, variants={with_variants}, pricing={pricing})",
         )
         block = data.get("products", {}) or {}
-        items = self._map_page(block.get("items") or [], with_variants)
+        items = self._map_page(block.get("items") or [], with_variants, pricing)
         total = int(block.get("totalItems") or len(items))
         return items, total
 
@@ -351,12 +397,13 @@ class VendureClient:
         with_variants: bool = False,
         page_size: int | None = None,
         concurrency: int | None = None,
+        pricing: bool = False,
     ) -> list[VendureProduct]:
         """Trae TODO el catálogo. La 1ra página da totalItems; el resto se piden
         en paralelo (semáforo `concurrency`, default FETCH_CONCURRENCY). Mucho más
         rápido que iterar secuencialmente página por página."""
         take = page_size or self.BULK_PAGE_SIZE
-        first, total = await self._fetch_page(0, take, with_variants)
+        first, total = await self._fetch_page(0, take, with_variants, pricing)
         if len(first) >= total or len(first) < take:
             return first
 
@@ -366,13 +413,26 @@ class VendureClient:
 
         async def _one(skip: int) -> list[VendureProduct]:
             async with sem:
-                items, _ = await self._fetch_page(skip, take, with_variants)
+                items, _ = await self._fetch_page(skip, take, with_variants, pricing)
                 return items
 
         pages = await asyncio.gather(*(_one(s) for s in skips))
         for page in pages:
             out.extend(page)
         return [p for p in out if p is not None]
+
+    async def fetch_all_products_priced(
+        self, concurrency: int | None = None,
+    ) -> list[VendureProduct]:
+        """Catálogo completo con `priced_variants` (priceWithTax + tramos).
+
+        Es la lectura FRESCA que hace el semáforo cada noche: el cache de
+        app/vendure/catalog.py puede tener el precio hasta 12 h viejo. Misma
+        concurrencia baja que el full refresh (2): cada página sigue siendo un
+        N+1 de variantList del lado de Vendure."""
+        return await self.fetch_all_products(
+            with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
+        )
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
         query = gql(

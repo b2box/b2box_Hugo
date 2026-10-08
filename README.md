@@ -43,9 +43,10 @@ El módulo `dedup/orchestrator.py` combina las tres y devuelve un score de confi
   contra el snapshot anterior supera `PRICE_DRIFT_THRESHOLD`, se crea un evento
   `price_flagged` y se manda la alerta.
 
-Hugo **no toca el precio de venta** en Vendure: solo avisa. Tampoco compara
-contra competidores: `pricing/competitor_check.py` existe pero no tiene ningún
-llamador (ni job, ni endpoint); es código muerto que quedó de la idea original.
+Hugo **no toca el precio de venta** en Vendure: solo avisa. La comparación
+contra Mercado Libre la hace el semáforo (ver [Semáforo de precios (modo
+sombra)](#semáforo-de-precios-modo-sombra)) por la API oficial;
+`pricing/competitor_check.py` (scraping del listado) sigue sin llamador.
 
 ### 3. Cuándo actúa
 
@@ -147,6 +148,186 @@ construye, `/app/lookup` devuelve `status:"indexing"`; seguilo con
 - Loguea TODO en `AuditLog` (Postgres en Supabase; SQLite en local).
 - Manda email a `tech@b2box.pro` con resumen diario y alertas críticas.
 
+## Semáforo de precios (modo sombra)
+
+Cada noche Hugo compara el catálogo publicado contra Mercado Libre y calcula
+cuánto ganaría un revendedor que nos compra y revende en ML. **En esta etapa
+solo mide y guarda**: no toca Vendure.
+
+### Qué hace
+
+Por cada producto habilitado (job `price_monitor`, `pricing/price_monitor.py`):
+
+1. Lee **nuestro precio fresco** de Vendure (`variantList` + `bulkPriceTiers`,
+   concurrencia 2; no usa el cache del catálogo, que puede tener 12 h). La
+   variante representativa es la primera con precio; el tramo sale de
+   `pm_tier_policy`.
+2. Busca en ML por **título** (`/products/search`, fichas de catálogo). La API
+   de ML no tiene búsqueda por foto: la foto se usa para **filtrar**. Si la
+   búsqueda no trae nada, prueba una segunda con las primeras palabras.
+3. Filtro "mismo producto" (`pricing/market_match.py`): CLIP contra las fotos
+   del producto en el índice del catálogo (escala centrada) + similitud de
+   nombre. Vetos, match por imagen fuerte o por imagen+nombre; lo que queda en
+   el medio es la **banda ambigua** (sin juez = no es el mismo producto).
+4. Para las fichas aceptadas trae los vendedores (`/products/{id}/items`) y
+   descarta los de pocas ventas (`sold_quantity` si viene; si no,
+   `/users/{id}`, cacheado 30 días). Solo pesos.
+5. Guarda **mediana, mínimo, cantidad de publicaciones y vendedores**, links
+   a las fichas, de dónde vino el match (`clip`, `clip+nombre`, `llm`) y, con
+   nuestro precio, la ganancia y el color.
+
+Ganancia estimada (en % sobre lo que nos paga el revendedor):
+
+```
+(mediana_ML − comisión_ML − envío_ML − nuestro_precio_con_IVA) / nuestro_precio_con_IVA × 100
+```
+
+Color: **verde** ≥ `pm_green_min_pct` (30 %), **amarillo** ≥ `pm_yellow_min_pct`
+(10 %), **rojo** si es menos o si nuestro precio supera la mediana de ML,
+**sin dato** si no hay match (no es malo: puede no haber llegado a ML).
+
+Historial: tablas propias `market_price_snapshot` (una fila por producto y
+corrida, siempre, con `ml_status` = `ok` | `no_data` | `failed` | `skipped`) y
+`price_monitor_run` (una por corrida: estado, totales por color, requests a ML,
+llamadas/tokens/costo del juez). `prune_price_history` no las toca; sí poda los
+embeddings de fotos de ML (`mlstatic`) más viejos que `pm_embed_cache_days`.
+
+Robustez:
+
+- Budget diario de requests a ML con reserva atómica (`pm_ml_daily_budget`):
+  si se acaba a mitad de corrida, lo que falta queda `skipped`; si la corrida
+  arranca sin cupo, se cierra `skipped` sin tocar ningún producto. Cada corrida
+  empieza por los productos que hace más que no se miden (último dato `ok` o
+  `no_data`), así con un budget corto todo el catálogo rota. 429/5xx/red →
+  backoff exponencial; si persiste, ese producto queda `failed` y la corrida
+  **sigue**.
+- El consumo (requests a ML, llamadas al juez) se suma a la corrida en la
+  misma transacción que reserva el cupo: después de un corte, la corrida
+  refleja exactamente lo gastado.
+- Si más del 20 % quedó `failed`, la corrida es `degraded`.
+- Solo corre en el líder, con lock. Si el proceso se reinicia a mitad, al
+  levantar **retoma la misma corrida** (mismo `run_id`, solo los productos sin
+  snapshot). Si el cron no disparó porque el proceso estaba caído, corre al
+  levantar. Una corrida sin terminar de más de 20 h se cierra como `failed`.
+- Primera noche: dos sondas de 1 request que quedan en `settings`
+  (`_meta:pm_probe_listing_prices`, `_meta:pm_probe_sold_quantity`) para
+  decidir si ML nos da comisión/envío por categoría y ventas por publicación.
+
+### Qué NO hace todavía
+
+- No pasa los rojos a inactivo ni escribe nada en Vendure (`pm_mode=1` existe
+  pero solo loguea "modo activo todavía no implementado").
+- No hay diagnóstico automático, bandeja de revisión de Pao, histéresis,
+  alertas (26 h sin correr, >20 % del catálogo cambia de color) ni campos en
+  Vendure para la web o para pauta. Eso es la etapa siguiente.
+
+### Settings (dashboard → Configuración → "Semáforo de precios")
+
+| Setting | Default | Qué hace |
+|---|---|---|
+| `pm_mode` | 0 | 0 sombra; 1 activo (todavía no implementado) |
+| `pm_green_min_pct` | 30 | ganancia mínima para verde |
+| `pm_yellow_min_pct` | 10 | ganancia mínima para amarillo |
+| `pm_ml_commission_pct` | 13 | comisión de ML, % de la mediana (a definir por Gabriel) |
+| `pm_ml_shipping_cents` | 0 | envío de ML, centavos ARS (a definir) |
+| `pm_min_seller_sales` | 50 | ventas mínimas del vendedor para contar |
+| `pm_image_threshold` | 0.65 | imagen mínima (junto con el nombre) |
+| `pm_name_threshold` | 0.60 | nombre mínimo (junto con la imagen) |
+| `pm_image_strong` | 0.80 | imagen que alcanza sola |
+| `pm_image_veto` / `pm_name_veto` | 0.40 / 0.30 | por debajo, descarte directo |
+| `pm_ml_daily_budget` | 15000 | requests a ML por día (UTC) |
+| `pm_ml_concurrency` | 4 | productos en paralelo contra ML |
+| `pm_tier_policy` | 0 | 0 tramo mínimo (compra chica); 1 tramo más barato |
+| `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
+| `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
+| `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
+
+Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
+umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
+
+Cambiar un corte recolorea en la **próxima corrida**, sin redeploy. El horario
+es env: `PRICE_MONITOR_CRON_UTC` (default `0 6 * * *` = 03:00 ART).
+
+Calibrar los umbrales con un set etiquetado (criterio: precisión ≥ 90 %,
+recall ≥ 60 %):
+
+```bash
+# en el container de prod (usa ML y CLIP; gasta ~1-2 requests por producto)
+python -m app.pricing.calibrate_market_match export --sample 100 --out pares.csv
+# completar la columna same_product (1/0) a mano y después, offline:
+python -m app.pricing.calibrate_market_match evaluate pares.csv --grid
+```
+
+### Juez IA para la banda ambigua (opcional)
+
+Un modelo multimodal barato mira nuestras fotos y las de las fichas dudosas y
+contesta, por ficha, `{ml_id, same_product, confidence, reason}` en JSON. Solo
+se consulta si `pm_vision_max_calls` > 0, con tope diario atómico; una
+respuesta ilegible, un timeout o la falta de cupo = sin veredicto. Tokens y
+costo estimado quedan en `price_monitor_run`. Se configura con tres variables
+(API OpenAI-compatible):
+
+```env
+PM_LLM_BASE_URL=...
+PM_LLM_API_KEY=...
+PM_LLM_MODEL=qwen3-vl-plus
+```
+
+- **Qwen (default)** — Alibaba Cloud Model Studio, región internacional
+  (Singapur). Según la doc oficial de Model Studio ("OpenAI 兼容", consultada
+  el 08-oct-2026) la URL es
+  `https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`
+  (el `WorkspaceId` está en el detalle del espacio de trabajo de la consola);
+  el dominio anterior `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
+  sigue funcionando. Modelo `qwen3-vl-plus`.
+- **Xiaomi MiMo** — `https://api.xiaomimimo.com/v1`, modelo `mimo-v2-omni`
+  (o `mimo-v2.5`). Verificar URL y nombre en la doc de MiMo antes de usarlo.
+- **OpenRouter** — `https://openrouter.ai/api/v1` con el slug del modelo de su
+  catálogo.
+
+Opcionales: `PM_LLM_TIMEOUT_S` (30) y, para estimar el costo,
+`PM_LLM_PRICE_IN_PER_M` / `PM_LLM_PRICE_OUT_PER_M` (USD por millón de tokens;
+0.20 / 1.60 por default). La base URL tiene que ser `https://` (si no, el
+juez queda apagado); el cliente no reintenta solo y es uno por corrida.
+
+#### Privacidad del juez
+
+Qué sale hacia el proveedor en cada llamada:
+
+- el **nombre** de nuestro producto (hasta 200 caracteres);
+- hasta **2 URLs de fotos de nuestro catálogo** (solo https): el proveedor
+  las descarga, así que ve esas URLs;
+- hasta **6 fichas públicas de Mercado Libre**: id, título (hasta 160
+  caracteres), una URL de foto de `mlstatic.com` y la mediana de precio
+  publicada en esa ficha.
+
+Qué **no** sale: nuestros precios, costos, tramos o márgenes, datos de
+clientes o pedidos, ni ninguna credencial salvo la API key del propio
+proveedor.
+
+Dónde se procesa:
+
+- **Qwen (Model Studio)**: en la región de la URL que se configure; con la
+  URL internacional de arriba, Singapur.
+- **Xiaomi MiMo**: región y retención **sin verificar**.
+- **OpenRouter**: enruta a terceros; la retención depende del proveedor final
+  que elija.
+
+Antes de subir `pm_vision_max_calls` por encima de 0, revisar los términos de
+retención y de uso de datos para entrenamiento del proveedor elegido.
+
+### Cómo dispararlo a mano
+
+- Dashboard → **Semáforo** → "Correr ahora" (o `POST /api/price-monitor/run`
+  con la sesión del dashboard). Corre en background. Devuelve 409 si ya hay
+  una corrida en curso y 429 si no queda cupo de ML hoy o si la última
+  corrida arrancó hace menos de `pm_manual_cooldown_min` (con `Retry-After`).
+- Endpoints (sesión del dashboard): `GET /api/price-monitor/runs`,
+  `GET /api/price-monitor/snapshots?run_id=&color=&status=&q=&page=&page_size=`,
+  `GET /api/price-monitor/products/{id}/history`, `GET /api/price-monitor/summary`.
+- La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
+  su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
+
 ## Estructura
 
 ```
@@ -167,6 +348,13 @@ backend/
 │   │   └── image_from_url.py # saca la foto de una URL de marketplace
 │   ├── pricing/
 │   │   ├── source_check.py   # precio del proveedor (OTAPI) + budget diario
+│   │   ├── daily_budget.py   # contador diario con reserva atómica (OTAPI, ML, juez)
+│   │   ├── price_monitor.py  # job del semáforo contra ML (modo sombra)
+│   │   ├── semaforo.py       # reglas puras: ganancia, color, tramo
+│   │   ├── market_ml.py      # API de ML: budget, backoff, vendedores
+│   │   ├── market_match.py   # filtro "mismo producto" (CLIP + nombre)
+│   │   ├── market_judge.py   # juez IA opcional (OpenAI-compatible)
+│   │   ├── calibrate_market_match.py  # precisión/recall del filtro
 │   │   ├── competitor_check.py  # SIN USO: no tiene llamador
 │   │   └── diff.py
 │   ├── scheduler/
@@ -289,6 +477,7 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `POST /app/lookup` — el b2box app manda una URL: PA + comprar ahora, o pedido a Cloud
 - `GET  /app/index-status` — si el índice de imágenes ya está listo
 - `POST /app/index-rebuild` — fuerza la reconstrucción del índice
+- `/api/price-monitor/*` — semáforo de precios contra ML (ver su sección)
 
 Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
@@ -431,3 +620,6 @@ Ver `.env.example`. Las críticas:
 - `DEDUP_*_THRESHOLD` — umbrales de confianza de cada estrategia (0-1).
 - `PRICE_DRIFT_THRESHOLD` — % mínimo de variación que dispara alerta.
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
+- `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
+- `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
+- `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo.

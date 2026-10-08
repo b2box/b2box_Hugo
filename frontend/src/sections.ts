@@ -54,6 +54,9 @@ export const SECTION_META: Record<string, SectionMeta> = {
   vision_lab: {
     desc: "Pegá un link y compará qué contesta cada proveedor de visión sobre la misma lista corta de CLIP. No toca el catálogo ni abre pedidos.",
   },
+  semaforo: {
+    desc: "Cada noche Hugo compara el catálogo contra Mercado Libre y calcula cuánto ganaría un revendedor. Modo sombra: solo mide, no toca Vendure.",
+  },
   settings: {
     desc: "Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.",
   },
@@ -67,6 +70,7 @@ export const GROUP_LABELS: Record<string, string> = {
   app: "Búsqueda del app",
   pricing: "Precios",
   scheduler: "Scheduler",
+  monitor: "Semáforo de precios (Mercado Libre)",
   general: "General",
 };
 
