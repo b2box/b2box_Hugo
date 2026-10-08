@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
@@ -985,3 +986,17 @@ def test_an_embedding_cache_hit_keeps_the_row_alive():
         assert row.updated_at > utcnow() - timedelta(minutes=1)
         s.delete(row)
         s.commit()
+
+
+def test_our_photos_is_one_version_of_the_featured_photo():
+    """Vendure da la misma foto como preview y como source: al juez va una."""
+    pm = price_monitor
+    p = replace(_product("1", "x"), featured_image_url="https://cdn.b2box/assets/preview/1.jpg",
+                image_urls=["https://cdn.b2box/assets/source/1.jpg"])
+    assert pm._our_photos(p) == ["https://cdn.b2box/assets/preview/1.jpg"]
+    no_preview = replace(p, featured_image_url=None)
+    assert pm._our_photos(no_preview) == ["https://cdn.b2box/assets/source/1.jpg"]
+    http_preview = replace(p, featured_image_url="http://cdn.b2box/assets/preview/1.jpg")
+    assert pm._our_photos(http_preview) == ["https://cdn.b2box/assets/source/1.jpg"]
+    assert pm._our_photos(replace(p, featured_image_url=None, image_urls=[])) == []
+    assert pm._our_photos(replace(p, featured_image_url="http://x/1.jpg", image_urls=["ftp://x/1.jpg"])) == []

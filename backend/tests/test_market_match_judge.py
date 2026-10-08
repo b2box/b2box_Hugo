@@ -7,17 +7,21 @@ doble que devuelve el texto que el test quiere.
 from __future__ import annotations
 
 import os
+from io import BytesIO
 from types import SimpleNamespace
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
 
 from app.config import Settings  # noqa: E402
 from app.db.models import Setting  # noqa: E402
 from app.db.session import engine  # noqa: E402
-from app.pricing import daily_budget, market_judge, market_match  # noqa: E402
+from app import net_guard  # noqa: E402
+from app.pricing import daily_budget, judge_images, market_judge, market_match  # noqa: E402
 from app.pricing.market_judge import JudgeCandidate  # noqa: E402
 from app.pricing.market_match import AMBIGUOUS, MATCH, NO, Thresholds  # noqa: E402
 from app.pricing.market_ml import MlCandidate  # noqa: E402
@@ -161,10 +165,10 @@ def test_messages_carry_our_photos_and_each_candidate():
 
 
 class FakeClient:
-    def __init__(self, text="", exc: Exception | None = None, usage=(1200, 80)):
+    def __init__(self, text="", exc: Exception | None = None, usage=(1200, 80), reasoning=None):
         self.calls: list[dict] = []
         self.closed = 0
-        self._text, self._exc, self._usage = text, exc, usage
+        self._text, self._exc, self._usage, self._reasoning = text, exc, usage, reasoning
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def close(self):
@@ -176,7 +180,11 @@ class FakeClient:
             raise self._exc
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self._text))],
-            usage=SimpleNamespace(prompt_tokens=self._usage[0], completion_tokens=self._usage[1]),
+            usage=SimpleNamespace(
+                prompt_tokens=self._usage[0], completion_tokens=self._usage[1],
+                completion_tokens_details=(None if self._reasoning is None
+                                           else SimpleNamespace(reasoning_tokens=self._reasoning)),
+            ),
         )
 
 
@@ -302,3 +310,307 @@ async def test_a_failed_call_still_counts_against_the_cap_and_runs_the_hook(monk
                                     on_reserve=lambda session: hooked.append(1)) is None
     assert hooked == [1] and daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1
     assert client.closed == 0  # el cliente es del llamador: no lo cierra el juez
+
+
+# ─── proveedor: pensamiento apagado por host (extra_body) ─────────────────
+
+
+@pytest.fixture
+def fresh_warnings(monkeypatch):
+    monkeypatch.setattr(market_judge, "_warned_once", set())
+
+
+MIMO_URL = "https://api.xiaomimimo.com/v1"
+
+
+@pytest.mark.parametrize("base_url,expected", [
+    (MIMO_URL, {"thinking": {"type": "disabled"}}),
+    ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://dashscope.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://ws-123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", {"enable_thinking": False}),
+    ("https://api.qwencloudapi.com/v1", {"enable_thinking": False}),
+    ("https://openrouter.ai/api/v1", {}),
+    ("https://llm.invalid/v1", {}),
+    ("https://evil-dashscope.example.com/v1", {}),       # "dashscope" en otro dominio no cuenta
+    ("https://api.xiaomimimo.com.evil.com/v1", {}),
+])
+def test_extra_body_by_provider_host(monkeypatch, base_url, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=base_url)
+    assert market_judge.extra_body() == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("{}", {}),                                                    # apagar el default
+    ('{"reasoning": {"enabled": false}}', {"reasoning": {"enabled": False}}),
+    ('  {"thinking": {"type": "enabled"}}  ', {"thinking": {"type": "enabled"}}),
+])
+def test_extra_body_env_override_replaces_the_default(monkeypatch, raw, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_extra_body=raw)
+    assert market_judge.extra_body() == expected
+
+
+@pytest.mark.parametrize("raw", ["{roto", "[1, 2]", '"texto"', "42", "null"])
+def test_invalid_extra_body_warns_once_and_falls_back_to_the_default(monkeypatch, caplog, fresh_warnings, raw):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_extra_body=raw)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            assert market_judge.extra_body() == {"thinking": {"type": "disabled"}}
+    assert caplog.text.count("PM_LLM_EXTRA_BODY no es un objeto JSON") == 1
+
+
+ALLOWED_EXTRA = {
+    "thinking": {"type": "disabled"}, "enable_thinking": False, "thinking_budget": 0,
+    "reasoning": {"enabled": False}, "reasoning_effort": "none", "top_p": 0.5, "seed": 7,
+    "response_format": {"type": "json_object"},
+}
+
+
+def test_extra_body_allowlist_is_exactly_the_documented_one():
+    assert market_judge._ALLOWED_BODY_KEYS == set(ALLOWED_EXTRA)
+
+
+def test_extra_body_lets_every_allowed_key_through(monkeypatch):
+    import json
+
+    _judge_settings(monkeypatch, pm_llm_extra_body=json.dumps(ALLOWED_EXTRA))
+    assert market_judge.extra_body() == ALLOWED_EXTRA
+
+
+DROPPED = ["model", "messages", "max_tokens", "max_completion_tokens", "temperature", "stream", "n",
+           "tools", "tool_choice", "user", "stop", "logit_bias", "metadata", "store", "base_url",
+           "extra_headers", "api_key"]
+
+
+def test_extra_body_drops_everything_that_is_not_allowed_and_warns_once_per_key(monkeypatch, caplog,
+                                                                              fresh_warnings):
+    """Lista blanca: el aviso nombra la clave y nunca el valor."""
+    import json
+    import logging
+
+    secret = "valor-que-no-debe-loguearse"
+    raw = json.dumps({**{k: secret for k in DROPPED}, "top_p": 0.5, "seed": 3})
+    _judge_settings(monkeypatch, pm_llm_extra_body=raw)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            assert market_judge.extra_body() == {"top_p": 0.5, "seed": 3}
+    for key in DROPPED:
+        assert caplog.text.count(f"la clave '{key}' no está permitida") == 1, key
+    assert secret not in caplog.text and "0.5" not in caplog.text
+    assert len(caplog.records) == len(DROPPED)
+
+
+def test_extra_body_warns_about_a_dropped_key_only_once_across_changes(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 1}')
+        market_judge.extra_body()
+        _judge_settings(monkeypatch, pm_llm_extra_body='{"max_tokens": 2, "stream": true}')
+        market_judge.extra_body()
+    assert caplog.text.count("'max_tokens'") == 1 and caplog.text.count("'stream'") == 1
+
+
+def test_a_very_long_dropped_key_is_truncated_in_the_log(monkeypatch, caplog, fresh_warnings):
+    import json
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_extra_body=json.dumps({"k" * 500: 1}))
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert market_judge.extra_body() == {}
+    assert "k" * 41 not in caplog.text and "k" * 40 in caplog.text
+
+
+def test_the_readme_documents_the_allowed_extra_body_keys():
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    for key in ALLOWED_EXTRA:
+        assert f"`{key}`" in readme, key
+
+
+async def test_judge_sends_the_provider_extra_body(monkeypatch):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_model="mimo-v2.6-flash",
+                    pm_llm_image_mode="url")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert client.calls[0]["max_tokens"] == market_judge._MAX_TOKENS
+
+
+async def test_judge_sends_no_extra_body_when_there_is_nothing_to_send(monkeypatch):
+    _judge_settings(monkeypatch, pm_llm_base_url="https://openrouter.ai/api/v1")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert "extra_body" not in client.calls[0]
+
+
+# ─── respuesta de un modelo que piensa = sin veredicto ────────────────────
+
+
+@pytest.mark.parametrize("text,reasoning", [
+    ("", 700),            # MiMo con el pensamiento prendido: todo max_tokens en reasoning
+    ("", None),           # content vacío sin detalle de tokens
+    ("   \n ", 0),       # solo espacios
+    (GOOD, 350),          # razonó y encima contestó: igual no es lo que costeamos
+])
+async def test_thinking_or_empty_answer_is_no_verdict_but_counts_tokens(
+        monkeypatch, caplog, fresh_warnings, text, reasoning):
+    import logging
+
+    _judge_settings(monkeypatch)
+    client = FakeClient(text, usage=(900, 700), reasoning=reasoning)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        res = await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert res is not None and res.verdicts == {}
+    assert (res.input_tokens, res.output_tokens) == (900, 700)
+    assert "el modelo está pensando, revisá PM_LLM_EXTRA_BODY" in caplog.text
+
+
+async def test_thinking_warning_is_logged_once(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    _judge_settings(monkeypatch)
+    client = FakeClient("", reasoning=700)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        for _ in range(3):
+            await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert caplog.text.count("el modelo está pensando") == 1
+
+
+async def test_zero_reasoning_tokens_keeps_the_verdicts(monkeypatch):
+    _judge_settings(monkeypatch)
+    client = FakeClient(GOOD, reasoning=0)
+    res = await market_judge.judge("x", [], CANDS, max_calls=5, client=client)
+    assert set(res.verdicts) == {"MLA1"}
+
+
+@pytest.mark.parametrize("usage,expected", [
+    (None, 0),
+    (SimpleNamespace(), 0),
+    (SimpleNamespace(completion_tokens_details=None), 0),
+    (SimpleNamespace(completion_tokens_details={"reasoning_tokens": 12}), 12),
+    (SimpleNamespace(completion_tokens_details=SimpleNamespace(reasoning_tokens="7")), 7),
+    (SimpleNamespace(completion_tokens_details=SimpleNamespace(reasoning_tokens="x")), 0),
+])
+def test_reasoning_tokens_reader(usage, expected):
+    assert market_judge._reasoning_tokens(usage) == expected
+
+
+# ─── modo de imágenes: url vs base64 ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("base_url,raw,expected", [
+    (MIMO_URL, "", "base64"),                          # MiMo no baja URLs remotas
+    ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "", "url"),
+    ("https://openrouter.ai/api/v1", "", "url"),
+    (MIMO_URL, "url", "url"),                          # el env manda
+    ("https://openrouter.ai/api/v1", " BASE64 ", "base64"),
+])
+def test_image_mode(monkeypatch, base_url, raw, expected):
+    _judge_settings(monkeypatch, pm_llm_base_url=base_url, pm_llm_image_mode=raw)
+    assert market_judge.image_mode() == expected
+
+
+def test_invalid_image_mode_warns_once_and_uses_the_default(monkeypatch, caplog, fresh_warnings):
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode="inline")
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        assert [market_judge.image_mode() for _ in range(3)] == ["base64"] * 3
+    assert caplog.text.count("PM_LLM_IMAGE_MODE") == 1
+
+
+@pytest.mark.parametrize("raw", ["inline", "sk-1234567890abcdef-esto-es-una-key", "Base 64"])
+def test_invalid_image_mode_warning_does_not_repeat_the_value(monkeypatch, caplog, fresh_warnings, raw):
+    """Una variable mal pegada puede traer una credencial: el aviso dice a lo
+    sumo el largo."""
+    import logging
+
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode=raw)
+    with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):
+        market_judge.image_mode()
+    assert raw.strip().lower()[:6] not in caplog.text.lower().replace("pm_llm_image_mode", "")
+    assert f"({len(raw.strip())} caracteres)" in caplog.text
+
+
+OUR_PHOTO = "https://example.invalid/assets/preview/p1__preview.jpg"   # host de VENDURE_API_URL
+ML_PHOTO = "https://http2.mlstatic.com/D_1.jpg"
+B64_CANDS = [JudgeCandidate("MLA1", "Org A", ML_PHOTO),
+             JudgeCandidate("MLA2", "Org B", "https://http2.mlstatic.com/D_rota.jpg")]
+
+
+@pytest.fixture
+def photos(monkeypatch):
+    """Fotos servidas por un MockTransport: {url: bytes}. Las que no están dan 404."""
+    buf = BytesIO()
+    Image.new("RGB", (900, 600), (10, 120, 200)).save(buf, format="JPEG")
+    served = {OUR_PHOTO: buf.getvalue(), ML_PHOTO: buf.getvalue()}
+    requested: list[str] = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        body = served.get(str(request.url))
+        if body is None:
+            return httpx.Response(404, request=request)
+        return httpx.Response(200, content=body, headers={"content-type": "image/jpeg"}, request=request)
+
+    monkeypatch.setattr(net_guard, "assert_public_url", lambda url: None)
+
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
+    monkeypatch.setattr(judge_images, "make_http_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return SimpleNamespace(served=served, requested=requested)
+
+
+def _sent_images(call) -> list[str]:
+    return [p["image_url"]["url"] for p in call["messages"][1]["content"] if p["type"] == "image_url"]
+
+
+async def test_base64_mode_sends_inline_photos_and_skips_the_broken_one(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_model="mimo-v2.6-flash")
+    client = FakeClient(GOOD)
+    res = await market_judge.judge("Organizador", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client)
+    assert set(res.verdicts) == {"MLA1"}
+    sent = _sent_images(client.calls[0])
+    assert len(sent) == 2 and all(u.startswith("data:image/jpeg;base64,") for u in sent)
+    texts = " ".join(p.get("text", "") for p in client.calls[0]["messages"][1]["content"])
+    assert "MLA2" in texts                         # la ficha va igual, sin su foto
+    assert OUR_PHOTO not in str(client.calls[0])   # ninguna URL viaja al proveedor
+
+
+async def test_base64_mode_without_any_of_our_photos_is_no_verdict_and_spends_nothing(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    photos.served.pop(OUR_PHOTO)
+    client = FakeClient(GOOD)
+    hooked = []
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client,
+                                    on_reserve=lambda s: hooked.append(1)) is None
+    assert client.calls == [] and hooked == []
+    assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 0
+
+
+async def test_base64_mode_our_photo_from_a_foreign_host_is_not_downloaded(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    client = FakeClient(GOOD)
+    assert await market_judge.judge("x", ["https://cdn.evil.com/p1.jpg"], B64_CANDS,
+                                    max_calls=5, client=client) is None
+    assert "https://cdn.evil.com/p1.jpg" not in photos.requested and client.calls == []
+
+
+async def test_base64_mode_without_quota_downloads_nothing(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL)
+    client = FakeClient(GOOD)
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=1, client=client) is not None
+    photos.requested.clear()
+    assert await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=1, client=client) is None
+    assert photos.requested == [] and len(client.calls) == 1
+
+
+async def test_url_mode_never_downloads(monkeypatch, photos):
+    _judge_settings(monkeypatch, pm_llm_base_url=MIMO_URL, pm_llm_image_mode="url")
+    client = FakeClient(GOOD)
+    await market_judge.judge("x", [OUR_PHOTO], B64_CANDS, max_calls=5, client=client)
+    assert photos.requested == []
+    assert _sent_images(client.calls[0])[0] == OUR_PHOTO

@@ -280,8 +280,21 @@ PM_LLM_MODEL=qwen3-vl-plus
   (el `WorkspaceId` está en el detalle del espacio de trabajo de la consola);
   el dominio anterior `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
   sigue funcionando. Modelo `qwen3-vl-plus`.
-- **Xiaomi MiMo** — `https://api.xiaomimimo.com/v1`, modelo `mimo-v2-omni`
-  (o `mimo-v2.5`). Verificar URL y nombre en la doc de MiMo antes de usarlo.
+- **Xiaomi MiMo** — `https://api.xiaomimimo.com/v1`, modelo `mimo-v2.6-flash`
+  (multimodal; `mimo-v2-omni` y `mimo-v2.5` están dados de baja). Probado
+  contra la API real el 08-oct-2026:
+
+  ```env
+  PM_LLM_BASE_URL=https://api.xiaomimimo.com/v1
+  PM_LLM_API_KEY=...
+  PM_LLM_MODEL=mimo-v2.6-flash
+  # opcionales: precio de mimo-v2.6-flash para el costo estimado
+  PM_LLM_PRICE_IN_PER_M=0.14
+  PM_LLM_PRICE_OUT_PER_M=0.28
+  ```
+
+  Con ese host el juez apaga solo el pensamiento y manda las fotos en
+  base64 (ver abajo); no hace falta configurar nada más.
 - **OpenRouter** — `https://openrouter.ai/api/v1` con el slug del modelo de su
   catálogo.
 
@@ -290,16 +303,66 @@ Opcionales: `PM_LLM_TIMEOUT_S` (30) y, para estimar el costo,
 0.20 / 1.60 por default). La base URL tiene que ser `https://` (si no, el
 juez queda apagado); el cliente no reintenta solo y es uno por corrida.
 
+**Pensamiento apagado.** MiMo v2.6 y los Qwen híbridos piensan por default:
+gastan todo `max_tokens` razonando y devuelven el contenido vacío (MiMo pro
+tardó 163 s). Según el host de `PM_LLM_BASE_URL` el juez manda en el body:
+
+| host | campo extra |
+|---|---|
+| `api.xiaomimimo.com` | `{"thinking": {"type": "disabled"}}` |
+| `dashscope*.aliyuncs.com`, `*.maas.aliyuncs.com`, `qwencloudapi.com` | `{"enable_thinking": false}` |
+| cualquier otro (OpenRouter…) | nada |
+
+`PM_LLM_EXTRA_BODY` (objeto JSON) reemplaza ese default entero; `{}` no manda
+nada. Si no es un objeto JSON válido se loguea un aviso y se usa el default.
+Es una lista blanca: solo pasan `thinking`, `enable_thinking`,
+`thinking_budget`, `reasoning`, `reasoning_effort`, `top_p`, `seed` y
+`response_format`. Cualquier otra clave (`model`, `messages`, `max_tokens`,
+`temperature`, `stream`, `tools`…) se descarta, con un aviso por clave y una
+sola vez que dice el nombre y nunca el valor.
+Si igual llega una respuesta con `reasoning_tokens` > 0 o vacía, cuenta como
+sin veredicto y queda un aviso "el modelo está pensando, revisá
+PM_LLM_EXTRA_BODY" en el log.
+
+**Fotos: url o base64** (`PM_LLM_IMAGE_MODE`, opcional). En `url` viaja la
+URL pública y la baja el proveedor. En `base64` las baja Hugo y viajan dentro
+del request. Vacío = `base64` con MiMo y `url` con el resto. MiMo baja bien
+las URLs de mlstatic y de nuestro Vendure, pero con otros hosts falló (400
+"failed to download or process media content"); en base64 además las fotos
+van achicadas y el mismo veredicto salió con ~45 % menos tokens de entrada.
+En base64:
+
+- solo se bajan fotos `https://` de `*.mlstatic.com` y del host de
+  `VENDURE_API_URL` (de ahí salen las de nuestro catálogo); cada redirect se
+  valida igual y el host tiene que resolver a una IP pública. Ya conectado y
+  antes de leer el body se vuelve a validar la IP real del servidor (DNS
+  rebinding); el cliente ignora `HTTP(S)_PROXY` y pide el body sin comprimir
+  (un `content-encoding` distinto de `identity` se rechaza);
+- hasta 5 MB por foto, `image/jpeg|png|webp|gif|bmp`, y un tope de 15 s para
+  todas las fotos de la consulta juntas (las que no llegan se omiten);
+- se reducen a 768 px de lado y se re-encodean JPEG, sin metadata (ni EXIF,
+  ni comentario, ni perfil de color);
+- memoria acotada (el container es de 3 GB y lo comparte Camoufox): PNG, WebP,
+  GIF y BMP hasta 16 MP, JPEG hasta 40 MP (se decodifica ya reducido); el
+  tamaño se mira en el header, antes de decodificar, y hay un solo decode a la
+  vez en todo el proceso;
+- una foto que falla se omite y el veredicto sigue; si no se pudo bajar
+  ninguna foto nuestra, ese producto queda sin veredicto (no gasta cupo).
+
+Si mlstatic empezara a cortar las descargas desde el servidor, las fichas
+van sin foto: probar con `PM_LLM_IMAGE_MODE=url`.
+
 #### Privacidad del juez
 
 Qué sale hacia el proveedor en cada llamada:
 
 - el **nombre** de nuestro producto (hasta 200 caracteres);
-- hasta **2 URLs de fotos de nuestro catálogo** (solo https): el proveedor
-  las descarga, así que ve esas URLs;
+- la **foto destacada de nuestro catálogo** (solo https, una sola versión:
+  la preview): en modo `url` el proveedor la descarga y ve esa URL; en modo
+  `base64` le llega la imagen (achicada a 768 px), sin la URL;
 - hasta **6 fichas públicas de Mercado Libre**: id, título (hasta 160
-  caracteres), una URL de foto de `mlstatic.com` y la mediana de precio
-  publicada en esa ficha.
+  caracteres), una foto de `mlstatic.com` (URL o imagen, según el modo) y la
+  mediana de precio publicada en esa ficha.
 
 Qué **no** sale: nuestros precios, costos, tramos o márgenes, datos de
 clientes o pedidos, ni ninguna credencial salvo la API key del propio
@@ -309,7 +372,8 @@ Dónde se procesa:
 
 - **Qwen (Model Studio)**: en la región de la URL que se configure; con la
   URL internacional de arriba, Singapur.
-- **Xiaomi MiMo**: región y retención **sin verificar**.
+- **Xiaomi MiMo**: en servidores de Xiaomi; región y retención **sin
+  verificar**.
 - **OpenRouter**: enruta a terceros; la retención depende del proveedor final
   que elija.
 
@@ -354,6 +418,7 @@ backend/
 │   │   ├── market_ml.py      # API de ML: budget, backoff, vendedores
 │   │   ├── market_match.py   # filtro "mismo producto" (CLIP + nombre)
 │   │   ├── market_judge.py   # juez IA opcional (OpenAI-compatible)
+│   │   ├── judge_images.py   # fotos del juez en base64 (descarga acotada)
 │   │   ├── calibrate_market_match.py  # precisión/recall del filtro
 │   │   ├── competitor_check.py  # SIN USO: no tiene llamador
 │   │   └── diff.py
@@ -622,4 +687,5 @@ Ver `.env.example`. Las críticas:
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
-- `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo.
+- `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo
+  (opcionales: `PM_LLM_IMAGE_MODE`, `PM_LLM_EXTRA_BODY`; ver "Juez IA").
