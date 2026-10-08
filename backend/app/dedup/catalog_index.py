@@ -154,6 +154,13 @@ def is_ready() -> bool:
     return _state.matrix.shape[0] > 0
 
 
+def has_product(product_id: str) -> bool:
+    """¿El producto tiene fotos en el índice? (habilitado y con imagen al
+    construirlo). Sirve para no gastar una búsqueda externa en algo que después
+    no se va a poder comparar por imagen."""
+    return product_id in _state.products
+
+
 def is_stale() -> bool:
     ttl = get_settings().embed_index_ttl_seconds
     return (time.monotonic() - _state.built_at) > ttl
