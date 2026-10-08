@@ -241,7 +241,7 @@ def test_runs_and_summary_expose_the_per_source_counters_and_the_index_state(cli
     assert run["sources"][gd]["igual"] == 1 and run["sources"][gd]["diferente"] == 1 and run["sources"][gd]["nada"] == 2
     summary = client.get("/api/price-monitor/summary").json()
     assert [s["name"] for s in summary["stores"]] == ["Gadnic", "Casa Perfecta"]
-    assert summary["stores"][0]["max_pages_per_day"] == 2000 and summary["stores_affect_color"] is False
+    assert summary["stores"][0]["max_pages_per_day"] == 2000 and summary["stores_affect_color"] is True
     assert summary["last_run"]["sources"] == run["sources"]
 
 
@@ -299,6 +299,11 @@ def test_label_validation_and_missing_matches(client):
 def test_labeling_recolors_when_the_stores_count(client):
     _seed()
     runtime.set_value("pm_stores_affect_color", 1)
+    with Session(engine) as s:       # "Dos" ya se había coloreado con el idéntico de Casa Perfecta (sin ML)
+        snap = s.exec(select(MarketPriceSnapshot).where(MarketPriceSnapshot.product_id == "2")).one()
+        snap.price_basis, snap.color = "tiendas", "verde"
+        s.add(snap)
+        s.commit()
     mid = _match_id("2", "Casa Perfecta", 1)                        # 30.000, idéntico creíble de "Dos" (sin ML)
     r = client.post(f"/api/price-monitor/store-matches/{mid}/label", json={"label": "no_es"})
     assert r.status_code == 200
@@ -324,7 +329,7 @@ def test_endpoints_need_a_dashboard_session():
 def test_list_stores_has_the_two_seeded_stores_and_their_index_state(client):
     body = client.get("/api/stores").json()
     assert [s["name"] for s in body["items"]] == ["Gadnic", "Casa Perfecta"]
-    assert body["platforms"] == ["tiendanube", "jsonld_sitemap"] and body["affect_color"] is False
+    assert body["platforms"] == ["tiendanube", "jsonld_sitemap"] and body["affect_color"] is True      # decisión de Nico
     gd = body["items"][0]
     assert gd["platform"] == "jsonld_sitemap" and gd["max_pages_per_day"] == 2000 and gd["house_brand"] == "Gadnic"
     assert gd["index"]["urls"] == 0 and gd["index"]["pages_today"] == 0
@@ -336,7 +341,7 @@ def test_adding_another_tiendanube_store_needs_only_a_row(client):
     assert r.status_code == 201
     new = r.json()
     assert new["enabled"] is True and new["refresh_days"] == 7 and new["max_pages_per_day"] == 1000
-    assert "mitiendanube.com" in store_urls.allowed_image_hosts()
+    assert "acdn*.mitiendanube.com" in store_urls.allowed_image_hosts()
     assert [s["label"] for s in client.get("/api/price-monitor/snapshots").json()["sources"]][-1] == "Otra Tienda"
     assert client.post("/api/stores", json={"name": "Otra Tienda", "base_url": "https://x.com.ar",
                                             "platform": "tiendanube"}).status_code == 409
@@ -363,7 +368,7 @@ def test_edit_and_disable_a_store(client):
     body = r.json()
     assert body["enabled"] is False and body["max_pages_per_day"] == 500 and body["house_brand"] is None
     assert body["name"] == "Gadnic" and body["platform"] == "jsonld_sitemap"      # lo no mandado no se toca
-    assert "bidcom.com.ar" not in store_urls.allowed_image_hosts()
+    assert "*.bidcom.com.ar" not in store_urls.allowed_image_hosts()
     assert client.put(f"/api/stores/{gd}", json={"refresh_days": 500}).status_code == 422
     assert client.put(f"/api/stores/{gd}", json={"name": "Casa Perfecta"}).status_code == 409
     assert client.put("/api/stores/999999", json={"enabled": True}).status_code == 404

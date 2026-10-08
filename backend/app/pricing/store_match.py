@@ -72,6 +72,11 @@ CATEGORIES = (IGUAL, SIMILAR, DIFERENTE)
 _CAT_RANK = {IGUAL: 0, SIMILAR: 1, DIFERENTE: 2}
 LABEL_YES, LABEL_NO = "es", "no_es"
 LABELS = (LABEL_YES, LABEL_NO)
+# Lo que corrige una persona: mismo vocabulario y mismos textos que en Mercado Libre.
+SOURCE_MANUAL = market_match.SOURCE_MANUAL
+SOURCE_UNCONFIRMED = market_match.SOURCE_UNCONFIRMED
+_SAME_REASON = "una persona la marcó «Es el mismo»"
+_NOT_SAME_REASON = "una persona la marcó «No es el mismo»"
 SOURCE_ML = "ml"
 # Un precio 10 veces más chico o más grande que el nuestro es casi seguro un dato malo.
 PRICE_RATIO_LIMIT = 10.0
@@ -171,6 +176,8 @@ class StoresRun:
     # (product_id, store_id) → {item_id: "es" | "no_es"}
     feedback: dict[tuple[str, int], dict[int, str]]
     affect_color: bool
+    # Tope diario del juez IA para las tiendas (contador propio); 0 = sin juez.
+    judge_max_calls: int = 0
     topup: list[store_catalog.IndexReport] = field(default_factory=list)
 
 
@@ -187,13 +194,28 @@ def load_feedback() -> dict[tuple[str, int], dict[int, str]]:
     return out
 
 
+# Margen sobre `pm_stores_topup_minutes` antes de cortar el top-up a la fuerza (cada pedido ya tiene su tope).
+TOPUP_GRACE_S = 120.0
+
+
+def _topup_budget_s(minutes: int) -> float:
+    return minutes * 60.0 + TOPUP_GRACE_S
+
+
 async def prepare(**topup_kwargs: Any) -> StoresRun | None:
     """Al empezar la corrida: refresca el índice viejo (dentro del cupo y del tiempo
     de `pm_stores_topup_minutes`) y carga en memoria el de cada tienda activa. None
     si no hay tiendas activas. Nunca lanza: sin tiendas la corrida sigue con ML."""
     try:
         minutes = int(runtime.get("pm_stores_topup_minutes") or 0)
-        topup = await store_catalog.topup_for_run(minutes, **topup_kwargs) if minutes > 0 else []
+        topup: list[store_catalog.IndexReport] = []
+        if minutes > 0:
+            try:
+                # Una tienda lenta no puede trabar el arranque de la corrida del semáforo.
+                topup = await asyncio.wait_for(store_catalog.topup_for_run(minutes, **topup_kwargs),
+                                               timeout=_topup_budget_s(minutes))
+            except (asyncio.TimeoutError, TimeoutError):
+                log.warning("tiendas: el top-up del índice pasó su tiempo (%d min): se compara con lo que hay", minutes)
         await asyncio.to_thread(store_catalog.refresh_allowed_image_hosts)
         infos = await asyncio.to_thread(store_catalog.active_stores)
         if not infos:
@@ -205,8 +227,10 @@ async def prepare(**topup_kwargs: Any) -> StoresRun | None:
         return None
     for st in stores:
         log.info("tiendas: %s → %d productos indexados para comparar", st.info.name, len(st.entries))
+    # El juez de las tiendas tiene tope propio, y solo corre si el de ML está prendido.
+    judge_cap = int(runtime.get("pm_stores_vision_max_calls") or 0) if int(runtime.get("pm_vision_max_calls") or 0) > 0 else 0
     return StoresRun(stores=stores, feedback=feedback, affect_color=bool(int(runtime.get("pm_stores_affect_color") or 0)),
-                     topup=topup)
+                     judge_max_calls=judge_cap, topup=topup)
 
 
 # ─── Un producto contra una tienda ──────────────────────────────────────────
@@ -237,20 +261,6 @@ def _category(d: market_match.Decision) -> str:
     return {market_match.MATCH: IGUAL, market_match.SIMILAR: SIMILAR}.get(d.verdict, DIFERENTE)
 
 
-def _why_different(d: market_match.Decision, thr: market_match.Thresholds) -> str:
-    if d.judged and d.reason:
-        return d.reason
-    if d.image_score is None:
-        return "sin foto para comparar"
-    if d.image_score < thr.image_veto:
-        return "la foto no se parece"
-    if d.name_score < thr.name_veto:
-        return "el nombre no se parece"
-    if d.verdict == market_match.AMBIGUOUS:
-        return "dudoso y sin juez IA para decidir: no se da por igual"
-    return d.reason or "no es el mismo producto"
-
-
 def _doubt(price: int | None, entry_doubtful: bool, entry_note: str, our_price: int | None) -> tuple[bool, str]:
     """¿Este precio no se puede creer? Lo marca el indexador (no coincide con la página,
     absurdo) o la comparación con el nuestro (10 veces más o menos)."""
@@ -268,7 +278,7 @@ def _doubt(price: int | None, entry_doubtful: bool, entry_note: str, our_price: 
 def _targets(decisions: list[market_match.Decision], brand_of: BrandTool,
              human: set[str]) -> list[market_match.Decision]:
     """A quién le pregunta el juez: la banda ambigua y los que ya pasaron por reglas pero
-    declaran una marca (regla de marca de Nico). Lo que confirmó una persona no se discute."""
+    declaran una marca (regla de marca de Nico). Lo que corrigió una persona no se discute."""
     ambiguous = [d for d in decisions if d.verdict == market_match.AMBIGUOUS and d.candidate.id not in human]
     branded = [d for d in decisions if d.verdict == market_match.MATCH and d.candidate.id not in human
                and brand_of(d.candidate)]
@@ -279,30 +289,46 @@ def _targets(decisions: list[market_match.Decision], brand_of: BrandTool,
 async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: VendureProduct, query: str,
                        specs: market_specs.OurSpecs | None, our_price: int | None,
                        judge: JudgeTool, brand_of: BrandTool) -> list[StoreMatch]:
+    """Los candidatos de UNA tienda para UN producto, clasificados. Igual que en ML: lo dudoso sin
+    juez queda SIMILAR «sin confirmar»; lo que una persona marcó «Es el mismo» entra como IGUAL y lo
+    marcado «No es el mismo» sigue visible como DIFERENTE (sin volver a bajar su foto), para poder
+    darlo vuelta."""
     labels = run.feedback.get((product.id, store.info.id), {})
-    excluded = frozenset(i for i, lab in labels.items() if lab == LABEL_NO)
-    confirmed = frozenset(i for i, lab in labels.items() if lab == LABEL_YES)
     # ~20 ms con 11.000 títulos: al thread, para no frenar el event loop (la API del dashboard comparte proceso).
-    entries = await asyncio.to_thread(store.prefilter, query, CANDIDATES_PER_STORE, exclude=excluded, force=confirmed)
+    entries = await asyncio.to_thread(store.prefilter, query, CANDIDATES_PER_STORE, force=frozenset(labels))
     if not entries:
         return []
-    candidates = [_candidate(store.info, e) for e in entries]
+    manual_no = {e.id for e in entries if labels.get(e.id) == LABEL_NO}
+    candidates = [_candidate(store.info, e) for e in entries if e.id not in manual_no]
     decisions = await market_match.score_candidates(
-        product, candidates, ctx.thresholds, scorer=_store_scorer, max_candidates=len(candidates))
-    human = {c.id for c, e in zip(candidates, entries) if e.id in confirmed}
+        product, candidates, ctx.thresholds, scorer=_store_scorer, max_candidates=max(1, len(candidates))) if candidates else []
+    human = {c.id for c in candidates if labels.get(_entry_id(c)) == LABEL_YES}
     # Lo que dijo Hugo por reglas de lo que una persona confirmó (sirve para deshacer su corrección).
     pre_human = {d.candidate.id: _category(d) for d in decisions if d.candidate.id in human}
     for d in decisions:
         if d.candidate.id in human:
-            d.verdict, d.source, d.confidence, d.reason = market_match.MATCH, "humano", 1.0, "marcado a mano"
+            d.verdict, d.source, d.confidence, d.reason, d.differences = (
+                market_match.MATCH, SOURCE_MANUAL, 1.0, _SAME_REASON, [])
     targets = _targets(decisions, brand_of, human)
-    if targets and ctx.judge_max_calls > 0:
-        await judge(ctx, product, targets, {})
+    if targets and run.judge_max_calls > 0:
+        # Contador y tope propios de las tiendas: no le restan llamadas al juez de ML.
+        await judge(ctx, product, targets, {}, counter_key=market_judge.STORES_LLM_COUNTER_KEY,
+                    max_calls=run.judge_max_calls)
     if ctx.spec_check:
         for d in decisions:
             if d.candidate.id not in human:
                 market_match.apply_specs(d, product.name, specs, dim_tol_pct=ctx.dim_tol_pct,
                                          weight_tol_pct=ctx.weight_tol_pct)
+    for d in decisions:
+        if d.verdict == market_match.AMBIGUOUS:          # nadie la confirmó ni la descartó
+            d.verdict, d.source = market_match.SIMILAR, SOURCE_UNCONFIRMED
+        if d.verdict == market_match.NO or d.source == SOURCE_UNCONFIRMED:
+            d.reason = market_match.explain_different(d, ctx.thresholds)
+    for e in entries:
+        if e.id in manual_no:
+            decisions.append(market_match.Decision(
+                _candidate(store.info, e), None, market_match.name_score(product.name, e.title), market_match.NO,
+                SOURCE_MANUAL, reason=_NOT_SAME_REASON))
     rows: list[StoreMatch] = []
     for d in decisions:
         entry = store.by_id[_entry_id(d.candidate)]
@@ -310,7 +336,7 @@ async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: Ven
         # La opinión final de Hugo (con juez y medidas): a ella vuelve «Deshacer».
         auto = pre_human.get(d.candidate.id, category)
         doubtful, note = _doubt(entry.price_cents, entry.price_doubtful, entry.price_note, our_price)
-        reason = _why_different(d, ctx.thresholds) if category == DIFERENTE else (d.reason or "")
+        is_human = d.candidate.id in human
         rows.append(StoreMatch(
             run_id=ctx.run_id, product_id=product.id, store_id=store.info.id, item_id=entry.id,
             category=category, auto_category=auto,
@@ -320,10 +346,10 @@ async def _match_store(run: StoresRun, store: StoreIndex, ctx: Any, product: Ven
             price_cents=entry.price_cents, price_doubtful=doubtful, price_note=note[:200] or None, stock=entry.stock,
             image_score=None if d.image_score is None else round(d.image_score, 3),
             name_score=round(d.name_score, 3),
-            confidence=d.confidence, reason=store_parse.one_line(reason, 300) or None,
+            confidence=d.confidence, reason=store_parse.one_line(d.reason, 300) or None,
             differences=json.dumps(list(d.differences)) if d.differences else None,
             notes=store_parse.one_line(" · ".join(d.notes), 300) or None,
-            human_label=LABEL_YES if d.candidate.id in human else None,
+            human_label=LABEL_YES if is_human else (LABEL_NO if entry.id in manual_no else None),
         ))
     rows.sort(key=lambda r: (_CAT_RANK[r.category], -(r.image_score or 0.0), -(r.name_score or 0.0)))
     for i, r in enumerate(rows, 1):
@@ -378,10 +404,28 @@ async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *
 # ─── Color (opcional) ───────────────────────────────────────────────────────
 
 
+# Un IDÉNTICO de tienda pinta el color solo si lo confirman la foto + el nombre (reglas), el chequeo de medidas
+# o una persona. El juez IA solo no alcanza: se ve como idéntico, pero su precio no mueve el color (el título y
+# la foto de una tienda hostil pueden empujar un «igual» del modelo).
+_COLOR_SOURCES = frozenset({"clip", "clip+nombre", "specs", SOURCE_MANUAL})
+
+
+def in_stock(m: StoreMatch) -> bool:
+    """`stock == 0` es agotado; sin dato (None) se asume que hay."""
+    return m.stock != 0
+
+
+def counts_for_color(m: StoreMatch) -> bool:
+    """¿El precio de este idéntico de tienda puede entrar a la mediana del color REAL? Idéntico, con precio
+    creíble, con stock y confirmado por reglas, medidas o una persona (no solo por el juez)."""
+    confirmed = m.source in _COLOR_SOURCES or m.human_label == LABEL_YES
+    return (m.category == IGUAL and bool(m.price_cents and m.price_cents > 0) and not m.price_doubtful
+            and in_stock(m) and confirmed)
+
+
 def counting_prices(rows: list[StoreMatch]) -> list[int]:
-    """Precios de las tiendas que pueden contar: IGUALES y creíbles."""
-    return [int(r.price_cents) for r in rows
-            if r.category == IGUAL and r.price_cents and r.price_cents > 0 and not r.price_doubtful]
+    """Precios de las tiendas que cuentan para el color real (ver `counts_for_color`)."""
+    return [int(r.price_cents) for r in rows if counts_for_color(r)]  # type: ignore[arg-type]
 
 
 def ml_prices(snap: MarketPriceSnapshot) -> list[int]:
@@ -431,7 +475,7 @@ def apply_color(snap: MarketPriceSnapshot, rows: list[StoreMatch], *, green_min:
 # Mismo criterio que el estimado de ML (price_monitor._feeds_estimate): un similar solo alimenta el color
 # ESTIMADO si está confirmado (juez, medidas o una persona) y no difiere en cantidad ni capacidad (su precio
 # no es comparable con el nuestro).
-_CONFIRMED_SOURCES = frozenset({"llm", "specs", "humano"})
+_CONFIRMED_SOURCES = frozenset({market_match.SOURCE_LLM, market_match.SOURCE_SPECS, SOURCE_MANUAL})
 _NOT_COMPARABLE = frozenset({market_specs.DIFF_QUANTITY, market_specs.DIFF_CAPACITY})
 
 
@@ -445,9 +489,9 @@ def _diff_list(raw: str | None) -> list[str]:
 
 def feeds_estimate(m: StoreMatch) -> bool:
     """¿Este similar de tienda puede entrar al color estimado (`in_estimate`)? Confirmado, sin
-    diferencia de cantidad ni capacidad y con un precio creíble."""
+    diferencia de cantidad ni capacidad, con un precio creíble y con stock."""
     return (m.category == SIMILAR and m.source in _CONFIRMED_SOURCES and bool(m.price_cents and m.price_cents > 0)
-            and not m.price_doubtful and not (set(_diff_list(m.differences)) & _NOT_COMPARABLE))
+            and not m.price_doubtful and in_stock(m) and not (set(_diff_list(m.differences)) & _NOT_COMPARABLE))
 
 
 def _price_monitor():
@@ -479,7 +523,7 @@ def affect_color_enabled() -> bool:
 def reapply_color(session: Session, snap: MarketPriceSnapshot) -> None:
     """Recalcula el color (y el estimado) de un snapshot ya guardado después de que una persona
     corrigió una coincidencia (de ML o de una tienda). No hace nada si las tiendas no cuentan y el
-    snapshot nunca las usó."""
+    snapshot nunca las usó; si cuentan pero no aportan ningún precio, deja el color como lo dejó ML."""
     enabled = affect_color_enabled()
     if not enabled and snap.price_basis == "ml":
         return
@@ -489,16 +533,18 @@ def reapply_color(session: Session, snap: MarketPriceSnapshot) -> None:
     rows = list(session.exec(select(StoreMatch).where(
         StoreMatch.run_id == snap.run_id, StoreMatch.product_id == snap.product_id)).all())
     store = counting_prices(rows) if enabled else []
-    ml = ml_prices(snap)
     if store:
         apply_color(snap, rows, green_min=green, yellow_min=yellow)
         return
-    # Las tiendas ya no aportan precio: vuelve a lo de ML (real si lo hay; si no, sin dato + estimado).
-    if ml:
-        _recolor(snap, ml, green_min=green, yellow_min=yellow)
-    else:
-        snap.color, snap.est_margin_pct = semaforo.SIN_DATO, None
-    snap.price_basis = "ml"
+    if snap.price_basis != "ml":
+        # Las tiendas ya no aportan precio: el color vuelve a ser el de ML (real si lo hay; si no, sin dato).
+        ml = ml_prices(snap)
+        if ml:
+            _recolor(snap, ml, green_min=green, yellow_min=yellow)
+        else:
+            snap.color, snap.est_margin_pct = semaforo.SIN_DATO, None
+        snap.price_basis = "ml"
+    # El estimado: los similares confirmados de ML y, si las tiendas cuentan, los de las tiendas.
     set_estimate(snap, rows, green_min=green, yellow_min=yellow, with_stores=enabled)
 
 
@@ -607,12 +653,13 @@ def _cell(key: str, label: str, matches: list[dict[str, Any]]) -> dict[str, Any]
     """La celda de una tienda: su mejor resultado (idéntico; si no hay, similar; si no, el
     más parecido) con el precio, el veredicto y el link."""
     counts = {c: sum(1 for m in matches if m["category"] == c) for c in CATEGORIES}
-    best = min(matches, key=lambda m: (_CAT_RANK[m["category"]], m["rank"]), default=None)
+    # Dentro de la misma categoría, primero el que tiene stock.
+    best = min(matches, key=lambda m: (_CAT_RANK[m["category"]], m["stock"] == 0, m["rank"]), default=None)
     cell: dict[str, Any] = {"key": key, "label": label, "category": None, "counts": counts}
     if best is not None:
         cell.update(category=best["category"], price_cents=best["price_cents"], price_doubtful=best["price_doubtful"],
                     price_note=best["price_note"], title=best["title"], url=best["url"], image_url=best["image_url"],
-                    match_id=best["id"], human_label=best["human_label"])
+                    match_id=best["id"], human_label=best["human_label"], stock=best["stock"])
     return cell
 
 
@@ -646,21 +693,24 @@ def _ml_cell(item: dict[str, Any]) -> dict[str, Any]:
 
 def _cheapest(item: dict[str, Any], by_store: dict[int, list[dict[str, Any]]],
               infos: dict[int, store_catalog.StoreInfo]) -> dict[str, Any] | None:
-    """El precio más bajo entre los idénticos de todas las fuentes (sin precios dudosos)."""
+    """El precio más bajo entre los idénticos de todas las fuentes (sin precios dudosos). Lo que no tiene
+    stock NO cuenta para decir que afuera es más barato; si lo único idéntico que hay afuera está agotado
+    se muestra igual, con la etiqueta «sin stock» (`out_of_stock`), solo como dato."""
     options: list[dict[str, Any]] = []
     if item.get("ml_status") == "ok" and item.get("ml_min_cents"):
         low = item["ml_min_cents"]
         listing = next((m for m in item.get("matched_listings") or [] if m.get("min_cents") == low),
                        (item.get("matched_listings") or [{}])[0])
-        options.append({"key": SOURCE_ML, "label": "Mercado Libre", "price_cents": low,
+        options.append({"key": SOURCE_ML, "label": "Mercado Libre", "price_cents": low, "out_of_stock": False,
                         "title": listing.get("title"), "url": listing.get("permalink") or None})
     for sid, matches in by_store.items():
         ok = [m for m in matches if m["category"] == IGUAL and m["price_cents"] and not m["price_doubtful"]]
         if ok:
-            m = min(ok, key=lambda x: x["price_cents"])
+            m = min(ok, key=lambda x: (x["stock"] == 0, x["price_cents"]))
             options.append({"key": store_key(sid), "label": infos[sid].name, "price_cents": m["price_cents"],
-                            "title": m["title"], "url": m["url"]})
-    return min(options, key=lambda o: o["price_cents"], default=None)
+                            "title": m["title"], "url": m["url"], "out_of_stock": m["stock"] == 0})
+    counting = [o for o in options if not o["out_of_stock"]]
+    return min(counting or options, key=lambda o: o["price_cents"], default=None)
 
 
 def decorate_items(session: Session, run_id: int, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -796,32 +846,40 @@ def _after_label(session: Session, m: StoreMatch) -> None:
 
 
 def prune(retention_days: int) -> dict[str, int]:
-    """Borra las coincidencias de corridas que ya no tienen snapshots (la poda del semáforo
-    se los saca) y los productos de tienda que hace más de 90 días que no figuran en el sitemap."""
+    """Borra las coincidencias de corridas que ya no tienen snapshots (la poda del semáforo se los saca),
+    lo que quedó de tiendas que ya no existen y los productos de tienda que hace más de 90 días que no
+    figuran en el sitemap (cuenta desde la última lectura o, si nunca se leyó, desde que se descubrió)."""
     out = {"matches": 0, "items": 0}
+    existing = select(MarketStore.id)
     with Session(engine) as s:
         if retention_days > 0:
             live = select(MarketPriceSnapshot.run_id).distinct()
             out["matches"] = s.execute(delete(StoreMatch).where(StoreMatch.run_id.notin_(live))).rowcount or 0  # type: ignore[attr-defined]
-        out["items"] = s.execute(delete(StoreCatalogItem).where(
+        out["matches"] += s.execute(delete(StoreMatch).where(StoreMatch.store_id.notin_(existing))).rowcount or 0  # type: ignore[attr-defined]
+        out["items"] = s.execute(delete(StoreCatalogItem).where(StoreCatalogItem.store_id.notin_(existing))).rowcount or 0  # type: ignore[attr-defined]
+        out["items"] += s.execute(delete(StoreCatalogItem).where(
             StoreCatalogItem.in_sitemap.is_(False),  # type: ignore[attr-defined]
-            StoreCatalogItem.last_checked_at < utcnow() - timedelta(days=90))).rowcount or 0  # type: ignore[arg-type]
+            func.coalesce(StoreCatalogItem.last_checked_at, StoreCatalogItem.first_seen_at)
+            < utcnow() - timedelta(days=90))).rowcount or 0
         s.commit()
     if any(out.values()):
-        log.info("prune: %d coincidencias de tiendas y %d productos de tienda viejos", out["matches"], out["items"])
+        log.info("prune: %d coincidencias de tiendas y %d productos de tienda viejos o huérfanos", out["matches"], out["items"])
     return out
 
 
 def prune_embed_cache(days: int) -> int:
-    """Poda el cache de embeddings de las fotos de tiendas más viejo que `days` (las de ML las
-    poda el job de siempre; las de nuestro catálogo no se tocan)."""
-    hosts = store_urls.allowed_image_hosts()
-    if days <= 0 or not hosts:
+    """Poda el cache de embeddings de las fotos de tiendas más viejo que `days` (las de ML las poda el job de
+    siempre; las de nuestro catálogo no se tocan). Incluye las tiendas apagadas: sus fotos no se vuelven a ver."""
+    if days <= 0:
+        return 0
+    entries = store_urls.allowed_image_hosts() | store_catalog.all_image_host_entries()
+    patterns = [p for e in sorted(entries) for p in store_urls.like_patterns(e)]
+    if not patterns:
         return 0
     cutoff = utcnow() - timedelta(days=days)
     with Session(engine) as s:
         result = s.execute(delete(ImageEmbedCache).where(
             ImageEmbedCache.updated_at < cutoff,  # type: ignore[arg-type]
-            or_(*[ImageEmbedCache.url.like(f"https://%{h}/%") for h in hosts])))  # type: ignore[attr-defined]
+            or_(*[ImageEmbedCache.url.like(p, escape="\\") for p in patterns])))  # type: ignore[attr-defined]
         s.commit()
     return int(result.rowcount or 0)

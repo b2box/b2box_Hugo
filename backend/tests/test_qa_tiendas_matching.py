@@ -108,23 +108,16 @@ async def _grid(sw, spec_check) -> tuple[list[tuple], set[tuple[str, str]]]:
     return mismatches, seen
 
 
-def _is_unconfirmed_ambiguous(mm: tuple) -> bool:
-    return mm[2] == "similar" and mm[3] == "diferente" and (mm[5] or "").startswith("dudoso y sin juez")
-
-
 @pytest.mark.parametrize("spec_check", [1, 0])
-async def test_a_store_item_gets_the_same_verdict_as_the_same_ml_listing_except_in_the_ambiguous_band(sw, spec_check):
+async def test_a_store_item_gets_the_same_verdict_as_the_same_ml_listing(sw, spec_check):
     """Mismo título, misma foto (mismo puntaje de CLIP), mismo producto: ML y la tienda clasifican igual en las 49
-    combinaciones salvo la banda AMBIGUA sin juez (ver el xfail de abajo)."""
+    combinaciones, también en la banda AMBIGUA sin juez (SIMILAR «sin confirmar» en las dos)."""
     mismatches, seen = await _grid(sw, spec_check)
     print("pares (ML, tienda) vistos:", sorted(seen))
-    assert [m for m in mismatches if not _is_unconfirmed_ambiguous(m)] == []
+    assert mismatches == []
     assert {c for c, _ in seen} >= {"igual", "similar", "diferente"}, "la tabla no ejercitó las tres categorías"
-    assert len(mismatches) < len(GRID_TITLES) * len(GRID_SCORES)
 
 
-@pytest.mark.xfail(strict=True, reason="DIFERENCIA con ML: lo dudoso sin juez (banda ambigua) es SIMILAR «sin confirmar» en ML y DIFERENTE "
-                                       "«dudoso y sin juez IA…» en las tiendas (store_match._category); cambia columna, contadores y filtros")
 async def test_the_ambiguous_band_without_a_judge_is_classified_like_ml(sw):
     mismatches, _ = await _grid(sw, 1)
     assert mismatches == []

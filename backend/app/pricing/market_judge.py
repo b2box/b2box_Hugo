@@ -53,6 +53,8 @@ from app.pricing.market_ml import _host_in
 log = logging.getLogger(__name__)
 
 LLM_COUNTER_KEY = "_meta:pm_llm_calls_today"
+# Las tiendas tienen su propio tope diario: con el de ML compartido, comparar tres fuentes le sacaba llamadas al juez de ML.
+STORES_LLM_COUNTER_KEY = "_meta:pm_llm_calls_stores_today"
 # Confianza mínima del juez para tomar su "igual" como match.
 MIN_CONFIDENCE = 0.60
 # Debajo de esto un "similar" no se acepta (queda diferente). Un "igual" con
@@ -417,12 +419,13 @@ def _reasoning_tokens(usage: Any) -> int:
 
 async def _inline_photos(
     our_image_urls: Sequence[str], candidates: Sequence[JudgeCandidate], max_calls: int,
+    counter_key: str = LLM_COUNTER_KEY,
 ) -> dict[str, str] | None:
     """Modo base64: baja las fotos ANTES de reservar cupo, así una foto rota
     no gasta una llamada. None = sin veredicto: ya no hay cupo hoy (no vale
     la pena bajar nada) o no se pudo bajar ninguna foto nuestra (comparar
     solo contra las de ML no dice nada)."""
-    used = await asyncio.to_thread(daily_budget.used_today, LLM_COUNTER_KEY)
+    used = await asyncio.to_thread(daily_budget.used_today, counter_key)
     if used >= max_calls:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
         return None
@@ -471,6 +474,7 @@ async def judge(
     max_calls: int,
     client: Any | None = None,
     on_reserve: Callable[[Any], None] | None = None,
+    counter_key: str = LLM_COUNTER_KEY,
 ) -> JudgeResult | None:
     """Pregunta al modelo. None = sin veredicto (apagado, sin cupo, falló o no
     se entendió la respuesta). El llamador trata None como "sigue ambiguo".
@@ -481,10 +485,10 @@ async def judge(
         return None
     inline: dict[str, str] | None = None
     if image_mode() == IMAGE_MODE_BASE64:
-        inline = await _inline_photos(our_image_urls, candidates, max_calls)
+        inline = await _inline_photos(our_image_urls, candidates, max_calls, counter_key)
         if inline is None:
             return None
-    if await daily_budget.reserve_async(LLM_COUNTER_KEY, int(max_calls), None, on_reserve) is None:
+    if await daily_budget.reserve_async(counter_key, int(max_calls), None, on_reserve) is None:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
         return None
 

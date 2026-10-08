@@ -175,7 +175,7 @@ async def test_every_product_gets_candidates_from_every_store_even_the_different
     assert _snap("3").ml_status == "no_data"
     gd = _by_title(_rows("3", "Gadnic"))
     assert gd["Producto raro importado"].category == "diferente"
-    assert gd["Producto raro importado"].reason == "la foto no se parece"
+    assert gd["Producto raro importado"].reason == "otro producto: la foto no se parece"
 
 
 async def test_classification_per_store_uses_photo_name_and_the_veto(stores_world):
@@ -185,7 +185,7 @@ async def test_classification_per_store_uses_photo_name_and_the_veto(stores_worl
     assert cp["Organizador de cocina"].image_score == pytest.approx(0.9)
     assert cp["Cortina de baño impermeable"].category == "diferente"
     assert cp["Cortina de baño impermeable"].source == "veto"
-    assert cp["Cortina de baño impermeable"].reason == "la foto no se parece"
+    assert cp["Cortina de baño impermeable"].reason == "otro producto: la foto no se parece"
     # El mejor primero: igual antes que diferente.
     assert [r.category for r in _rows("1", "Casa Perfecta")][0] == "igual"
     assert all(r.run_id == _snap("1").run_id for r in _rows("1"))
@@ -195,7 +195,7 @@ async def test_a_photo_missing_is_different_with_that_reason(stores_world):
     STORE_SCORES.clear()                    # CLIP no devuelve nada para ninguna foto (no conoce ninguna)
     await price_monitor.run_price_monitor()
     rows = _rows("1", "Casa Perfecta")
-    assert rows and all(r.category == "diferente" and r.reason == "sin foto para comparar" for r in rows)
+    assert rows and all(r.category == "diferente" and r.reason == "no se pudo comparar la foto (sin foto o sin CLIP)" for r in rows)
 
 
 async def test_capacity_difference_makes_the_store_item_similar(stores_world):
@@ -300,11 +300,12 @@ async def test_known_brand_goes_to_the_judge_and_the_store_own_brand_does_not(st
     assert run.llm_calls >= 1
 
 
-async def test_ambiguous_band_without_a_judge_is_different_with_that_reason(stores_world):
+async def test_ambiguous_band_without_a_judge_is_similar_unconfirmed_like_ml(stores_world):
     STORE_SCORES[("1", f"{GD_IMG}/gd-org.jpg")] = 0.55   # entre el veto (0,40) y el umbral (0,65)
     await price_monitor.run_price_monitor()
     row = _by_title(_rows("1", "Gadnic"))["Organizador de cocina plegable"]
-    assert row.category == "diferente" and "sin juez" in row.reason
+    assert (row.category, row.source) == ("similar", "ambiguo") and row.reason == "parecido en foto y nombre, sin confirmar"
+    assert not store_match.feeds_estimate(row), "sin confirmar: se muestra pero no mueve ningún color"
 
 
 def _runs() -> list[PriceMonitorRun]:
@@ -368,7 +369,7 @@ async def test_re_evaluating_a_product_in_the_same_run_replaces_its_rows(stores_
 
 async def test_disabled_stores_are_not_compared_and_the_image_hosts_follow_them(stores_world):
     await price_monitor.run_price_monitor()
-    assert "bidcom.com.ar" in store_urls.allowed_image_hosts() and "mitiendanube.com" in store_urls.allowed_image_hosts()
+    assert "*.bidcom.com.ar" in store_urls.allowed_image_hosts() and "acdn*.mitiendanube.com" in store_urls.allowed_image_hosts()
     with Session(engine) as s:
         row = s.exec(select(MarketStore).where(MarketStore.name == "Gadnic")).one()
         row.enabled = False
@@ -377,7 +378,7 @@ async def test_disabled_stores_are_not_compared_and_the_image_hosts_follow_them(
     await price_monitor.run_price_monitor()
     latest = _snap("1").run_id
     assert _rows("1", "Gadnic", run_id=latest) == [] and _rows("1", "Casa Perfecta", run_id=latest)
-    assert "bidcom.com.ar" not in store_urls.allowed_image_hosts()
+    assert "*.bidcom.com.ar" not in store_urls.allowed_image_hosts()
 
 
 async def test_the_index_is_refreshed_before_comparing_and_a_failure_there_does_not_stop_the_run(stores_world, monkeypatch):
@@ -408,7 +409,7 @@ async def test_the_index_is_refreshed_before_comparing_and_a_failure_there_does_
 # ─── correcciones humanas ────────────────────────────────────────────────────
 
 
-async def test_no_es_el_mismo_demotes_the_candidate_and_it_is_not_proposed_again(stores_world):
+async def test_no_es_el_mismo_demotes_the_candidate_and_it_stays_visible_as_different(stores_world):
     await price_monitor.run_price_monitor()
     first = _by_title(_rows("1", "Casa Perfecta"))["Organizador de cocina"]
     with Session(engine) as s:
@@ -426,7 +427,10 @@ async def test_no_es_el_mismo_demotes_the_candidate_and_it_is_not_proposed_again
 
     await price_monitor.run_price_monitor()
     latest = _snap("1").run_id
-    assert "Organizador de cocina" not in {r.title for r in _rows("1", "Casa Perfecta", run_id=latest)}
+    again = _by_title(_rows("1", "Casa Perfecta", run_id=latest))["Organizador de cocina"]
+    assert (again.category, again.human_label, again.source) == ("diferente", "no_es", "manual")
+    assert again.reason == "una persona la marcó «No es el mismo»" and again.image_score is None, "no se volvió a bajar su foto"
+    assert again.price_cents == 8_000, "se sigue viendo con su precio"
 
 
 async def test_es_el_mismo_promotes_a_different_candidate_and_it_comes_back_as_igual(stores_world):
@@ -440,7 +444,7 @@ async def test_es_el_mismo_promotes_a_different_candidate_and_it_comes_back_as_i
     await price_monitor.run_price_monitor()
     latest = _snap("1").run_id
     again = _by_title(_rows("1", "Casa Perfecta", run_id=latest))["Cortina de baño impermeable"]
-    assert again.category == "igual" and again.human_label == "es" and again.source == "humano"
+    assert again.category == "igual" and again.human_label == "es" and again.source == "manual"
     assert again.confidence == 1.0 and again.auto_category == "diferente"
     # Y la foto no se le preguntó a nadie: sigue siendo la misma que dijo "veto".
     assert again.image_score == pytest.approx(0.2)

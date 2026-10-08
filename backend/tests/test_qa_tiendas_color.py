@@ -337,16 +337,17 @@ async def test_a_correction_on_one_product_does_not_touch_another_one_sharing_th
         fb = s.exec(select(StoreMatchFeedback)).all()
         assert [(f.product_id, f.label) for f in fb] == [("1", "no_es")]
     assert _shape(_snap("2", run0)) == before_2
-    # y la próxima corrida: al 1 no se lo vuelve a proponer, al 2 sí
+    # y la próxima corrida: al 1 sigue visible pero como diferente (marcado a mano), al 2 se lo propone igual
     await price_monitor.run_price_monitor()
     run1 = _runs()[-1].id
     with Session(engine) as s:
-        ids1 = {m.item_id for m in s.exec(select(StoreMatch).where(StoreMatch.run_id == run1, StoreMatch.product_id == "1")).all()}
+        rows1 = {m.item_id: (m.category, m.human_label) for m in s.exec(
+            select(StoreMatch).where(StoreMatch.run_id == run1, StoreMatch.product_id == "1")).all()}
         c2 = [m.category for m in s.exec(select(StoreMatch).where(StoreMatch.run_id == run1, StoreMatch.product_id == "2")).all()]
-    assert m1.item_id not in ids1 and c2 == ["igual"]
+    assert rows1[m1.item_id] == ("diferente", "no_es") and c2 == ["igual"]
 
 
-# ─── el tope del juez es compartido con ML ──────────────────────────────────
+# ─── el tope del juez de las tiendas es propio, no el de ML ─────────────────
 
 
 @pytest.fixture
@@ -363,10 +364,11 @@ def judge_world(sw, monkeypatch):
         add_item(CP, f"cp-{i}", f"Soporte celular auto {i} reforzado", 31_000, 0.62, product=str(i))
     calls: list[str] = []
 
-    async def judge(our_name, our_images, candidates, *, max_calls, on_reserve=None, **kw):
-        if await daily_budget.reserve_async(market_judge.LLM_COUNTER_KEY, max_calls, None, on_reserve) is None:
+    async def judge(our_name, our_images, candidates, *, max_calls, on_reserve=None,
+                    counter_key=market_judge.LLM_COUNTER_KEY, **kw):
+        if await daily_budget.reserve_async(counter_key, max_calls, None, on_reserve) is None:
             return None
-        calls.append(our_name)
+        calls.append((our_name, counter_key))
         return market_judge.JudgeResult(
             verdicts={c.ml_id: market_judge.JudgeVerdict(c.ml_id, True, 0.9, "igual") for c in candidates})
 
@@ -381,10 +383,7 @@ def _ml_view() -> dict[str, tuple]:
     return {pid: (s.ml_status, s.color, s.ml_median_cents, s.match_source) for pid, s in _snaps().items()}
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: el juez comparte el tope diario pm_vision_max_calls con ML y cada producto gasta además una llamada por "
-                                       "tienda: con el tope justo para ML, las tiendas prendidas (aun sin contar para el color) dejan a los "
-                                       "últimos productos de ML sin juez y su resultado de ML cambia")
-async def test_the_judge_cap_is_shared_but_the_stores_must_not_leave_ml_without_judge(judge_world):
+async def test_the_judge_cap_is_separate_but_the_stores_must_not_leave_ml_without_judge(judge_world):
     """Con el tope justo para ML sola (6 productos = 6 llamadas) y las tiendas apagadas, ML juzga a los 6. Con las
     tiendas prendidas (y SIN contar para el color) el resultado de ML tiene que ser el mismo: hoy no lo es, porque
     cada producto gasta además una llamada por tienda y a los últimos productos se les acaba el tope."""
@@ -414,10 +413,12 @@ async def test_the_judge_cap_is_shared_but_the_stores_must_not_leave_ml_without_
     print("ML con juez: tiendas apagadas", sorted(off.items()), "| prendidas", sorted(on.items()),
           "| llamadas apagadas", used_off, "prendidas", len(judge_world.judge_calls))
     assert on == off, "las tiendas le sacaron llamadas al juez de ML: cambió el resultado de ML"
+    ml_calls = [k for _n, k in judge_world.judge_calls if k == market_judge.LLM_COUNTER_KEY]
+    store_calls = [k for _n, k in judge_world.judge_calls if k == market_judge.STORES_LLM_COUNTER_KEY]
+    assert len(ml_calls) == 6 and store_calls, "ML gastó las suyas y las tiendas, las de su contador"
+    assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 6
 
 
-@pytest.mark.xfail(strict=True, reason="DIFERENCIA con ML: lo marcado «No es el mismo» en una tienda desaparece de la lista en la corrida siguiente "
-                                       "(se excluye del prefiltro) y ya no se puede ver ni dar vuelta; en ML queda visible como diferente")
 async def test_a_no_es_el_mismo_candidate_stays_visible_as_different_in_the_next_run_like_in_ml(sw, client):
     """En ML, lo que una persona marca «No es el mismo» sigue visible como DIFERENTE en las corridas siguientes (con
     su precio) y se puede dar vuelta con «Es el mismo». En las tiendas el candidato marcado desaparece de la lista en

@@ -465,12 +465,14 @@ class _Work:
     igual_unpriced: list[dict[str, Any]] = field(default_factory=list)
 
 
-async def _judge_will_answer(ctx: RunContext) -> bool:
-    """¿Vale la pena preparar la consulta? Juez configurado y con cupo hoy."""
-    if ctx.judge_max_calls <= 0 or not market_judge.enabled():
+async def _judge_will_answer(ctx: RunContext, counter_key: str = market_judge.LLM_COUNTER_KEY,
+                             max_calls: int | None = None) -> bool:
+    """¿Vale la pena preparar la consulta? Juez configurado y con cupo hoy (en el contador que corresponda)."""
+    cap = ctx.judge_max_calls if max_calls is None else max_calls
+    if cap <= 0 or not market_judge.enabled():
         return False
-    used = await asyncio.to_thread(daily_budget.used_today, market_judge.LLM_COUNTER_KEY)
-    return used < ctx.judge_max_calls
+    used = await asyncio.to_thread(daily_budget.used_today, counter_key)
+    return used < cap
 
 
 def _ars_median(listings: list[MlListing]) -> int | None:
@@ -499,12 +501,18 @@ async def _prefetch_prices(ctx: RunContext, ambiguous: list[market_match.Decisio
 
 async def _consult_judge(ctx: RunContext, product: VendureProduct,
                          targets: list[market_match.Decision],
-                         prefetched: dict[str, Listings]) -> None:
+                         prefetched: dict[str, Listings], *,
+                         counter_key: str = market_judge.LLM_COUNTER_KEY,
+                         max_calls: int | None = None) -> None:
     """Le pregunta al juez por la banda ambigua (y, en la web, por los matches
     con marca declarada, para aplicar la regla de marca) y aplica su veredicto
-    de tres valores. Nunca lanza."""
+    de tres valores. Nunca lanza. `counter_key` / `max_calls`: el contador y el tope
+    diarios que corresponden (las tiendas tienen los suyos, separados de los de ML)."""
+    cap = ctx.judge_max_calls if max_calls is None else max_calls
+    # Solo se pasa `counter_key` si no es el de siempre (los dobles de los tests no lo conocen).
+    extra = {} if counter_key == market_judge.LLM_COUNTER_KEY else {"counter_key": counter_key}
     prices: dict[str, int | None] = {}
-    if await _judge_will_answer(ctx):
+    if await _judge_will_answer(ctx, counter_key, cap):
         api_targets = [d for d in targets if d.candidate.origin == ORIGIN_API]
         if api_targets:
             prices = await _prefetch_prices(ctx, api_targets, prefetched)
@@ -521,10 +529,10 @@ async def _consult_judge(ctx: RunContext, product: VendureProduct,
     ]
     try:
         result = await ctx.judge_fn(
-            product.name, _our_photos(product), cands, max_calls=ctx.judge_max_calls,
+            product.name, _our_photos(product), cands, max_calls=cap,
             client=ctx.judge_client,
             # La llamada se cuenta al reservar el cupo, aunque después falle.
-            on_reserve=_usage_increment(ctx.run_id, llm_calls=1),
+            on_reserve=_usage_increment(ctx.run_id, llm_calls=1), **extra,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Juez LLM reventó para %s: %s", product.id, exc)
