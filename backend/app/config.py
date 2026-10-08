@@ -371,6 +371,25 @@ class Settings(BaseSettings):
     # Minutos mínimos entre el arranque de una corrida y un disparo manual
     # desde el dashboard: un botón apretado varias veces no quema el budget.
     pm_manual_cooldown_min: int = 30
+    # Productos DESHABILITADOS de Vendure: 1 = también se miden (marcados como
+    # tales en el snapshot y la API); 0 = solo los habilitados. En ningún caso
+    # el job escribe en Vendure: sigue siendo sombra.
+    pm_include_disabled: int = 1
+    # Chequeo de medidas/cantidad/capacidad: una publicación que coincide en foto
+    # y nombre pero difiere acá pasa de IGUAL a SIMILAR (no cuenta para el precio).
+    pm_spec_check: int = 1
+    pm_dim_tol_pct: float = 10.0
+    pm_weight_tol_pct: float = 15.0
+    # Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar con Camoufox +
+    # BROWSER_PROXY) para los productos sin ficha de catálogo IGUAL en la API.
+    # Ver app/pricing/market_ml_web.py. 0 = apagada.
+    pm_ml_web_daily_budget: int = 2000
+    pm_ml_web_max_results: int = 8
+    pm_ml_web_concurrency: int = 1
+    pm_ml_web_pause_s: float = 4.0
+    # Fallos seguidos (bloqueo, captcha, proxy caído) que cortan la fuente web
+    # por esa noche.
+    pm_ml_web_block_streak: int = 5
 
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.

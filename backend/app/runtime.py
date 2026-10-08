@@ -385,6 +385,91 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1440, step=5, group="monitor",
     ),
     SettingMeta(
+        key="pm_include_disabled",
+        label="Medir también los productos deshabilitados (1 / 0)",
+        description=(
+            "1 = el semáforo también mide los productos deshabilitados en Vendure (se marcan "
+            "como tales y se pueden filtrar). 0 = solo los habilitados. Nunca escribe en Vendure."
+        ),
+        type="int", parser=int,
+        default_attr="pm_include_disabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_spec_check",
+        label="Chequeo de medidas, cantidad y capacidad (1 / 0)",
+        description=(
+            "1 = una publicación igual en foto y nombre pero con otra cantidad (pack), "
+            "capacidad o medidas pasa de IGUAL a SIMILAR y no cuenta para el precio."
+        ),
+        type="int", parser=int,
+        default_attr="pm_spec_check",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_dim_tol_pct",
+        label="Tolerancia de medidas (± % por lado)",
+        description="Si las medidas de la publicación difieren de las nuestras más que esto, es SIMILAR.",
+        type="float", parser=float,
+        default_attr="pm_dim_tol_pct",
+        min=0.0, max=100.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_weight_tol_pct",
+        label="Tolerancia de peso (± %)",
+        description="Si el peso de la publicación difiere del nuestro más que esto, es SIMILAR.",
+        type="float", parser=float,
+        default_attr="pm_weight_tol_pct",
+        min=0.0, max=100.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_web_daily_budget",
+        label="ML web: búsquedas por día",
+        description=(
+            "Búsquedas en la web de Mercado Libre por día (UTC), para los productos sin ficha "
+            "IGUAL en la API. 0 = fuente apagada. Necesita BROWSER_PROXY (sin proxy no se intenta). "
+            "Cada búsqueda baja cientos de KB por el proxy."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_web_daily_budget",
+        min=0, max=20000, step=100, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_web_max_results",
+        label="ML web: resultados por búsqueda",
+        description="Cuántas publicaciones de cada búsqueda se comparan con el producto (las primeras de ML).",
+        type="int", parser=int,
+        default_attr="pm_ml_web_max_results",
+        min=1, max=24, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_web_concurrency",
+        label="ML web: búsquedas en paralelo",
+        description="1-2. Más paralelismo gasta el proxy más rápido y llama la atención del anti-bot.",
+        type="int", parser=int,
+        default_attr="pm_ml_web_concurrency",
+        min=1, max=2, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_web_pause_s",
+        label="ML web: pausa entre búsquedas (s)",
+        description="Espera (con variación al azar) después de cada búsqueda.",
+        type="float", parser=float,
+        default_attr="pm_ml_web_pause_s",
+        min=0.0, max=120.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_ml_web_block_streak",
+        label="ML web: fallos seguidos que la cortan",
+        description=(
+            "Bloqueos, captchas o fallos del proxy seguidos que apagan la fuente web por esa "
+            "noche. Los productos sin dato por esto muestran el motivo."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_web_block_streak",
+        min=1, max=50, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_embed_cache_days",
         label="Días de cache de fotos de ML",
         description=(
