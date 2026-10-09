@@ -58,6 +58,8 @@ CONFIGS: dict[str, dict] = {
     "con_deshabilitados": {"pm_include_disabled": 1},
     "umbrales": {"pm_green_min_pct": 80.0, "pm_yellow_min_pct": 40.0, "pm_ml_commission_pct": 20.0},
     "cupo_corto": {"pm_ml_daily_budget": 37},
+    # las tiendas (Gadnic, Casa Perfecta) con el índice LLENO de productos con el mismo nombre que los nuestros y el color afectado
+    "tiendas_llenas": {},
 }
 SEEDS = (11, 2026)
 API_PATHS = ["/api/price-monitor/snapshots?page_size=200", "/api/price-monitor/snapshots?page_size=200&color=verde",
@@ -193,6 +195,14 @@ def dump(w, client) -> dict:  # noqa: F811
 @pytest.fixture
 def qworld(webw, store_db, monkeypatch):  # noqa: F811
     store_catalog.seed_default_stores()           # las tiendas prendidas, con el índice vacío (como en prod al arrancar)
+
+    async def clip(our, urls):                    # solo la ficha de la tienda con el id de ESTE producto se parece a su foto
+        if not urls:
+            return None
+        return 0.95 if urls[0].rsplit("-", 1)[-1].split(".", 1)[0] == our.id else 0.20
+
+    monkeypatch.setattr(market_match, "clip_score_urls", clip)
+    runtime.set_value("pm_stores_affect_color", 1)
     runtime.set_value("pm_ml_concurrency", 1)
     runtime.set_value("pm_stores_topup_minutes", 0)
     yield webw
@@ -214,6 +224,9 @@ async def test_origin_main_dump_or_compare(qworld, client, seed, config):  # noq
     w = qworld
     _apply(config)
     build_world(w, seed)
+    if config == "tiendas_llenas":
+        from tests.test_qa2_tiendas_regresion import fill_index
+        fill_index()
     await price_monitor.run_price_monitor()
     got = dump(w, client)
     key = f"{config}/{seed}"

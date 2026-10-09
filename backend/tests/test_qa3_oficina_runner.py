@@ -506,3 +506,71 @@ def test_the_public_oficina_prefix_does_not_open_any_dashboard_route(hugo, path)
     body = raw.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in raw else b""
     assert status != 200 or b"last_run" not in body, (path, status, body[:200])
     assert b"cron_utc" not in body and b"fresh_products" not in body, path
+
+
+# ─── Hugo reiniciándose a la hora del runner ────────────────────────────────
+
+
+class StubHugo:
+    """Un Hugo de mentira que falla las primeras N veces el GET de la cola (un redeploy de Coolify a la 01:00) y después anda."""
+
+    def __init__(self, fail_first: int, items: list[dict]) -> None:
+        self.fail_first, self.items, self.gets, self.posts = fail_first, items, 0, 0
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a, **k) -> None:
+                return
+
+            def _send(self, status: int, payload: dict) -> None:
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:  # noqa: N802
+                outer.gets += 1
+                if outer.gets <= outer.fail_first:
+                    return self._send(503, {"detail": "Service Unavailable"})
+                self._send(200, {"items": outer.items, "max_results": 8, "ttl_days": 7})
+
+            def do_POST(self) -> None:  # noqa: N802
+                outer.posts += 1
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+                n = len(body["results"])
+                self._send(200, {"received": n, "stored": n, "duplicates": 0, "rejected": [], "rejected_total": 0})
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.mark.xfail(strict=True, reason="GAP: el GET de la cola no se reintenta (el POST sí, 3 veces con espera): si Hugo está "
+                                       "reiniciándose a la 01:00 (redeploy de Coolify, un 502/503 de Traefik) el runner sale con 4 y "
+                                       "esa noche no se busca nada")
+def test_a_transient_5xx_on_the_queue_does_not_cost_the_whole_night(box, ml):
+    stub = StubHugo(fail_first=1, items=[{"product_id": "1", "queries": ["taza ceramica"]}])
+    try:
+        box.env_file.write_text(f"OFICINA_SEARCH_KEY={KEY}\nHUGO_URL={stub.url}\n")
+        r = box(timeout=120)
+        assert r.code == 0 and len(ml.hits) == 1 and stub.posts == 1
+    finally:
+        stub.close()
+
+
+def test_a_persistent_5xx_on_the_queue_is_exit_4_without_a_traceback(box, ml):
+    stub = StubHugo(fail_first=10_000, items=[])
+    try:
+        box.env_file.write_text(f"OFICINA_SEARCH_KEY={KEY}\nHUGO_URL={stub.url}\n")
+        r = box()
+        assert r.code == 4 and ml.hits == [] and "Traceback" not in r.out and KEY not in r.out + r.log
+    finally:
+        stub.close()

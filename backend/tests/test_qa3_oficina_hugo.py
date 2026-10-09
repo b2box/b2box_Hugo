@@ -547,3 +547,68 @@ def test_two_runners_with_the_same_queue_each_store_their_own_result_and_history
         _post(api, [_res(i["product_id"], fetched_at=_iso(-timedelta(minutes=delta))) for i in q1])
     assert len(_rows()) == 10
     assert _queue(api)["items"] == []
+
+
+# ─── fuzz: JSON azaroso con tipos mezclados en cada campo ───────────────────
+
+
+def _junk(rng, depth: int = 0):
+    kinds = ["int", "float", "str", "none", "bool", "list", "dict", "bigint", "unicode", "url", "nan"]
+    kind = rng.choice(kinds if depth < 3 else kinds[:5])
+    if kind == "int":
+        return rng.choice([0, 1, -1, 2500, 10**11, 2**63, -2**63, rng.randint(-10**6, 10**12)])
+    if kind == "float":
+        return rng.choice([0.0, -0.0, 1.5, 1e308, 2.0, 1e-9, 12345.678])
+    if kind == "str":
+        return "".join(rng.choice("abcXYZ 019-_/.:") for _ in range(rng.randint(0, 40)))
+    if kind == "none":
+        return None
+    if kind == "bool":
+        return rng.choice([True, False])
+    if kind == "list":
+        return [_junk(rng, depth + 1) for _ in range(rng.randint(0, 4))]
+    if kind == "dict":
+        return {rng.choice(["id", "name", "price_cents", "x", "permalink", "image_urls"]): _junk(rng, depth + 1) for _ in range(rng.randint(0, 4))}
+    if kind == "bigint":
+        return 10 ** rng.randint(20, 300)
+    if kind == "unicode":
+        return "".join(chr(rng.choice([0, 1, 0x1b, 0x85, 0x200b, 0x202e, 0x2066, 0xd800 - 1, 0xe000, 0xfffe, 0x10ffff, 0x1f600, 65])) for _ in range(rng.randint(0, 10)))
+    if kind == "url":
+        return rng.choice(["https://articulo.mercadolibre.com.ar/MLA-1", "https://evil.com/x", "javascript:1", "https://http2.mlstatic.com/x.jpg", "//x", ""])
+    return float("nan")
+
+
+def test_random_json_never_gives_a_500_and_whatever_is_stored_obeys_the_whitelists(api):
+    import random
+    rng = random.Random(20261009)
+    for i in range(1, 6):
+        _snap(str(i))
+    good_fields = ["product_id", "query", "fetched_at", "status", "reason", "candidates"]
+    cand_fields = ["id", "name", "image_urls", "permalink", "domain_id", "price_cents", "currency", "brand", "seller", "sold_quantity", "catalog_id"]
+    statuses = {200, 400, 413}
+    for round_no in range(150):
+        oficina_routes.reset_limits()
+        results = []
+        for _ in range(rng.randint(0, 8)):
+            res = _res(str(rng.randint(1, 6)), fetched_at=_iso(-timedelta(minutes=rng.randint(1, 10_000))))
+            for f in rng.sample(good_fields, rng.randint(0, 3)):
+                res[f] = _junk(rng)
+            if isinstance(res.get("candidates"), list) or rng.random() < 0.7:
+                res["candidates"] = [{f: (_junk(rng) if rng.random() < 0.5 else _card()[f]) for f in rng.sample(cand_fields, rng.randint(0, 11))}
+                                     for _ in range(rng.randint(0, 10))]
+            results.append(res)
+        body = json.dumps({"results": results} if rng.random() < 0.9 else _junk(rng), ensure_ascii=rng.random() < 0.5, allow_nan=True)
+        r = api.post("/api/oficina/ml-results", content=body.encode("utf-8", "surrogatepass"), headers={**H, "content-type": "application/json"})
+        assert r.status_code in statuses, (round_no, r.status_code, r.text[:200])
+    rows = _rows()
+    assert len(rows) >= 10 and sum(1 for r in rows if r.n_candidates) >= 5, "el fuzz tiene que guardar cosas para que valga"
+    for row in rows:
+        assert row.status in oficina_ml.STATUSES and 1 <= len(row.query) <= 200 and "\n" not in row.query
+        cands = json.loads(row.candidates)
+        assert len(cands) <= oficina_ml.HARD_MAX_CANDIDATES and len({c["id"] for c in cands}) == len(cands)
+        for c in cands:
+            assert oficina_ml.valid_ref(c["id"]) and 0 < len(c["name"]) <= 200
+            assert c["permalink"].startswith("https://") and "mercadolibre.com" in c["permalink"].split("/")[2]
+            assert all(u.startswith("https://") and u.split("/")[2].endswith("mlstatic.com") for u in c["image_urls"])
+            assert c["price_cents"] is None or 0 < c["price_cents"] < 10**11
+            assert all(not unicodedata.category(ch).startswith("C") for ch in c["name"] + c["seller"] + c["brand"])

@@ -14,18 +14,20 @@ from sqlmodel import Session, select
 def qa3_clean():
     yield
     from app import runtime
+    from app.db import models
     from app.db.models import (
         MarketMatchFeedback,
         MarketPriceSnapshot,
         MlSellerCache,
-        MlWebResult,
         PriceMonitorRun,
         Setting,
     )
     from app.db.session import engine
 
+    # MlWebResult no existe en origin/main: así este archivo también corre en el worktree de e8209e1 (dorado).
+    web_results = [m for m in (getattr(models, "MlWebResult", None),) if m is not None]
     with Session(engine) as s:
-        for model in (MlWebResult, MarketPriceSnapshot, PriceMonitorRun, MarketMatchFeedback, MlSellerCache):
+        for model in (*web_results, MarketPriceSnapshot, PriceMonitorRun, MarketMatchFeedback, MlSellerCache):
             for row in s.exec(select(model)).all():
                 s.delete(row)
         for row in s.exec(select(Setting)).all():
