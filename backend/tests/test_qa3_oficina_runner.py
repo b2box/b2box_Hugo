@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from app import main as main_mod  # noqa: E402
 from app.api import oficina_routes  # noqa: E402
 from app.db.models import MlWebResult  # noqa: E402
 from app.db.session import engine  # noqa: E402
+from app.clock import utcnow  # noqa: E402
 from app.pricing import market_match, market_ml_web  # noqa: E402
 from tests.ml_web_fixtures import ANTIBOT_HTML, listing_html, page, polycard  # noqa: E402,F401
 from tests.test_oficina_api import KEY, _snap, api  # noqa: E402,F401
@@ -241,17 +243,40 @@ def test_an_empty_queue_is_a_normal_night(box, ml):
     assert r.code == 0 and ml.hits == [] and "vacía" in r.out
 
 
-def test_a_product_with_several_queries_pauses_between_queries_and_stops_at_the_first_with_results(box, ml):
+def test_one_page_per_product_per_night_and_the_next_variant_the_night_after(box, ml):
+    """Tope de ML desde la IP de la oficina: Hugo da UNA consulta por producto; si vino vacía, la siguiente recién la noche
+    siguiente (la cola espera 12 h desde el resultado vacío)."""
     _snap("1", name="Organizador Doble Ajustable 3 Niveles 40x30 Blanco")
     q1 = _slug("Organizador Doble Ajustable 3 Niveles 40x30 Blanco")
     q2 = _slug("Organizador Doble Ajustable Niveles")
     ml.routes[q1] = (200, {}, listing_html([]))
     ml.routes[q2] = (200, {}, _listing("Organizador doble ajustable"))
     r = box()
-    assert r.code == 0 and ml.slugs == [q1, q2]                                  # la tercera ni se pide
-    assert len(r.sleeps) == 1 and 8 <= r.sleeps[0] <= 15
+    assert r.code == 0 and ml.slugs == [q1]                                       # una sola página; la segunda ni se pide
+    assert r.sleeps == []
     [row] = _rows()
-    assert (row.status, row.query) == ("ok", "Organizador Doble Ajustable Niveles")
+    assert (row.status, row.query) == ("empty", market_match.search_query("Organizador Doble Ajustable 3 Niveles 40x30 Blanco"))
+    again = box()                                                                 # esa misma noche (otra corrida): nada
+    assert again.code == 0 and ml.slugs == [q1] and "vacía" in again.out
+    with Session(engine) as s:                                                    # pasa la noche
+        row = s.get(MlWebResult, row.id)
+        row.fetched_at -= timedelta(hours=20)
+        s.add(row)
+        s.commit()
+    tomorrow = box()
+    assert tomorrow.code == 0 and ml.slugs == [q1, q2]
+    assert [(x.status, x.query) for x in _rows()][-1] == ("ok", "Organizador Doble Ajustable Niveles")
+
+
+def test_even_if_hugo_sent_several_queries_the_runner_opens_one_page(box, ml):
+    stub = StubHugo(fail_first=0, items=[{"product_id": "1", "queries": ["taza ceramica", "taza", "ceramica"]}])
+    try:
+        box.env_file.write_text(f"OFICINA_SEARCH_KEY={KEY}\nHUGO_URL={stub.url}\n")
+        ml.default = (200, {}, listing_html([]))
+        r = box()
+        assert r.code == 0 and ml.slugs == ["taza-ceramica"] and stub.posts == 1
+    finally:
+        stub.close()
 
 
 # ─── frena al primer bloqueo de verdad ──────────────────────────────────────
@@ -445,9 +470,6 @@ def test_sigint_behaves_like_sigterm(box, ml):
 # ─── dos runners a la vez ───────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="GAP: el runner no tiene candado de instancia única: un piloto manual a la hora del launchd "
-                                       "(o dos Macs) busca los MISMOS productos al doble de ritmo desde la misma IP de la oficina, "
-                                       "justo lo que el ritmo de 8-15 s y el corte al primer bloqueo quieren evitar")
 def test_a_second_runner_refuses_to_start_while_another_one_is_running(box, ml):
     _seed(10)
     ml.delay = 0.3
@@ -473,14 +495,20 @@ def test_a_mac_clock_a_few_minutes_behind_still_delivers(box, ml):
     assert r.code == 0 and [x.status for x in _rows()] == ["ok"] * 3
 
 
-@pytest.mark.xfail(strict=True, reason="GAP: con el reloj de la Mac adelantado más de 5 minutos Hugo rechaza TODOS los resultados por "
-                                       "fetched_at en el futuro y el runner igual sale con 0 y loguea 'lote enviado' en INFO: la "
-                                       "oficina queda muerta sin que nadie se entere (ni exit code, ni ERROR en el log)")
-def test_a_mac_clock_ahead_makes_hugo_reject_everything_and_the_runner_must_say_so(box, ml):
+def test_a_mac_clock_ahead_does_not_make_hugo_reject_everything_because_fetched_at_follows_hugos_clock(box, ml):
+    """Antes: con el reloj de la Mac 10 minutos adelantado Hugo rechazaba TODO por fetched_at en el futuro y el runner salía con 0.
+    Ahora fetched_at sale del reloj de Hugo (header Date de la cola)."""
     _seed(3)
     r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "10"})
-    assert _rows() == [], "Hugo rechazó todo (fetched_at en el futuro)"
-    assert r.code != 0 or "ERROR" in r.log or "ERROR" in r.out
+    assert r.code == 0 and [x.status for x in _rows()] == ["ok"] * 3
+    assert all(abs((utcnow() - x.fetched_at).total_seconds()) < 120 for x in _rows())
+    assert "adelantado" in r.out or "adelantado" in r.log                          # y avisa que el reloj está corrido
+
+
+def test_a_mac_clock_a_day_behind_is_corrected_too(box, ml):
+    _seed(2)
+    r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "-1440"})
+    assert r.code == 0 and len(_rows()) == 2 and all(abs((utcnow() - x.fetched_at).total_seconds()) < 120 for x in _rows())
 
 
 # ─── el prefijo público no abre el dashboard ────────────────────────────────
@@ -553,9 +581,6 @@ class StubHugo:
         self.server.server_close()
 
 
-@pytest.mark.xfail(strict=True, reason="GAP: el GET de la cola no se reintenta (el POST sí, 3 veces con espera): si Hugo está "
-                                       "reiniciándose a la 01:00 (redeploy de Coolify, un 502/503 de Traefik) el runner sale con 4 y "
-                                       "esa noche no se busca nada")
 def test_a_transient_5xx_on_the_queue_does_not_cost_the_whole_night(box, ml):
     stub = StubHugo(fail_first=1, items=[{"product_id": "1", "queries": ["taza ceramica"]}])
     try:

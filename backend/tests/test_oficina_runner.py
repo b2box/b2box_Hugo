@@ -3,6 +3,8 @@ bloqueo, lotes, dry-run, y de punta a punta contra el Hugo de verdad (con ML y e
 
 from __future__ import annotations
 
+import asyncio
+import email.utils
 import json
 import logging
 import os
@@ -11,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
@@ -33,12 +36,18 @@ SECRET = "S3cr3t-" + "k" * 40
 
 
 @pytest.fixture(autouse=True)
-def _keep_the_environment(monkeypatch):
+def _keep_the_environment(monkeypatch, tmp_path):
     """`main()` prepara el entorno de la Mac (sin proxy, DB de mentira…): que no se filtre a otros tests."""
     for name in ("BROWSER_PROXY", "BROWSER_FETCH_ENABLED", "DATABASE_URL", "VENDURE_API_URL"):
         monkeypatch.setenv(name, os.environ.get(name, ""))
         if name not in os.environ or os.environ[name] == "":
             monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
+def _private_lock(monkeypatch, tmp_path):
+    """Los tests de `main()` no usan el candado de verdad de la Mac (~/.config/b2box-bench)."""
+    monkeypatch.setattr(runner, "DEFAULT_LOCK", tmp_path / "lock" / "oficina.lock")
 
 
 def _cards(*refs: str):
@@ -233,21 +242,23 @@ async def test_the_listing_urls_are_ml_search_pages():
     assert ml.urls == ["https://listado.mercadolibre.com.ar/organizador-doble-ajustable-niños".replace("ñ", "%C3%B1")]
 
 
-async def test_an_empty_first_query_goes_on_to_the_next_and_stops_at_the_first_with_results():
+async def test_only_the_first_query_is_searched_one_page_per_product_per_night():
+    """Tope de ML desde la IP de la oficina: aunque Hugo mande varias consultas, se abre UNA página por producto. Si vino vacía,
+    la siguiente variante es cosa de la noche siguiente (Hugo se la da entonces)."""
     ml = FakeML({"larga": EMPTY, "corta": _ok("MLA5"), "claves": _ok("MLA6")})
     hugo = FakeHugo()
-    await _go(_searcher(ml, hugo), [{"product_id": "9", "queries": ["larga", "corta", "claves"]}])
-    assert [u.rsplit("/", 1)[-1] for u in ml.urls] == ["larga", "corta"]          # la tercera no hace falta
+    s = _searcher(ml, hugo)
+    await _go(s, [{"product_id": "9", "queries": ["larga", "corta", "claves"]}])
+    assert [u.rsplit("/", 1)[-1] for u in ml.urls] == ["larga"] and s.sleeps == []
     [res] = hugo.posts[0]
-    assert (res["status"], res["query"]) == ("ok", "corta") and res["candidates"][0]["id"] == "MLA5"
+    assert (res["status"], res["query"], res["candidates"]) == ("empty", "larga", [])
 
 
-async def test_every_query_empty_is_reported_empty_with_the_last_query():
-    ml = FakeML(default=EMPTY)
-    hugo = FakeHugo()
-    await _go(_searcher(ml, hugo), [{"product_id": "9", "queries": ["a", "b"]}])
+async def test_a_product_with_results_on_the_first_query_is_ok():
+    ml, hugo = FakeML({"larga": _ok("MLA5")}), FakeHugo()
+    await _go(_searcher(ml, hugo), [{"product_id": "9", "queries": ["larga", "corta"]}])
     [res] = hugo.posts[0]
-    assert (res["status"], res["query"], res["candidates"]) == ("empty", "b", []) and len(ml.urls) == 2
+    assert (res["status"], res["query"]) == ("ok", "larga") and res["candidates"][0]["id"] == "MLA5" and len(ml.urls) == 1
 
 
 async def test_max_limits_the_products_it_searches():
@@ -262,7 +273,7 @@ async def test_hugo_items_with_a_wrong_shape_are_skipped():
     bad = [None, 5, {"product_id": "../x", "queries": ["a"]}, {"product_id": "1"}, {"product_id": "2", "queries": []},
            {"product_id": "3", "queries": [None, 5, "  "]}, {"product_id": "4", "queries": ["bien"] * 9}]
     await _go(_searcher(ml, FakeHugo()), bad)
-    assert len(ml.urls) == 1                                    # solo el "4", y con una sola consulta (la primera con resultados corta)
+    assert len(ml.urls) == 1                                    # solo el "4", y con una sola consulta (la primera)
 
 
 # ─── el primer bloqueo frena la noche ──────────────────────────────────────
@@ -292,11 +303,11 @@ async def test_the_first_block_stops_the_whole_night_and_is_reported_without_ret
     assert s.stats.blocked == 1 and len(s.sleeps) == 2                           # nada de esperar y volver a probar
 
 
-async def test_a_block_on_a_second_query_does_not_try_the_third():
-    ml = FakeML({"a": EMPTY, "b": page(ANTIBOT_HTML), "c": _ok()})
+async def test_a_block_stops_before_the_next_product_and_never_tries_another_query():
+    ml = FakeML({"b": page(ANTIBOT_HTML), "c": _ok()})
     hugo = FakeHugo()
-    code = await _go(_searcher(ml, hugo), [{"product_id": "1", "queries": ["a", "b", "c"]}, {"product_id": "2", "queries": ["z"]}])
-    assert code == runner.EXIT_BLOCKED and len(ml.urls) == 2
+    code = await _go(_searcher(ml, hugo), [{"product_id": "1", "queries": ["b", "c"]}, {"product_id": "2", "queries": ["z"]}])
+    assert code == runner.EXIT_BLOCKED and [u.rsplit("/", 1)[-1] for u in ml.urls] == ["b"]
     assert [(r["status"], r["query"]) for r in hugo.posts[0]] == [("blocked", "b")]
 
 
@@ -588,3 +599,171 @@ def test_the_run_log_is_private_also_after_rotating(tmp_path):
         assert stat.S_IMODE(log_file.with_name("run.log.1").stat().st_mode) == 0o600
     finally:
         logging.getLogger().handlers.clear()
+
+
+# ─── una sola instancia ────────────────────────────────────────────────────
+
+
+def test_the_lock_admits_one_runner_at_a_time_and_is_released_on_close(tmp_path):
+    path = tmp_path / "x" / "oficina.lock"
+    first = runner.acquire_lock(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    with pytest.raises(runner.AlreadyRunning, match=f"Ya hay otra corrida.*PID {os.getpid()}"):
+        runner.acquire_lock(path)
+    first.close()
+    runner.acquire_lock(path).close()
+
+
+def test_main_refuses_to_start_while_another_one_holds_the_lock_and_check_does_not_need_it(tmp_path, monkeypatch, capsys):
+    env = _write_env(tmp_path / ".env", f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://hugo.example\n")
+    held = runner.acquire_lock(runner.DEFAULT_LOCK)
+    hugo = FakeHugo(_items(1))
+    monkeypatch.setattr(runner, "HugoClient", lambda cfg: pytest.fail("ni le habla a Hugo"))
+    try:
+        assert runner.main(["--env-file", str(env), "--log-file", str(tmp_path / "l")]) == runner.EXIT_BUSY
+        assert "ya hay otra corrida" in capsys.readouterr().out.lower()
+        monkeypatch.setattr(runner, "HugoClient", lambda cfg: hugo.client())
+        assert runner.main(["--check", "--env-file", str(env), "--log-file", str(tmp_path / "l")]) == 0
+    finally:
+        held.close()
+
+
+# ─── el reloj y los rechazos ───────────────────────────────────────────────
+
+
+def _dated_hugo(minutes_ahead: float, hugo: FakeHugo) -> runner.HugoClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        resp = hugo.handler(request)
+        when = datetime.now(timezone.utc) + timedelta(minutes=minutes_ahead)
+        resp.headers["date"] = email.utils.format_datetime(when, usegmt=True)
+        return resp
+
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://hugo.example", headers={"x-oficina-key": SECRET})
+    return HugoClient(runner.Config(key=SECRET, hugo_url="https://hugo.example"), client=http, sleep=lambda s: None)
+
+
+async def test_fetched_at_follows_the_clock_of_hugo_not_the_one_of_the_mac(caplog):
+    caplog.set_level(logging.WARNING)
+    hugo = FakeHugo(_items(2))
+    client = _dated_hugo(-30, hugo)                                      # el reloj de la Mac está 30 minutos adelantado
+    client.queue(5)
+    s = runner.Searcher(fetch=FakeML().fetch, hugo=client, sleep=lambda x: asyncio.sleep(0))
+    await s.run(_items(1), 5)
+    stamp = datetime.fromisoformat(hugo.posts[0][0]["fetched_at"].replace("Z", "+00:00"))
+    assert abs((stamp - (datetime.now(timezone.utc) - timedelta(minutes=30))).total_seconds()) < 5
+    assert "adelantado" in caplog.text
+
+
+async def test_without_a_date_header_it_uses_the_local_clock():
+    hugo = FakeHugo(_items(1))
+    client = hugo.client()
+    client.queue(5)
+    assert client.clock_offset == timedelta(0)
+    assert abs((datetime.fromisoformat(client.now_iso().replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()) < 3
+
+
+class RejectingHugo(FakeHugo):
+    def __init__(self, reason: str | list[str], items=None):
+        super().__init__(items)
+        self.reason = reason
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return super().handler(request)
+        results = json.loads(request.content)["results"]
+        reasons = [self.reason] * len(results) if isinstance(self.reason, str) else self.reason
+        self.posts.append(results)
+        return httpx.Response(200, json={"received": len(results), "stored": 0, "duplicates": 0, "rejected_total": len(results),
+                                         "rejected": [{"product_id": r["product_id"], "reason": why} for r, why in zip(results, reasons)]})
+
+
+async def test_when_hugo_rejects_a_whole_batch_for_one_reason_the_runner_says_so_stops_and_exits_with_error(caplog):
+    caplog.set_level(logging.INFO)
+    ml, hugo = FakeML(), RejectingHugo("fetched_at inválido o en el futuro")
+    s = _searcher(ml, hugo, batch_size=5)
+    code = await _go(s, _items(20))
+    assert code == runner.EXIT_SEND and len(ml.urls) == 5            # frenó después del primer lote: no sigue tirando páginas de ML
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("rechazó TODO el lote" in m and "fetched_at" in m for m in errors)
+    assert not any("lote enviado" in r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
+    assert s.stats.rejected == 5 and s.stats.sent == 0
+
+
+async def test_a_batch_rejected_for_different_reasons_is_an_error_but_the_night_goes_on(caplog):
+    ml, hugo = FakeML(), RejectingHugo(["producto desconocido", "fetched_at inválido"] * 3)
+    s = _searcher(ml, hugo, batch_size=4)
+    code = await _go(s, _items(8))
+    assert code == runner.EXIT_SEND and len(ml.urls) == 8
+
+
+async def test_a_partly_rejected_batch_is_a_warning_not_an_error(caplog):
+    caplog.set_level(logging.INFO)
+
+    class Half(FakeHugo):
+        def handler(self, request):
+            if request.method == "GET":
+                return super().handler(request)
+            results = json.loads(request.content)["results"]
+            self.posts.append(results)
+            return httpx.Response(200, json={"received": 2, "stored": 1, "duplicates": 0, "rejected_total": 1,
+                                             "rejected": [{"product_id": results[0]["product_id"], "reason": "producto desconocido"}]})
+
+    s = _searcher(FakeML(), Half(), batch_size=2)
+    code = await _go(s, _items(2))
+    assert code == 0 and any("1 rechazados" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+
+# ─── reintentos de la cola ─────────────────────────────────────────────────
+
+
+def _flaky(statuses: list[int], headers: dict | None = None):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        status = statuses[min(calls["n"] - 1, len(statuses) - 1)]
+        if status == 200:
+            return httpx.Response(200, json={"items": [], "max_results": 8})
+        return httpx.Response(status, json={"detail": "x"}, headers=headers or {})
+
+    sleeps: list[float] = []
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://hugo.example")
+    return HugoClient(runner.Config(key=SECRET, hugo_url="https://hugo.example"), client=http, sleep=sleeps.append), calls, sleeps
+
+
+def test_the_queue_is_retried_three_times_with_growing_waits():
+    client, calls, sleeps = _flaky([503, 502, 200])
+    assert client.queue(5)["items"] == [] and calls["n"] == 3 and sleeps == [5.0, 15.0]
+    client, calls, sleeps = _flaky([503])
+    with pytest.raises(runner.SendFailed):
+        client.queue(5)
+    assert calls["n"] == runner.SEND_ATTEMPTS and sleeps == [5.0, 15.0]
+
+
+def test_a_429_on_the_queue_waits_what_retry_after_says_capped():
+    client, calls, sleeps = _flaky([429, 200], {"retry-after": "7"})
+    client.queue(5)
+    assert sleeps == [7.0]
+    client, calls, sleeps = _flaky([429, 200], {"retry-after": "99999"})
+    client.queue(5)
+    assert sleeps == [runner.RETRY_AFTER_CAP_S]
+
+
+@pytest.mark.parametrize("status", [401, 404, 400, 422])
+def test_a_key_or_endpoint_problem_on_the_queue_is_not_retried(status):
+    client, calls, sleeps = _flaky([status])
+    with pytest.raises(runner.HugoError):
+        client.queue(5)
+    assert calls["n"] == 1 and sleeps == []
+
+
+def test_the_network_down_is_retried_and_then_reported_without_a_traceback():
+    def handler(request):
+        raise httpx.ConnectError("no route")
+
+    sleeps: list[float] = []
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://hugo.example")
+    client = HugoClient(runner.Config(key=SECRET, hugo_url="https://hugo.example"), client=http, sleep=sleeps.append)
+    with pytest.raises(runner.SendFailed, match="ConnectError") as err:
+        client.queue(5)
+    assert SECRET not in str(err.value) and len(sleeps) == runner.SEND_ATTEMPTS - 1

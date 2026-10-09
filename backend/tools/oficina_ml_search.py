@@ -17,14 +17,20 @@ Uso (con el venv del repo, desde cualquier carpeta):
 Configuración: ~/.config/b2box-bench/.env (permisos 600) con OFICINA_SEARCH_KEY y HUGO_URL. La key NUNCA se
 imprime ni se loguea. Ver el README ("Buscador de la oficina") para la instalación con launchd.
 
+Una sola página de ML por producto por noche (la consulta que Hugo le da); una sola instancia a la vez (candado en
+~/.config/b2box-bench/oficina-ml-search.lock).
+
 Códigos de salida: 0 bien · 2 configuración o autenticación · 3 ML bloqueó (la noche se frenó) · 4 no se pudieron
-enviar los resultados · 5 el navegador no anda o demasiados errores seguidos.
+enviar los resultados, o Hugo los rechazó · 5 el navegador no anda o demasiados errores seguidos · 6 ya hay otra
+corrida en marcha.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import email.utils
+import fcntl
 import logging
 import logging.handlers
 import os
@@ -40,7 +46,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,6 +54,7 @@ from urllib.parse import urlsplit
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = Path.home() / ".config" / "b2box-bench" / ".env"
 DEFAULT_LOG = Path.home() / "Library" / "Logs" / "b2box-oficina-ml-search.log"
+DEFAULT_LOCK = Path.home() / ".config" / "b2box-bench" / "oficina-ml-search.lock"
 KEY_VAR, URL_VAR = "OFICINA_SEARCH_KEY", "HUGO_URL"
 
 DEFAULT_MAX = 250
@@ -57,12 +64,13 @@ BATCH_SIZE = 10
 PAUSE_MIN_S, PAUSE_MAX_S = 8.0, 15.0
 # Errores de lectura seguidos (página ilegible, navegador caído) que frenan la noche. No son bloqueos.
 ERROR_STREAK = 5
-MAX_QUERIES_PER_PRODUCT = 3
+# UNA página de ML por producto por noche: la primera consulta que da Hugo. Si vino vacía, Hugo da la siguiente la noche siguiente.
+MAX_QUERIES_PER_PRODUCT = 1
 SEND_ATTEMPTS = 3
 SEND_BACKOFF_S = (5.0, 15.0, 45.0)
 RETRY_AFTER_CAP_S = 120.0
 
-EXIT_OK, EXIT_CONFIG, EXIT_BLOCKED, EXIT_SEND, EXIT_BROWSER = 0, 2, 3, 4, 5
+EXIT_OK, EXIT_CONFIG, EXIT_BLOCKED, EXIT_SEND, EXIT_BROWSER, EXIT_BUSY = 0, 2, 3, 4, 5, 6
 
 log = logging.getLogger("oficina_ml_search")
 
@@ -79,7 +87,11 @@ class HugoError(Exception):
 
 
 class SendFailed(Exception):
-    """No se pudo entregar un lote después de los reintentos."""
+    """No se pudo hablar con Hugo después de los reintentos."""
+
+
+class AlreadyRunning(Exception):
+    """Hay otra corrida del buscador en marcha."""
 
 
 # ─── Configuración local ───────────────────────────────────────────
@@ -178,6 +190,30 @@ def init_key(env_path: Path) -> str:
     return "\n".join(steps)
 
 
+# ─── Una sola instancia ────────────────────────────────────────────
+
+
+def acquire_lock(path: Path):
+    """Candado de instancia única (flock): un piloto manual a la hora del launchd, o dos Macs con el mismo archivo de
+    configuración, buscarían los MISMOS productos al doble de ritmo desde la misma IP. Devuelve el archivo abierto (el candado
+    vive mientras el proceso; se suelta solo al terminar, también si muere)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(fd, "r+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        owner = handle.read().strip()
+        handle.close()
+        raise AlreadyRunning(f"Ya hay otra corrida del buscador de la oficina en marcha{f' (PID {owner})' if owner.isdigit() else ''}: "
+                             f"esta no arranca para no duplicar las búsquedas desde la misma IP.") from None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 # ─── Hugo ──────────────────────────────────────────────────────────
 
 
@@ -193,9 +229,29 @@ class HugoClient:
             base_url=config.hugo_url, follow_redirects=False,
             timeout=httpx.Timeout(30.0, connect=10.0),
             headers={"x-oficina-key": config.key, "user-agent": "b2box-oficina-ml-search/1"})
+        # Cuánto adelanta (+) o atrasa (-) el reloj de Hugo respecto del de esta Mac, según el header Date de sus respuestas.
+        self.clock_offset = timedelta(0)
 
     def close(self) -> None:
         self._client.close()
+
+    def now_iso(self) -> str:
+        """La hora para `fetched_at`: la de Hugo. Con el reloj de la Mac corrido más de unos minutos Hugo rechazaría todo
+        por "fecha en el futuro"."""
+        return (datetime.now(timezone.utc) + self.clock_offset).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _learn_clock(self, resp) -> None:
+        try:
+            hugo = email.utils.parsedate_to_datetime(resp.headers.get("date", ""))
+        except (TypeError, ValueError):
+            return
+        if hugo.tzinfo is None:
+            hugo = hugo.replace(tzinfo=timezone.utc)
+        offset = hugo - datetime.now(timezone.utc)
+        if abs(offset) > timedelta(seconds=90) and abs(offset - self.clock_offset) > timedelta(seconds=90):
+            log.warning("el reloj de esta Mac está %s minutos %s que el de Hugo: se usa la hora de Hugo para fetched_at",
+                        round(abs(offset.total_seconds()) / 60, 1), "atrasado" if offset > timedelta(0) else "adelantado")
+        self.clock_offset = offset
 
     def _call(self, method: str, path: str, **kw: Any):
         try:
@@ -212,44 +268,48 @@ class HugoClient:
                    422: "Hugo rechazó los parámetros (422)"}
         raise HugoError(reasons.get(resp.status_code, f"Hugo contestó {resp.status_code}"))
 
-    def queue(self, limit: int) -> dict[str, Any]:
-        resp = self._call("GET", "/api/oficina/ml-queue", params={"limit": limit})
-        if resp.status_code != 200:
-            if resp.status_code in (429, 500, 502, 503, 504):
-                raise SendFailed(f"Hugo no pudo dar la cola ({resp.status_code})")
-            self._fatal(resp)
-        try:
-            data = resp.json()
-        except ValueError:
-            raise HugoError("Hugo contestó algo que no es JSON") from None
-        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
-            raise HugoError("Hugo contestó una cola con otra forma")
-        return data
-
-    def send(self, results: list[dict[str, Any]]) -> dict[str, Any]:
-        """Un lote. Reintenta (es idempotente por producto y fetched_at) solo lo transitorio."""
+    def _request(self, method: str, path: str, **kw: Any):
+        """Un pedido con reintentos SOLO para lo transitorio (red caída, 5xx de un redeploy, 429 con su Retry-After):
+        SEND_ATTEMPTS intentos con espera creciente. Lo demás (key mala, endpoint apagado) no se reintenta."""
         last = ""
         for attempt in range(SEND_ATTEMPTS):
             try:
-                resp = self._call("POST", "/api/oficina/ml-results", json={"results": results})
+                resp = self._call(method, path, **kw)
             except SendFailed as exc:
                 last = str(exc)
             else:
                 if resp.status_code == 200:
-                    try:
-                        return resp.json()
-                    except ValueError:
-                        raise HugoError("Hugo contestó algo que no es JSON") from None
+                    self._learn_clock(resp)
+                    return resp
                 if resp.status_code not in (429, 500, 502, 503, 504):
                     self._fatal(resp)
                 last = f"Hugo contestó {resp.status_code}"
                 retry_after = resp.headers.get("retry-after", "")
                 if resp.status_code == 429 and retry_after.isdigit():
-                    self._sleep(min(float(retry_after), RETRY_AFTER_CAP_S))
+                    if attempt + 1 < SEND_ATTEMPTS:
+                        self._sleep(min(float(retry_after), RETRY_AFTER_CAP_S))
                     continue
             if attempt + 1 < SEND_ATTEMPTS:
                 self._sleep(SEND_BACKOFF_S[min(attempt, len(SEND_BACKOFF_S) - 1)])
-        raise SendFailed(last or "no se pudo enviar")
+        raise SendFailed(last or "no se pudo hablar con Hugo")
+
+    @staticmethod
+    def _json(resp) -> Any:
+        try:
+            return resp.json()
+        except ValueError:
+            raise HugoError("Hugo contestó algo que no es JSON") from None
+
+    def queue(self, limit: int) -> dict[str, Any]:
+        data = self._json(self._request("GET", "/api/oficina/ml-queue", params={"limit": limit}))
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise HugoError("Hugo contestó una cola con otra forma")
+        return data
+
+    def send(self, results: list[dict[str, Any]]) -> dict[str, Any]:
+        """Un lote (idempotente por producto y fetched_at, así que reintentarlo no duplica nada)."""
+        data = self._json(self._request("POST", "/api/oficina/ml-results", json={"results": results}))
+        return data if isinstance(data, dict) else {}
 
 
 # ─── La búsqueda ───────────────────────────────────────────────────
@@ -300,7 +360,7 @@ class Searcher:
     def __init__(self, *, fetch: Fetcher, hugo: HugoClient | None, max_results: int = 8, batch_size: int = BATCH_SIZE,
                  pause_min: float = PAUSE_MIN_S, pause_max: float = PAUSE_MAX_S, dry_run: bool = False,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep, rng: random.Random | None = None,
-                 now: Callable[[], str] = _now_iso) -> None:
+                 now: Callable[[], str] | None = None) -> None:
         from app.ingest import browser_fetch
         from app.pricing import market_ml_web, oficina_ml
 
@@ -308,7 +368,9 @@ class Searcher:
         self._fetch, self._hugo = fetch, hugo
         self.max_results, self.batch_size, self.dry_run = max(1, int(max_results)), max(1, int(batch_size)), dry_run
         self.pause_min, self.pause_max = pause_min, pause_max
-        self._sleep, self._rng, self._now = sleep, rng or random.Random(), now
+        self._sleep, self._rng = sleep, rng or random.Random()
+        # fetched_at con la hora de HUGO (su header Date), no la de esta Mac: con el reloj corrido Hugo rechazaría todo.
+        self._now = now or (hugo.now_iso if hugo is not None else _now_iso)
         self.stats = Stats()
         self.pending: list[dict[str, Any]] = []
         self.exit_code = EXIT_OK
@@ -396,11 +458,30 @@ class Searcher:
                 self._stop, self.exit_code = True, EXIT_CONFIG
                 log.error("Hugo rechazó el envío, se frena la noche: %s", exc)
                 return
-            self.stats.sent += int(report.get("stored", 0))
-            self.stats.duplicates += int(report.get("duplicates", 0))
-            self.stats.rejected += len(report.get("rejected") or [])
-            log.info("lote enviado: %s guardados, %s repetidos, %s rechazados", report.get("stored"),
-                     report.get("duplicates"), report.get("rejected_total", 0))
+            self._account(batch, report)
+
+    def _account(self, batch: list[dict[str, Any]], report: dict[str, Any]) -> None:
+        """Anota lo que Hugo dijo de un lote. Que Hugo rechace TODO no es un "lote enviado": se avisa fuerte, la corrida
+        termina con error y, si todos los rechazos tienen la misma causa (fecha en el futuro, key de otro entorno…), se frena
+        la noche en vez de seguir gastando páginas de ML para tirarlas."""
+        stored, duplicates = int(report.get("stored") or 0), int(report.get("duplicates") or 0)
+        rejected = report.get("rejected") or []
+        total_rejected = max(int(report.get("rejected_total") or 0), len(rejected))
+        self.stats.sent += stored
+        self.stats.duplicates += duplicates
+        self.stats.rejected += total_rejected
+        reasons = sorted({str(r.get("reason", ""))[:80] for r in rejected if isinstance(r, dict)})
+        if total_rejected and stored + duplicates == 0:
+            self.exit_code = self.exit_code or EXIT_SEND
+            log.error("Hugo rechazó TODO el lote (%d resultados): %s", len(batch), "; ".join(reasons) or "sin motivo")
+            if len(reasons) == 1 and len(batch) > 1:
+                self._stop = True
+                log.error("el motivo es el mismo para todos: se frena la noche")
+        elif total_rejected:
+            log.warning("lote enviado: %d guardados, %d repetidos, %d rechazados (%s)", stored, duplicates, total_rejected,
+                        "; ".join(reasons[:3]) or "sin motivo")
+        else:
+            log.info("lote enviado: %d guardados, %d repetidos", stored, duplicates)
 
     async def run(self, items: list[Any], limit: int) -> int:
         todo = [c for c in (_clean_item(i) for i in items) if c][:limit]
@@ -495,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause-max", type=float, default=PAUSE_MAX_S, help=f"pausa máxima en s (default {PAUSE_MAX_S:g})")
     p.add_argument("--env-file", type=Path, default=DEFAULT_ENV, help=f"default {DEFAULT_ENV}")
     p.add_argument("--log-file", type=Path, default=DEFAULT_LOG, help=f"default {DEFAULT_LOG}")
+    p.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help=f"candado de instancia única (default {DEFAULT_LOCK})")
     p.add_argument("--no-caffeinate", action="store_true", help="no impedir que la Mac se duerma mientras corre")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -517,6 +599,13 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         log.error("%s", exc)
         return EXIT_CONFIG
+    lock = None
+    if not args.check:                      # (--check no busca: puede correr con una corrida en marcha)
+        try:
+            lock = acquire_lock(args.lock_file)
+        except AlreadyRunning as exc:
+            log.error("%s", exc)
+            return EXIT_BUSY
     prepare_environment()
     # launchd (o el apagado de la Mac) corta con SIGTERM: se trata como Ctrl+C, así lo que ya se buscó se entrega.
     previous_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
@@ -549,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         hugo.close()
+        if lock is not None:
+            lock.close()                    # suelta el candado
 
 
 if __name__ == "__main__":

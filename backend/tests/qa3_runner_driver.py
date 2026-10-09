@@ -83,6 +83,7 @@ def _prepare() -> None:
 
 
 runner.prepare_environment = _prepare
+runner.SEND_BACKOFF_S = (0.05, 0.05, 0.05)          # los reintentos contra Hugo, sin esperar 5 y 15 s de verdad
 
 if __name__ == "__main__":
     sys.exit(runner.main(sys.argv[1:]))
