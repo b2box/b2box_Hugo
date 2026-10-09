@@ -781,3 +781,96 @@ def test_a_config_directory_open_to_others_is_a_warning_not_a_refusal(tmp_path, 
     d.chmod(0o700)
     runner.load_config(d / ".env")
     assert caplog.text == ""
+
+
+# ─── un header Date raro no rompe ni engaña al runner ──────────────────────
+
+
+class _Resp:
+    status_code = 200
+
+    def __init__(self, date: str | None) -> None:
+        self.headers = {} if date is None else {"date": date}
+
+
+def _client() -> runner.HugoClient:
+    return HugoClient(runner.Config(key=SECRET, hugo_url="https://hugo.example"),
+                      client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+
+
+@pytest.mark.parametrize("date", ["Fri, 31 Dec 9999 23:59:59 GMT", "Wed, 30 Dec 9999 23:59:59 GMT", "Mon, 01 Jan 1990 00:00:00 GMT",
+                                  "Mon, 01 Jan 2024 00:00:00 GMT", "Sat, 10 Oct 2030 12:00:00 GMT"])
+def test_a_date_more_than_a_day_away_is_ignored_logged_and_the_local_clock_is_used(date, caplog):
+    caplog.set_level(logging.WARNING)
+    client = _client()
+    client.clock_offset = timedelta(minutes=7)                         # algo aprendido antes
+    client._learn_clock(_Resp(date))
+    assert client.clock_offset == timedelta(0) and "se ignora" in caplog.text
+    stamp = datetime.fromisoformat(client.now_iso().replace("Z", "+00:00"))                        # y no revienta
+    assert abs((stamp - datetime.now(timezone.utc)).total_seconds()) < 3
+
+
+@pytest.mark.parametrize("date", ["no soy una fecha", "", None, "Fri, 99 Dec 2026 99:99:99 GMT", "Mon, 01 Jan 0001 00:00:00 GMT",
+                                  "\x00\x00", "Sun, 06 Nov 9999 08:49:37 -2359"])
+def test_an_unparseable_or_overflowing_date_never_raises(date):
+    client = _client()
+    client._learn_clock(_Resp(date))                                  # (no lanza: OverflowError, ValueError, TypeError)
+    assert abs(client.clock_offset) <= timedelta(days=1)
+    client.now_iso()
+
+
+def test_an_offset_just_inside_the_limit_is_used():
+    client = _client()
+    when = datetime.now(timezone.utc) - timedelta(hours=23)
+    client._learn_clock(_Resp(email.utils.format_datetime(when, usegmt=True)))
+    assert timedelta(hours=-23, minutes=-1) < client.clock_offset < timedelta(hours=-22, minutes=-59)
+
+
+def test_the_lock_does_not_follow_a_symlink_planted_in_its_place(tmp_path):
+    victim = tmp_path / "victima.txt"
+    victim.write_text("datos importantes\n")
+    link = tmp_path / "oficina.lock"
+    link.symlink_to(victim)
+    with pytest.raises(runner.ConfigError, match="link simbólico"):
+        runner.acquire_lock(link)
+    assert victim.read_text() == "datos importantes\n"             # no se escribió el PID en el archivo apuntado
+
+
+def test_the_lock_is_not_inherited_by_child_processes(tmp_path):
+    import fcntl
+
+    handle = runner.acquire_lock(tmp_path / "x.lock")
+    try:
+        assert fcntl.fcntl(handle.fileno(), fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+    finally:
+        handle.close()
+
+
+def test_main_with_a_planted_symlink_lock_exits_with_a_config_error_and_touches_nothing(tmp_path, monkeypatch):
+    env = _write_env(tmp_path / ".env", f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://hugo.example\n")
+    victim = tmp_path / "victima.txt"
+    victim.write_text("intacto")
+    link = tmp_path / "link.lock"
+    link.symlink_to(victim)
+    monkeypatch.setattr(runner, "HugoClient", lambda cfg: pytest.fail("ni le habla a Hugo"))
+    code = runner.main(["--env-file", str(env), "--log-file", str(tmp_path / "l"), "--lock-file", str(link)])
+    assert code == runner.EXIT_CONFIG and victim.read_text() == "intacto"
+
+
+def test_the_run_log_does_not_follow_a_symlink_either(tmp_path):
+    victim = tmp_path / "victima.txt"
+    victim.write_text("intacto")
+    log_link = tmp_path / "run.log"
+    log_link.symlink_to(victim)
+    with pytest.raises(OSError):
+        runner.setup_logging(log_link)
+    logging.getLogger().handlers.clear()
+    assert victim.read_text() == "intacto"
+
+
+def test_main_with_a_symlink_as_log_file_is_a_config_error_not_a_traceback(tmp_path, capsys):
+    victim = tmp_path / "victima.txt"
+    victim.write_text("intacto")
+    (tmp_path / "run.log").symlink_to(victim)
+    assert runner.main(["--check", "--env-file", str(tmp_path / ".env"), "--log-file", str(tmp_path / "run.log")]) == runner.EXIT_CONFIG
+    assert "link simbólico" in capsys.readouterr().err and victim.read_text() == "intacto"

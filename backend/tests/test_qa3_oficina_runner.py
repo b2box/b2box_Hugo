@@ -505,9 +505,10 @@ def test_a_mac_clock_ahead_does_not_make_hugo_reject_everything_because_fetched_
     assert "adelantado" in r.out or "adelantado" in r.log                          # y avisa que el reloj está corrido
 
 
-def test_a_mac_clock_a_day_behind_is_corrected_too(box, ml):
+def test_a_mac_clock_ten_hours_behind_is_corrected_too(box, ml):
+    """(Más de un día de diferencia ya no se corrige con el Date de Hugo: ver test_oficina_runner.py.)"""
     _seed(2)
-    r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "-1440"})
+    r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "-600"})
     assert r.code == 0 and len(_rows()) == 2 and all(abs((utcnow() - x.fetched_at).total_seconds()) < 120 for x in _rows())
 
 

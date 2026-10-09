@@ -69,6 +69,8 @@ MAX_QUERIES_PER_PRODUCT = 1
 SEND_ATTEMPTS = 3
 SEND_BACKOFF_S = (5.0, 15.0, 45.0)
 RETRY_AFTER_CAP_S = 120.0
+# Un header Date de Hugo que difiere más que esto de la hora de la Mac no se usa.
+MAX_CLOCK_OFFSET = timedelta(days=1)
 
 EXIT_OK, EXIT_CONFIG, EXIT_BLOCKED, EXIT_SEND, EXIT_BROWSER, EXIT_BUSY = 0, 2, 3, 4, 5, 6
 
@@ -201,7 +203,12 @@ def acquire_lock(path: Path):
     configuración, buscarían los MISMOS productos al doble de ritmo desde la misma IP. Devuelve el archivo abierto (el candado
     vive mientras el proceso; se suelta solo al terminar, también si muere)."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        # O_NOFOLLOW: si alguien dejó un link simbólico en lugar del candado, no se abre (ni se escribe el PID en el archivo al que
+        # apunta). O_CLOEXEC: el candado no se hereda a los procesos hijos (caffeinate).
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise ConfigError(f"No se puede usar {path} como candado ({exc.strerror}): si es un link simbólico, borralo") from None
     handle = os.fdopen(fd, "r+")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -244,13 +251,21 @@ class HugoClient:
         return (datetime.now(timezone.utc) + self.clock_offset).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _learn_clock(self, resp) -> None:
+        """Aprende la diferencia con el reloj de Hugo (header Date). Un Date que difiere más de MAX_CLOCK_OFFSET del reloj de la
+        Mac no se cree (un proxy o un servidor raro; o un año 9999 que reventaba la suma): se usa el reloj de la Mac."""
         try:
             hugo = email.utils.parsedate_to_datetime(resp.headers.get("date", ""))
-        except (TypeError, ValueError):
+            if hugo.tzinfo is None:
+                hugo = hugo.replace(tzinfo=timezone.utc)
+            offset = hugo - datetime.now(timezone.utc)
+            if abs(offset) > MAX_CLOCK_OFFSET:
+                log.warning("el header Date de Hugo difiere en más de %d día de la hora de esta Mac: se ignora y se usa la hora "
+                            "de la Mac", MAX_CLOCK_OFFSET.days)
+                self.clock_offset = timedelta(0)
+                return
+            (datetime.now(timezone.utc) + offset).isoformat()          # que la suma no se salga de rango
+        except (TypeError, ValueError, OverflowError):
             return
-        if hugo.tzinfo is None:
-            hugo = hugo.replace(tzinfo=timezone.utc)
-        offset = hugo - datetime.now(timezone.utc)
         if abs(offset) > timedelta(seconds=90) and abs(offset - self.clock_offset) > timedelta(seconds=90):
             log.warning("el reloj de esta Mac está %s minutos %s que el de Hugo: se usa la hora de Hugo para fetched_at",
                         round(abs(offset.total_seconds()) / 60, 1), "atrasado" if offset > timedelta(0) else "adelantado")
@@ -527,7 +542,7 @@ class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """El log con permisos 600 (también el archivo nuevo después de rotar): no lo lee otra gente de la Mac."""
 
     def _open(self):
-        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         os.chmod(self.baseFilename, 0o600)
         return os.fdopen(fd, self.mode, encoding=self.encoding)
 
@@ -596,7 +611,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.pause_min < PAUSE_MIN_S or args.pause_max < args.pause_min:
         print(f"La pausa mínima no puede ser menor a {PAUSE_MIN_S:g} s ni mayor que la máxima", file=sys.stderr)
         return EXIT_CONFIG
-    setup_logging(args.log_file, args.verbose)
+    try:
+        setup_logging(args.log_file, args.verbose)
+    except OSError as exc:
+        print(f"No se puede abrir el log {args.log_file} ({exc.strerror}): si es un link simbólico, borralo", file=sys.stderr)
+        return EXIT_CONFIG
     try:
         config = load_config(args.env_file)
     except ConfigError as exc:
@@ -609,6 +628,9 @@ def main(argv: list[str] | None = None) -> int:
         except AlreadyRunning as exc:
             log.error("%s", exc)
             return EXIT_BUSY
+        except ConfigError as exc:
+            log.error("%s", exc)
+            return EXIT_CONFIG
     prepare_environment()
     # launchd (o el apagado de la Mac) corta con SIGTERM: se trata como Ctrl+C, así lo que ya se buscó se entrega.
     previous_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
