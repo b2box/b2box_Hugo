@@ -91,18 +91,35 @@ def sort_rules(rule_ids: Iterable[str]) -> list[str]:
 _WS_RE = re.compile(r"\s+")
 
 
-def fold(text: str | None) -> str:
-    """Minúsculas, sin tildes, comillas rectas y espacios colapsados: la forma en
-    que se comparan los textos."""
-    t = unicodedata.normalize("NFKD", text or "")
-    t = "".join(c for c in t if not unicodedata.combining(c))
+_COMBINING_RE = re.compile("[\u0300-\u036f]")
+_FOLD_CACHE_MAX_CHARS = 5_000
+
+
+@functools.lru_cache(maxsize=4096)
+def _fold_cached(text: str) -> str:
+    return _fold(text)
+
+
+def _fold(text: str) -> str:
+    t = _COMBINING_RE.sub("", unicodedata.normalize("NFKD", text))
     t = t.replace("\u2019", "'").replace("\u2018", "'").replace("`", "'").replace("\u00b4", "'")
     return _WS_RE.sub(" ", t.casefold()).strip()
 
 
-_BLOCK_TAG_RE = re.compile(r"</?(?:p|br|li|ul|ol|div|h[1-6]|tr|td|table)\b[^>]*>", re.I)
-_TAG_RE = re.compile(r"<[^>]*>")
-_HAS_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
+def fold(text: str | None) -> str:
+    """Minúsculas, sin tildes, comillas rectas y espacios colapsados: la forma en
+    que se comparan los textos. Los textos cortos (nombres, y las descripciones que se
+    repiten entre idiomas) se memorizan; los larguísimos no, para no retener memoria."""
+    if not text:
+        return ""
+    return _fold_cached(text) if len(text) <= _FOLD_CACHE_MAX_CHARS else _fold(text)
+
+
+_BLOCK_TAG_RE = re.compile(r"</?(?:p|br|li|ul|ol|div|h[1-6]|tr|td|table)\b[^<>]*>", re.I)
+_TAG_RE = re.compile(r"<[^<>]*>")
+_HAS_TAG_RE = re.compile(r"</?[A-Za-z][^<>]*>")
+# Tope de lo que se analiza de una descripción (las reales miden unos pocos miles).
+MAX_TEXT_CHARS = 200_000
 _HAS_ENTITY_RE = re.compile(r"&(?:[A-Za-z]{2,8}|#\d{1,6}|#[xX][0-9A-Fa-f]{1,6});")
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2300-\u23FF\uFE0F\u200D]"
@@ -111,14 +128,14 @@ _EMOJI_RE = re.compile(
 
 def plain_text(raw: str | None) -> str:
     """Descripción HTML → texto plano (sin etiquetas, con entidades resueltas)."""
-    t = _BLOCK_TAG_RE.sub(" ", raw or "")
+    t = _BLOCK_TAG_RE.sub(" ", (raw or "")[:MAX_TEXT_CHARS])
     t = _TAG_RE.sub("", t)
     return _WS_RE.sub(" ", html.unescape(t)).strip()
 
 
 def html_problems(raw: str | None) -> list[str]:
     """Qué de la descripción llega sucio a la meta description."""
-    text = raw or ""
+    text = (raw or "")[:MAX_TEXT_CHARS]
     out: list[str] = []
     if _HAS_TAG_RE.search(text):
         out.append("etiquetas HTML")
@@ -210,28 +227,66 @@ def check_nombre_es_codigo(name: str, product_code: str | None) -> str | None:
     return None
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9']+")
+
+
+@dataclass(frozen=True, slots=True)
+class TermIndex:
+    """Lista de términos lista para buscar: {palabras plegadas → el término como se escribió}."""
+
+    by_parts: dict[tuple[str, ...], str]
+    max_len: int
+
+
 @functools.lru_cache(maxsize=32)
-def _compile_terms(terms: tuple[str, ...], plural: bool) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """Cada término (ya sin tildes ni mayúsculas) → patrón de palabra entera. Los
-    espacios y guiones del término aceptan cualquiera de los dos o ninguno
-    («hello kitty» = «hello-kitty» = «hellokitty»)."""
-    out: list[tuple[str, re.Pattern[str]]] = []
+def _term_index(terms: tuple[str, ...]) -> TermIndex:
+    """Cada término (ya sin tildes ni mayúsculas) → su secuencia de palabras. Los espacios y
+    guiones del término valen lo mismo («hello kitty» = «hello-kitty») y también se acepta
+    pegado («hellokitty»). Se compara por palabras enteras: «guide» no salta en «guiderail»."""
+    by_parts: dict[tuple[str, ...], str] = {}
+    longest = 1
     for display in terms:
-        parts = [re.escape(p) for p in re.split(r"[\s\-]+", fold(display)) if p]
+        parts = tuple(p for p in re.split(r"[\s\-]+", fold(display)) if p)
         if not parts:
             continue
-        body = r"[\s\-]*".join(parts)
-        tail = "s?" if plural else ""
-        out.append((display, re.compile(rf"(?<![a-z0-9]){body}{tail}(?![a-z0-9])")))
-    return tuple(out)
+        by_parts.setdefault(parts, display)
+        if len(parts) > 1:
+            by_parts.setdefault(("".join(parts),), display)
+        longest = max(longest, len(parts))
+    return TermIndex(by_parts, longest)
+
+
+def find_terms(folded: str, index: TermIndex) -> list[tuple[str, int]]:
+    """Términos de `index` que aparecen en `folded` (texto ya plegado): [(término, posición)].
+    Acepta el plural con «s» y las palabras separadas o pegadas. Sin una regex por término:
+    recorre las palabras una sola vez."""
+    spans = [(m.group(0), m.start()) for m in _TOKEN_RE.finditer(folded)]
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    i = 0
+    while i < len(spans):
+        hit_len = 0
+        for n in range(min(index.max_len, len(spans) - i), 0, -1):
+            words = tuple(w for w, _ in spans[i:i + n])
+            display = index.by_parts.get(words)
+            if display is None and n > 1:                   # «spider man» para el término «Spiderman»
+                display = index.by_parts.get(("".join(words),))
+            if display is None and len(words[-1]) > 2 and words[-1].endswith("s"):
+                singular = words[:-1] + (words[-1][:-1],)
+                display = index.by_parts.get(singular) or (
+                    index.by_parts.get(("".join(singular),)) if n > 1 else None)
+            if display is not None:
+                if display not in seen:
+                    seen.add(display)
+                    out.append((display, spans[i][1]))
+                hit_len = n
+                break
+        i += hit_len or 1
+    return out
 
 
 def check_relleno(name: str, lists: TextLists) -> str | None:
-    folded = fold(name)
-    hits: list[str] = []
-    for display, pattern in _compile_terms(lists.filler, True):
-        if pattern.search(folded) and display not in hits:
-            hits.append(display)
+    hits = [display for display, _ in find_terms(fold(name), _term_index(lists.filler))]
     return ("; ".join(hits[:4]) + (f" (+{len(hits) - 4})" if len(hits) > 4 else "")) if hits else None
 
 
@@ -242,15 +297,10 @@ def brand_hits(text: str, lists: TextLists) -> list[tuple[str, bool]]:
     """Marcas de la lista que aparecen en el texto: (marca, es_de_compatibilidad).
     «Funda para iPhone» es compatibilidad; «Funda iPhone Efecto Líquido» no."""
     folded = fold(text)
-    out: list[tuple[str, bool]] = []
-    seen: set[str] = set()
-    for display, pattern in _compile_terms(lists.brands, True):
-        m = pattern.search(folded)
-        if not m or display in seen:
-            continue
-        seen.add(display)
-        out.append((display, bool(_COMPAT_PREFIX_RE.search(folded[: m.start()]))))
-    return out
+    return [
+        (display, bool(_COMPAT_PREFIX_RE.search(folded[:pos])))
+        for display, pos in find_terms(folded, _term_index(lists.brands))
+    ]
 
 
 def check_marcas(name: str, description_plain: str, lists: TextLists) -> str | None:

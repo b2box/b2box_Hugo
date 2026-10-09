@@ -33,7 +33,7 @@ DEFAULT_BRANDS: tuple[str, ...] = (
     "Fitbit", "Lenovo", "Logitech", "Kingston", "SanDisk", "JBL", "Bose", "Alexa",
     "TikTok",
     # Juguetes, personajes y licencias
-    "Lego", "Barbie", "Hot Wheels", "Disney", "Marvel", "Spiderman", "Spider-Man",
+    "Lego", "Barbie", "Hot Wheels", "Disney", "Marvel", "Spiderman",
     "Batman", "Superman", "Avengers", "Mickey", "Minnie", "Peppa Pig", "Paw Patrol",
     "Pokemon", "Pikachu", "Hello Kitty", "Sanrio", "Cinnamoroll", "My Melody",
     "Naruto", "Dragon Ball", "One Piece", "Minecraft", "Fortnite", "Roblox",
@@ -71,7 +71,8 @@ DEFAULT_TECHNICAL: tuple[str, ...] = (
     "PU", "PP", "PE", "HDMI", "LCD", "OLED", "TV", "PC", "GPS", "RGB", "NFC", "DIY",
     "SOS", "FM", "AM", "AA", "AAA", "XL", "XXL", "XS", "SMD", "DVD", "CD", "MP3",
     "MP4", "WIFI", "SIM", "SD", "SSD", "RAM", "LTE", "BLE", "OTG", "CPU", "GSM", "FPV",
-    "VR", "HD", "FHD", "UHD", "HDR", "ECG", "SPF", "UPF", "RFID", "EAN", "QR",
+    "VR", "HD", "FHD", "UHD", "HDR", "ECG", "SPF", "UPF", "RFID", "EAN", "QR", "TWS",
+    "IR", "OBD", "ANC", "PWM",
 )
 
 LIST_NAMES: tuple[str, ...] = ("marcas", "relleno", "tecnicos")

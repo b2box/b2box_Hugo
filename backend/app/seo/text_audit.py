@@ -17,6 +17,7 @@ import csv
 import io
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -182,8 +183,17 @@ def rule_counts(rows: Iterable[TextAuditItem]) -> dict[str, int]:
 
 # ─── Corrida ───────────────────────────────────────────────────────
 
+_SECRET_RES = (
+    re.compile(r"(?i)\bbearer\s+\S+"),
+    re.compile(r"(?i)\b(authorization|token|api[-_ ]?key|password|secret)\b\s*[:=]\s*\S+"),
+)
+
+
 def _short(exc: BaseException) -> str:
+    """El motivo de un fallo para mostrar en el dashboard: corto y sin credenciales."""
     msg = " ".join(str(exc).split())
+    msg = _SECRET_RES[0].sub("Bearer …", msg)
+    msg = _SECRET_RES[1].sub(r"\1 …", msg)
     return f"{type(exc).__name__}: {msg}"[:300] if msg else type(exc).__name__
 
 
@@ -240,6 +250,41 @@ def _utc_iso(dt: datetime | None) -> str | None:
     return dt.isoformat() + "Z"
 
 
+def _save_results(
+    run_id: int,
+    merged: list[MergedProduct],
+    items: list[TextAuditItem],
+    reads: dict[str, TextsRead],
+    failed: dict[str, str],
+    notes: list[str],
+    elapsed_s: float,
+) -> dict[str, Any]:
+    """Guarda las filas y cierra la corrida. Devuelve el resumen."""
+    counts = rule_counts(items)
+    with Session(engine) as session:
+        run = session.get(TextAuditRun, run_id)
+        assert run is not None
+        for item in items:
+            item.run_id = run_id
+        session.add_all(items)
+        run.products_total = len(merged)
+        run.products_enabled = sum(1 for m in merged if m.product.enabled)
+        run.rows_total = len(items)
+        run.products_with_issues = len({i.product_id for i in items if i.n_issues})
+        run.channels_ok = ",".join(reads)
+        run.channels_failed = json.dumps(failed, ensure_ascii=False) if failed else None
+        run.counts = json.dumps(counts, ensure_ascii=False)
+        run.notes = " ".join(notes) or None
+        run.status = RUN_DEGRADED if failed else RUN_OK
+        run.finished_at = utcnow()
+        run.duration_s = round(elapsed_s, 1)
+        session.add(run)
+        session.commit()
+        _prune(session)
+        session.refresh(run)
+        return run_to_dict(run)
+
+
 def run_to_dict(run: TextAuditRun) -> dict[str, Any]:
     return {
         "id": run.id,
@@ -291,30 +336,12 @@ async def run_text_audit(trigger: str = "cron", reader: Reader | None = None) ->
                 notes.append("Vendure no expone supplierBusiness/supplierSizeModel: "
                              "la regla FAB solo compara el link del proveedor.")
             merged = merge_channels(reads)
-            items = evaluate(merged, lists)
-            counts = rule_counts(items)
-            with Session(engine) as session:
-                run = session.get(TextAuditRun, run_id)
-                assert run is not None
-                for item in items:
-                    item.run_id = run_id
-                session.add_all(items)
-                run.products_total = len(merged)
-                run.products_enabled = sum(1 for m in merged if m.product.enabled)
-                run.rows_total = len(items)
-                run.products_with_issues = len({i.product_id for i in items if i.n_issues})
-                run.channels_ok = ",".join(reads)
-                run.channels_failed = json.dumps(failed, ensure_ascii=False) if failed else None
-                run.counts = json.dumps(counts, ensure_ascii=False)
-                run.notes = " ".join(notes) or None
-                run.status = RUN_DEGRADED if failed else RUN_OK
-                run.finished_at = utcnow()
-                run.duration_s = round(time.monotonic() - t0, 1)
-                session.add(run)
-                session.commit()
-                _prune(session)
-                session.refresh(run)
-                result = run_to_dict(run)
+            # La evaluación y el guardado son CPU y base: en un hilo, para no frenar el
+            # event loop (dashboard, scheduler) mientras se procesan miles de filas.
+            items = await asyncio.to_thread(evaluate, merged, lists)
+            result = await asyncio.to_thread(
+                _save_results, run_id, merged, items, reads, failed, notes, time.monotonic() - t0,
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("seo_text_audit falló")
             with Session(engine) as session:
