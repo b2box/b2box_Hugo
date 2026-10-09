@@ -62,8 +62,14 @@ _PICTURE_ID = re.compile(r"^[0-9A-Za-z_-]{6,80}$", re.ASCII)
 _ANY_ML_ID = re.compile(r"MLAU?-?(\d{5,})", re.ASCII)
 _BRACES = re.compile(r"\{[^}]*\}")
 _WS = re.compile(r"\s+")
-_NORDIC_CTX = re.compile(r'<script[^>]*id="__NORDIC_RENDERING_CTX__"[^>]*>', re.I)
-_JSON_LD = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.I | re.S)
+# Los <script> se recorren UNA vez, de corrido (`_scripts`): el atributo se busca con un tope de largo y el cierre con `str.find`.
+# Antes cada patrón (`<script[^>]*…[^>]*>(.*?)</script>`) volvía a escanear hasta el final del HTML por cada `<script` sin
+# cerrar: 30.000 de esos tardaban más de 20 s (cuadrático) con la página de un tercero.
+_SCRIPT_OPEN = re.compile(r"<script\b([^>]{0,400})>", re.I)
+_NORDIC_ATTR = re.compile(r'\bid\s*=\s*"__NORDIC_RENDERING_CTX__"', re.I)
+_LD_ATTR = re.compile(r'\btype\s*=\s*"application/ld\+json"', re.I)
+_MAX_SCRIPT_TAGS = 3000
+_MAX_LD_SCRIPTS = 100
 _CTX_PREFIX = "_n.ctx.r="
 # Tope de HTML que se mira. Las páginas reales pesan 2,2 a 3,6 MB sin comprimir y
 # el JSON-LD (de donde sale la marca) puede quedar pasando los 3,0 MB: se corta
@@ -122,12 +128,29 @@ def _json_after(text: str, start: int) -> Any:
     return obj
 
 
+def _scripts(html: str):
+    """(atributos, inicio, fin) de cada `<script …>…</script>`, en orden y en tiempo lineal. Un script sin cerrar llega
+    hasta el final del HTML y es el último (después de él no hay nada que pueda cerrarse)."""
+    pos = 0
+    for _ in range(_MAX_SCRIPT_TAGS):
+        m = _SCRIPT_OPEN.search(html, pos)
+        if m is None:
+            return
+        end = html.find("</script>", m.end())
+        if end < 0:
+            yield m.group(1), m.end(), len(html)
+            return
+        yield m.group(1), m.end(), end
+        pos = end + len("</script>")
+
+
 def _nordic_state(html: str) -> dict | None:
-    m = _NORDIC_CTX.search(html)
-    if not m:
+    for attrs, start, end in _scripts(html):
+        if _NORDIC_ATTR.search(attrs):
+            body = html[start:end]
+            break
+    else:
         return None
-    end = html.find("</script>", m.end())
-    body = html[m.end(): end if end >= 0 else len(html)]
     at = body.find(_CTX_PREFIX)
     if at < 0:
         return None
@@ -265,9 +288,15 @@ def _from_polycard(item: dict) -> MlCandidate | None:
 
 def _ld_products(html: str) -> list[dict]:
     out: list[dict] = []
-    for m in _JSON_LD.finditer(html):
+    seen = 0
+    for attrs, start, end in _scripts(html):
+        if not _LD_ATTR.search(attrs):
+            continue
+        seen += 1
+        if seen > _MAX_LD_SCRIPTS:
+            break
         try:
-            data = json.loads(m.group(1))
+            data = json.loads(html[start:end])
         except (ValueError, RecursionError):
             continue
         graph = data.get("@graph") if isinstance(data, dict) else data
