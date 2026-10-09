@@ -37,6 +37,11 @@ def _configure_logging() -> None:
         level=s.log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Aunque LOG_LEVEL sea DEBUG: gql, httpx y httpcore loguean respuestas con datos del proveedor y
+    # headers con el token de Vendure (ver quiet_http_loggers).
+    from app.vendure.client import quiet_http_loggers
+
+    quiet_http_loggers()
 
 
 def _enforce_prod_secrets() -> None:

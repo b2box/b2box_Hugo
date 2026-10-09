@@ -30,6 +30,18 @@ from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
 
+
+def quiet_http_loggers() -> None:
+    """Sube gql, httpx y httpcore a WARNING. Con LOG_LEVEL=DEBUG el transporte de gql loguea la
+    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink de todos los
+    productos) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en
+    INFO, la URL de cada request. Se llama al importar este módulo y desde _configure_logging."""
+    for name in ("gql", "httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+quiet_http_loggers()
+
 # El módulo httpx que usa el transport de gql, que NO siempre es el nuestro:
 # gql 4.4 importa `httpx2` si está instalado, y anthropic>=1 / openai>=3 lo
 # instalan. Un httpx.Timeout de httpx 0.28 pasado a un cliente httpx2 llega
@@ -154,10 +166,6 @@ class VendureClient:
     _shared_bearer: str = ""
 
     DEFAULT_PAGE_SIZE = 25
-
-    # ¿El schema de Vendure tiene supplierBusiness y supplierSizeModel? Si la
-    # query de la auditoría de textos revienta por eso, se apaga y se lee sin ellos.
-    _supplier_fields_supported: bool = True
 
     def __init__(self, channel_token: str | None = _CHANNEL_FROM_SETTINGS) -> None:
         """`channel_token`: sin pasarlo, el canal de VENDURE_CHANNEL_TOKEN. Un
@@ -588,15 +596,15 @@ class VendureClient:
         todas sus traducciones y los datos del proveedor. Páginas de 100, una
         lectura por página, en secuencia. NO escribe nada."""
         take = page_size or self.TEXT_AUDIT_PAGE_SIZE
-        if VendureClient._supplier_fields_supported:
-            try:
-                return TextsRead(await self._fetch_texts(True, take), True)
-            except TransportQueryError as exc:
-                if "Cannot query field" not in str(exc):
-                    raise
-                log.warning("Vendure no tiene supplierBusiness/supplierSizeModel: "
-                            "se leen los textos sin ellos (%s)", str(exc)[:160])
-                VendureClient._supplier_fields_supported = False
+        try:
+            return TextsRead(await self._fetch_texts(True, take), True)
+        except TransportQueryError as exc:
+            if "Cannot query field" not in str(exc):
+                raise
+            # Solo para esta lectura: la próxima corrida vuelve a probar (si el schema se
+            # actualiza, la regla FAB recupera sus tres campos sin reiniciar Hugo).
+            log.warning("Vendure no tiene supplierBusiness/supplierSizeModel: "
+                        "se leen los textos sin ellos (%s)", str(exc)[:160])
         return TextsRead(await self._fetch_texts(False, take), False)
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
