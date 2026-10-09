@@ -148,8 +148,7 @@ async def index_now(request: Request, store_id: int = Path(..., ge=1, le=DB_INT_
     info = await asyncio.to_thread(store_catalog.get_store, store_id)
     if info is None:
         raise HTTPException(404, "tienda no encontrada")
-    lock = store_catalog._locks.get(store_id)
-    if lock is not None and lock.locked():
+    if store_catalog.is_indexing(info):
         raise HTTPException(409, "ya hay un indexado de esa tienda en curso")
     row = session.get(MarketStore, store_id)
     # El descanso es por SITIO: borrar y volver a crear la tienda no lo saltea.

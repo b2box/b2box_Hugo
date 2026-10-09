@@ -603,7 +603,19 @@ def _save_outcome_safe(item_id: int, out: _Outcome, now: datetime) -> bool:
 
 # ─── La pasada de una tienda ─────────────────────────────────────────────────
 
-_locks: dict[int, asyncio.Lock] = {}
+# Un candado por SITIO (apex), no por id de tienda: borrar y recrear la tienda en medio de una pasada
+# le da otro id, y con el candado por id las dos pasadas corrían a la vez contra el mismo sitio.
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def lock_key(info: StoreInfo) -> str:
+    return info.apex or f"id:{info.id}"
+
+
+def is_indexing(info: StoreInfo) -> bool:
+    """¿Hay una pasada en curso contra el sitio de esta tienda (sea con este id o con el de una anterior)?"""
+    lock = _locks.get(lock_key(info))
+    return lock is not None and lock.locked()
 
 
 def _delay_range() -> tuple[float, float]:
@@ -625,7 +637,7 @@ async def index_store(
     info = await asyncio.to_thread(get_store, store_id)
     if info is None:
         return IndexReport(store_id, "?", "skipped", "la tienda no existe")
-    lock = _locks.setdefault(store_id, asyncio.Lock())
+    lock = _locks.setdefault(lock_key(info), asyncio.Lock())
     if lock.locked():
         return IndexReport(store_id, info.name, "skipped", "ya hay una pasada en curso")
     report = IndexReport(store_id, info.name)
@@ -637,27 +649,30 @@ async def index_store(
         except Exception as exc:  # noqa: BLE001  (un bug no tumba a las demás tiendas)
             log.exception("indexado de %s reventó", info.name)
             report.status, report.message = "error", f"{type(exc).__name__}: {str(exc)[:120]}"
-        await asyncio.to_thread(_record_status, store_id, report)
+        await asyncio.to_thread(_record_status, store_id, info.apex, report)
     log.info("tiendas: %s → %s", info.name, report.summary())
     return report
 
 
-def _record_status(store_id: int, report: IndexReport) -> None:
+def _record_status(store_id: int, apex: str, report: IndexReport) -> None:
+    """Deja dicho en la tienda cómo terminó la pasada y, aparte, que hubo una contra ese SITIO. Lo segundo
+    se anota aunque la tienda ya no exista (la borraron mientras se la leía): el descanso de «Indexar
+    ahora» es del sitio, y borrar y recrear la tienda no puede saltearlo."""
     if report.status == "skipped":
         return
-    apex = None
-    with Session(engine) as s:
-        row = s.get(MarketStore, store_id)
-        if row is not None:
-            row.last_indexed_at = utcnow()
-            row.last_index_status = report.summary()
-            if report.health:
-                row.health = report.health
-            s.add(row)
-            s.commit()
-            apex = store_urls.apex(store_urls.host_of(row.base_url))
-    if apex:
-        _record_pass(apex, utcnow())
+    try:
+        with Session(engine) as s:
+            row = s.get(MarketStore, store_id)
+            if row is not None:
+                row.last_indexed_at = utcnow()
+                row.last_index_status = report.summary()
+                if report.health:
+                    row.health = report.health
+                s.add(row)
+                s.commit()
+    finally:
+        if apex:
+            _record_pass(apex, utcnow())
 
 
 def _store_active(store_id: int) -> bool:
@@ -695,7 +710,8 @@ async def _index(info: StoreInfo, report: IndexReport, *, max_seconds: float | N
         robots = store_robots.from_status(resp.status_code, resp.content.decode("utf-8", "replace"),
                                           get_settings().store_user_agent)
         if robots.blocked_all:
-            report.status, report.message = "aborted", f"robots.txt devolvió HTTP {resp.status_code}: no se rastrea"
+            why = robots.reason or f"robots.txt devolvió HTTP {resp.status_code}"
+            report.status, report.message = "aborted", f"{why}: no se rastrea"
             return
     except Exception as exc:  # noqa: BLE001  (cualquier error acá = no se rastrea, no una pasada en «error»)
         report.status, report.message = "aborted", f"no se pudo leer robots.txt ({type(exc).__name__}): no se rastrea"

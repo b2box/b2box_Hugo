@@ -251,6 +251,14 @@ def test_our_own_group_wins_over_the_wildcard_even_with_other_groups_in_between(
     assert not robots.allows("/solo-esto") and robots.allows("/todo")
 
 
+async def test_a_robots_over_the_rules_cap_aborts_the_pass_and_says_why(store_db, monkeypatch):
+    sid = add_store()
+    big = ("User-agent: *\n" + "".join(f"Disallow: /p{i}/\n" for i in range(store_robots.MAX_RULES + 5))).encode()
+    report = await _pass(sid, monkeypatch, {"/productos/a/": _ok_page("a"), "/robots.txt": (200, big, {})})
+    assert report.status == "aborted" and report.fetched == 0
+    assert "reglas" in report.message and "no se rastrea" in report.message and "HTTP" not in report.message
+
+
 # ─── B2: sufijos públicos ────────────────────────────────────────────────────────
 
 PUBLIC_SUFFIXES = ["com.uy", "com.pe", "co.nz", "org.uk", "co.uk", "com.au", "gob.ar", "gov.uk", "co.jp", "com.br", "com.mx",
@@ -302,6 +310,67 @@ def test_deleting_and_recreating_a_store_does_not_skip_the_manual_cooldown(clien
     assert new.status_code == 201
     r = client.post(f"/api/stores/{new.json()['id']}/index")
     assert r.status_code == 429 and int(r.headers["Retry-After"]) > 0
+
+
+async def test_a_pass_cut_because_the_store_was_deleted_still_records_the_site_pass(store_db):
+    """R2: sin esto, borrar la tienda en medio de una pasada dejaba el descanso del sitio sin anotar."""
+    sid = add_store()
+    apex = store_catalog.get_store(sid).apex
+    site = tn_site([f"p{i}" for i in range(6)])
+    seen: list[str] = []
+
+    def on_request(url):
+        if not url.endswith((".xml", "robots.txt")):
+            seen.append(url)
+            if len(seen) == 2:
+                assert store_catalog.delete_store(sid)
+
+    site.on_request = on_request
+    assert store_catalog.last_pass_at(apex) is None
+    report = await run_index(sid, site)
+    assert report.status == "aborted" and len(site.fetched_pages()) == 2
+    assert store_catalog.get_store(sid) is None
+    assert store_catalog.last_pass_at(apex) is not None
+
+
+@pytest.mark.usefixtures("seeded")
+def test_index_delete_recreate_index_cycle_hits_the_cooldown(client):
+    """Indexar, borrar en medio, recrear la misma dirección e indexar de nuevo: el descanso del sitio sigue."""
+    with Session(engine) as s:
+        cp = int(s.exec(select(MarketStore.id).where(MarketStore.name == "Casa Perfecta")).one())
+    site = tn_site([f"p{i}" for i in range(6)])
+    seen: list[str] = []
+
+    def on_request(url):
+        if not url.endswith((".xml", "robots.txt")):
+            seen.append(url)
+            if len(seen) == 2:
+                assert client.delete(f"/api/stores/{cp}").status_code == 200
+
+    site.on_request = on_request
+    report = asyncio.run(run_index(cp, site))
+    assert report.status == "aborted"
+    new = client.post("/api/stores", json={"name": "Casa Perfecta de nuevo", "base_url": fx.CP, "platform": "tiendanube"})
+    assert new.status_code == 201
+    r = client.post(f"/api/stores/{new.json()['id']}/index")
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) > 0
+
+
+async def test_the_indexing_lock_is_per_site_so_a_recreated_store_cannot_run_in_parallel(store_db):
+    first = add_store(name="Una")
+    info = store_catalog.get_store(first)
+    assert not store_catalog.is_indexing(info)
+    lock = store_catalog._locks.setdefault(store_catalog.lock_key(info), asyncio.Lock())
+    await lock.acquire()
+    try:
+        # Otro id para el mismo sitio (lo que pasa al borrar y recrear en Postgres, donde los ids no se reusan).
+        again = add_store(name="Otra con la misma dirección")
+        assert again != first and store_catalog.is_indexing(store_catalog.get_store(again))
+        report = await store_catalog.index_store(again)
+        assert report.status == "skipped" and "en curso" in report.message
+    finally:
+        lock.release()
+        store_catalog._locks.pop(store_catalog.lock_key(info), None)
 
 
 # ─── B4: sitemaps vacíos o a medias nunca dan URLs por «ya no están» ─────────────

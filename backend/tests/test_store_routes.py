@@ -401,14 +401,15 @@ def test_index_now_runs_in_background_and_refuses_a_second_one(client, monkeypat
     import asyncio
 
     lock = asyncio.Lock()
-    store_catalog._locks[cp] = lock
+    key = store_catalog.lock_key(store_catalog.get_store(cp))
+    store_catalog._locks[key] = lock
     try:
         async def hold():
             await lock.acquire()
         asyncio.run(hold())
         assert client.post(f"/api/stores/{cp}/index").status_code == 409
     finally:
-        store_catalog._locks.pop(cp, None)
+        store_catalog._locks.pop(key, None)
     assert store_routes._background is not None
 
 
