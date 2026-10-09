@@ -12,16 +12,19 @@ los objetos que los guardan ocultan los valores en `repr`.
 
 from __future__ import annotations
 
+import bisect
 import functools
+import heapq
 import html
 import math
 import re
+import time
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from app.seo.lists import TextLists
+from app.seo.lists import MAX_TERM_WORDS, TextLists
 
 # ─── Umbrales ──────────────────────────────────────────────────────
 
@@ -35,9 +38,20 @@ MIN_DESCRIPTION_CHARS = 20
 SLUG_MAX_OVERLAP = 0.5
 # DUP_CASI: parecido mínimo (Jaccard sobre palabras con contenido) y mínimo de
 # palabras con contenido en cada nombre para comparar.
-DUP_CASI_JACCARD = 0.6
+DUP_CASI_JACCARD = 0.65
 DUP_CASI_MIN_TOKENS = 3
 DUP_MAX_LISTED = 5        # cuántos productos parecidos se nombran en el detalle
+# Una palabra del prefijo compartida por más nombres que esto es una «familia»: cada producto se
+# compara con sus vecinos más cercanos (por id) y no con toda la familia, para que 10.000 fundas
+# casi iguales no cuesten 10.000² comparaciones. El conteo de esa familia queda aproximado.
+DUP_MAX_BUCKET = 100
+# Tope de lo que se mira de un nombre y de un slug (los reales miden decenas de caracteres).
+MAX_NAME_CHARS = 1_000
+MAX_SLUG_CHARS = 500
+
+
+class AuditTimeout(TimeoutError):
+    """La evaluación pasó su plazo (se corta por dentro, no se deja un hilo huérfano)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +73,8 @@ RULES: tuple[RuleInfo, ...] = (
              "Aparece una marca, personaje o nombre comercial de la lista (editable)."),
     RuleInfo("FAB", "Fábrica o código de proveedor", "marcas",
              "El texto coincide con el nombre de fábrica, el modelo o el link del proveedor de ESTE producto, o nombra un sitio de proveedor. No se muestra cuál."),
+    RuleInfo("MARCA_PROPIA", "Nombra a B2BOX en el título", "marcas",
+             "Informativa: el storefront ya agrega « - B2BOX» al título de la ficha, así que queda repetido."),
     RuleInfo("SLUG_NO_COINCIDE", "El nombre no coincide con la URL", "titulo",
              "Se reescribió el nombre y quedó la URL vieja (o al revés)."),
     RuleInfo("NOMBRE_ES_CODIGO", "El nombre es el código interno", "titulo",
@@ -100,9 +116,12 @@ def _fold_cached(text: str) -> str:
     return _fold(text)
 
 
+_APOSTROPHES = str.maketrans({c: "'" for c in "\u2019\u2018\u02bc\u2032\u00b4`"})
+
+
 def _fold(text: str) -> str:
-    t = _COMBINING_RE.sub("", unicodedata.normalize("NFKD", text))
-    t = t.replace("\u2019", "'").replace("\u2018", "'").replace("`", "'").replace("\u00b4", "'")
+    # Los apóstrofos raros se rectifican ANTES de normalizar: NFKD vuelve «´» un espacio + tilde.
+    t = _COMBINING_RE.sub("", unicodedata.normalize("NFKD", text.translate(_APOSTROPHES)))
     return _WS_RE.sub(" ", t.casefold()).strip()
 
 
@@ -227,7 +246,13 @@ def check_nombre_es_codigo(name: str, product_code: str | None) -> str | None:
     return None
 
 
-_TOKEN_RE = re.compile(r"[a-z0-9']+")
+# Palabras = tiras de letras o de dígitos: «iphone15» son «iphone» y «15».
+_TOKEN_RE = re.compile(r"[a-z]+|[0-9]+")
+
+
+def _mfold(text: str | None) -> str:
+    """`fold` para buscar términos: además sin apóstrofos («Let's Slim» = «Lets Slim»)."""
+    return fold(text).replace("'", "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,14 +265,15 @@ class TermIndex:
 
 @functools.lru_cache(maxsize=32)
 def _term_index(terms: tuple[str, ...]) -> TermIndex:
-    """Cada término (ya sin tildes ni mayúsculas) → su secuencia de palabras. Los espacios y
-    guiones del término valen lo mismo («hello kitty» = «hello-kitty») y también se acepta
-    pegado («hellokitty»). Se compara por palabras enteras: «guide» no salta en «guiderail»."""
+    """Cada término → su secuencia de palabras (sin tildes, mayúsculas ni apóstrofos). Los
+    espacios y guiones del término valen lo mismo («hello kitty» = «hello-kitty») y también se
+    acepta pegado («hellokitty»). Se compara por palabras enteras: «guide» no salta en
+    «guiderail», pero sí en «guide2»."""
     by_parts: dict[tuple[str, ...], str] = {}
     longest = 1
     for display in terms:
-        parts = tuple(p for p in re.split(r"[\s\-]+", fold(display)) if p)
-        if not parts:
+        parts = tuple(_TOKEN_RE.findall(_mfold(display)))
+        if not parts or len(parts) > MAX_TERM_WORDS:
             continue
         by_parts.setdefault(parts, display)
         if len(parts) > 1:
@@ -257,9 +283,9 @@ def _term_index(terms: tuple[str, ...]) -> TermIndex:
 
 
 def find_terms(folded: str, index: TermIndex) -> list[tuple[str, int]]:
-    """Términos de `index` que aparecen en `folded` (texto ya plegado): [(término, posición)].
-    Acepta el plural con «s» y las palabras separadas o pegadas. Sin una regex por término:
-    recorre las palabras una sola vez."""
+    """Términos de `index` que aparecen en `folded` (texto ya plegado con `_mfold`): [(término,
+    posición)]. Acepta el plural con «s» y las palabras separadas o pegadas. Sin una regex por
+    término: recorre las palabras una sola vez."""
     spans = [(m.group(0), m.start()) for m in _TOKEN_RE.finditer(folded)]
     out: list[tuple[str, int]] = []
     seen: set[str] = set()
@@ -285,8 +311,16 @@ def find_terms(folded: str, index: TermIndex) -> list[tuple[str, int]]:
     return out
 
 
+# Palabras que solo son relleno cuando encabezan el título («Elegante Reloj…», «Mágico Vaso…»):
+# en el medio suelen ser el producto o su tipo («Traje Elegante», «Cubo Mágico»).
+_FILLER_LEADING_ONLY = frozenset({"elegante", "magico", "magica"})
+
+
 def check_relleno(name: str, lists: TextLists) -> str | None:
-    hits = [display for display, _ in find_terms(fold(name), _term_index(lists.filler))]
+    hits = [
+        display for display, pos in find_terms(_mfold(name), _term_index(lists.filler))
+        if pos == 0 or fold(display) not in _FILLER_LEADING_ONLY
+    ]
     return ("; ".join(hits[:4]) + (f" (+{len(hits) - 4})" if len(hits) > 4 else "")) if hits else None
 
 
@@ -296,7 +330,7 @@ _COMPAT_PREFIX_RE = re.compile(r"(?:para|compatible con|compatible|apto para|apt
 def brand_hits(text: str, lists: TextLists) -> list[tuple[str, bool]]:
     """Marcas de la lista que aparecen en el texto: (marca, es_de_compatibilidad).
     «Funda para iPhone» es compatibilidad; «Funda iPhone Efecto Líquido» no."""
-    folded = fold(text)
+    folded = _mfold(text)
     return [
         (display, bool(_COMPAT_PREFIX_RE.search(folded[:pos])))
         for display, pos in find_terms(folded, _term_index(lists.brands))
@@ -317,13 +351,21 @@ def check_marcas(name: str, description_plain: str, lists: TextLists) -> str | N
     return "; ".join(parts[:5]) + (f" (+{len(parts) - 5})" if len(parts) > 5 else "") if parts else None
 
 
+_B2BOX_RE = re.compile(r"(?<![a-z0-9])b2[\s\-]?box(?![a-z0-9])")
+
+
+def check_marca_propia(name: str) -> str | None:
+    if _B2BOX_RE.search(fold(name)):
+        return "el título nombra a B2BOX; la ficha ya le agrega « - B2BOX»"
+    return None
+
+
 # Códigos de modelo: 1 a 3 letras, 1 a 3 dígitos, una letra opcional (C64, H6S).
 _MODEL_RE = re.compile(r"(?<!\w)([A-Z]{1,3}\d{1,3}[A-Z]?)(?!\w)")
 # Con guion (ZK-7731, X-200): el código entero, no la sigla suelta.
 _HYPHEN_CODE_RE = re.compile(r"(?<!\w)([A-Z]{1,4}-\d{1,5}[A-Z]?)(?!\w)")
 _CAPS_RE = re.compile(r"(?<!\w)([A-Z]{2,4})(?!\w)")
 _QTY_RE = re.compile(r"(?<!\w)x\d{1,3}(?:u|ud|uds|un|unid)(?!\w)", re.I)
-_ASTERISK_RE = re.compile(r"\S*\*\S*")
 _SCALE_RE = re.compile(r"(?<!\w)escala\s+(\d{2,})(?![\w:/])", re.I)
 # Datos técnicos que parecen código y no lo son (no se editan: familias por patrón).
 TECH_PATTERN = re.compile(
@@ -348,6 +390,7 @@ def _mostly_upper(text: str) -> bool:
 
 
 def check_cod(name: str, lists: TextLists) -> str | None:
+    name = name[:MAX_NAME_CHARS]
     technical = frozenset(t.upper() for t in lists.technical)
     found: list[str] = []
 
@@ -368,8 +411,9 @@ def check_cod(name: str, lists: TextLists) -> str | None:
                 add(tok)
     for m in _QTY_RE.finditer(name):
         add(f"{m.group(0)} (cantidad pegada)")
-    for m in _ASTERISK_RE.finditer(name):
-        add(f"{m.group(0)} (asterisco)")
+    for word in name.split():                    # por palabras: una regex \S*\*\S* es cuadrática
+        if "*" in word:
+            add(f"{word[:40]} (asterisco)")
     for m in _SCALE_RE.finditer(name):
         add(f"escala {m.group(1)} (¿1:{m.group(1)[-2:]}?)")
     if not _INTERNAL_CODE_NAME_RE.match(name.strip()):
@@ -427,11 +471,19 @@ _CJK_GENERIC = (
     "股份有限公司", "有限责任公司", "有限公司", "电子商务", "贸易", "商贸", "科技", "实业", "工贸",
     "公司", "义乌市", "深圳市", "广州市", "东莞市", "宁波市", "杭州市", "佛山市", "上海市",
 )
-_MEASURE_RE = re.compile(
-    r"^\d+(?:[.,]\d+)?(?:mm|cm|m|kg|g|mg|ml|l|lt|w|kw|v|a|ma|mah|pcs|pc|pzs|u|un|und|uds|ud|"
-    r"in|oz|lb|hz|khz|mhz|ghz|gb|mb|tb|k|x|h|min|s)$",
-    re.I,
+# Unidades que acompañan a una medida. «x», «×» y «*» sirven de unión: 25x30cm, 98*56cm, 5V2A.
+_UNITS = (
+    "mm", "cm", "m", "kg", "g", "gr", "grs", "mg", "ml", "l", "lt", "lts", "w", "kw", "v", "a", "ma", "mah",
+    "pcs", "pc", "pzs", "u", "un", "und", "uds", "ud", "in", "oz", "lb", "hz", "khz", "mhz", "ghz", "gb",
+    "mb", "tb", "k", "h", "min", "s", "pa", "mpa", "bar", "psi", "rpm", "db", "dpi", "x", "\u00d7", "*",
 )
+_UNIT_RE = "|".join(sorted(map(re.escape, _UNITS), key=len, reverse=True))
+# número [unidad número]* [unidad]: una medida simple o compuesta, nunca un código. Sin grupos
+# anidados ambiguos (cada vuelta empieza con una unidad), así que no hay backtracking explosivo.
+_MEASURE_RE = re.compile(
+    rf"^\d+(?:[.,]\d+)?(?:(?:{_UNIT_RE})\d+(?:[.,]\d+)?)*(?:{_UNIT_RE})?$", re.I,
+)
+_UNIT_WORDS = frozenset(_UNITS)
 _SUPPLIER_SITE_RE = re.compile(
     r"(?<![a-z0-9])(?:1688|alibaba|aliexpress|taobao|tmall|dhgate|made-in-china)(?![a-z0-9])"
 )
@@ -467,7 +519,7 @@ def _model_needles(value: str, technical: frozenset[str]) -> list[re.Pattern[str
     out: list[re.Pattern[str]] = []
     for piece in re.split(r"[\s,;/|:()\[\]\u3001\uff0c\uff1b]+", value):
         piece = piece.strip(".-_")
-        if len(piece) < 2 or len(piece) > 30 or _MEASURE_RE.match(piece):
+        if len(piece) < 2 or len(piece) > 30 or _MEASURE_RE.match(piece) or piece.lower() in _UNIT_WORDS:
             continue
         if _is_technical(piece, technical):
             continue
@@ -599,8 +651,8 @@ def audit_translation(
     """Reglas que se evalúan con los textos de UNA traducción de UN producto.
     Devuelve {regla: detalle} en el orden de `RULES`. Las que comparan entre
     productos (DUP_*) y SIN_ES_AR las agrega quien llama."""
-    n = name or ""
-    s = slug or ""
+    n = (name or "")[:MAX_NAME_CHARS]
+    s = (slug or "")[:MAX_SLUG_CHARS]
     desc_plain = plain_text(description)
     found: dict[str, str] = {}
 
@@ -617,6 +669,7 @@ def audit_translation(
         put("SLUG_NO_COINCIDE", check_slug(n, s))
     put("MAR", check_marcas(n, desc_plain, lists))
     put("FAB", check_proveedor(n, s, desc_plain, matcher or SupplierMatcher(None)))
+    put("MARCA_PROPIA", check_marca_propia(n))
     found.update(check_descripcion(description or ""))
     return {rule: found[rule] for rule in sort_rules(found)}
 
@@ -636,10 +689,12 @@ def id_sort_key(pid: str) -> tuple[int, int | str]:
     return (0, int(pid)) if pid.isdigit() else (1, pid)
 
 
-def _listed(ids: list[str]) -> str:
+def _listed(ids: list[str], total: int | None = None) -> str:
+    """Hasta DUP_MAX_LISTED ids ordenados; `total` es cuántos hay en realidad (si se conoce)."""
     ids = sorted(set(ids), key=id_sort_key)
     shown = ", ".join(ids[:DUP_MAX_LISTED])
-    return shown + (f" (+{len(ids) - DUP_MAX_LISTED})" if len(ids) > DUP_MAX_LISTED else "")
+    extra = (total if total is not None else len(ids)) - min(len(ids), DUP_MAX_LISTED)
+    return shown + (f" (+{extra})" if extra > 0 else "")
 
 
 def _prefix_len(size: int) -> int:
@@ -648,14 +703,24 @@ def _prefix_len(size: int) -> int:
     return size - math.ceil(DUP_CASI_JACCARD * size - 1e-9) + 1
 
 
-def find_duplicates(entries: Iterable[tuple[str, str, str]]) -> dict[str, dict[str, str]]:
+def _check_deadline(deadline: float | None, step: int) -> None:
+    if deadline is not None and step % 128 == 0 and time.monotonic() > deadline:
+        raise AuditTimeout("la búsqueda de duplicados pasó su plazo")
+
+
+def find_duplicates(
+    entries: Iterable[tuple[str, str, str]], deadline: float | None = None,
+) -> dict[str, dict[str, str]]:
     """`entries`: (clave_de_fila, id_de_producto, nombre) de UN idioma, solo de
     productos habilitados. Devuelve {clave_de_fila: {DUP_EXACTO|DUP_CASI: detalle}}.
 
-    DUP_CASI usa Jaccard sobre palabras con contenido y el filtro por prefijo
-    (se indexa solo lo imprescindible de las palabras más raras): exacto, sin
-    comparar todos contra todos."""
-    rows = [(rk, pid, name) for rk, pid, name in entries if (name or "").strip()]
+    DUP_CASI usa Jaccard sobre palabras con contenido y el filtro por prefijo (se indexa solo
+    lo imprescindible de las palabras más raras): sin comparar todos contra todos. Una palabra
+    del prefijo compartida por más de DUP_MAX_BUCKET nombres (una familia de fundas casi
+    iguales) se recorre solo en una ventana de vecinos por id; por producto se guardan los
+    DUP_MAX_LISTED más parecidos y la cantidad, no todos los pares. `deadline` (monotonic)
+    corta con AuditTimeout."""
+    rows = [(rk, pid, name[:MAX_NAME_CHARS]) for rk, pid, name in entries if (name or "").strip()]
     out: dict[str, dict[str, str]] = {}
 
     # Exactos: mismo nombre normalizado en productos distintos.
@@ -666,13 +731,15 @@ def find_duplicates(entries: Iterable[tuple[str, str, str]]) -> dict[str, dict[s
             by_key.setdefault(key, []).append((rk, pid))
     exact_key_of: dict[str, str] = {}
     for key, members in by_key.items():
-        pids = {pid for _, pid in members}
+        pids = sorted({pid for _, pid in members}, key=id_sort_key)
         if len(pids) < 2:
             continue
-        for rk, pid in members:
+        for step, (rk, pid) in enumerate(members):
+            _check_deadline(deadline, step)
             exact_key_of[rk] = key
-            others = [p for _, p in members if p != pid]
-            out.setdefault(rk, {})["DUP_EXACTO"] = f"mismo nombre que el producto {_listed(others)}"
+            others = [p for p in pids[:DUP_MAX_LISTED + 1] if p != pid][:DUP_MAX_LISTED]
+            out.setdefault(rk, {})["DUP_EXACTO"] = (
+                f"mismo nombre que el producto {_listed(others, len(pids) - 1)}")
 
     # Casi iguales.
     sets: list[tuple[str, str, frozenset[str]]] = []
@@ -691,14 +758,23 @@ def find_duplicates(entries: Iterable[tuple[str, str, str]]) -> dict[str, dict[s
         ordered.append(ranked)
         for t in ranked[:_prefix_len(len(ranked))]:
             index.setdefault(t, []).append(i)
-    similar: dict[int, dict[int, float]] = {}
+    half = DUP_MAX_BUCKET // 2
     for i, (rk_i, pid_i, toks_i) in enumerate(sets):
+        _check_deadline(deadline, i)
         candidates: set[int] = set()
         for t in ordered[i][:_prefix_len(len(ordered[i]))]:
-            candidates.update(index.get(t, ()))
-        for j in candidates:
-            if j <= i:
+            posting = index.get(t, ())
+            if len(posting) > DUP_MAX_BUCKET:                      # familia: los vecinos por id
+                pos = bisect.bisect_left(posting, i)
+                lo = max(0, min(pos - half, len(posting) - DUP_MAX_BUCKET))
+                posting = posting[lo:lo + DUP_MAX_BUCKET]
+            candidates.update(posting)
+        count, best = 0, 0.0
+        top: list[tuple[float, int]] = []
+        for step, j in enumerate(candidates):
+            if j == i:
                 continue
+            _check_deadline(deadline, step)
             rk_j, pid_j, toks_j = sets[j]
             if pid_i == pid_j:
                 continue
@@ -706,11 +782,14 @@ def find_duplicates(entries: Iterable[tuple[str, str, str]]) -> dict[str, dict[s
                 continue
             jac = len(toks_i & toks_j) / len(toks_i | toks_j)
             if jac >= DUP_CASI_JACCARD:
-                similar.setdefault(i, {})[j] = jac
-                similar.setdefault(j, {})[i] = jac
-    for i, neighbours in similar.items():
-        rk, _, _ = sets[i]
-        best = max(neighbours.values())
-        ids = [sets[j][1] for j in neighbours]
-        out.setdefault(rk, {})["DUP_CASI"] = f"parecido al producto {_listed(ids)} (hasta {round(best * 100)} %)"
+                count += 1
+                best = max(best, jac)
+                top.append((jac, j))
+                if len(top) > 4 * DUP_MAX_LISTED:                  # no crece con el tamaño de la familia
+                    top = heapq.nlargest(DUP_MAX_LISTED, top)
+        if count:
+            top = heapq.nlargest(DUP_MAX_LISTED, top)
+            out.setdefault(rk_i, {})["DUP_CASI"] = (
+                f"parecido al producto {_listed([sets[j][1] for _, j in top], count)} "
+                f"(hasta {round(best * 100)} %)")
     return out

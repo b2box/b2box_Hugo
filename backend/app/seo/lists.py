@@ -20,6 +20,8 @@ from app.db.models import Setting
 
 log = logging.getLogger(__name__)
 
+# «One Piece» no está: es también el nombre de la malla/traje de baño enteriza (producto, no marca).
+# «B2BOX» tampoco: tiene su propia regla informativa (MARCA_PROPIA).
 # Marcas, personajes y nombres comerciales de terceros. Siembra: los casos de la
 # sección 2.3 del diseño (iPhone, Kuromi, Guide, Let's Slim, Nespresso) más las
 # marcas y personajes que más se cuelan en fichas de 1688. Se compara sin tildes
@@ -31,12 +33,12 @@ DEFAULT_BRANDS: tuple[str, ...] = (
     "Apple", "iPad", "AirPods", "MacBook", "Samsung", "Xiaomi", "Redmi", "Huawei",
     "Motorola", "Sony", "PlayStation", "Xbox", "Nintendo", "GoPro", "DJI", "Garmin",
     "Fitbit", "Lenovo", "Logitech", "Kingston", "SanDisk", "JBL", "Bose", "Alexa",
-    "TikTok",
+    "TikTok", "everyU", "Rosen",
     # Juguetes, personajes y licencias
     "Lego", "Barbie", "Hot Wheels", "Disney", "Marvel", "Spiderman",
     "Batman", "Superman", "Avengers", "Mickey", "Minnie", "Peppa Pig", "Paw Patrol",
     "Pokemon", "Pikachu", "Hello Kitty", "Sanrio", "Cinnamoroll", "My Melody",
-    "Naruto", "Dragon Ball", "One Piece", "Minecraft", "Fortnite", "Roblox",
+    "Naruto", "Dragon Ball", "Minecraft", "Fortnite", "Roblox", "Otamatone",
     "Super Mario", "Star Wars", "Harry Potter",
     # Indumentaria y accesorios
     "Nike", "Adidas", "Reebok", "Crocs", "Havaianas", "Lacoste", "Ray-Ban",
@@ -55,13 +57,19 @@ DEFAULT_BRANDS: tuple[str, ...] = (
 # de confort"...). Se compara sin tildes ni mayúsculas, por palabra entera y con
 # o sin "s" final.
 DEFAULT_FILLER: tuple[str, ...] = (
-    "oasis de confort", "magia", "mágico", "mágica", "según tu", "vibe", "disfrutá",
+    "oasis de confort", "con magia", "mágico", "mágica", "según tu", "vibe", "disfrutá",
     "disfrutalo", "iluminá tus", "descubrí", "descubre", "transformá", "súper",
-    "increíble", "espectacular", "perfecto", "perfecta", "ideal para", "elegante",
+    "increíble", "espectacular", "perfecto", "perfecta", "elegante",
     "divertido", "divertida", "eficiente", "versátil", "ambiente relajante",
     "sin límites", "en cualquier lugar", "el mejor", "la mejor", "premium",
     "revolucionario", "innovador",
+    "práctico", "práctica", "practicidad", "comodidad", "elegancia", "cautivador",
+    "cautivadora", "impactante", "novedoso", "novedosa", "sin igual",
+    "solución ideal", "solución perfecta", "la solución", "tu solución",
 )
+# «elegante», «mágico» y «mágica» solo cuentan si encabezan el título («Elegante Reloj…»): en el
+# medio suelen ser el producto o su tipo («Traje Elegante», «Cubo Mágico»). «Solución» a secas
+# tampoco está: «solución salina» o «solución limpiadora» son productos.
 
 # Datos técnicos que parecen código pero no lo son: se aceptan en mayúsculas en
 # un título (regla COD). Aparte hay familias que se reconocen por patrón (IP67,
@@ -73,6 +81,8 @@ DEFAULT_TECHNICAL: tuple[str, ...] = (
     "MP4", "WIFI", "SIM", "SD", "SSD", "RAM", "LTE", "BLE", "OTG", "CPU", "GSM", "FPV",
     "VR", "HD", "FHD", "UHD", "HDR", "ECG", "SPF", "UPF", "RFID", "EAN", "QR", "TWS",
     "IR", "OBD", "ANC", "PWM",
+    "IA", "AI", "VESA", "USBC", "USB-C", "SK5", "V8", "DPI", "PIR", "HSS", "SDS", "MDF", "BPA",
+    "FDA", "BBQ", "ISO", "TPR", "BMX", "PD", "QC", "RC", "SPA", "DC", "B22", "HB", "ZIP", "PS4", "PS5",
 )
 
 LIST_NAMES: tuple[str, ...] = ("marcas", "relleno", "tecnicos")
@@ -84,6 +94,10 @@ _DEFAULTS: dict[str, tuple[str, ...]] = {
 
 MAX_ITEMS = 500
 MAX_ITEM_LEN = 60
+# Palabras (tiras de letras o de dígitos) de un término: la ventana de búsqueda crece con la
+# más larga, así que un término de 30 palabras de una letra encarecería todo el recorrido.
+MAX_TERM_WORDS = 6
+_WORD_RE = re.compile(r"[^\W\d_]+|\d+")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -122,6 +136,8 @@ def sanitize_items(items: object) -> list[str]:
             raise ValueError("Hay caracteres de control en la lista")
         if len(item) > MAX_ITEM_LEN:
             raise ValueError(f"«{item[:20]}…» pasa de {MAX_ITEM_LEN} caracteres")
+        if len(_WORD_RE.findall(item.replace("'", ""))) > MAX_TERM_WORDS:
+            raise ValueError(f"«{item[:20]}…» tiene más de {MAX_TERM_WORDS} palabras")
         folded = item.casefold()
         if folded in seen:
             continue
