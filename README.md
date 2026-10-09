@@ -553,12 +553,15 @@ backend/tools/oficina_ml_search.py
 
 **Lado Hugo** (`pricing/oficina_ml.py`, `api/oficina_routes.py`):
 
-- **Prender/apagar.** Variable `OFICINA_SEARCH_KEY` (>= 24 caracteres y >= 12 caracteres distintos: `aaaa…` no vale). Sin ella,
-  o con una key floja/placeholder, los dos endpoints dan **404** y no existen en la práctica. `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado.
+- **Prender/apagar.** Variable `OFICINA_SEARCH_KEY` (**>= 32 caracteres** y >= 12 distintos: `aaaa…` no vale; **usá la que genera
+  `oficina_ml_search.py --init`**, 43 caracteres aleatorios). El largo importa: la key correcta nunca se bloquea (ver abajo), así que
+  lo único que frena la fuerza bruta es que la key sea imposible de adivinar. Sin la variable, o con una key floja/placeholder, los
+  dos endpoints dan **404** y no existen en la práctica (la causa se loguea UNA vez, sin la key). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado.
 - **Auth.** Header `x-oficina-key` contra la variable, comparado en tiempo constante (se comparan los SHA-256). No usan la
   cookie del dashboard (`/api/oficina/` está en las rutas públicas del middleware; la sesión del dashboard tampoco los abre).
-  Rate limit por IP (30 pedidos por minuto) y bloqueo de 5 minutos tras 10 intentos con key mala (`429`). **El bloqueo frena
-  fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
+  Rate limit por IP (30 pedidos por minuto) y bloqueo de 5 minutos tras 10 intentos con key mala (`429`). Las tablas por IP tienen **tope duro de 5.000 entradas (LRU)**, el barrido de lo vencido corre como mucho cada 30 s y las IPv6 se
+  agrupan por **/64** (quien tiene una red IPv6 tiene 2^64 direcciones): cada request cuesta O(1) aunque inventen 100.000 IPs.
+  **El bloqueo frena fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
   sin cola al runner bloqueándola. La auth está declarada UNA vez, en el `APIRouter`: una ruta nueva no puede olvidarse de ella.
 - **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los productos cuya última medición no tuvo un
   IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados — **los
@@ -580,7 +583,7 @@ backend/tools/oficina_ml_search.py
   |---|---|
   | `product_id` | `[A-Za-z0-9_-]{1,64}` y tiene que existir en el semáforo (producto desconocido: rechazado) |
   | `id` de la publicación | `MLA<dígitos>` / `MLAU<dígitos>`, solo ASCII (`re.ASCII`: `MLA١٢٣` no pasa) |
-  | `permalink` | https y host de Mercado Libre, sin usuario ni puerto raro ni click-trackers, **hasta 512 caracteres** (un link real mide menos de 300; el tope vale para todos los usos de `safe_permalink`); si no cumple se reemplaza por el link canónico del id |
+  | `permalink` | https y host de Mercado Libre, sin usuario ni puerto raro ni click-trackers, **hasta 512 caracteres** (un link real de ML mide menos de 100; el tope vale para todos los usos de `safe_permalink` / `safe_image_url`, que son de ML); si no cumple se reemplaza por el link canónico del id |
   | fotos | solo `*.mlstatic.com` (http se sube a https), hasta 512 caracteres; cualquier otro host o largo se descarta. Una URL con un carácter que no se puede escribir (un surrogate suelto) se descarta: no tira el lote |
   | precio | entero en centavos, `0 < p < 10^11`; fuera de rango (o bool, NaN, texto) se descarta el precio, no la publicación; una moneda que no son 3 letras descarta el precio |
   | título, vendedor, marca | una sola línea: sin controles, sin caracteres de formato/inversión de texto, sin las marcas `{…}` de ML; cortados a 200 / 60 / 40 |
@@ -600,7 +603,10 @@ backend/tools/oficina_ml_search.py
   criterio que las tiendas) es un precio dudoso: se ve como idéntico sin precio, con el aviso, y no cuenta para el color ni para el
   estimado. Es la defensa contra una key robada o una Mac comprometida (una publicación con nuestro título, una foto real de
   mlstatic y el precio que quiera quien manda no puede fijar el color); una persona que marcó «Es el mismo» manda sobre el
-  chequeo. (No hay «mediana de la API» contra la que comparar: a la oficina solo se llega cuando la API NO tuvo un IGUAL con
+  chequeo. **Alcance:** el rango [0,1×, 10×] es contra precios *absurdos* (un dato malo, una moneda mal leída, un atacante torpe), **no
+  contra una manipulación dirigida**: quien tenga la key y elija un precio dentro del rango (por ejemplo 5× el nuestro) sí puede mover
+  el color de ese producto. Por eso la key es larga, está solo en la Mac y en Coolify, y todo lo que entra queda guardado con su
+  origen (`oficina`) en el snapshot. (No hay «mediana de la API» contra la que comparar: a la oficina solo se llega cuando la API NO tuvo un IGUAL con
   precio.) Si no hay resultado fresco, todo sigue como antes (el servidor busca solo si tiene proxy). El snapshot guarda
   `match_origin = oficina` y `web_via = oficina`; la corrida, `oficina_fresh` (productos con resultado fresco al empezar) y
   `n_oficina_ok`. En el dashboard: "Web (oficina)", el filtro de origen y una línea en Salud (productos frescos, última carga,
@@ -616,9 +622,11 @@ backend/tools/oficina_ml_search.py
   (si Hugo mandara más de una, se usa solo la primera); lo vacío no se reintenta con otra variante esa misma noche.
 - **Una sola instancia a la vez**: candado `flock` en `~/.config/b2box-bench/oficina-ml-search.lock`. Un piloto manual a la hora del
   launchd (o dos Macs con el mismo archivo) buscaría los mismos productos al doble de ritmo desde la misma IP; la segunda corrida
-  dice «Ya hay otra corrida…» y sale con código 6. `--check` no lo necesita.
+  dice «Ya hay otra corrida…» y sale con código 6. `--check` no lo necesita. El candado y el log se abren con `O_NOFOLLOW`: un link
+  simbólico plantado en su lugar es un error de configuración (código 2), no se escribe en el archivo al que apunta.
 - **`fetched_at` sale del reloj de Hugo** (header `Date` de la respuesta de la cola), no del de la Mac: con el reloj corrido más de
-  5 minutos Hugo rechazaría todo por «fecha en el futuro». Si el reloj está desfasado más de 90 s lo avisa en el log.
+  5 minutos Hugo rechazaría todo por «fecha en el futuro». Si el reloj está desfasado más de 90 s lo avisa en el log. Un `Date` que
+  difiere **más de un día** de la hora de la Mac (o roto, o del año 9999) no se cree: se avisa y se usa el reloj de la Mac.
 - **Al primer captcha o bloqueo (`page_problem` = `blocked`: captcha, verificación de cuenta, 403/429, redirect a otro sitio) frena la
   noche entera**, lo reporta a Hugo (`status: blocked`) y termina con código 3. No reintenta, no espera para probar de nuevo, no
   cambia nada para esquivarlo. Cinco errores de lectura seguidos (página ilegible, navegador caído) también la frenan (código 5).
