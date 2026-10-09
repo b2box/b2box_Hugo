@@ -547,8 +547,10 @@ diferentes o nada, y el estado del índice de cada tienda.
   buscador); Casa Perfecta prohíbe `/search/` (el sitemap de Tiendanube trae `/ar/search/?q=…`: se
   descartan). Si el robots.txt no se puede bajar (5xx, 429, 401 o 403), no se rastrea nada; si no
   existe (404), todo permitido. Un `Crawl-delay` del robots alarga la pausa. El patrón se compara sin
-  regex (un robots hostil no puede colgar el proceso) y hay un tope de reglas en total, sumando todos
-  los grupos. **Qué grupo es el nuestro**: se compara el *token* del User-Agent declarado en el robots
+  regex (un robots hostil no puede colgar el proceso). **Tope de reglas**: 2.000 por tienda, contando
+  solo las de los grupos que nos aplican (las de otros bots no cuentan y no pueden desplazar las
+  nuestras); si lo nuestro se pasa, no se rastrea nada (fail-closed) y el motivo queda en el estado de la
+  pasada. Un `Disallow` de más de 400 caracteres se acorta (prohíbe lo mismo y algo más). **Qué grupo es el nuestro**: se compara el *token* del User-Agent declarado en el robots
   (las letras, `_` y `-` del principio, hasta la primera `/`, espacio, `(` o `;`). `HugoPriceBot`,
   `HugoPriceBot/1.0` y `HugoPriceBot (+https://b2box.pro)` son nuestros; `HugoPriceBot2` o `o` no. Si
   no hay grupo nuestro vale el `*`.
@@ -563,12 +565,17 @@ diferentes o nada, y el estado del índice de cada tienda.
   contra el sitio de la tienda y contra robots.txt.
 - **Cupo y descanso por sitio, no por tienda**: el cupo diario de páginas y los 10 minutos de descanso
   de «Indexar ahora» se cuentan por el dominio del sitio (sin el `www.`). Borrar y volver a crear la
-  tienda no los reinicia.
+  tienda no los reinicia, aunque se la borre en medio de una pasada (esa pasada igual queda anotada). El
+  candado de «ya hay una pasada en curso» también es por sitio: la tienda recreada con otro id no puede
+  correr en paralelo con la que se estaba leyendo.
 - **Topes de tiempo en la comparación**: cada tienda tiene 120 s por producto y el producto entero
   300 s (`STORE_MATCH_TIMEOUT_S` / `PRODUCT_MATCH_TIMEOUT_S` en `store_match.py`). Si una foto gotea o
   el juez se cuelga, ese producto sigue sin esa tienda y la corrida no se traba. Cada foto tiene además
   un tope **total** de 30 s (12 s cuando hay un cliente esperando, como en `/app/lookup`), no solo por
   chunk.
+  **Corta-circuito**: si una tienda se pasa de esos 120 s tres productos seguidos (`STORE_TIMEOUT_STREAK`),
+  se la saltea el resto de esa corrida y el motivo aparece en Salud, debajo de su nombre en «Productos
+  por fuente». Un producto que sí contesta reinicia la cuenta, y la corrida siguiente vuelve a probarla.
 - **Una ficha rara no corta la pasada**: un charset inválido, un parser que falla o un error de red
   inesperado en UNA ficha es el resultado de esa ficha (error de red = transitorio, no se guarda; error
   de lectura = un fallo de esa ficha, con el motivo) y la pasada sigue con la siguiente. Si no se puede
