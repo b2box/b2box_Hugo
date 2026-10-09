@@ -244,8 +244,13 @@ arman, sin IA y de forma determinista (`pricing/market_query.py`), hasta
 | 2 | `corto` | sin medidas, cantidades, códigos, colores ni relleno; las primeras 5 palabras con contenido | `Organizador Doble Ajustable Niveles` |
 | 3 | `claves` | el sustantivo principal (el primero, salvo kit/set/juego) y hasta 2 atributos, sin modificadores flojos (doble, mini…) | `Organizador Ajustable Niveles` |
 
-Las repetidas (después de normalizar mayúsculas y tildes) se buscan una sola vez: un
-título ya corto y limpio hace una sola búsqueda.
+Lo que identifica al producto **se conserva**: el número de modelo o de tamaño (`iPhone 13`, `Número 5`), los códigos con
+letras y dígitos (`i12`, `PH2`, `T6`, `A5`, `3D`) y los conectores con guion (`USB-C`); en `claves` esos códigos tienen
+prioridad sobre los atributos comunes. Lo que se saca son las medidas y cantidades (`40x30`, `500 ml`, `20W`, `3 Niveles`,
+`100 Piezas`, `Pack x6`, `1.5 L`), los colores, el relleno de marketing, los códigos internos BX/PA y los números de más de 4
+dígitos. **Nunca se busca una variante de una sola palabra** (`Juego`, `Limpieza`): trae de todo; el título sí se busca siempre,
+aunque sea corto. Las repetidas (después de normalizar mayúsculas y tildes) se buscan una sola vez: un título ya corto y limpio
+hace una sola búsqueda.
 
 - Se prueban **en orden y se corta en la primera que da un IGUAL con precio**. Las fichas
   de todas las variantes probadas se juntan sin repetir por id y pasan por el **mismo**
@@ -258,13 +263,22 @@ título ya corto y limpio hace una sola búsqueda.
 - Para medir: el snapshot guarda en `ml_variant` qué búsqueda encontró el match
   (`titulo` | `corto` | `claves` | `inicio`) y la corrida suma en `variant_stats` cuántos
   productos resolvió cada una (el dashboard lo muestra debajo de la última corrida).
-  `ml_requests_used` sube en lo que cuestan las variantes: con 1.800 productos "sin dato"
-  son hasta 2 requests más por producto y noche.
+  `ml_requests_used` sube en lo que cuestan las variantes (ver "Costo real" abajo).
 - **`pm_ml_query_variants = 1` es exactamente el comportamiento anterior**: el título y,
   solo si no trajo ninguna ficha, sus primeras 4 palabras (`inicio`). Hay un test dorado
   que corre el mundo de 16 productos de origin/main con 1 variante y compara TODAS las
   columnas del snapshot y de la corrida. Con 2 o 3 el respaldo de "4 palabras" no se usa
   (lo cubre la variante corta).
+- **Costo real.** Un producto sin ficha en ningún lado gasta 3 requests (una búsqueda por variante) en vez de 1 o 2. Pero cada
+  ficha IGUAL pide además sus vendedores (`/items`, hasta 4 fichas **por variante**) y, si la mitad de los vendedores no trae
+  `sold_quantity`, `/users/{id}` (cacheado 30 días): el peor caso de UN producto, con 4 fichas IGUAL sin vendedores en cada
+  variante, son 3 + 3×4 = **15 requests**. Con el juez de IA prendido (`pm_vision_max_calls` > 0), cada variante que trae fichas
+  dudosas (o una IGUAL con marca conocida) es **una llamada más al juez**: hasta 3 por producto en vez de 1, más los `/items` que se
+  piden para mostrarle el precio; el tope diario del juez acota el gasto. Referencia: la corrida #4 (con 1 variante) usó **2.359
+  requests**; con 1.857 productos "sin dato" y 3 variantes el consumo esperado es de ~6.000 (2.359 + 2 × 1.857 en el peor caso de
+  "ninguna ficha"), contra el `pm_ml_daily_budget` de 15.000. **No hace falta subirlo**; sin cupo el producto queda `skipped` y la
+  noche siguiente empieza por esos. Conviene mirar `ml_requests_used` las primeras noches: si pasara de ~10.000, bajar
+  `pm_ml_query_variants` a 2.
 - La búsqueda web de ML del servidor (fuente 2) no cambia: título y, si no hay
   resultados, las primeras 4 palabras.
 
@@ -529,9 +543,9 @@ con `ListingBrowser` sin proxy). Entonces: **la Mac busca de a poco y Hugo hace 
 ```
 Mac de la oficina (01:00 ART)                       Hugo
 backend/tools/oficina_ml_search.py
-  GET  /api/oficina/ml-queue?limit=N   ───────▶  productos sin idéntico con precio + sus consultas
-  busca cada consulta en listado.mercadolibre.com.ar
-  (sin proxy, 1 a la vez, pausa 8-15 s)
+  GET  /api/oficina/ml-queue?limit=N   ───────▶  productos sin idéntico con precio + UNA consulta cada uno
+  busca esa consulta en listado.mercadolibre.com.ar
+  (sin proxy, 1 página por producto, pausa 8-15 s)
   POST /api/oficina/ml-results         ───────▶  re-sanea TODO y guarda en `ml_web_result`
                                                   el semáforo de las 03:00 ART lo usa como fuente "web"
                                                   (origen `oficina`, "Web (oficina)" en el dashboard)
@@ -539,18 +553,26 @@ backend/tools/oficina_ml_search.py
 
 **Lado Hugo** (`pricing/oficina_ml.py`, `api/oficina_routes.py`):
 
-- **Prender/apagar.** Variable `OFICINA_SEARCH_KEY` (>= 24 caracteres). Sin ella, o con una key floja/placeholder, los dos
-  endpoints dan **404** y no existen en la práctica. `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado.
+- **Prender/apagar.** Variable `OFICINA_SEARCH_KEY` (>= 24 caracteres y >= 12 caracteres distintos: `aaaa…` no vale). Sin ella,
+  o con una key floja/placeholder, los dos endpoints dan **404** y no existen en la práctica. `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado.
 - **Auth.** Header `x-oficina-key` contra la variable, comparado en tiempo constante (se comparan los SHA-256). No usan la
   cookie del dashboard (`/api/oficina/` está en las rutas públicas del middleware; la sesión del dashboard tampoco los abre).
-  Rate limit por IP (30 pedidos por minuto) y bloqueo de 5 minutos tras 10 intentos con key mala (`429`).
-- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500): primero los productos cuya última medición no tuvo un
-  IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados; después los
-  que tienen resultado de la oficina **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a la
-  oficina). Cada item trae solo `product_id` y `queries` (las mismas variantes que la API de ML, ver "Variantes de búsqueda");
-  nada de costos, proveedor ni precios nuestros. **Se vuelve a pedir un producto un día antes de que su resultado venza**
-  (a los 6 días con el TTL de 7): si no, la corrida de las 03:00 lo encontraría vencido y ese producto perdería el dato un día
-  por semana.
+  Rate limit por IP (30 pedidos por minuto) y bloqueo de 5 minutos tras 10 intentos con key mala (`429`). **El bloqueo frena
+  fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
+  sin cola al runner bloqueándola. La auth está declarada UNA vez, en el `APIRouter`: una ruta nueva no puede olvidarse de ella.
+- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los productos cuya última medición no tuvo un
+  IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados — **los
+  deshabilitados se buscan también**: Nico pidió medirlos (`pm_include_disabled`) y su nombre viaja en la consulta, como el de
+  cualquier otro producto del catálogo —; (2) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante
+  por probar; (3) los que tienen resultado **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a
+  la oficina). **Cada item trae UNA sola consulta**: una página de ML por producto por noche como tope. Si la del título vino
+  vacía, la variante siguiente (corta, después claves) se da recién la noche siguiente (12 horas después como mínimo); si las tres
+  vinieron vacías el producto espera a que venza el resultado y empieza de nuevo por el título. Solo viaja `product_id` y `queries`
+  (con un único elemento): nada de costos, proveedor ni precios nuestros. **Se vuelve a pedir un producto un día antes de que su
+  resultado venza** (a los 6 días con el TTL de 7): si no, la corrida de las 03:00 lo encontraría vencido y ese producto perdería el
+  dato un día por semana. **Los productos que el semáforo ya no mide no entran**: se mira cuán viejo es su último snapshot respecto
+  del más nuevo de todos (más de 3 días: borrado de Vendure, o deshabilitado con `pm_include_disabled = 0`), así que si el semáforo
+  estuvo caído una semana nadie queda afuera.
 - **Los resultados** (`POST /api/oficina/ml-results`, `{"results": [{product_id, query, fetched_at, status, reason, candidates}]}`).
   Hugo no confía en lo que llega: cada campo se vuelve a sanear con las listas blancas de la búsqueda web del servidor:
 
@@ -558,8 +580,8 @@ backend/tools/oficina_ml_search.py
   |---|---|
   | `product_id` | `[A-Za-z0-9_-]{1,64}` y tiene que existir en el semáforo (producto desconocido: rechazado) |
   | `id` de la publicación | `MLA<dígitos>` / `MLAU<dígitos>`, solo ASCII (`re.ASCII`: `MLA١٢٣` no pasa) |
-  | `permalink` | https y host de Mercado Libre, sin usuario ni puerto raro ni click-trackers; si no cumple se reemplaza por el link canónico del id |
-  | fotos | solo `*.mlstatic.com` (http se sube a https); cualquier otro host se descarta |
+  | `permalink` | https y host de Mercado Libre, sin usuario ni puerto raro ni click-trackers, **hasta 512 caracteres** (un link real mide menos de 300; el tope vale para todos los usos de `safe_permalink`); si no cumple se reemplaza por el link canónico del id |
+  | fotos | solo `*.mlstatic.com` (http se sube a https), hasta 512 caracteres; cualquier otro host o largo se descarta. Una URL con un carácter que no se puede escribir (un surrogate suelto) se descarta: no tira el lote |
   | precio | entero en centavos, `0 < p < 10^11`; fuera de rango (o bool, NaN, texto) se descarta el precio, no la publicación; una moneda que no son 3 letras descarta el precio |
   | título, vendedor, marca | una sola línea: sin controles, sin caracteres de formato/inversión de texto, sin las marcas `{…}` de ML; cortados a 200 / 60 / 40 |
   | `fetched_at` | ISO 8601 (con o sin zona); en el futuro (más de 5 min) se rechaza: no puede mantener un resultado fresco para siempre |
@@ -567,12 +589,19 @@ backend/tools/oficina_ml_search.py
 
   Topes: **512 KB** de body (también sin `Content-Length`), **50 productos** por lote, **`pm_ml_web_max_results`** publicaciones por
   producto, sin repetir id. **Idempotente por `(product_id, fetched_at)`**: mandar dos veces el mismo lote no duplica nada. Un
-  resultado malo se rechaza solo (con el motivo en la respuesta) sin tirar el lote. Se conservan los últimos 5 resultados de cada producto.
+  resultado malo (o que revienta al procesarlo) se rechaza solo, con el motivo en la respuesta, sin tirar el lote. **Retención:** de
+  cada producto se conservan los últimos 5 resultados (`ok` / `empty`) y, aparte, los últimos 5 bloqueos / errores —una racha de
+  bloqueos no desplaza el último resultado bueno que sigue dentro del TTL—, y todo lo que tiene más de 30 días se borra.
 - **La corrida del semáforo.** Si un producto sin IGUAL de la API tiene un resultado `ok` o `empty` de la oficina de menos de
   `OFICINA_RESULT_TTL_DAYS`, se usan esos candidatos **en lugar** de buscar desde el servidor, por el mismo filtro que la web
   (CLIP, nombre, juez, medidas, "No es el mismo" / "Es el mismo"). Un `empty` fresco dice "la oficina buscó y ML no tiene nada" y
   tampoco dispara la búsqueda del servidor. Un `blocked` / `error` no es un resultado. El color real sigue saliendo solo de
-  idénticos. Si no hay resultado fresco, todo sigue como antes (el servidor busca solo si tiene proxy). El snapshot guarda
+  idénticos. **Plausibilidad:** un candidato de la oficina con un precio 10 veces más chico o más grande que el nuestro (el mismo
+  criterio que las tiendas) es un precio dudoso: se ve como idéntico sin precio, con el aviso, y no cuenta para el color ni para el
+  estimado. Es la defensa contra una key robada o una Mac comprometida (una publicación con nuestro título, una foto real de
+  mlstatic y el precio que quiera quien manda no puede fijar el color); una persona que marcó «Es el mismo» manda sobre el
+  chequeo. (No hay «mediana de la API» contra la que comparar: a la oficina solo se llega cuando la API NO tuvo un IGUAL con
+  precio.) Si no hay resultado fresco, todo sigue como antes (el servidor busca solo si tiene proxy). El snapshot guarda
   `match_origin = oficina` y `web_via = oficina`; la corrida, `oficina_fresh` (productos con resultado fresco al empezar) y
   `n_oficina_ok`. En el dashboard: "Web (oficina)", el filtro de origen y una línea en Salud (productos frescos, última carga,
   últimas 24 h con cuántas bloqueadas).
@@ -583,16 +612,26 @@ backend/tools/oficina_ml_search.py
   imprime ni se loguea; `HUGO_URL` tiene que ser `https://`).
 - `ListingBrowser` **sin proxy** (`BROWSER_PROXY` forzado a vacío antes de importar nada), scripts bloqueados, de a una página,
   **pausa al azar de 8 a 15 s** entre búsquedas (no se puede bajar), tope `--max` (default 250; el piloto, `--max 50`).
-  Parsea con `market_ml_web.parse_search` y `page_problem`. Prueba las consultas de cada producto en orden y se queda con la
-  primera que trae publicaciones.
+  Parsea con `market_ml_web.parse_search` y `page_problem`. **Abre UNA página por producto por noche**: la consulta que Hugo le da
+  (si Hugo mandara más de una, se usa solo la primera); lo vacío no se reintenta con otra variante esa misma noche.
+- **Una sola instancia a la vez**: candado `flock` en `~/.config/b2box-bench/oficina-ml-search.lock`. Un piloto manual a la hora del
+  launchd (o dos Macs con el mismo archivo) buscaría los mismos productos al doble de ritmo desde la misma IP; la segunda corrida
+  dice «Ya hay otra corrida…» y sale con código 6. `--check` no lo necesita.
+- **`fetched_at` sale del reloj de Hugo** (header `Date` de la respuesta de la cola), no del de la Mac: con el reloj corrido más de
+  5 minutos Hugo rechazaría todo por «fecha en el futuro». Si el reloj está desfasado más de 90 s lo avisa en el log.
 - **Al primer captcha o bloqueo (`page_problem` = `blocked`: captcha, verificación de cuenta, 403/429, redirect a otro sitio) frena la
   noche entera**, lo reporta a Hugo (`status: blocked`) y termina con código 3. No reintenta, no espera para probar de nuevo, no
   cambia nada para esquivarlo. Cinco errores de lectura seguidos (página ilegible, navegador caído) también la frenan (código 5).
-- Manda lotes de 10 productos; un lote que no se puede entregar se reintenta 3 veces (5 / 15 / 45 s) y, si no, se cuenta como perdido
-  y sigue (código 4). Key mala o endpoint apagado (401 / 404): frena sin reintentar (código 2).
+- Manda lotes de 10 productos. **Tanto el GET de la cola como el POST se reintentan** 3 veces con espera creciente (5 / 15 s; un 429
+  respeta su `Retry-After`, con tope de 2 minutos) cuando es algo transitorio (red, 502/503 de un redeploy de Coolify): un lote que
+  igual no se puede entregar se cuenta como perdido y sigue (código 4). Key mala o endpoint apagado (401 / 404): frena sin
+  reintentar (código 2). **Si Hugo rechaza TODO un lote**, el log dice `ERROR … rechazó TODO el lote` con el motivo y la corrida
+  termina con código 4; si todos los rechazos tienen la misma causa se frena la noche en vez de seguir gastando páginas de ML para
+  tirarlas. Un rechazo parcial es un `WARNING` con los motivos.
 - `--dry-run` busca de verdad pero **no manda nada** a Hugo. `--check` solo prueba la configuración y que Hugo acepte la key.
-  `caffeinate -i` atado al proceso mientras corre. Log en `~/Library/Logs/b2box-oficina-ml-search.log` (sin la key, sin headers, sin
-  los textos de las consultas).
+  `caffeinate -i` atado al proceso mientras corre. Log en `~/Library/Logs/b2box-oficina-ml-search.log` (permisos 600, sin la key,
+  sin headers, sin los textos de las consultas). `--init` crea `~/.config/b2box-bench/` con permisos 700 (si no existía) y el
+  `.env` con 600.
 
 **Instalación en la Mac de la oficina** (una sola vez; pasos para Nico):
 
@@ -604,7 +643,7 @@ backend/tools/oficina_ml_search.py
 5. En el mismo archivo, `HUGO_URL=https://<dominio de Hugo>`.
 6. `.venv/bin/python tools/oficina_ml_search.py --check` → tiene que decir `OK`.
 7. Prueba chica sin mandar nada: `… --dry-run --max 3` (3 búsquedas reales a ML, tarda ~1 minuto).
-8. **Piloto de 50:** `… tools/oficina_ml_search.py --max 50` (~15 minutos). En el dashboard, Semáforo, aparecen "Web (oficina)" a la
+8. **Piloto de 50:** `… tools/oficina_ml_search.py --max 50` (~15 minutos, una página por producto). En el dashboard, Semáforo, aparecen "Web (oficina)" a la
    noche siguiente, cuando corre el semáforo.
 9. **Automático a la 01:00 ART:** copiar `backend/tools/com.b2box.oficina-ml-search.plist` a `~/Library/LaunchAgents/`, cambiar
    `/Users/USUARIO/...` por la carpeta y el usuario de esa Mac, y `launchctl bootstrap gui/$(id -u)
@@ -625,10 +664,11 @@ ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS variant_stats, DROP COLUMN I
     DROP COLUMN IF EXISTS n_oficina_ok;
 ```
 
-**Cobertura.** Con 250 productos por noche y 1.800 "sin dato", una vuelta completa son ~8 noches; con el TTL de 7 días el
-régimen no alcanza a refrescar todo antes de que venza (necesitaría ~265 por noche). Subir `--max` en el plist (hasta 500) o
-`OFICINA_RESULT_TTL_DAYS` lo resuelve. Medido en la prueba real (5 búsquedas desde esta Mac, sin proxy): 3 a 7 s de carga + la pausa de 8 a 15 s = ~16 s por producto, así que
-50 productos son ~13 minutos y 250 son ~1 hora 10 (más si la primera consulta viene vacía y hace falta otra).
+**Cobertura y tiempos.** Con UNA página por producto por noche, un producto cuya primera variante viene vacía tarda hasta 3 noches
+en probar las tres. Con 250 productos por noche y 1.800 "sin dato", una vuelta de primeras variantes son ~8 noches; con el TTL de 7
+días el régimen no alcanza a refrescar todo antes de que venza (necesitaría ~265 por noche). Subir `--max` en el plist (hasta 500) o
+`OFICINA_RESULT_TTL_DAYS` lo resuelve. Tiempo medido en la prueba real (5 búsquedas desde esta Mac, sin proxy): 3 a 7 s de carga + la
+pausa de 8 a 15 s (promedio 11,5) = **~17-18 s por producto**: 50 productos son ~15 minutos y 250 son ~1 hora 15.
 
 **Riesgos.** Es la misma fuente que la búsqueda web del servidor (`robots.txt` de `listado.mercadolibre.com.ar`: permite las
 búsquedas por palabra a los agentes genéricos) pero desde una IP de oficina, así que si ML la bloquea esa IP queda marcada: por eso
