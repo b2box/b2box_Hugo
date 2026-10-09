@@ -98,6 +98,21 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Variante con nombre 'PA…' detectada",
         "tone": "warning",
     },
+    "seo_audit_requested": {
+        "icon": "info",
+        "title": "Auditoría de textos del catálogo disparada a mano",
+        "tone": "muted",
+    },
+    "seo_list_changed": {
+        "icon": "info",
+        "title": "Lista de la auditoría de textos modificada",
+        "tone": "info",
+    },
+    "seo_list_reset": {
+        "icon": "info",
+        "title": "Lista de la auditoría de textos restablecida",
+        "tone": "info",
+    },
     "bx_no_image_flagged": {
         "icon": "alert",
         "title": "Nombre 'BX…' sin imagen (confirmar para deshabilitar)",

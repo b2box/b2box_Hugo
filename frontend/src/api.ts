@@ -18,6 +18,11 @@ import type {
   PriceMonitorSummary,
   SectionsResponse,
   SemaforoColor,
+  SeoItemsResponse,
+  SeoList,
+  SeoListName,
+  SeoListsResponse,
+  SeoSummary,
   Setting,
   StatusResponse,
   StoreMatchRow,
@@ -43,10 +48,31 @@ async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
   return resp;
 }
 
+// El `detail` de FastAPI es un texto, o una lista de errores de validación (422):
+// [{loc: ["body", "items", 0], msg: "…"}]. Sin esto un 422 se mostraba como «[object Object]».
+export function detailText(detail: unknown, fallback: string): string {
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail
+      .map((d) => {
+        if (typeof d === "string") return d;
+        if (d && typeof d === "object" && "msg" in d) {
+          const loc = Array.isArray((d as { loc?: unknown }).loc)
+            ? ((d as { loc: unknown[] }).loc as unknown[]).filter((x) => x !== "body").join(".")
+            : "";
+          return `${loc ? loc + ": " : ""}${String((d as { msg: unknown }).msg)}`;
+        }
+        return JSON.stringify(d);
+      })
+      .join(" · ");
+  }
+  return fallback;
+}
+
 async function asJson<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
-    const body = await resp.json().catch(() => ({}) as { detail?: string });
-    throw new ApiError(body.detail || resp.statusText, resp.status);
+    const body = await resp.json().catch(() => ({}) as { detail?: unknown });
+    throw new ApiError(detailText(body.detail, resp.statusText), resp.status);
   }
   return resp.json() as Promise<T>;
 }
@@ -341,4 +367,96 @@ export async function deleteStore(id: number): Promise<void> {
 
 export async function indexStoreNow(id: number): Promise<void> {
   await asJson(await apiFetch(`/api/stores/${id}/index`, { method: "POST" }));
+}
+
+// ─── Auditoría de textos del catálogo (SEO, solo lectura) ──────────
+
+export type SeoEnabled = "all" | "enabled" | "disabled";
+export type SeoChannel = "all" | "ar" | "solo_default";
+
+export interface SeoQuery {
+  rule?: string | null;
+  enabled: SeoEnabled;
+  lang?: string | null;
+  channel: SeoChannel;
+  q?: string;
+  onlyIssues: boolean;
+  page?: number;
+  pageSize?: number;
+}
+
+function seoParams(query: SeoQuery, paged: boolean): URLSearchParams {
+  const params = new URLSearchParams({ only_issues: String(query.onlyIssues) });
+  if (query.rule) params.set("rule", query.rule);
+  if (query.enabled !== "all") params.set("enabled", query.enabled);
+  if (query.lang) params.set("lang", query.lang);
+  if (query.channel !== "all") params.set("channel", query.channel);
+  if (query.q && query.q.trim()) params.set("q", query.q.trim());
+  if (paged) {
+    params.set("page", String(query.page ?? 0));
+    params.set("page_size", String(query.pageSize ?? 25));
+  }
+  return params;
+}
+
+export async function getSeoSummary(): Promise<SeoSummary> {
+  return asJson<SeoSummary>(await apiFetch("/api/seo/text-audit/summary"));
+}
+
+export async function getSeoItems(query: SeoQuery): Promise<SeoItemsResponse> {
+  return asJson<SeoItemsResponse>(await apiFetch("/api/seo/text-audit/items?" + seoParams(query, true)));
+}
+
+// Devuelve la Response cruda: el 409 ("ya hay una") y el 429 son avisos, no errores.
+export async function runSeoAudit(): Promise<Response> {
+  return apiFetch("/api/seo/text-audit/run", { method: "POST" });
+}
+
+// Baja el CSV con los mismos filtros. Va por fetch (no por un link) para que una
+// sesión vencida redirija al login en vez de bajar un JSON de error.
+export interface SeoCsvResult {
+  total: number;
+  truncated: boolean;
+  maxRows: number;
+}
+
+export async function downloadSeoCsv(query: SeoQuery): Promise<SeoCsvResult> {
+  const r = await apiFetch("/api/seo/text-audit/export.csv?" + seoParams(query, false));
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}) as { detail?: unknown });
+    throw new ApiError(detailText(body.detail, r.statusText), r.status);
+  }
+  const blob = await r.blob();
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? "auditoria-textos.csv";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return {
+    total: Number(r.headers.get("X-Export-Total") ?? 0),
+    truncated: r.headers.get("X-Export-Truncated") === "1",
+    maxRows: Number(r.headers.get("X-Export-Max-Rows") ?? 0),
+  };
+}
+
+export async function getSeoLists(): Promise<SeoListsResponse> {
+  return asJson<SeoListsResponse>(await apiFetch("/api/seo/text-audit/lists"));
+}
+
+// `allowEmpty`: dejar la lista vacía apaga la regla; el servidor lo rechaza (422) si no se pide a propósito.
+export async function saveSeoList(name: SeoListName, items: string[], allowEmpty = false): Promise<SeoList> {
+  const r = await apiFetch(`/api/seo/text-audit/lists/${name}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items, allow_empty: allowEmpty }),
+  });
+  return asJson<SeoList>(r);
+}
+
+export async function resetSeoList(name: SeoListName): Promise<SeoList> {
+  return asJson<SeoList>(await apiFetch(`/api/seo/text-audit/lists/${name}`, { method: "DELETE" }));
 }

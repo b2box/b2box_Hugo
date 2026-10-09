@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -29,6 +29,18 @@ from app.pricing.market_specs import our_specs_from_custom_fields
 from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
+
+
+def quiet_http_loggers() -> None:
+    """Sube gql, httpx y httpcore a WARNING. Con LOG_LEVEL=DEBUG el transporte de gql loguea la
+    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink de todos los
+    productos) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en
+    INFO, la URL de cada request. Se llama al importar este módulo y desde _configure_logging."""
+    for name in ("gql", "httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+quiet_http_loggers()
 
 # El módulo httpx que usa el transport de gql, que NO siempre es el nuestro:
 # gql 4.4 importa `httpx2` si está instalado, y anthropic>=1 / openai>=3 lo
@@ -86,6 +98,47 @@ class VendureProduct:
     priced_variants: list[PricedVariant] | None = None
 
 
+@dataclass(slots=True)
+class ProductTranslationText:
+    """Nombre, slug y descripción de UNA traducción de un producto."""
+
+    language: str
+    name: str
+    slug: str
+    description: str
+
+
+@dataclass(slots=True)
+class ProductTexts:
+    """Lo que la auditoría de textos (HG1) lee de un producto: todas sus
+    traducciones y los datos del proveedor con los que se comparan los textos.
+    Los datos del proveedor no se muestran ni se guardan: no salen en `repr`."""
+
+    id: str
+    enabled: bool
+    product_code: str | None
+    updated_at: str | None
+    translations: list[ProductTranslationText]
+    supplier_business: str | None = field(default=None, repr=False)
+    supplier_size_model: str | None = field(default=None, repr=False)
+    supplier_link: str | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True)
+class TextsRead:
+    """Resultado de VendureClient.fetch_texts_for_audit. `supplier_fields` es
+    False si el schema de Vendure no tiene supplierBusiness/supplierSizeModel y se
+    leyó sin ellos (la regla FAB queda a medias)."""
+
+    products: list[ProductTexts]
+    supplier_fields: bool = True
+
+
+# Valor por defecto de `channel_token`: "el canal de VENDURE_CHANNEL_TOKEN".
+# None significa otra cosa: sin header `vendure-token`, o sea el canal por defecto.
+_CHANNEL_FROM_SETTINGS: Any = object()
+
+
 # ─── Cliente ───────────────────────────────────────────────────────
 
 
@@ -114,10 +167,15 @@ class VendureClient:
 
     DEFAULT_PAGE_SIZE = 25
 
-    def __init__(self) -> None:
+    def __init__(self, channel_token: str | None = _CHANNEL_FROM_SETTINGS) -> None:
+        """`channel_token`: sin pasarlo, el canal de VENDURE_CHANNEL_TOKEN. Un
+        token explícito elige ese canal; `None` lee el canal por defecto (sin
+        header `vendure-token`)."""
         s = get_settings()
         self._url = s.vendure_api_url
-        self._channel_token = s.vendure_channel_token
+        self._channel_token = (
+            s.vendure_channel_token if channel_token is _CHANNEL_FROM_SETTINGS else channel_token
+        )
         self._user = s.vendure_user
         self._pass = s.vendure_pass
         self._source_field = s.vendure_source_url_field
@@ -469,6 +527,85 @@ class VendureClient:
             return await self.fetch_all_products(
                 with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
             )
+
+    # ── Textos para la auditoría (solo lectura) ────────────────
+
+    TEXT_AUDIT_PAGE_SIZE = 100
+
+    def _text_audit_query(self, supplier_fields: bool):
+        """Query de la auditoría de textos. Sin `variantList`: una página de 100
+        productos es una sola lectura barata del lado de Vendure, no el N+1 del
+        listado de precios. Siempre `query`: la auditoría no escribe."""
+        custom = f"{self._source_field} b2boxProductCode"
+        if supplier_fields:
+            custom = f"supplierBusiness supplierSizeModel {custom}"
+        text = (
+            "query TextAuditProducts($skip: Int!, $take: Int!) { "
+            "products(options: { skip: $skip, take: $take, sort: { id: ASC } }) { "
+            "items { id enabled updatedAt "
+            "translations { languageCode name slug description } "
+            f"customFields {{ {custom} }} }} totalItems }} }}"
+        )
+        if not text.lstrip().startswith("query "):  # defensa: nunca una mutation
+            raise RuntimeError("la lectura de textos tiene que ser una query")
+        return gql(text)
+
+    @staticmethod
+    def _map_product_texts(raw: dict[str, Any], source_field: str) -> ProductTexts:
+        custom = raw.get("customFields") or {}
+        return ProductTexts(
+            id=str(raw["id"]),
+            enabled=bool(raw.get("enabled", True)),
+            product_code=custom.get("b2boxProductCode"),
+            updated_at=raw.get("updatedAt"),
+            translations=[
+                ProductTranslationText(
+                    language=str(t.get("languageCode") or ""),
+                    name=t.get("name") or "",
+                    slug=t.get("slug") or "",
+                    description=t.get("description") or "",
+                )
+                for t in (raw.get("translations") or [])
+                if isinstance(t, dict)
+            ],
+            supplier_business=custom.get("supplierBusiness"),
+            supplier_size_model=custom.get("supplierSizeModel"),
+            supplier_link=custom.get(source_field),
+        )
+
+    async def _fetch_texts(self, supplier_fields: bool, page_size: int) -> list[ProductTexts]:
+        query = self._text_audit_query(supplier_fields)
+        out: list[ProductTexts] = []
+        skip = 0
+        total: int | None = None
+        while True:
+            data = await self._execute_with_retry(
+                query, {"skip": skip, "take": page_size},
+                what=f"textos(skip={skip}, take={page_size})",
+            )
+            block = data.get("products") or {}
+            items = block.get("items") or []
+            out.extend(self._map_product_texts(it, self._source_field) for it in items)
+            total = int(block.get("totalItems") or len(out))
+            if not items or len(items) < page_size or len(out) >= total:
+                return out
+            skip += page_size
+
+    async def fetch_texts_for_audit(self, page_size: int | None = None) -> TextsRead:
+        """Todos los productos (habilitados y no) del canal de este cliente, con
+        todas sus traducciones y los datos del proveedor. Páginas de 100, una
+        lectura por página, en secuencia. NO escribe nada."""
+        take = page_size or self.TEXT_AUDIT_PAGE_SIZE
+        try:
+            return TextsRead(await self._fetch_texts(True, take), True)
+        except TransportQueryError as exc:
+            if "Cannot query field" not in str(exc):
+                raise
+            # Solo para esta lectura: la próxima corrida vuelve a probar (si el schema se
+            # actualiza, la regla FAB recupera sus tres campos sin reiniciar Hugo).
+            log.warning("Vendure no tiene supplierBusiness/supplierSizeModel: "
+                        "se leen los textos sin ellos (%s)", str(exc)[:160])
+        return TextsRead(await self._fetch_texts(False, take), False)
 
     async def get_product(self, product_id: str) -> VendureProduct | None:
         query = gql(

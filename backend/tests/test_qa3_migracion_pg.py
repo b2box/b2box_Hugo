@@ -47,7 +47,9 @@ def _rollback_sql() -> str:
 def _shape(engine) -> dict:
     insp = inspect(engine)
     out = {}
-    for table in sorted(insp.get_table_names()):
+    # Las tablas de la auditoría de textos (HG1) son de un PR posterior a este esquema de partida:
+    # las prueba test_seo_text_audit_pg.py.
+    for table in sorted(t for t in insp.get_table_names() if not t.startswith("text_audit_")):
         cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)}
         idx = {i["name"]: (tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
         out[table] = (cols, idx)
