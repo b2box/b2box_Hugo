@@ -612,3 +612,15 @@ def test_random_json_never_gives_a_500_and_whatever_is_stored_obeys_the_whitelis
             assert all(u.startswith("https://") and u.split("/")[2].endswith("mlstatic.com") for u in c["image_urls"])
             assert c["price_cents"] is None or 0 < c["price_cents"] < 10**11
             assert all(not unicodedata.category(ch).startswith("C") for ch in c["name"] + c["seller"] + c["brand"])
+
+
+@pytest.mark.xfail(strict=True, reason="GAP (bajo): la cola mira el ÚLTIMO snapshot de cada producto sin mirar su fecha. Un producto borrado de "
+                                       "Vendure conserva para siempre su último snapshot (la poda deja el último de cada uno), nadie lo vuelve "
+                                       "a medir y la Mac lo busca cada 6 días eternamente, para un resultado que el semáforo no va a usar")
+def test_products_the_semaforo_stopped_measuring_do_not_stay_in_the_queue_forever(api):
+    _snap("1")
+    with Session(engine) as s:
+        s.add(MarketPriceSnapshot(run_id=0, product_id="2", ml_status="no_data", product_name="Producto borrado de Vendure",
+                                  product_enabled=True, captured_at=utcnow() - timedelta(days=90)))
+        s.commit()
+    assert [i["product_id"] for i in _queue(api)["items"]] == ["1"]
