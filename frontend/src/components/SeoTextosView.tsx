@@ -152,8 +152,15 @@ export default function SeoTextosView() {
   async function handleExport() {
     setExporting(true);
     try {
-      await downloadSeoCsv(query);
-      setFeedback(null);
+      const res = await downloadSeoCsv(query);
+      setFeedback(
+        res.truncated
+          ? {
+              ok: false,
+              text: `El CSV trae solo las primeras ${nfmt(res.maxRows)} filas de ${nfmt(res.total)}. Filtrá más (regla, idioma, canal) y exportá de nuevo.`,
+            }
+          : null,
+      );
     } catch (err) {
       setFeedback({ ok: false, text: err instanceof Error ? err.message : "No se pudo exportar." });
     } finally {
@@ -182,7 +189,13 @@ export default function SeoTextosView() {
             <IconRefresh className="w-3.5 h-3.5" />
             Actualizar
           </button>
-          <Button size="sm" variant="secondary" onClick={handleExport} disabled={exporting || !run}>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleExport}
+            disabled={exporting || !run}
+            title="CSV con «;» como separador (se abre directo en Excel en español) y los mismos filtros"
+          >
             {exporting ? "Exportando…" : "Exportar CSV"}
           </Button>
           <Button size="sm" onClick={handleRun} disabled={running}>
@@ -486,9 +499,15 @@ function ListEditor({
   const count = text.split("\n").filter((l) => l.trim()).length;
 
   async function save() {
+    const empty = count === 0;
+    if (
+      empty &&
+      !window.confirm(`Dejar «${label}» vacía apaga esa regla: no va a marcar nada. ¿Seguro?`)
+    )
+      return;
     setBusy(true);
     try {
-      await saveSeoList(name, text.split("\n"));
+      await saveSeoList(name, text.split("\n"), empty);
       setMsg({ ok: true, text: "Guardada. Vale desde la próxima corrida." });
       onChanged();
     } catch (err) {
