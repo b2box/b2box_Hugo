@@ -133,9 +133,10 @@ def _iso(delta: timedelta = timedelta(0)) -> str:
 
 
 def test_ingest_is_idempotent_on_postgres_and_the_queue_follows(pg):
-    first = oficina_ml.ingest([_res("11", [_card("MLA111"), _card("MLA222")], fetched_at=_iso(-timedelta(minutes=5)))])
+    same = _iso(-timedelta(minutes=5))                    # UN solo instante: dos _iso() pueden caer en segundos distintos
+    first = oficina_ml.ingest([_res("11", [_card("MLA111"), _card("MLA222")], fetched_at=same)])
     assert (first.stored, first.duplicates) == (1, 0)
-    again = oficina_ml.ingest([_res("11", [_card("MLA111")], fetched_at=_iso(-timedelta(minutes=5)))])
+    again = oficina_ml.ingest([_res("11", [_card("MLA111")], fetched_at=same)])
     assert (again.stored, again.duplicates) == (0, 1)
     with Session(pg) as s:
         rows = list(s.exec(select(MlWebResult)))
@@ -147,8 +148,9 @@ def test_ingest_is_idempotent_on_postgres_and_the_queue_follows(pg):
 
 def test_a_lost_race_is_a_duplicate_on_postgres_too(pg):
     now = utcnow()
-    oficina_ml.ingest([_res("11", fetched_at=_iso(-timedelta(minutes=9)))])
-    a = oficina_ml.clean_result(_res("11", fetched_at=_iso(-timedelta(minutes=9))), now=now, max_candidates=8)
+    same = _iso(-timedelta(minutes=9))                    # UN solo instante (ver el test de arriba)
+    oficina_ml.ingest([_res("11", fetched_at=same)])
+    a = oficina_ml.clean_result(_res("11", fetched_at=same), now=now, max_candidates=8)
     b = oficina_ml.clean_result(_res("11", fetched_at=_iso(-timedelta(minutes=2))), now=now, max_candidates=8)
     report = oficina_ml.IngestReport()
     with Session(pg) as s:
