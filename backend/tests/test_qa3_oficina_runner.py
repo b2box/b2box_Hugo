@@ -476,3 +476,28 @@ def test_a_mac_clock_ahead_makes_hugo_reject_everything_and_the_runner_must_say_
     r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "10"})
     assert _rows() == [], "Hugo rechazó todo (fetched_at en el futuro)"
     assert r.code != 0 or "ERROR" in r.log or "ERROR" in r.out
+
+
+# ─── el prefijo público no abre el dashboard ────────────────────────────────
+
+PATH_TRICKS = ["/api/oficina/../price-monitor/summary", "/api/oficina/%2e%2e/price-monitor/summary", "/api/oficina/..%2fprice-monitor/summary",
+               "/api/oficina/./../price-monitor/summary", "/api/oficina//..//price-monitor/summary", "/api/oficina/%2e%2e%2fprice-monitor/summary",
+               "/api/oficina/..;/price-monitor/summary", "/api/oficina/\\..\\price-monitor/summary", "//api/price-monitor/summary",
+               "/api/oficina%2f..%2fprice-monitor/summary", "/api/oficina/ml-queue/../../price-monitor/summary", "/api/oficina/%252e%252e/price-monitor/summary",
+               "/API/PRICE-MONITOR/summary", "/api/price-monitor/summary", "/api/price-monitor/summary/"]
+
+
+@pytest.mark.parametrize("path", PATH_TRICKS)
+def test_the_public_oficina_prefix_does_not_open_any_dashboard_route(hugo, path):
+    """`/api/oficina/` está en las rutas públicas del middleware (sin cookie): ningún truco de ruta (puntos, %2e, barras, mayúsculas)
+    puede colarse por ahí hasta `/api/price-monitor/*`. Se manda crudo por un socket: un cliente HTTP normaliza la ruta antes."""
+    host, port = hugo.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=10) as s:
+        s.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n".encode())
+        raw = b""
+        while chunk := s.recv(65536):
+            raw += chunk
+    status = int(raw.split(b" ", 2)[1])
+    body = raw.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in raw else b""
+    assert status != 200 or b"last_run" not in body, (path, status, body[:200])
+    assert b"cron_utc" not in body and b"fresh_products" not in body, path
