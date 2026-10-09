@@ -1119,15 +1119,16 @@ y el otro se audita igual. Tiene un tope de 270 s por canal.
 | Regla | Qué marca |
 |---|---|
 | `LARGO` | Nombre de más de 60 caracteres |
-| `RELLENO` | Frases de marketing que no aportan búsqueda («Iluminá tus espacios con magia», «súper práctico») |
+| `RELLENO` | Frases de marketing que no aportan búsqueda («Iluminá tus espacios con magia», «súper práctico», «práctico», «comodidad», «sin igual»). «Elegante», «mágico» y «mágica» solo cuentan si encabezan el título: en el medio suelen ser el producto («Traje Elegante», «Cubo Mágico») |
 | `COD` | Código de modelo (`C64`, `H6S`, `ZK-7731`), sigla suelta (`SG`), cantidad pegada (`x4u`), medida con asterisco (`98*56cm`), escala mal copiada (`Escala 176`) |
-| `MAR` | Marca o personaje de terceros de la lista (`iPhone`, `Kuromi`, `Guide`, `Let's Slim`, `Nespresso`…), en título o descripción; avisa si está solo como «para iPhone» |
-| `FAB` | El texto coincide con el nombre de fábrica, el modelo o el link del proveedor **de ese producto**, o nombra un sitio de proveedor (1688, Alibaba, AliExpress…) |
+| `MAR` | Marca o personaje de terceros de la lista (`iPhone`, `Kuromi`, `Guide`, `Let's Slim`, `Nespresso`, `everyU`, `Rosen`, `Otamatone`…), en título o descripción; avisa si está solo como «para iPhone». Se compara sin tildes, mayúsculas ni apóstrofos (`Lets Slim`), con el número pegado (`iPhone15`) y por palabra entera. «One Piece» no está: también es la malla enteriza |
+| `MARCA_PROPIA` | Informativa: el título nombra a B2BOX (el storefront ya agrega « - B2BOX») |
+| `FAB` | El texto coincide con el nombre de fábrica, el modelo o el link del proveedor **de ese producto**, o nombra un sitio de proveedor (1688, Alibaba, AliExpress…). Las medidas del modelo (`25x30cm`, `500 ml`, `5V2A`) no cuentan |
 | `SLUG_NO_COINCIDE` | Nombre y URL comparten la mitad o menos de sus palabras (se reescribió uno y quedó el otro) |
 | `NOMBRE_ES_CODIGO` | El nombre es `BX…`/`PA…` o el código del producto |
 | `ESPACIOS` | Espacio al inicio o al final, espacios dobles, saltos de línea |
 | `DUP_EXACTO` | Mismo nombre que otro producto **habilitado** (en el mismo idioma) |
-| `DUP_CASI` | Nombre casi igual (Jaccard ≥ 0,6 sobre palabras con contenido) a otro producto habilitado |
+| `DUP_CASI` | Nombre casi igual (Jaccard ≥ 0,65 sobre palabras con contenido) a otro producto habilitado. En una familia de más de 100 nombres casi iguales cada producto se compara con sus 100 vecinos por id: el conteo de esa familia es aproximado |
 | `SIN_DESCRIPCION` | Descripción vacía o de menos de 20 caracteres |
 | `DESC_CON_HTML_EN_META` | La descripción trae etiquetas HTML, entidades o emojis: la ficha la copia tal cual a la meta description |
 | `META_LARGA` | Esa descripción, ya en texto plano, pasa de 160 caracteres |
@@ -1139,9 +1140,10 @@ recorte la meta (SF1) deja de ser un problema real, pero el conteo sirve de lín
 
 **Datos del proveedor.** `FAB` compara los textos contra `supplierBusiness`, `supplierSizeModel`
 y `supplierLink` del propio producto (el modelo se compara sin medidas ni datos técnicos como
-`200W` o `XL`). Esos valores **no se guardan, no se loguean y no salen por la API ni por el CSV**:
+`200W`, `25x30cm` o `XL`). Esos valores **no se guardan, no se loguean y no salen por la API ni por el CSV**:
 la regla solo dice «coincide con nombre de fábrica: sí» (o código / link) y en qué parte del
-texto. Los objetos que los cargan ocultan los valores en `repr`.
+texto. Los objetos que los cargan ocultan los valores en `repr`. Con `LOG_LEVEL=DEBUG` los loggers `gql`, `httpx` y `httpcore`
+quedan igual en WARNING: sin eso loguearían la respuesta completa de Vendure (con esos campos) y los headers del login.
 
 ### Cómo usarlo
 
@@ -1151,15 +1153,23 @@ texto. Los objetos que los cargan ocultan los valores en `repr`.
   recupera al arrancar). `SEO_TEXT_AUDIT_CRON_UTC` la cambia; **vacía = sin corrida programada**. En APScheduler el
   `1` del día de la semana es martes: escribir el día con su nombre (`mon`, `tue`…).
 - La vista tiene un chip por regla con la cantidad de **productos distintos** (respeta los demás filtros), filtros
-  de habilitados / canal / idioma / «solo con problemas», búsqueda por nombre, URL o código, y exporta **CSV** (UTF-8
-  con BOM, abre bien en Excel; las celdas que empiezan con `=`, `+`, `-` o `@` salen escapadas) con los mismos filtros.
+  de habilitados / canal / idioma / «solo con problemas», búsqueda por nombre, URL o código, y exporta **CSV** con los
+  mismos filtros: UTF-8 con BOM y **`;` como separador** (la coma es el separador decimal en es-AR y Excel abría todo en
+  una columna; `?sep=,` o `?sep=tab` para otras herramientas). Las celdas que empiezan con `=`, `+`, `-` o `@` (aunque
+  antes tengan espacios o caracteres de control) salen escapadas. Máximo 20.000 filas: si hay más, el dashboard avisa
+  (`X-Export-Truncated`, `X-Export-Total`).
 - Las listas de **marcas**, **relleno** y **datos técnicos permitidos** se editan en el panel «Listas editables» (sin
   redeploy). Lo guardado reemplaza a la lista de fábrica entera y vale desde la próxima corrida; «Restablecer» vuelve
-  a la de fábrica.
+  a la de fábrica. Cada término tiene hasta 6 palabras. Dejar una lista **vacía** apagaría la regla: el servidor lo
+  rechaza (422) salvo `allow_empty: true`, y el dashboard pide confirmación. Cada cambio, restablecimiento y disparo
+  manual queda en el `AuditLog` (sección «Todo») con quién lo hizo y qué se agregó o quitó.
 - Endpoints (sesión del dashboard): `GET /api/seo/text-audit/summary`, `GET /api/seo/text-audit/items?rule=&enabled=&lang=&channel=&q=&only_issues=&run_id=&page=&page_size=`
   (`enabled`: `all` | `enabled` | `disabled`; `channel`: `all` | `ar` | `solo_default`; `lang`: `-` = sin traducciones),
-  `GET /api/seo/text-audit/export.csv` (mismos filtros), `GET|PUT|DELETE /api/seo/text-audit/lists[/{marcas|relleno|tecnicos}]`.
-- Se conservan las últimas 8 corridas.
+  `GET /api/seo/text-audit/export.csv` (mismos filtros, `sep=;|,|tab`), `GET|PUT|DELETE /api/seo/text-audit/lists[/{marcas|relleno|tecnicos}]`.
+- Se conservan las últimas 8 corridas. Si algo falla, el dashboard muestra el tipo de la excepción y una frase fija
+  («TimeoutError: Vendure no respondió en 270 s (canal default)»); el detalle va solo al log del servidor. Un producto con
+  datos que rompen una regla se saltea (queda un aviso en la corrida) y una traducción con el idioma repetido se ignora:
+  no tiran la corrida. El schema de Vendure sin `supplierBusiness`/`supplierSizeModel` se vuelve a probar en cada corrida.
 
 **Qué sigue (no está hecho):** HG2 en adelante (diccionario, reescritura, aplicar a Vendure). Los typos
 («Biométricacon») y las traducciones literales («fregadero», «flexómetro») quedan para HG4: necesitan
