@@ -378,3 +378,84 @@ async def test_dns_resolution_does_not_block_the_event_loop(monkeypatch):
     await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)
     await task
     assert seen["thread"] != main and len(ticks) == 5
+
+
+# ─── gzip roto, vacío o de varios miembros; headers no ASCII ────────────────
+
+
+async def test_a_body_that_claims_gzip_but_is_not_raises_bad_encoding_not_zlib_error(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"<html>esto no es gzip</html>", content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_a_corrupt_gzip_raises_bad_encoding(monkeypatch):
+    import gzip
+
+    data = bytearray(gzip.compress(b"hola " * 1000))
+    data[20:30] = b"\xff" * 10
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, bytes(data), content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100_000)
+
+
+@pytest.mark.parametrize("status", [204, 304, 404])
+async def test_an_empty_body_declared_as_gzip_is_accepted(monkeypatch, status):
+    """Un 404/204 sin cuerpo puede venir igual con `Content-Encoding: gzip`."""
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, status=status, content_encoding="gzip"))
+    resp = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+    assert resp.status_code == status and resp.content == b""
+
+
+@pytest.mark.parametrize("split", [False, True])
+async def test_a_multi_member_gzip_is_refused_instead_of_silently_truncated(monkeypatch, split):
+    import gzip
+
+    first = gzip.compress(b"primero ")
+    two = first + gzip.compress(b"segundo")
+    chunks = (two[:len(first)], two[len(first):]) if split else (two,)
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, *chunks, content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+HEADERS_8BIT = [(b"content-disposition", 'attachment; filename="ácido.jpg"'.encode("latin-1")), (b"etag", b'"\xff\xfe"'),
+                (b"x-raro", "ñandú".encode("utf-8")), (b"content-type", b"text/html; charset=latin-1")]
+
+
+@pytest.mark.parametrize("path", ["plain", "gzip", "redirect_target", "consumed"])
+async def test_headers_that_are_not_ascii_do_not_break_any_route_of_safe_get(monkeypatch, path):
+    """Reconstruir la Response desde strings los re-codificaba en ASCII: UnicodeEncodeError con un
+    Content-Disposition con acento o un ETag con 0xFF (rompía las fotos de todo Hugo)."""
+    import gzip
+
+    def handler(req):
+        if path == "plain":
+            return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"cuerpo"), request=req)
+        if path == "gzip":
+            return httpx.Response(200, headers=[*HEADERS_8BIT, (b"content-encoding", b"gzip")],
+                                  stream=_Raw(gzip.compress(b"cuerpo")), request=req)
+        if path == "redirect_target":
+            if req.url.path == "/a":
+                return httpx.Response(301, headers=[*HEADERS_8BIT, (b"location", b"https://example.com/b")], stream=_Raw(), request=req)
+            return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"cuerpo"), request=req)
+        return httpx.Response(200, headers=HEADERS_8BIT, content=b"cuerpo", request=req)       # ya leída (MockTransport)
+
+    _patch_for_streaming(monkeypatch, handler)
+    url = "https://example.com/a" if path == "redirect_target" else "https://example.com/p"
+    resp = await net_guard.safe_get(url, timeout=httpx.Timeout(2.0), max_bytes=1000)
+    assert resp.content == b"cuerpo" and resp.status_code == 200
+    assert dict(resp.headers.raw)[b"etag"] == b'"\xff\xfe"'
+    assert dict(resp.headers.raw)[b"content-disposition"] == 'attachment; filename="ácido.jpg"'.encode("latin-1")
+    assert b"content-encoding" not in dict(resp.headers.raw)
+
+
+async def test_image_download_survives_8bit_headers(monkeypatch):
+    """El mismo camino que usa image_hash._fetch para todas las fotos de Hugo."""
+    from app.dedup import image_hash
+
+    def handler(req):
+        return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"\x89PNG-bytes"), request=req)
+
+    _patch_for_streaming(monkeypatch, handler)
+    assert await image_hash._fetch("https://acdn-us.mitiendanube.com/a.png") == b"\x89PNG-bytes"

@@ -137,11 +137,26 @@ def _with_accept_encoding(headers: dict[str, str] | None) -> dict[str, str]:
     return kept
 
 
+_DROPPED_HEADERS = (b"content-encoding", b"content-length", b"transfer-encoding")
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _decoded_response(resp: httpx.Response, body: bytes) -> httpx.Response:
+    """Una Response normal con el cuerpo ya leído. Los headers se copian CRUDOS (bytes): reconstruirlos
+    desde strings los re-codifica en ASCII y un `Content-Disposition` con acento, un ETag con 0xFF o un
+    header en latin-1 reventaban con UnicodeEncodeError. Se sacan los que describen el cuerpo del cable,
+    que ya no vale (sin esto httpx intentaría descomprimirlo otra vez al leer `.content`)."""
+    kept = [(k, v) for k, v in resp.headers.raw if k.lower() not in _DROPPED_HEADERS]
+    return httpx.Response(resp.status_code, headers=kept, content=body, request=resp.request,
+                          extensions={"http_version": resp.extensions.get("http_version", b"HTTP/1.1")})
+
+
 async def _read_capped(client: httpx.AsyncClient, url: str, headers: dict[str, str] | None,
                        max_bytes: int) -> httpx.Response:
     """GET en streaming que corta apenas el cuerpo DESCOMPRIMIDO pasa `max_bytes`. Devuelve una
     Response normal con el cuerpo ya leído; si no cabe lanza ResponseTooLarge sin haberlo juntado
-    entero, y si viene con una codificación que no se acepta, BadEncoding sin descomprimir nada."""
+    entero, y si viene con una codificación que no se acepta (o un gzip roto, de varios miembros o
+    incompleto), BadEncoding."""
     async with client.stream("GET", url, headers=_with_accept_encoding(headers)) as resp:
         # Ya conectado, todavía sin leer el body: ¿a quién nos conectamos de verdad?
         # (assert_public_url resuelve el DNS por su cuenta y httpx vuelve a resolver.)
@@ -164,36 +179,41 @@ async def _read_capped(client: httpx.AsyncClient, url: str, headers: dict[str, s
             body = resp.content
             if len(body) > max_bytes:
                 raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
-            kept = [(k, v) for k, v in resp.headers.multi_items()
-                    if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
-            return httpx.Response(resp.status_code, headers=kept, content=body, request=resp.request)
+            return _decoded_response(resp, body)
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS) if gzipped else None
         buf = bytearray()
         raw = 0
-        async for chunk in resp.aiter_raw():
-            raw += len(chunk)
-            if raw > max_bytes:
-                raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
-            if inflater is None:
-                buf += chunk
-            else:
-                pending = chunk
-                while pending and not inflater.eof:
-                    # max_length=0 sería "sin tope": siempre queda lugar para al menos 1 byte.
-                    buf += inflater.decompress(pending, max_bytes + 1 - len(buf))
-                    if len(buf) > max_bytes:
-                        raise ResponseTooLarge(f"el cuerpo descomprimido pasó el tope de {max_bytes} bytes")
-                    pending = inflater.unconsumed_tail
-            if len(buf) > max_bytes:
-                raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
-        if inflater is not None and not inflater.eof:
-            raise BadEncoding("gzip incompleto")
-        # El cuerpo ya viene decodificado: sin estos headers httpx intentaría
-        # descomprimirlo otra vez al leer `.content`.
-        kept = [(k, v) for k, v in resp.headers.multi_items()
-                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
-        return httpx.Response(resp.status_code, headers=kept, content=bytes(buf),
-                              request=resp.request, extensions={"http_version": resp.http_version})
+        after_eof = b""            # lo que llega después de que terminó el primer miembro gzip
+        try:
+            async for chunk in resp.aiter_raw():
+                raw += len(chunk)
+                if raw > max_bytes:
+                    raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
+                if inflater is None:
+                    buf += chunk
+                else:
+                    if inflater.eof:
+                        after_eof = (after_eof + chunk)[:2]           # llegó algo después del último miembro
+                        continue
+                    pending = chunk
+                    while pending and not inflater.eof:
+                        # max_length=0 sería "sin tope": siempre queda lugar para al menos 1 byte.
+                        buf += inflater.decompress(pending, max_bytes + 1 - len(buf))
+                        if len(buf) > max_bytes:
+                            raise ResponseTooLarge(f"el cuerpo descomprimido pasó el tope de {max_bytes} bytes")
+                        pending = inflater.unconsumed_tail
+                if len(buf) > max_bytes:
+                    raise ResponseTooLarge(f"el cuerpo pasó el tope de {max_bytes} bytes")
+        except zlib.error as exc:
+            # Cuerpo corrupto o que dice ser gzip y no lo es: es un error de la tienda, no una excepción suelta.
+            raise BadEncoding(f"gzip inválido: {str(exc)[:60]}") from exc
+        if inflater is not None:
+            if raw and not inflater.eof:
+                raise BadEncoding("gzip incompleto")
+            if (inflater.unused_data + after_eof)[:2] == _GZIP_MAGIC:
+                # Varios miembros pegados: solo se abre el primero y el resto se perdería en silencio.
+                raise BadEncoding("gzip de varios miembros")
+        return _decoded_response(resp, bytes(buf))
 
 
 async def safe_get(
