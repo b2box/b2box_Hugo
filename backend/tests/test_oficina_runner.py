@@ -767,3 +767,16 @@ def test_the_network_down_is_retried_and_then_reported_without_a_traceback():
     with pytest.raises(runner.SendFailed, match="ConnectError") as err:
         client.queue(5)
     assert SECRET not in str(err.value) and len(sleeps) == runner.SEND_ATTEMPTS - 1
+
+
+def test_a_config_directory_open_to_others_is_a_warning_not_a_refusal(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    d = tmp_path / "cfg"
+    d.mkdir()
+    d.chmod(0o755)
+    runner.load_config(_write_env(d / ".env", f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://hugo.example\n"))
+    assert "chmod 700" in caplog.text and SECRET not in caplog.text
+    caplog.clear()
+    d.chmod(0o700)
+    runner.load_config(d / ".env")
+    assert caplog.text == ""

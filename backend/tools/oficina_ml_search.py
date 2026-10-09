@@ -135,6 +135,9 @@ def load_config(env_path: Path) -> Config:
     if not env_path.exists():
         raise ConfigError(f"No existe {env_path}. Corré --init para crear la key.")
     _check_permissions(env_path)
+    if stat.S_IMODE(env_path.parent.stat().st_mode) & 0o077:
+        log.warning("la carpeta %s la puede recorrer otra gente de la Mac (tiene otras keys adentro): chmod 700 %s",
+                    env_path.parent, env_path.parent)
     values = dotenv_values(env_path)
     key = (values.get(KEY_VAR) or "").strip()
     if not key:
