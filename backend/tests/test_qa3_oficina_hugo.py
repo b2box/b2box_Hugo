@@ -174,15 +174,12 @@ def test_permalinks_over_http(api, link, what):
         assert cand["permalink"] == link
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (bajo): permalink y foto no tienen tope de largo; un link de 100 KB se guarda y se "
-                                       "copia a cada snapshot (un permalink real de ML tiene < 300 caracteres)")
 def test_an_absurdly_long_permalink_is_not_stored_as_is(api):
     _snap("1")
     _post(api, [_res("1", [_card("MLA777", permalink="https://articulo.mercadolibre.com.ar/" + "a" * 100_000)])])
     assert len(_stored_candidates()[0]["permalink"]) <= 2048
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (bajo): la URL de la foto no tiene tope de largo")
 def test_an_absurdly_long_photo_url_is_not_stored_as_is(api):
     _snap("1")
     _post(api, [_res("1", [_card("MLA777", image_urls=["https://http2.mlstatic.com/" + "a" * 100_000])])])

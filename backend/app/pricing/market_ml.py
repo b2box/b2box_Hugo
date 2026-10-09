@@ -71,6 +71,8 @@ _RETRY_AFTER_CAP_S = 60.0
 # Lo que viene de ML termina en el dashboard (href) y en el juez/CLIP (fotos):
 # se acepta solo lo que tiene la forma esperada.
 _LINK_DOMAINS = ("mercadolibre.com.ar", "mercadolibre.com")
+# Un permalink o una foto reales de ML miden menos de 300 caracteres: más que esto es basura (o un ataque a la base).
+MAX_URL_CHARS = 512
 _IMAGE_DOMAIN = "mlstatic.com"
 # re.ASCII: \d de Python acepta dígitos de otros alfabetos ("MLA١٢٣"), que no son ids de ML.
 _PRODUCT_ID = re.compile(r"^MLA\d+$", re.ASCII)    # fichas de catálogo e items
@@ -86,10 +88,14 @@ def _clean_https_parts(url: object, *, allow_http: bool = False):
     """urlsplit de una URL "limpia" o None. Rechaza lo que un navegador podría
     leer distinto que Python: backslash, espacios/controles y userinfo
     (`https://mercadolibre.com.ar@evil.com`)."""
-    if not isinstance(url, str):
+    if not isinstance(url, str) or len(url) > MAX_URL_CHARS + 64:
         return None
     raw = url.strip()
-    if not raw or "\\" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in raw):
+    if not raw or len(raw) > MAX_URL_CHARS or "\\" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in raw):
+        return None
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError:        # un surrogate suelto no se puede escribir en la base ni en un JSON
         return None
     try:
         parts = urlsplit(raw)

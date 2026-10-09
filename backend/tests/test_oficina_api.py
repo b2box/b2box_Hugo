@@ -598,3 +598,63 @@ def test_the_ip_tables_do_not_grow_without_bound(api, monkeypatch):
     clock["t"] += oficina_routes.FAIL_WINDOW_S + oficina_routes.LOCK_S + 5
     api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala"})            # una pasada con todo vencido
     assert len(oficina_routes._fails) <= 2 and len(oficina_routes._locked_until) <= 1
+
+
+# ─── largo de las URLs y surrogates sueltos ─────────────────────────────────
+
+
+def test_urls_have_a_length_cap_for_every_use_not_only_the_oficina():
+    from app.pricing import market_ml
+
+    ok = "https://articulo.mercadolibre.com.ar/MLA-1-" + "a" * 100
+    assert market_ml.safe_permalink(ok) == ok
+    edge = "https://articulo.mercadolibre.com.ar/" + "a" * (market_ml.MAX_URL_CHARS - len("https://articulo.mercadolibre.com.ar/"))
+    assert len(edge) == market_ml.MAX_URL_CHARS and market_ml.safe_permalink(edge) == edge
+    assert market_ml.safe_permalink(edge + "a") == ""
+    assert market_ml.safe_permalink("https://articulo.mercadolibre.com.ar/" + "a" * 400_000) == ""
+    img = "https://http2.mlstatic.com/D_NQ_NP_1-F.jpg"
+    assert market_ml.safe_image_url(img) == img
+    assert market_ml.safe_image_url("https://http2.mlstatic.com/" + "a" * market_ml.MAX_URL_CHARS) is None
+    assert market_ml.safe_image_url("https://http2.mlstatic.com/" + "a" * 400_000) is None
+
+
+def test_long_urls_from_the_mac_become_the_canonical_link_or_no_photo(api):
+    _snap("1")
+    _post(api, [_res("1", [_card("MLA777", permalink="https://articulo.mercadolibre.com.ar/" + "a" * 600,
+                                 image_urls=["https://http2.mlstatic.com/" + "b" * 600, "https://http2.mlstatic.com/ok.jpg"])])])
+    [cand] = json.loads(_rows()[0].candidates)
+    assert cand["permalink"] == "https://articulo.mercadolibre.com.ar/MLA-777"
+    assert cand["image_urls"] == ["https://http2.mlstatic.com/ok.jpg"]
+
+
+@pytest.mark.parametrize("field", ["permalink", "image_urls"])
+def test_a_lone_surrogate_in_a_url_drops_that_url_and_not_the_batch(api, field):
+    """Antes: UnicodeEncodeError al guardar → 500 de todo el lote."""
+    _snap("1")
+    _snap("2")
+    bad = "https://articulo.mercadolibre.com.ar/MLA-1-\ud800x" if field == "permalink" else ["https://http2.mlstatic.com/\ud800.jpg"]
+    r = _post(api, [_res("1", [_card("MLA777", **{field: bad})]), _res("2", [_card("MLA888")])])
+    assert r.status_code == 200 and r.json()["stored"] == 2
+    rows = {row.product_id: row for row in _rows()}
+    [cand] = json.loads(rows["1"].candidates)
+    if field == "permalink":
+        assert cand["permalink"] == "https://articulo.mercadolibre.com.ar/MLA-777"
+    else:
+        assert cand["image_urls"] == [] and cand["permalink"].startswith("https://articulo.mercadolibre.com.ar/MLA-777-")
+    assert json.loads(rows["2"].candidates)[0]["id"] == "MLA888"
+
+
+def test_an_unexpected_error_on_one_result_rejects_only_that_result(api, monkeypatch):
+    _snap("1")
+    _snap("2")
+    real = oficina_ml.sanitize_candidates
+
+    def boom(raw, limit):
+        if raw and raw[0].get("id") == "MLA666":
+            raise RuntimeError("bug")
+        return real(raw, limit)
+
+    monkeypatch.setattr(oficina_ml, "sanitize_candidates", boom)
+    r = _post(api, [_res("1", [_card("MLA666")]), _res("2", [_card("MLA888")])])
+    body = r.json()
+    assert r.status_code == 200 and body["stored"] == 1 and body["rejected"] == [{"product_id": "1", "reason": "no se pudo procesar"}]

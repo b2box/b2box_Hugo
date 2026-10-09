@@ -261,7 +261,11 @@ def ingest(items: list[Any], *, now: datetime | None = None) -> IngestReport:
     limit = _max_candidates()
     cleaned: list[CleanResult] = []
     for raw in items:
-        res = clean_result(raw, now=now, max_candidates=limit)
+        try:
+            res = clean_result(raw, now=now, max_candidates=limit)
+        except Exception as exc:  # noqa: BLE001  (un resultado raro no puede tirar el lote entero)
+            log.warning("oficina: no se pudo procesar un resultado (%s)", type(exc).__name__)
+            res = "no se pudo procesar"
         if isinstance(res, str):
             pid = clean_line(raw.get("product_id"), 64) if isinstance(raw, dict) else ""
             report.rejected.append((pid, res))
