@@ -18,11 +18,11 @@ que hubo coincidencia.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from sqlmodel import Session
 
 from app.config import get_settings
@@ -141,7 +141,9 @@ async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
 # ─── Listas editables ──────────────────────────────────────────────
 
 class ListBody(BaseModel):
-    items: list[str] = Field(max_length=seo_lists.MAX_ITEMS + 50)
+    # Topes anchos solo para cortar cuerpos enormes antes de validar; el límite real
+    # (y su mensaje) lo pone seo_lists.sanitize_items.
+    items: list[Annotated[str, StringConstraints(max_length=400)]] = Field(max_length=seo_lists.MAX_ITEMS + 50)
 
 
 def _check_list_name(name: str) -> None:

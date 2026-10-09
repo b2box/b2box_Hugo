@@ -323,6 +323,13 @@ def test_la_regla_fab_dice_que_hubo_coincidencia_pero_no_con_que(monkeypatch, cl
     assert {i["rule"]: i["detail"] for i in item["issues"]}["COD"] == "ZK-7731"
 
 
+def test_el_motivo_de_un_fallo_no_arrastra_credenciales():
+    exc = RuntimeError("401 Unauthorized para https://admin.example/admin-api con Authorization: Bearer abc.DEF-123 y token=xyz")
+    msg = text_audit._short(exc)
+    assert "abc.DEF-123" not in msg and "xyz" not in msg and msg.startswith("RuntimeError: 401 Unauthorized")
+    assert len(text_audit._short(RuntimeError("x" * 1000))) <= 300
+
+
 def test_el_dataclass_de_producto_no_muestra_los_campos_de_proveedor_en_repr():
     p = vendure_client.ProductTexts(
         id="1", enabled=True, product_code=None, updated_at=None, translations=[],
@@ -580,7 +587,7 @@ def test_listas_get_put_delete(client):
 
 
 @pytest.mark.parametrize("name,body,status", [
-    ("marcas", {"items": ["a" * 61]}, 422), ("marcas", {"items": "x"}, 422), ("marcas", {}, 422),
+    ("marcas", {"items": ["a" * 61]}, 422), ("marcas", {"items": ["a" * 5000]}, 422), ("marcas", {"items": "x"}, 422), ("marcas", {}, 422),
     ("marcas", {"items": [1, 2]}, 422), ("nope", {"items": ["a"]}, 404),
     ("marcas", {"items": [f"m{i}" for i in range(600)]}, 422),
 ])

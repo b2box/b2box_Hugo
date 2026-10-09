@@ -199,7 +199,7 @@ def test_cod_respeta_la_lista_editable_de_datos_tecnicos():
     ("Funda iPhone Efecto Líquido", "iPhone"), ("Taza Kuromi Rosa", "Kuromi"),
     ("Cámara Térmica Guide Pro", "Guide"), ("Mangas Let’s Slim Protección", "Let's Slim"),
     ("Cápsulas para Nespresso Reutilizables", "Nespresso"), ("Mochila de HELLO KITTY", "Hello Kitty"),
-    ("Muñeco Spider-Man Articulado", "Spider-Man"), ("Fundas iPhones Pack", "iPhone"),
+    ("Muñeco Spider-Man Articulado", "Spiderman"), ("Muñeco SPIDERMAN Articulado", "Spiderman"), ("Fundas iPhones Pack", "iPhone"),
 ])
 def test_mar_detecta_marcas_y_personajes(title, brand):
     assert brand in audit(title)["MAR"]
@@ -208,6 +208,13 @@ def test_mar_detecta_marcas_y_personajes(title, brand):
 def test_mar_por_palabra_entera():
     assert "MAR" not in rules_of("Guiderail Metálico Cortina")
     assert "MAR" not in rules_of("Manzana Roja Decorativa")
+    assert "MAR" not in rules_of("Funda iPhone15 Rosa")              # «iphone15» es otra palabra
+    assert "MAR" not in rules_of("Cámara Hello Rosa Kitty")          # las palabras tienen que ir seguidas
+
+
+def test_mar_acepta_el_termino_pegado_separado_o_con_guion():
+    for title in ("Taza HelloKitty", "Taza Hello Kitty", "Taza Hello-Kitty", "Taza HELLO  KITTY Rosa"):
+        assert "Hello Kitty" in audit(title)["MAR"], title
 
 
 def test_mar_mira_tambien_la_descripcion_y_dice_donde():
@@ -384,6 +391,22 @@ def test_meta_larga():
     assert "META_LARGA" in got and got["META_LARGA"].startswith("319 caracteres")
 
 
+def test_una_descripcion_patologica_no_vuelve_cuadratica_la_regex():
+    import time
+
+    nasty = "<a" * 60_000 + " texto " * 50
+    t0 = time.monotonic()
+    audit("Taza", description=nasty)
+    audit("Taza", description="<p " * 60_000)
+    assert time.monotonic() - t0 < 3
+
+
+def test_se_analiza_como_mucho_un_tope_de_texto():
+    huge = "palabra " * 100_000                      # 800.000 caracteres
+    got = audit("Taza", description=huge)
+    assert got["META_LARGA"].startswith(f"{r.MAX_TEXT_CHARS - 1} caracteres")
+
+
 def test_los_tags_no_cuentan_para_el_largo_de_la_meta():
     desc = "<p><strong>" + "a" * 100 + "</strong></p>" * 3
     assert "META_LARGA" not in audit("Taza", description=desc)
@@ -494,6 +517,10 @@ def test_sanitize_items():
     for bad in ("x", [1], ["a" * 61], [f"m{i}" for i in range(501)], ["a\x00b"]):
         with pytest.raises(ValueError):
             seo_lists.sanitize_items(bad)
+
+
+def test_tws_y_otras_siglas_tecnicas_de_fabrica_no_son_codigo():
+    assert "COD" not in rules_of("Auriculares Bluetooth TWS Inalámbricos")
 
 
 def test_la_lista_de_fabrica_trae_los_casos_sembrados_del_diseno():
