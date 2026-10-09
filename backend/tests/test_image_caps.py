@@ -91,3 +91,43 @@ async def test_hash_image_gives_up_on_a_pixel_bomb(monkeypatch):
     monkeypatch.setattr(image_hash, "_db_get", lambda url: None)
     monkeypatch.setattr(image_hash, "_db_put", lambda url, h: None)
     assert await image_hash.hash_image("https://acdn-us.mitiendanube.com/bomba.png") is None
+
+
+# ─── tope total de tiempo ────────────────────────────────────────────────────
+
+
+async def test_a_photo_that_drips_is_cut_by_the_total_deadline(monkeypatch):
+    """Un host que gotea un byte cada 19 s: el timeout de httpx es por chunk y no lo corta nunca."""
+    import asyncio
+    import time
+
+    async def drip(url, **kw):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(image_hash, "safe_get", drip)
+    monkeypatch.setattr(image_hash, "_DEADLINE_S", 0.1)
+    t0 = time.time()
+    with pytest.raises(asyncio.TimeoutError):
+        await image_hash._fetch("https://acdn-us.mitiendanube.com/lenta.webp")
+    assert time.time() - t0 < 2.0
+
+
+async def test_the_deadline_is_shorter_when_a_client_is_waiting(monkeypatch):
+    import asyncio
+
+    seen = {}
+    real = asyncio.wait_for
+
+    async def spy(aw, timeout):
+        seen["timeout"] = timeout
+        return await real(aw, timeout)
+
+    async def ok(url, **kw):
+        return httpx.Response(200, content=b"x", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(image_hash, "safe_get", ok)
+    monkeypatch.setattr(image_hash.asyncio, "wait_for", spy)
+    await image_hash._fetch("https://x.example/a.png", interactive=True)
+    assert seen["timeout"] == image_hash._INTERACTIVE_DEADLINE_S == 12.0
+    await image_hash._fetch("https://x.example/a.png")
+    assert seen["timeout"] == image_hash._DEADLINE_S == 30.0

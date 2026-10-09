@@ -139,7 +139,23 @@ def _cache_put(url: str, h: imagehash.ImageHash) -> None:
         _HASH_CACHE.popitem(last=False)
 
 
+# Tope TOTAL de una descarga (todos los intentos juntos). El timeout de httpx es por chunk: un host que
+# gotea un byte cada 19 s estiraba una foto para siempre y dejaba trabado el slot de la corrida.
+_DEADLINE_S = 30.0
+_INTERACTIVE_DEADLINE_S = 12.0
+
+
 async def _fetch(url: str, *, interactive: bool = False) -> bytes:
+    """Descarga una imagen con un tope de tiempo total (`_DEADLINE_S`; 12 s si hay un cliente esperando)."""
+    budget = _INTERACTIVE_DEADLINE_S if interactive else _DEADLINE_S
+    try:
+        return await asyncio.wait_for(_fetch_with_retries(url, interactive=interactive), timeout=budget)
+    except asyncio.TimeoutError:
+        log.info("No se pudo descargar %s: pasó el tope de %.0f s", url[:160], budget)
+        raise
+
+
+async def _fetch_with_retries(url: str, *, interactive: bool = False) -> bytes:
     """Descarga una imagen, reintentando los fallos transitorios.
 
     safe_get valida scheme + IP pública y cada redirect (anti-SSRF); el guard
