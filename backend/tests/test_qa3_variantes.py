@@ -103,16 +103,18 @@ def test_reasonable_variants(title):
 
 
 def test_known_lossy_variants_are_documented():
-    """Variantes que pierden lo que identifica al producto (número de modelo, talle, conector). No son un bug de
-    ejecución: son el costo de 'sin medidas ni códigos'. Si cambia la heurística este test avisa."""
+    """Lo que las variantes siguen perdiendo A PROPÓSITO (medidas, cantidades, colores, relleno) y lo que ya no: antes se iban
+    el número de modelo (iPhone 13, i12), el tamaño (Número 5) y el conector (USB-C), y quedaban consultas de una sola palabra
+    genérica ("Juego", "Limpieza"). Si cambia la heurística este test avisa."""
     q = lambda t: market_query.query_variants(t, 3)  # noqa: E731
-    assert q("Funda Silicona iPhone 13 Pro Max Transparente")[1] == "Funda Silicona iPhone Pro Max"        # sin el 13
-    assert q("Auriculares Bluetooth Inalámbricos TWS i12 Blanco")[1] == "Auriculares Bluetooth Inalámbricos TWS"  # sin i12
-    assert q("Globo Metalizado Número 5 Dorado 40 cm")[1] == "Globo Metalizado Número"                      # sin el 5
-    assert q("Cargador Rápido 20W USB-C PD Cable Incluido")[1] == "Cargador Rápido USB PD Cable"           # USB-C → USB
-    assert q("Set de Juego")[1:] == ["Set Juego", "Juego"]                                                 # una palabra genérica
-    assert q("Kit de Limpieza")[1:] == ["Kit Limpieza", "Limpieza"]                                         # perdió el "kit de"
-    assert q("Taza (350ml) - Blanca/Negra, c/ cuchara")[1] == "Taza cuchara"                              # "c/" → nada
+    assert q("Funda Silicona iPhone 13 Pro Max Transparente")[1] == "Funda Silicona iPhone 13 Pro Max"      # conserva el 13
+    assert q("Auriculares Bluetooth Inalámbricos TWS i12 Blanco")[1] == "Auriculares Bluetooth Inalámbricos TWS i12"
+    assert q("Globo Metalizado Número 5 Dorado 40 cm")[1] == "Globo Metalizado Número 5"                    # conserva el 5, no los 40 cm
+    assert q("Cargador Rápido 20W USB-C PD Cable Incluido")[1] == "Cargador Rápido USB-C PD Cable"         # USB-C entero; 20W afuera
+    assert q("Set de Juego") == ["Set de Juego", "Set Juego"]                                              # "Juego" solo ya no se busca
+    assert q("Kit de Limpieza") == ["Kit de Limpieza", "Kit Limpieza"]                                     # ni "Limpieza"
+    assert q("Taza (350ml) - Blanca/Negra, c/ cuchara")[1] == "Taza cuchara"                              # "c/" → nada (a propósito)
+    assert q("Soldadora Inverter 200A Portátil")[1] == "Soldadora Inverter Portátil"                      # los amperes son una medida
 
 
 # ─── presupuesto y costo ───────────────────────────────────────────────────────

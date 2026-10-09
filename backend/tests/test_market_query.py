@@ -26,7 +26,7 @@ def test_short_title_drops_measures_quantities_colors_codes_and_filler():
     assert mq.short_title(LONG) == "Organizador Doble Ajustable Niveles"
     assert mq.short_title("Pack x6 Medias Deportivas Algodón Talle 40-44 Negras") == "Medias Deportivas Algodón"
     assert mq.short_title("Lámpara LED USB Recargable 3 Colores Luz Cálida 5W") == "Lámpara LED USB Recargable Luz"
-    assert mq.short_title("Termo 500ml E27 BX99 x3 acero para el mate") == "Termo acero mate"
+    assert mq.short_title("Termo 500ml E27 BX99 x3 acero para el mate") == "Termo E27 acero mate"      # E27 identifica; 500ml y x3 no
 
 
 def test_short_title_keeps_at_most_five_content_words_and_never_repeats_one():
@@ -102,3 +102,58 @@ def test_hostile_titles_do_not_break_it_and_stay_short():
         for n in (1, 2, 3):
             for step in mq.query_plan(name, n):
                 assert step.query and len(step.query) <= mq.MAX_QUERY_CHARS
+
+
+# ─── no perder lo que identifica al producto ───────────────────────────────
+
+
+@pytest.mark.parametrize("title, short, keys", [
+    ("Funda Silicona iPhone 13 Pro Max Transparente", "Funda Silicona iPhone 13 Pro Max", "Funda Silicona iPhone 13"),
+    ("Auriculares Bluetooth Inalámbricos TWS i12 Blanco", "Auriculares Bluetooth Inalámbricos TWS i12", "Auriculares Bluetooth i12"),
+    ("Globo Metalizado Número 5 Dorado 40 cm", "Globo Metalizado Número 5", None),                 # claves == corto: una sola
+    ("Cargador Rápido 20W USB-C PD Cable Incluido", "Cargador Rápido USB-C PD Cable", "Cargador Rápido USB-C"),
+    ("Destornillador Philips PH2 x 100 mm Mango Bi-material", "Destornillador Philips PH2 Mango Bi-material",
+     "Destornillador PH2 Bi-material"),
+    ("Linterna LED Recargable USB 3 Modos CREE T6", "Linterna LED Recargable USB Modos", "Linterna LED T6"),
+    ("Cuaderno A5 Tapa Dura Rayado 100 Hojas Celeste", "Cuaderno A5 Tapa Dura Rayado", "Cuaderno A5 Tapa"),
+    ("Lámpara Luna 3D 15 cm Recargable USB Touch", "Lámpara Luna 3D Recargable USB", "Lámpara Luna 3D"),
+])
+def test_model_numbers_sizes_and_connectors_survive(title, short, keys):
+    assert mq.short_title(title) == short
+    if keys is not None:
+        assert mq.keywords(title) == keys
+
+
+@pytest.mark.parametrize("title, gone", [
+    ("Organizador 3 Niveles 40x30", "3"), ("Kit de Herramientas 108 Piezas", "108"), ("Pack 10 Llaveros", "10"),
+    ("Taladro 20V con 2 Baterías", "2"), ("Pistola de Silicona 40W con 10 Barras", "10"), ("Mate x 6 Calabaza", "6"),
+    ("Tupper 1.5 L Hermético", "1.5"), ("Amoladora Angular 4 1/2 Pulgadas 850W", "4"), ("Termo 1 Litro Acero", "1"),
+    ("Cinta Aisladora 20 m x 18 mm Pack 10", "20"), ("Escalera 4 Escalones Aluminio", "4"), ("Cable 7791234567890 USB", "7791234567890"),
+])
+def test_counts_measures_and_barcodes_are_still_dropped(title, gone):
+    assert gone not in mq.content_words(title) and not any(gone in w.split() for w in mq.content_words(title))
+
+
+def test_a_number_that_names_a_plus_model_is_not_taken_for_a_count():
+    assert "iPhone 13" in mq.content_words("Funda iPhone 13 Plus Silicona")
+    assert "Galaxy 21" in mq.content_words("Funda Galaxy 21 Ultra")
+    assert "Cuaderno" in mq.content_words("Cuaderno 3 Materias") and not any("3" in w for w in mq.content_words("Cuaderno 3 Materias"))
+
+
+def test_hyphenated_connectors_and_decimals_are_single_words():
+    assert mq.content_words("Cable USB-C a USB-A de 1,5 m") == ["Cable", "USB-C", "USB-A"]
+    assert mq.content_words("Parlante 3.5mm Jack") == ["Parlante", "Jack"]
+
+
+def test_internal_codes_never_leak_even_glued_to_punctuation():
+    assert "PA1" not in mq.short_title("Soporte (PA1) Pared") and "BX12" not in mq.keywords("Taza [BX12] Cerámica Grande")
+
+
+@pytest.mark.parametrize("title", ["Set de Juego", "Kit de Limpieza", "Combo Kit Set", "Juego", "Doble Mini Extra Pro"])
+def test_a_generic_single_word_is_never_a_query_of_its_own(title):
+    for extra in mq.query_variants(title, 3)[1:]:
+        assert len(extra.split()) >= 2, (title, extra)
+
+
+def test_the_title_itself_is_always_the_first_query_even_if_it_is_one_word():
+    assert mq.query_variants("Taza", 3) == ["Taza"] and mq.query_variants("Set de Juego", 3)[0] == "Set de Juego"

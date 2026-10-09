@@ -22,8 +22,9 @@ def qa3_clean():
         PriceMonitorRun,
         Setting,
     )
-    from app.db.session import engine
+    from app.db.session import engine, init_db
 
+    init_db()                    # (este test puede correr solo: las tablas tienen que existir para vaciarlas)
     # MlWebResult no existe en origin/main: así este archivo también corre en el worktree de e8209e1 (dorado).
     web_results = [m for m in (getattr(models, "MlWebResult", None),) if m is not None]
     with Session(engine) as s:
