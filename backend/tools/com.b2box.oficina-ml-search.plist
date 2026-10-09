@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Buscador de la oficina: corre todas las noches a la 01:00 (hora de la Mac, que tiene que estar en
+  America/Argentina/Buenos_Aires) y busca en Mercado Libre lo que Hugo le pide.
+
+  Instalación (ver README, "Buscador de la oficina"):
+    1. Cambiá /Users/USUARIO/Documents/GitHub/b2box_Hugo por la carpeta donde está el repo en ESTA Mac
+       (las dos veces que aparece) y USUARIO en las rutas de los logs.
+    2. cp backend/tools/com.b2box.oficina-ml-search.plist ~/Library/LaunchAgents/
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.b2box.oficina-ml-search.plist
+    Para sacarlo:  launchctl bootout gui/$(id -u)/com.b2box.oficina-ml-search
+    Para probarlo ahora:  launchctl kickstart -k gui/$(id -u)/com.b2box.oficina-ml-search
+
+  La key NO va acá: el programa la lee de ~/.config/b2box-bench/.env (permisos 600).
+  La Mac tiene que estar DESPIERTA a la 01:00: launchd no despierta una Mac dormida. El despertar programado
+  (sudo pmset repeat wakeorpoweron MTWRFSU 00:55:00) lo hace una persona con su clave de administrador.
+  Mientras corre, el programa se pone un `caffeinate -i` propio para que la Mac no se duerma a mitad de camino.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.b2box.oficina-ml-search</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USUARIO/Documents/GitHub/b2box_Hugo/backend/.venv/bin/python</string>
+    <string>/Users/USUARIO/Documents/GitHub/b2box_Hugo/backend/tools/oficina_ml_search.py</string>
+    <string>--max</string>
+    <string>250</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/USUARIO/Documents/GitHub/b2box_Hugo/backend</string>
+
+  <!-- 01:00 todos los días, hora local de la Mac (ART). -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>1</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Una sola vez por noche: si termina (o falla), no se vuelve a lanzar hasta la próxima. -->
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USUARIO/Library/Logs/b2box-oficina-ml-search.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USUARIO/Library/Logs/b2box-oficina-ml-search.err.log</string>
+
+  <!-- Prioridad baja: es un trabajo de fondo. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>
