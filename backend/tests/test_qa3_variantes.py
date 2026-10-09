@@ -213,3 +213,22 @@ async def test_worst_case_cost_of_a_product_whose_fichas_are_identical_but_have_
     assert v1_cost == 1 + n                                   # 1 búsqueda + /items de 4 fichas
     assert v3_cost == 3 * (1 + n) + 0                         # 3 búsquedas + /items de 4 fichas en CADA variante
     assert _snaps()["1"].ml_status == "no_data"
+
+
+@pytest.mark.parametrize("variants, judge_calls", [(1, 1), (2, 2), (3, 3)])
+async def test_the_llm_judge_is_asked_once_per_variant_that_brings_ambiguous_fichas(catalog, monkeypatch, variants, judge_calls):
+    """Costo que el README no menciona: cada variante con fichas ambiguas es UNA llamada más al juez de IA (si está prendido,
+    `pm_vision_max_calls` > 0; apagado por defecto). Un producto sin dato con fichas dudosas en las tres búsquedas pasa de 1 a 3
+    llamadas. El tope diario del juez acota el gasto."""
+    from tests import qa2_world as qw
+    title = "Organizador Doble Ajustable 3 Niveles 40x30 Blanco"
+    FakeVendure.products = [_product("1", title)]
+    _set("pm_ml_query_variants", variants)
+    _set("pm_vision_max_calls", 100)
+    calls: list = []
+    qw.install_judge(monkeypatch, calls)
+    for k, q in enumerate(s.query for s in market_query.query_plan(title, variants) if not s.only_if_empty):
+        catalog.ml.search[q] = [_candidate(f"MLA{k}0", title + " compatible")]
+        catalog.image_scores[ML_IMG.format(f"MLA{k}0")] = 0.5          # ambigua: la mira el juez
+    await price_monitor.run_price_monitor()
+    assert len(calls) == judge_calls and _snaps()["1"].ml_status == "no_data"
