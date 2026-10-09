@@ -439,6 +439,8 @@ export interface SourceStats {
   similar: number;
   diferente: number;
   nada: number;
+  // Si la corrida dejó de comparar con esta tienda a mitad de camino (timeouts seguidos), el motivo.
+  skipped?: string;
 }
 
 export interface StoreIndexStatus {

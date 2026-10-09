@@ -184,6 +184,113 @@ async def test_a_product_stuck_on_all_the_stores_does_not_hold_the_run(stores_wo
     assert _rows("1") == [] and _snap("1").color == "verde"
 
 
+def _more_products(n: int) -> None:
+    from tests.test_price_monitor import FakeVendure, _product
+
+    FakeVendure.products = [_product(str(i), "Organizador cocina") for i in range(1, n + 1)]
+    runtime.set_value("pm_ml_concurrency", 1)
+
+
+def _run_sources(run_id: int) -> dict:
+    from app.db.models import PriceMonitorRun
+
+    with Session(engine) as s:
+        return store_match.run_sources(s.get(PriceMonitorRun, run_id))
+
+
+async def test_a_store_that_times_out_three_times_in_a_row_is_skipped_for_the_rest_of_the_run(stores_world, monkeypatch):
+    _more_products(8)
+    monkeypatch.setattr(store_match, "STORE_MATCH_TIMEOUT_S", 0.02)
+    calls: dict[str, int] = {}
+    real = store_match._match_store
+
+    async def match(run, store, *a, **kw):
+        calls[store.info.name] = calls.get(store.info.name, 0) + 1
+        if store.info.name == "Gadnic":
+            await asyncio.sleep(30)
+        return await real(run, store, *a, **kw)
+
+    monkeypatch.setattr(store_match, "_match_store", match)
+    result = await price_monitor.run_price_monitor()
+    assert result["status"] == "ok"
+    assert calls["Gadnic"] == store_match.STORE_TIMEOUT_STREAK == 3, "después de 3 seguidos ya no se la consulta"
+    assert calls["Casa Perfecta"] == 8, "las otras tiendas siguen todo el resto de la corrida"
+    stats = _run_sources(result["run_id"])
+    gadnic = stats[store_match.store_key(_store_id_of("Gadnic"))]
+    assert "salteada" in gadnic["skipped"] and "3 productos seguidos" in gadnic["skipped"]
+    assert "skipped" not in stats[store_match.store_key(_store_id_of("Casa Perfecta"))]
+    assert stats[store_match.store_key(_store_id_of("Gadnic"))]["label"] == "Gadnic"
+
+
+async def test_the_skip_reason_survives_the_recount_and_reaches_the_api(stores_world, monkeypatch, client):
+    _more_products(5)
+    monkeypatch.setattr(store_match, "STORE_MATCH_TIMEOUT_S", 0.02)
+    real = store_match._match_store
+
+    async def match(run, store, *a, **kw):
+        if store.info.name == "Casa Perfecta":
+            await asyncio.sleep(30)
+        return await real(run, store, *a, **kw)
+
+    monkeypatch.setattr(store_match, "_match_store", match)
+    result = await price_monitor.run_price_monitor()
+    from app.db.models import PriceMonitorRun
+
+    with Session(engine) as s:
+        price_monitor.recount_run(s, result["run_id"])      # lo que pasa al corregir una marca
+        s.commit()
+        run = s.get(PriceMonitorRun, result["run_id"])
+        served = price_monitor.run_to_dict(run)["sources"]
+    key = store_match.store_key(_store_id_of("Casa Perfecta"))
+    assert "salteada" in served[key]["skipped"]
+    assert "skipped" not in served[store_match.store_key(_store_id_of("Gadnic"))]
+
+
+async def test_a_success_in_between_resets_the_streak_so_the_store_is_never_skipped(stores_world, monkeypatch):
+    _more_products(9)
+    monkeypatch.setattr(store_match, "STORE_MATCH_TIMEOUT_S", 0.02)
+    calls = {"n": 0}
+    real = store_match._match_store
+
+    async def match(run, store, *a, **kw):
+        if store.info.name == "Gadnic":
+            calls["n"] += 1
+            if calls["n"] % 3 != 0:          # timeout, timeout, ok, timeout, timeout, ok…
+                await asyncio.sleep(30)
+        return await real(run, store, *a, **kw)
+
+    monkeypatch.setattr(store_match, "_match_store", match)
+    result = await price_monitor.run_price_monitor()
+    assert calls["n"] == 9, "cada producto la consultó: nunca hubo 3 timeouts seguidos"
+    assert not any("skipped" in v for v in _run_sources(result["run_id"]).values())
+
+
+async def test_the_breaker_does_not_carry_over_to_the_next_run(stores_world, monkeypatch):
+    _more_products(4)
+    monkeypatch.setattr(store_match, "STORE_MATCH_TIMEOUT_S", 0.02)
+    hang = {"on": True}
+    real = store_match._match_store
+
+    async def match(run, store, *a, **kw):
+        if store.info.name == "Gadnic" and hang["on"]:
+            await asyncio.sleep(30)
+        return await real(run, store, *a, **kw)
+
+    monkeypatch.setattr(store_match, "_match_store", match)
+    first = await price_monitor.run_price_monitor()
+    assert "skipped" in _run_sources(first["run_id"])[store_match.store_key(_store_id_of("Gadnic"))]
+    hang["on"] = False
+    second = await price_monitor.run_price_monitor(force=True) if "force" in price_monitor.run_price_monitor.__code__.co_varnames \
+        else await price_monitor.run_price_monitor()
+    assert not any("skipped" in v for v in _run_sources(second["run_id"]).values())
+
+
+def _store_id_of(name: str) -> int:
+    from tests.test_store_match import _store_id
+
+    return _store_id(name)
+
+
 def test_the_time_limits_exist_and_are_sane():
     assert 30 <= store_match.STORE_MATCH_TIMEOUT_S <= 300 and store_match.PRODUCT_MATCH_TIMEOUT_S >= store_match.STORE_MATCH_TIMEOUT_S
     from app.dedup import image_hash

@@ -532,7 +532,10 @@ export function SourcesStats({ run, stores }: { run: PriceMonitorRun; stores?: S
             <tbody>
               {entries.map(([key, st]) => (
                 <tr key={key}>
-                  <td className="pr-4 py-0.5 text-foreground">{st.label}</td>
+                  <td className="pr-4 py-0.5 text-foreground">
+                    {st.label}
+                    {st.skipped && <span className="block text-[11px] text-warning">{st.skipped}</span>}
+                  </td>
                   <td className="pr-4 py-0.5 text-right num-tabular font-semibold">{nfmt(st.igual)}</td>
                   <td className="pr-4 py-0.5 text-right num-tabular">{nfmt(st.similar)}</td>
                   <td className="pr-4 py-0.5 text-right num-tabular">{nfmt(st.diferente)}</td>

@@ -179,6 +179,10 @@ class StoresRun:
     # Tope diario del juez IA para las tiendas (contador propio); 0 = sin juez.
     judge_max_calls: int = 0
     topup: list[store_catalog.IndexReport] = field(default_factory=list)
+    # Corta-circuito por tienda: racha de timeouts seguidos y, si llegó al tope, el motivo por el que se la
+    # saltea el resto de la corrida (id de tienda → texto; se ve en Salud).
+    timeouts: dict[int, int] = field(default_factory=dict)
+    skipped: dict[int, str] = field(default_factory=dict)
 
 
 def load_feedback() -> dict[tuple[str, int], dict[int, str]]:
@@ -380,6 +384,41 @@ def save_matches(run_id: int, product_id: str, rows: list[StoreMatch]) -> None:
 # `pm_ml_concurrency` slots, un par de productos colgados la dejaban sin terminar).
 STORE_MATCH_TIMEOUT_S = 120.0
 PRODUCT_MATCH_TIMEOUT_S = 300.0
+# Una tienda que se pasa del tope tres veces seguidas está caída o colgada: seguir esperándole 120 s por
+# producto (con miles de productos) alargaría la corrida entera. Se la saltea el resto de la corrida.
+STORE_TIMEOUT_STREAK = 3
+
+
+def _save_skip_reason(run_id: int, store_id: int, name: str, reason: str) -> None:
+    """Deja el motivo en los contadores por fuente de la corrida (Salud). `source_stats` lo conserva cuando
+    se recuentan."""
+    key = store_key(store_id)
+    try:
+        with Session(engine) as s:
+            run = s.get(PriceMonitorRun, run_id)
+            if run is None:
+                return
+            data = run_sources(run)
+            entry = data.get(key)
+            data[key] = {**(entry if isinstance(entry, dict) else {"label": name}), "skipped": reason}
+            run.source_stats = json.dumps(data)
+            s.add(run)
+            s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("tiendas: no se pudo dejar dicho por qué se saltea «%s»", name, exc_info=True)
+
+
+async def _store_timed_out(run: StoresRun, ctx: Any, store: StoreIndex, product_id: str) -> None:
+    sid = store.info.id
+    streak = run.timeouts[sid] = run.timeouts.get(sid, 0) + 1
+    log.warning("tiendas: %s en «%s» pasó los %.0f s: se sigue sin esa tienda (%d seguidos)",
+                product_id, store.info.name, STORE_MATCH_TIMEOUT_S, streak)
+    if streak >= STORE_TIMEOUT_STREAK and sid not in run.skipped:
+        reason = (f"salteada el resto de la corrida: {streak} productos seguidos pasaron los "
+                  f"{STORE_MATCH_TIMEOUT_S:.0f} s (desde el producto {product_id})")
+        run.skipped[sid] = reason
+        log.warning("tiendas: «%s» %s", store.info.name, reason)
+        await asyncio.to_thread(_save_skip_reason, ctx.run_id, sid, store.info.name, reason)
 
 
 async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *,
@@ -399,13 +438,15 @@ async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *
 
         async def all_stores() -> None:
             for store in run.stores:
+                if store.info.id in run.skipped:
+                    continue
                 try:
                     rows.extend(await asyncio.wait_for(
                         _match_store(run, store, ctx, product, query, specs, snap.our_price_cents, judge, brand_of),
                         timeout=STORE_MATCH_TIMEOUT_S))
+                    run.timeouts[store.info.id] = 0
                 except (asyncio.TimeoutError, TimeoutError):
-                    log.warning("tiendas: %s en «%s» pasó los %.0f s: se sigue sin esa tienda",
-                                product.id, store.info.name, STORE_MATCH_TIMEOUT_S)
+                    await _store_timed_out(run, ctx, store, product.id)
 
         try:
             await asyncio.wait_for(all_stores(), timeout=PRODUCT_MATCH_TIMEOUT_S)
@@ -611,6 +652,8 @@ def source_stats(session: Session, run_id: int) -> dict[str, dict[str, Any]]:
         per_store.setdefault(int(sid), Counter())[CATEGORIES[int(r)]] += 1
     names = {int(i): (n, bool(en)) for i, n, en in session.exec(
         select(MarketStore.id, MarketStore.name, MarketStore.enabled)).all()}
+    run = session.get(PriceMonitorRun, run_id)
+    prior = run_sources(run) if run is not None else {}
     for sid, (name, enabled) in sorted(names.items()):
         if not enabled and sid not in per_store:
             continue
@@ -618,6 +661,10 @@ def source_stats(session: Session, run_id: int) -> dict[str, dict[str, Any]]:
         out[store_key(sid)] = {
             "label": name, "total": total, **{k: c[k] for k in CATEGORIES},
             "nada": max(0, total - sum(c[k] for k in CATEGORIES))}
+        # El motivo por el que se salteó la tienda en esta corrida no se calcula: viene de lo ya guardado.
+        before = prior.get(store_key(sid))
+        if isinstance(before, dict) and isinstance(before.get("skipped"), str) and before["skipped"]:
+            out[store_key(sid)]["skipped"] = before["skipped"][:300]
     return out
 
 
