@@ -52,15 +52,21 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Post
 BASE_SQL = (Path(__file__).parent / "golden" / "pg_schema_origin_main_77645f9.sql").read_text()
 OLD_TABLES = ("audit_log", "image_embed_cache", "image_hash_cache", "market_match_feedback", "market_price_snapshot",
               "ml_seller_cache", "price_history", "price_monitor_run", "settings")
-NEW_TABLES = ("market_store", "store_catalog_item", "store_match", "store_match_feedback")
-ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run", "source_stats")}
+# ml_web_result: el buscador de la oficina (feat/semaforo-variantes-y-oficina), que se apila sobre las tiendas.
+NEW_TABLES = ("market_store", "store_catalog_item", "store_match", "store_match_feedback", "ml_web_result")
+ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run", "source_stats"),
+                 # variantes de búsqueda y buscador de la oficina
+                 ("market_price_snapshot", "ml_variant"), ("market_price_snapshot", "web_via"),
+                 ("price_monitor_run", "variant_stats"), ("price_monitor_run", "oficina_fresh"),
+                 ("price_monitor_run", "n_oficina_ok")}
 PROD_TIMESTAMPTZ = [("price_monitor_run", "started_at"), ("price_monitor_run", "finished_at"), ("market_price_snapshot", "captured_at"),
                     ("ml_seller_cache", "fetched_at"), ("market_match_feedback", "created_at")]
 
 DOWN_SQL = """
-DROP TABLE IF EXISTS store_match_feedback, store_match, store_catalog_item, market_store;
-ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS price_basis;
-ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS source_stats;
+DROP TABLE IF EXISTS store_match_feedback, store_match, store_catalog_item, market_store, ml_web_result;
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS price_basis, DROP COLUMN IF EXISTS ml_variant, DROP COLUMN IF EXISTS web_via;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS source_stats, DROP COLUMN IF EXISTS variant_stats,
+    DROP COLUMN IF EXISTS oficina_fresh, DROP COLUMN IF EXISTS n_oficina_ok;
 DELETE FROM settings WHERE key LIKE '_meta:store%' OR key LIKE 'pm_stores%' OR key = '_meta:pm_llm_calls_stores_today';
 """
 
