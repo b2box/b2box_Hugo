@@ -351,6 +351,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=8, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_ml_query_variants",
+        label="Búsquedas por producto en la API de ML",
+        description=(
+            "1 = como siempre: el título y, si no trajo nada, sus 4 primeras palabras. 2 = suma el título "
+            "corto (sin medidas, cantidades, colores ni relleno). 3 = suma además las palabras clave "
+            "(sustantivo + atributos). Se prueban en orden y se corta en la primera que da un IGUAL con "
+            "precio; cada búsqueda cuenta contra el budget diario de ML."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_query_variants",
+        min=1, max=3, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_tier_policy",
         label="Tramo propio a comparar (0 mínimo / 1 más barato)",
         description=(

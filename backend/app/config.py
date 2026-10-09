@@ -370,6 +370,11 @@ class Settings(BaseSettings):
     # vez. 1.500 productos ≈ 13.500 requests en régimen.
     pm_ml_daily_budget: int = 15000
     pm_ml_concurrency: int = 4
+    # Búsquedas por producto en la API de ML (fichas de catálogo): 1 = el título (y, si
+    # no trajo nada, sus 4 primeras palabras), como siempre; 2-3 = también el título
+    # corto y las palabras clave (ver app/pricing/market_query.py). Se corta en la
+    # primera que da un IGUAL con precio; cada búsqueda cuenta contra el budget.
+    pm_ml_query_variants: int = 3
     # Contra qué tramo comparamos: 0 = tramo mínimo (el más caro por unidad, el
     # que paga quien compra lo justo); 1 = tramo más barato (= priceWithTax).
     pm_tier_policy: int = 0

@@ -73,6 +73,13 @@ const MATCH_LABEL: Record<string, string> = {
 
 // De dónde salió la publicación y cómo se decidió.
 const ORIGIN_LABEL: Record<MatchOrigin, string> = { api: "ficha API", web: "web" };
+// Qué búsqueda de la API de ML encontró la ficha (pm_ml_query_variants).
+const VARIANT_LABEL: Record<string, string> = {
+  titulo: "título",
+  corto: "título corto",
+  claves: "palabras clave",
+  inicio: "primeras palabras",
+};
 const SOURCE_LABEL: Record<string, string> = {
   clip: "foto",
   "clip+nombre": "foto + nombre",
@@ -592,6 +599,16 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
           )}
         </span>
       )}
+      {run.variants && Object.keys(run.variants).length > 0 && (
+        <span className="block mt-0.5">
+          Fichas de la API, por la búsqueda que las encontró:{" "}
+          <span className="num-tabular">
+            {Object.entries(run.variants)
+              .map(([k, n]) => `${VARIANT_LABEL[k] ?? k} ${nfmt(n)}`)
+              .join(" · ")}
+          </span>
+        </span>
+      )}
       {run.web && (run.web.searches > 0 || run.web.status) && (
         <span className="block mt-0.5">
           ML web:{" "}
@@ -760,6 +777,7 @@ function SnapshotRow({
         {s.matched_listings.length > 0 && s.match_source && (
           <span className="block text-[11px] text-muted-foreground">
             idéntico · {s.match_origin ? `${ORIGIN_LABEL[s.match_origin]} · ` : ""}
+            {s.match_origin === "api" && s.ml_variant && s.ml_variant !== "titulo" && `búsqueda: ${VARIANT_LABEL[s.ml_variant] ?? s.ml_variant} · `}
             {MATCH_LABEL[s.match_source] ?? s.match_source}
             {s.match_confidence != null && ` (${Math.round(s.match_confidence * 100)}%)`}
           </span>

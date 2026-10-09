@@ -228,6 +228,9 @@ class PriceMonitorRun(SQLModel, table=True):
     # productos tienen, por fuente, un idéntico, solo similares, solo diferentes o
     # nada (ver pricing/store_match.source_stats).
     source_stats: str | None = Field(default=None)
+    # JSON {"titulo": n, "corto": n, "claves": n}: cuántos productos resolvió con un IGUAL
+    # con precio cada búsqueda de la API de ML (para medir si las variantes sirven).
+    variant_stats: str | None = Field(default=None)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -327,6 +330,9 @@ class MarketPriceSnapshot(SQLModel, table=True):
     # De qué precios sale el color: ml | ml+tiendas | tiendas. Solo cambia de "ml"
     # con `pm_stores_affect_color` prendido (ver pricing/store_match.apply_color).
     price_basis: str = Field(default="ml", max_length=12)
+    # Qué búsqueda de la API de ML encontró el IGUAL con precio: titulo | corto | claves |
+    # inicio (ver pricing/market_query.py). None = no salió de la API.
+    ml_variant: str | None = Field(default=None, max_length=12)
 
 
 class MarketMatchFeedback(SQLModel, table=True):

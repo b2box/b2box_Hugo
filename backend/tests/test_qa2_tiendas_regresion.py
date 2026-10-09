@@ -40,7 +40,8 @@ from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 from tests.test_semaforo_web import webw  # noqa: E402,F401
 
 GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_qa2.json").read_text())
-ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats"}
+# price_basis y source_stats: las tiendas (#21). ml_variant y variant_stats: las variantes de búsqueda (aditivas).
+ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats"}
 CP_IMG = "https://acdn-us.mitiendanube.com/stores/001/133/924/products/{}.webp"
 GD_IMG = "https://static.bidcom.com.ar/publicacionesML/productos/{}.jpg"
 
@@ -261,9 +262,9 @@ async def test_with_the_ml_judge_off_the_stores_do_not_use_theirs_even_with_a_ca
 # ─── 4) lo que el dashboard recibe de ML: la API, clave por clave ────────────
 
 API_GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_api_qa2.json").read_text())
-NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis"}
+NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant"}
 NEW_LIST_KEYS = {"sources", "stores_affect_color"}
-NEW_RUN_KEYS = {"sources"}
+NEW_RUN_KEYS = {"sources", "variants"}
 NEW_SUMMARY_KEYS = {"stores", "stores_affect_color"}
 
 
@@ -328,7 +329,7 @@ async def test_the_dashboard_api_serves_every_old_key_with_the_same_value_stores
                 else:
                     _assert_old_keys_equal(value, new[key], f"{path}.{key}", set())
         else:
-            _assert_old_keys_equal(old["body"], new, path, {"price_basis"}, deep=True)
+            _assert_old_keys_equal(old["body"], new, path, {"price_basis", "ml_variant"}, deep=True)
     if stores == "prendidas_sin_identicos":
         items = client.get("/api/price-monitor/snapshots?page_size=200").json()["items"]
         assert all(i["price_basis"] == "ml" for i in items) and any(i["stores"] for i in items)

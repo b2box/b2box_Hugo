@@ -35,7 +35,7 @@ from tests.test_semaforo_web import _card, _score, _web_page, webw  # noqa: E402
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_b052e4f_full.json"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
-ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats"}
+ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats"}
 
 
 def _mixed_world(w) -> None:

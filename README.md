@@ -173,10 +173,10 @@ mismo espacio centrado.
    `boxWidth`, `boxHeight`, `boxWeight`; cm y kg: son columnas de la misma fila,
    no suman consultas del lado de Vendure). Si el schema no tuviera esos
    campos, la query se repite sin ellos y el semáforo sigue sin medidas.
-2. **Fuente 1, API de ML**: busca por **título** (`/products/search`, fichas de
-   catálogo). La API de ML no tiene búsqueda por foto: la foto se usa para
-   **filtrar**. Si la búsqueda no trae nada, prueba una segunda con las
-   primeras palabras.
+2. **Fuente 1, API de ML**: busca (`/products/search`, fichas de catálogo). La API
+   de ML no tiene búsqueda por foto: la foto se usa para **filtrar**. Busca con
+   hasta `pm_ml_query_variants` consultas por producto (default 3), ver
+   ["Variantes de búsqueda"](#variantes-de-búsqueda-en-la-api-de-ml).
 3. **Fuente 2, web de ML** (solo si la API no dio un IGUAL con precio): el mismo
    título en `listado.mercadolibre.com.ar` con el navegador de Hugo. Ver
    ["Búsqueda web de ML"](#búsqueda-web-de-ml-fuente-2).
@@ -227,6 +227,43 @@ mismo espacio centrado.
    el **origen** del precio (`api` | `web`), de dónde vino cada match (`clip`,
    `clip+nombre`, `llm`, `specs`, `manual`, `ambiguo`) con sus % de foto y de
    nombre, y, con nuestro precio, la ganancia y el color real.
+
+### Variantes de búsqueda en la API de ML
+
+Muchos títulos son largos o genéricos ("Organizador Doble Ajustable 3 Niveles 40x30
+Blanco") y `/products/search?q=<título completo>` no encuentra ficha. Por producto se
+arman, sin IA y de forma determinista (`pricing/market_query.py`), hasta
+`pm_ml_query_variants` consultas, de la más específica a la más general:
+
+| # | Etiqueta | Qué es | Ejemplo |
+|---|---|---|---|
+| 1 | `titulo` | el título como siempre (sin códigos BX/PA) | `Organizador Doble Ajustable 3 Niveles 40x30 Blanco` |
+| 2 | `corto` | sin medidas, cantidades, códigos, colores ni relleno; las primeras 5 palabras con contenido | `Organizador Doble Ajustable Niveles` |
+| 3 | `claves` | el sustantivo principal (el primero, salvo kit/set/juego) y hasta 2 atributos, sin modificadores flojos (doble, mini…) | `Organizador Ajustable Niveles` |
+
+Las repetidas (después de normalizar mayúsculas y tildes) se buscan una sola vez: un
+título ya corto y limpio hace una sola búsqueda.
+
+- Se prueban **en orden y se corta en la primera que da un IGUAL con precio**. Las fichas
+  de todas las variantes probadas se juntan sin repetir por id y pasan por el **mismo**
+  filtro (CLIP, nombre, juez, medidas); cada ficha se juzga UNA vez, en la variante que
+  la trajo (el juez no se llama dos veces por la misma). Un IGUAL sin vendedores que
+  cuenten no corta: sigue con la variante siguiente.
+- **Cada búsqueda cuenta contra `pm_ml_daily_budget`** (la reserva atómica de siempre). Sin
+  cupo a mitad de camino el producto queda `skipped`; un fallo de ML en una variante lo
+  deja `failed`, igual que con la primera.
+- Para medir: el snapshot guarda en `ml_variant` qué búsqueda encontró el match
+  (`titulo` | `corto` | `claves` | `inicio`) y la corrida suma en `variant_stats` cuántos
+  productos resolvió cada una (el dashboard lo muestra debajo de la última corrida).
+  `ml_requests_used` sube en lo que cuestan las variantes: con 1.800 productos "sin dato"
+  son hasta 2 requests más por producto y noche.
+- **`pm_ml_query_variants = 1` es exactamente el comportamiento anterior**: el título y,
+  solo si no trajo ninguna ficha, sus primeras 4 palabras (`inicio`). Hay un test dorado
+  que corre el mundo de 16 productos de origin/main con 1 variante y compara TODAS las
+  columnas del snapshot y de la corrida. Con 2 o 3 el respaldo de "4 palabras" no se usa
+  (lo cubre la variante corta).
+- La búsqueda web de ML del servidor (fuente 2) no cambia: título y, si no hay
+  resultados, las primeras 4 palabras.
 
 ### Siempre trae algo
 
@@ -698,6 +735,7 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 | `pm_image_veto` / `pm_name_veto` | 0.40 / 0.30 | por debajo, descarte directo |
 | `pm_ml_daily_budget` | 15000 | requests a ML por día (UTC) |
 | `pm_ml_concurrency` | 4 | productos en paralelo contra ML |
+| `pm_ml_query_variants` | 3 | búsquedas por producto en la API de ML (1 = título y 4 primeras palabras, como antes; 2 = + título corto; 3 = + palabras clave) |
 | `pm_tier_policy` | 0 | 0 tramo mínimo (compra chica); 1 tramo más barato |
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |

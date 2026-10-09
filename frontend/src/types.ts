@@ -208,6 +208,9 @@ export interface PriceMonitorRun {
     bytes_per_search: number | null;
   };
   n_con_similares?: number;
+  // Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML
+  // (titulo | corto | claves | inicio). Corridas viejas: sin campo o vacío.
+  variants?: Record<string, number>;
   // Color ESTIMADO por similares (aparte del real) y productos con solo diferentes.
   estimated?: { verde: number; amarillo: number; rojo: number };
   solo_diferentes?: number;
@@ -308,6 +311,8 @@ export interface PriceMonitorSnapshot {
   estimated_listing_count?: number;
   estimated_from?: "similar" | null;
   match_origin?: MatchOrigin | null;
+  // Qué búsqueda de la API de ML encontró el idéntico (titulo | corto | claves | inicio).
+  ml_variant?: string | null;
   web_state?: WebState | null;
   web_searches?: number;
   web_bytes?: number;
