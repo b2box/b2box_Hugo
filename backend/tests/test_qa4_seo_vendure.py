@@ -231,3 +231,18 @@ def test_una_corrida_fallida_no_pisa_a_la_ultima_buena_en_el_dashboard(monkeypat
     from app.db.session import engine
     with Session(engine) as s:
         assert text_audit.latest_run(s).id == ok["id"]
+
+
+# ─── Datos raros que no deberían tirar toda la auditoría ───────────
+
+@pytest.mark.xfail(strict=True, reason=(
+    "BUG (bajo): un producto con dos traducciones que normalizan al mismo idioma («es_AR» y «es-AR», o el mismo código "
+    "repetido) viola el índice único (run, producto, idioma) al guardar y TODA la corrida queda `failed`; además el "
+    "motivo que ve el dashboard trae el INSERT crudo. Vendure no debería devolverlo (languageCode es un enum), pero "
+    "evaluate() ya normaliza «es-ar», o sea que lo contempla. Debería quedarse con una y seguir."))
+def test_una_traduccion_repetida_no_tira_la_corrida_entera(monkeypatch):
+    weird = raw_product(7, translations=[("es_AR", "Taza uno", "taza-uno", "Taza larga y descriptiva para todos."),
+                                         ("es-AR", "Taza dos", "taza-dos", "Otra taza larga y descriptiva.")])
+    result = run(monkeypatch, FakeVendure({"ar": [weird, raw_product(8)], None: [weird, raw_product(8)]}))
+    assert result["status"] == "ok" and result["products_total"] == 2
+    assert "INSERT" not in (result.get("error") or "")
