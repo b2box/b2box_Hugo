@@ -60,6 +60,20 @@ class LocalBrowser:
         pass
 
 
+SKEW_MIN = float(os.environ.get("QA3_CLOCK_SKEW_MIN", "0"))
+if SKEW_MIN:
+    import datetime as _dt
+
+    class _SkewedDatetime(_dt.datetime):
+        """El reloj de la Mac adelantado (o atrasado) SKEW_MIN minutos respecto del de Hugo."""
+
+        @classmethod
+        def now(cls, tz=None):
+            return super().now(tz) + _dt.timedelta(minutes=SKEW_MIN)
+
+    runner.datetime = _SkewedDatetime
+
+
 def _prepare() -> None:
     _original_prepare()
     from app.ingest import browser_fetch as bf

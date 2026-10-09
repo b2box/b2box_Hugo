@@ -457,3 +457,22 @@ def test_a_second_runner_refuses_to_start_while_another_one_is_running(box, ml):
     first.communicate(timeout=60)
     assert second.returncode != 0 and "ya hay" in out2.lower()
     assert len(ml.hits) <= before + 6
+
+
+# ─── un fallo silencioso: el reloj de la Mac ────────────────────────────────
+
+
+def test_a_mac_clock_a_few_minutes_behind_still_delivers(box, ml):
+    _seed(3)
+    r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "-30"})
+    assert r.code == 0 and [x.status for x in _rows()] == ["ok"] * 3
+
+
+@pytest.mark.xfail(strict=True, reason="GAP: con el reloj de la Mac adelantado más de 5 minutos Hugo rechaza TODOS los resultados por "
+                                       "fetched_at en el futuro y el runner igual sale con 0 y loguea 'lote enviado' en INFO: la "
+                                       "oficina queda muerta sin que nadie se entere (ni exit code, ni ERROR en el log)")
+def test_a_mac_clock_ahead_makes_hugo_reject_everything_and_the_runner_must_say_so(box, ml):
+    _seed(3)
+    r = box(extra_env={"QA3_CLOCK_SKEW_MIN": "10"})
+    assert _rows() == [], "Hugo rechazó todo (fetched_at en el futuro)"
+    assert r.code != 0 or "ERROR" in r.log or "ERROR" in r.out
