@@ -493,6 +493,45 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_stores_affect_color",
+        label="Tiendas cuentan para el color (1 / 0)",
+        description=(
+            "1 = el color y la ganancia usan la mediana de los idénticos de Mercado Libre Y de las "
+            "tiendas, como si fueran una publicación más. Un idéntico de tienda solo cuenta si lo "
+            "confirman la foto + el nombre, las medidas o una persona (no el juez IA solo), con precio "
+            "creíble y con stock. 0 = Casa Perfecta, Gadnic y las demás se muestran como referencia y "
+            "el color sale solo de Mercado Libre."
+        ),
+        type="int", parser=int,
+        default_attr="pm_stores_affect_color",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_stores_topup_minutes",
+        label="Tiendas: minutos para refrescar el índice al empezar",
+        description=(
+            "Si al arrancar una corrida el índice de una tienda está viejo, Hugo lo refresca hasta "
+            "este tiempo (dentro del tope diario de páginas de la tienda) antes de comparar. "
+            "0 = no se refresca ahí: solo lo hace el job de la madrugada."
+        ),
+        type="int", parser=int,
+        default_attr="pm_stores_topup_minutes",
+        min=0, max=180, step=5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_stores_vision_max_calls",
+        label="Tiendas: tope diario del juez IA",
+        description=(
+            "Llamadas por día (UTC) al juez IA para comparar con las tiendas. Es un tope PROPIO, separado "
+            "del de Mercado Libre (así comparar tiendas no le saca llamadas al juez de ML). Solo corre "
+            "si el juez de ML está prendido. 0 = las tiendas se comparan sin juez (lo dudoso queda "
+            "«similar sin confirmar»)."
+        ),
+        type="int", parser=int,
+        default_attr="pm_stores_vision_max_calls",
+        min=0, max=20000, step=50, group="monitor",
+    ),
+    SettingMeta(
         key="pm_embed_cache_days",
         label="Días de cache de fotos de ML",
         description=(

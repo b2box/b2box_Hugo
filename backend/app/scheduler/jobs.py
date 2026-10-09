@@ -4,7 +4,8 @@ Jobs:
   1. audit_duplicates    → recorre Vendure y deshabilita duplicados.
   2. audit_source_prices → snapshot de precios fuente + alerta cuando cambian.
   3. daily_digest        → email/webhook con el resumen de las últimas 24h.
-  4. price_monitor       → semáforo de precios contra Mercado Libre (sombra).
+  4. price_monitor       → semáforo de precios contra Mercado Libre y tiendas (sombra).
+  5. store_index         → indexa las tiendas (Casa Perfecta, Gadnic…) de madrugada.
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -36,6 +37,7 @@ from app.dedup.orchestrator import find_duplicate_pairs
 from app.dedup.url_match import normalize_url
 from app.notifier.dispatcher import notify, notify_digest
 from app.pricing import price_monitor as price_monitor_mod
+from app.pricing import store_catalog, store_match
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
 from app.vendure.client import VendureClient, VendureProduct, VendureVariant
@@ -741,6 +743,13 @@ async def prune_price_history() -> None:
         price_monitor_mod.prune_snapshots(get_settings().price_monitor_retention_days)
     except Exception as exc:  # noqa: BLE001
         log.warning("prune del historial del semáforo falló: %s", exc)
+    try:
+        from app import runtime
+
+        store_match.prune(get_settings().price_monitor_retention_days)
+        store_match.prune_embed_cache(int(runtime.get("pm_embed_cache_days") or 0))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prune de las tiendas falló: %s", exc)
     days = get_settings().price_history_retention_days
     if days <= 0:
         return
@@ -771,6 +780,21 @@ async def price_monitor(trigger: str = "cron") -> dict | None:
     if result and result.get("status") in (price_monitor_mod.RUN_OK, price_monitor_mod.RUN_DEGRADED):
         _mark_job_run(PRICE_MONITOR_JOB_ID)
     return result
+
+
+# ─── Job 8: indexado de las tiendas (Casa Perfecta, Gadnic…) ───────
+
+STORE_INDEX_JOB_ID = store_catalog.JOB_ID
+_STORE_INDEX_DEFAULT_CRON = "20 3 * * *"
+
+
+async def store_index() -> list[dict]:
+    """Lee los sitemaps de las tiendas activas y actualiza su catálogo local (ver
+    app/pricing/store_catalog.py). Va de madrugada y ANTES del semáforo, que solo
+    compara contra lo que quedó indexado. Una tienda que corta (429, red) no frena a las demás."""
+    reports = await store_catalog.index_all()
+    _mark_job_run(STORE_INDEX_JOB_ID)
+    return [{"store": r.store, "status": r.status, "summary": r.summary()} for r in reports]
 
 
 def _price_monitor_trigger(expr: str) -> CronTrigger:
@@ -876,6 +900,19 @@ def register_jobs() -> None:
         id=PRICE_MONITOR_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
         **pm_kwargs,
+    )
+    # Tiendas: indexado de madrugada (UTC), antes del semáforo de las 06:00 UTC.
+    try:
+        store_trigger = CronTrigger.from_crontab(
+            getattr(s, "store_index_cron_utc", None) or _STORE_INDEX_DEFAULT_CRON, timezone="UTC")
+    except ValueError as exc:
+        log.error("STORE_INDEX_CRON_UTC inválido (%s); uso %r", exc, _STORE_INDEX_DEFAULT_CRON)
+        store_trigger = CronTrigger.from_crontab(_STORE_INDEX_DEFAULT_CRON, timezone="UTC")
+    scheduler.add_job(
+        store_index,
+        store_trigger,
+        id=STORE_INDEX_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
     )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:

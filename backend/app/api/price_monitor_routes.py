@@ -3,7 +3,7 @@
 POST /api/price-monitor/run                    → dispara una corrida a mano
 GET  /api/price-monitor/runs                   → últimas corridas
 GET  /api/price-monitor/snapshots              → tabla paginada (run_id, color, q, enabled,
-                                                  match, origin)
+                                                  match, origin, source, igual_in)
 GET  /api/price-monitor/products/{id}/history  → tendencia de un producto
 GET  /api/price-monitor/summary                → tarjeta de Salud
 POST /api/price-monitor/snapshots/{id}/not-same → "No es el mismo": saca una publicación,
@@ -31,7 +31,7 @@ from app import auth, runtime
 from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
-from app.pricing import match_feedback, price_monitor
+from app.pricing import match_feedback, price_monitor, store_match
 from app.pricing.market_ml import ml_budget_status
 from app.pricing.semaforo import COLORS
 
@@ -195,6 +195,8 @@ async def list_snapshots(
     match: str | None = Query(None, max_length=16),
     origin: str | None = Query(None, max_length=8),
     estimated: str | None = Query(None, max_length=8),
+    source: str | None = Query(None, max_length=16),
+    igual_in: str | None = Query(None, max_length=160),
     page: int = Query(0, ge=0, le=PAGE_MAX),
     page_size: int = Query(PAGE_SIZE_DEFAULT, ge=1, le=PAGE_SIZE_MAX),
     session: Session = Depends(get_session),
@@ -205,7 +207,11 @@ async def list_snapshots(
     (tiene idéntico) | similar (tiene similares) | solo_similar | diferente (tiene
     diferentes) | solo_diferente | ninguno (ML no devolvió nada). `origin`: api |
     web. `estimated`: verde | amarillo | rojo | any, el color ESTIMADO por similares
-    (los productos sin idéntico; no es el color real)."""
+    (los productos sin idéntico; no es el color real).
+
+    Por fuente (Mercado Libre y las tiendas): `source` = "ml" o el id de una tienda (productos
+    con algo de esa fuente); `igual_in` = lista separada por comas de esas mismas claves (productos
+    con un idéntico en alguna de ellas)."""
     if color and color not in COLORS:
         raise HTTPException(400, f"color inválido: {color}")
     if status and status not in STATUSES:
@@ -218,11 +224,18 @@ async def list_snapshots(
         raise HTTPException(400, f"origin inválido: {origin}")
     if estimated and estimated not in ESTIMATED_FILTERS:
         raise HTTPException(400, f"estimated inválido: {estimated}")
+    source_key = store_match.parse_source(source) if source else None
+    if source and source_key is None:
+        raise HTTPException(400, f"source inválido: {source}")
+    igual_keys = [store_match.parse_source(x) for x in (igual_in or "").split(",") if x.strip()][:10]
+    if any(k is None for k in igual_keys):
+        raise HTTPException(400, f"igual_in inválido: {igual_in}")
     if run_id is None:
         run_id = _latest_run_id(session)
     if run_id is None:
         return {"run_id": None, "items": [], "total": 0, "page": page, "page_size": page_size,
-                "has_more": False, "colors": {}, "estimated_colors": {}, "states": {}}
+                "has_more": False, "colors": {}, "estimated_colors": {}, "states": {},
+                "sources": store_match.sources_meta(session)}
 
     base = select(MarketPriceSnapshot).where(MarketPriceSnapshot.run_id == run_id)
     count_stmt = select(func.count(MarketPriceSnapshot.id)).where(  # type: ignore[arg-type]
@@ -230,6 +243,7 @@ async def list_snapshots(
     )
     # Filtros que también acotan los contadores por color (los chips de arriba).
     scope = _scope_conditions(enabled, match, origin, estimated)
+    scope += store_match.filter_conditions(source_key, [k for k in igual_keys if k])
     for cond in scope:
         base = base.where(cond)
         count_stmt = count_stmt.where(cond)
@@ -287,7 +301,9 @@ async def list_snapshots(
     }
     return {
         "run_id": run_id,
-        "items": [price_monitor.snapshot_to_dict(r) for r in rows],
+        "items": store_match.decorate_items(session, run_id, [price_monitor.snapshot_to_dict(r) for r in rows]),
+        "sources": store_match.sources_meta(session),
+        "stores_affect_color": store_match.affect_color_enabled(),
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -321,6 +337,7 @@ def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id:
     """Guarda en UNA transacción la corrección, el snapshot recalculado y los
     contadores de la corrida. Si otra pestaña guardó la misma corrección en este
     instante (IntegrityError), responde "ya estaba" con lo que quedó."""
+    store_match.reapply_color(session, snap)       # con las tiendas contando, el color las incluye
     session.add(snap)
     price_monitor.recount_run(session, snap.run_id)
     try:

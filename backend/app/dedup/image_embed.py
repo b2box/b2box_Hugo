@@ -36,14 +36,13 @@ import os
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
-from io import BytesIO
 
 import numpy as np
 from PIL import Image
 from sqlmodel import Session
 
 from app.config import get_settings
-from app.dedup.image_hash import _fetch  # mismo fetch con guard SSRF + tope de bytes
+from app.dedup.image_hash import _fetch, open_checked  # mismo fetch con guard SSRF + tope de bytes y de píxeles
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +133,7 @@ def available() -> bool:
 
 def _preprocess(raw: bytes) -> np.ndarray:
     """bytes → tensor float32 [1, 3, 224, 224] normalizado como CLIP."""
-    img = Image.open(BytesIO(raw)).convert("RGB")
+    img = open_checked(raw).convert("RGB")
     # Resize del lado corto a 224 y center crop (idéntico al preproceso de CLIP).
     w, h = img.size
     scale = _IMAGE_SIZE / min(w, h)

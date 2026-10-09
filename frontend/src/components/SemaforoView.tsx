@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { IconExternalLink, IconRefresh, IconSearch, IconTrafficLight } from "../icons";
 import { fmtArs, fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format";
 import { SECTION_META } from "../sections";
+import { CheapestCell, SourceCell, SourceFilters, SourceHeads, StoresPanel } from "./SourceCells";
 import type {
   ListingSpecs,
   MatchCategory,
@@ -31,6 +32,7 @@ import type {
   PriceMonitorRun,
   PriceMonitorSnapshot,
   SemaforoColor,
+  SourceMeta,
   WebState,
 } from "../types";
 
@@ -241,6 +243,9 @@ export default function SemaforoView() {
   const [match, setMatch] = useState<MatchFilter | null>(null);
   const [origin, setOrigin] = useState<MatchOrigin | null>(null);
   const [estimated, setEstimated] = useState<EstimatedFilter | null>(null);
+  // Por fuente (Mercado Libre, Gadnic, Casa Perfecta…): "tiene algo de" y "tiene idéntico en".
+  const [source, setSource] = useState<string | null>(null);
+  const [igualIn, setIgualIn] = useState<string[]>([]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -258,10 +263,10 @@ export default function SemaforoView() {
   const running = summaryQ.data?.running ?? false;
 
   const snapsQ = useQuery({
-    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin, estimated],
+    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin, estimated, source, igualIn],
     queryFn: () =>
       getPriceMonitorSnapshots({
-        page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin, estimated,
+        page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin, estimated, source, igualIn,
       }),
     placeholderData: keepPreviousData,
     // Mientras corre, la tabla de la corrida en curso va creciendo.
@@ -275,6 +280,10 @@ export default function SemaforoView() {
   const colorCounts = data?.colors ?? {};
   const estimatedCounts = data?.estimated_colors ?? {};
   const stateCounts = data?.states ?? {};
+  const sources: SourceMeta[] = data?.sources ?? [];
+  const storeSources = sources.filter((x) => x.key !== "ml");
+  // Producto, Color, Mediana, Mínimo, Publ., Nuestro, Ganancia, Mercado Libre, [tiendas], Más barato, Fecha.
+  const columns = 9 + storeSources.length + (storeSources.length > 0 ? 1 : 0);
   const allCount = COLOR_ORDER.reduce((acc, c) => acc + (colorCounts[c] ?? 0), 0);
   const lastRun = summaryQ.data?.last_run ?? null;
 
@@ -436,6 +445,19 @@ export default function SemaforoView() {
             resetView();
           }}
         />
+        <SourceFilters
+          sources={sources}
+          source={source}
+          onSource={(v) => {
+            setSource(v);
+            resetView();
+          }}
+          igualIn={igualIn}
+          onToggleIgual={(k) => {
+            setIgualIn((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
+            resetView();
+          }}
+        />
       </div>
 
       {snapsQ.error ? (
@@ -464,6 +486,15 @@ export default function SemaforoView() {
                 <th className="text-right font-medium px-3 py-2">Nuestro</th>
                 <th className="text-right font-medium px-3 py-2">Ganancia</th>
                 <th className="text-left font-medium px-3 py-2">Mercado Libre</th>
+                <SourceHeads sources={storeSources} />
+                {storeSources.length > 0 && (
+                  <th
+                    className="text-left font-medium px-3 py-2"
+                    title="El precio más bajo entre los idénticos de Mercado Libre y las tiendas (sin precios dudosos)"
+                  >
+                    Más barato afuera
+                  </th>
+                )}
                 <th className="text-left font-medium px-3 py-2">Fecha</th>
               </tr>
             </thead>
@@ -472,13 +503,15 @@ export default function SemaforoView() {
                 <Fragment key={s.id}>
                   <SnapshotRow
                     s={s}
+                    storeSources={storeSources}
                     expanded={expanded === s.product.id}
                     onToggle={() => setExpanded(expanded === s.product.id ? null : s.product.id)}
                   />
                   {expanded === s.product.id && (
                     <tr className="bg-muted/40">
-                      <td colSpan={9} className="px-3 py-3 space-y-4">
+                      <td colSpan={columns} className="px-3 py-3 space-y-4">
                         <ListingsPanel s={s} />
+                        <StoresPanel s={s} affectColor={data?.stores_affect_color ?? false} />
                         <ProductHistory productId={s.product.id} />
                       </td>
                     </tr>
@@ -616,7 +649,8 @@ export function EstimatedDot({ color }: { color: SemaforoColor }) {
 // similares, el ESTIMADO (punto hueco); con solo diferentes, su propio estado; "Sin
 // dato" únicamente cuando ML no devolvió nada (o falló).
 function ColorCell({ s }: { s: PriceMonitorSnapshot }) {
-  if (s.ml_status === "ok") return <ColorDot color={s.color} />;
+  // Color real: de ML o, si las tiendas cuentan y no hay idéntico en ML, de las tiendas.
+  if (s.ml_status === "ok" || s.price_basis === "tiendas") return <ColorDot color={s.color} />;
   if (isEstimated(s)) return <EstimatedDot color={s.estimated_color!} />;
   const st = stateOf(s);
   if (st === "diferente" || st === "similar" || st === "igual_sin_precio") {
@@ -631,10 +665,12 @@ function ColorCell({ s }: { s: PriceMonitorSnapshot }) {
 
 function SnapshotRow({
   s,
+  storeSources,
   expanded,
   onToggle,
 }: {
   s: PriceMonitorSnapshot;
+  storeSources: SourceMeta[];
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -665,6 +701,14 @@ function SnapshotRow({
         <span className="block text-[11px] text-muted-foreground mt-0.5" title={s.ml_error ?? undefined}>
           {statusText(s)}
         </span>
+        {s.price_basis && s.price_basis !== "ml" && (
+          <span
+            className="block text-[11px] text-muted-foreground mt-0.5"
+            title="El color usa también los idénticos de las tiendas (ajuste «Tiendas cuentan para el color»)"
+          >
+            {s.price_basis === "tiendas" ? "según tiendas" : "según ML + tiendas"}
+          </span>
+        )}
       </td>
       <td className="px-3 py-2 text-right num-tabular whitespace-nowrap">
         {isEstimated(s) ? (
@@ -712,33 +756,13 @@ function SnapshotRow({
         </td>
       )}
       <td className="px-3 py-2">
-        {s.matched_listings.length === 0 ? (
-          (s.similar_count ?? 0) + (s.other_count ?? 0) + (s.unpriced_listings?.length ?? 0) === 0 && (
-            <span className="text-xs text-muted-foreground">—</span>
-          )
-        ) : (
-          <div className="space-y-0.5">
-            {s.matched_listings.slice(0, 3).map((m) => (
-              <a
-                key={m.ml_id}
-                href={safeMlHref(m.permalink, m.ml_id)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-primary hover:underline max-w-[220px]"
-                title={m.title}
-              >
-                <IconExternalLink className="w-3 h-3 shrink-0" />
-                <span className="truncate">{m.title || m.ml_id}</span>
-              </a>
-            ))}
-            {s.match_source && (
-              <span className="block text-[11px] text-muted-foreground">
-                igual · {s.match_origin ? `${ORIGIN_LABEL[s.match_origin]} · ` : ""}
-                {MATCH_LABEL[s.match_source] ?? s.match_source}
-                {s.match_confidence != null && ` (${Math.round(s.match_confidence * 100)}%)`}
-              </span>
-            )}
-          </div>
+        <SourceCell cell={s.cells?.ml} hideCounts />
+        {s.matched_listings.length > 0 && s.match_source && (
+          <span className="block text-[11px] text-muted-foreground">
+            idéntico · {s.match_origin ? `${ORIGIN_LABEL[s.match_origin]} · ` : ""}
+            {MATCH_LABEL[s.match_source] ?? s.match_source}
+            {s.match_confidence != null && ` (${Math.round(s.match_confidence * 100)}%)`}
+          </span>
         )}
         <SimilarChip s={s} />
         <OtherChip s={s} />
@@ -748,6 +772,16 @@ function SnapshotRow({
           </span>
         )}
       </td>
+      {storeSources.map((src) => (
+        <td key={src.key} className="px-3 py-2">
+          <SourceCell cell={s.cells?.[src.key]} />
+        </td>
+      ))}
+      {storeSources.length > 0 && (
+        <td className="px-3 py-2 whitespace-nowrap">
+          <CheapestCell c={s.cheapest_outside} />
+        </td>
+      )}
       <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{fmtTime(s.captured_at)}</td>
     </tr>
   );

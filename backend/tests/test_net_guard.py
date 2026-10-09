@@ -176,3 +176,286 @@ async def test_assert_peer_public_with_the_real_httpcore_extension():
     finally:
         server.close()
         await server.wait_closed()
+
+
+# ─── safe_get(max_bytes=…): tope del cuerpo descomprimido ───────────────────
+
+
+class _Raw(httpx.AsyncByteStream):
+    """Cuerpo CRUDO (lo que viaja por el cable): con `content=` httpx lo leería y descomprimiría
+    al construir la Response, y no se podría probar la lectura en streaming."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for c in self.chunks:
+            yield c
+
+
+def _raw_response(req, *chunks: bytes, status: int = 200, **headers: str) -> httpx.Response:
+    return httpx.Response(status, headers={k.replace("_", "-"): v for k, v in headers.items()},
+                          stream=_Raw(*chunks), request=req)
+
+
+def _patch_for_streaming(monkeypatch, handler):
+    monkeypatch.setattr(net_guard.httpx, "AsyncClient", _client_factory(handler))
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", lambda host, *a, **kw: [(0, 0, 0, "", ("93.184.216.34", 0))])
+    # El transporte de mentira no expone el socket: el chequeo de la IP conectada se salta.
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
+
+
+async def test_safe_get_with_max_bytes_returns_a_normal_response(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"hola ", b"mundo", x_test="1"))
+    resp = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100)
+    assert resp.status_code == 200 and resp.content == b"hola mundo" and resp.text == "hola mundo"
+    assert resp.headers["x-test"] == "1"
+
+
+async def test_safe_get_with_max_bytes_rejects_a_body_over_the_cap(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"x" * 600, b"x" * 600, b"x" * 600))
+    with pytest.raises(net_guard.ResponseTooLarge):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_safe_get_with_max_bytes_rejects_a_declared_size_over_the_cap(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"x", content_length="999999"))
+    with pytest.raises(net_guard.ResponseTooLarge):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_safe_get_with_max_bytes_opens_one_layer_of_gzip_with_a_cap(monkeypatch):
+    import gzip
+
+    bomb = gzip.compress(b"a" * 200_000)           # chico en el cable, grande al abrirlo
+    assert len(bomb) < 1000
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, bomb, content_encoding="gzip"))
+    with pytest.raises(net_guard.ResponseTooLarge):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=10_000)
+    ok = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=300_000)
+    assert ok.content == b"a" * 200_000 and "content-encoding" not in ok.headers
+
+
+async def test_safe_get_with_max_bytes_opens_gzip_that_arrives_in_pieces(monkeypatch):
+    import gzip
+
+    data = gzip.compress(b"hola mundo " * 5000)
+    pieces = [data[i:i + 7] for i in range(0, len(data), 7)]
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, *pieces, content_encoding="gzip"))
+    resp = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1_000_000)
+    assert resp.content == b"hola mundo " * 5000
+
+
+async def test_stacked_gzip_bomb_is_refused_before_anything_is_decompressed(monkeypatch):
+    """`Content-Encoding: gzip, gzip, gzip`: 246 bytes en el cable que httpx convertía en UN chunk de 64 MB."""
+    import gzip
+    import time
+    import tracemalloc
+
+    payload = b"\0" * (64 * 1024 * 1024)
+    for _ in range(3):
+        payload = gzip.compress(payload, 9)
+    assert len(payload) < 100_000
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, payload, content_encoding="gzip, gzip, gzip"))
+    tracemalloc.start()
+    t0 = time.time()
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1_000_000)
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert time.time() - t0 < 1.0 and peak < 5_000_000, f"pico de memoria {peak} bytes"
+
+
+@pytest.mark.parametrize("encoding", ["br", "zstd", "deflate", "gzip, br", "compress", "gzip,gzip"])
+async def test_content_encodings_that_are_not_one_layer_of_gzip_are_refused(monkeypatch, encoding):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"datos", content_encoding=encoding))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_a_truncated_gzip_is_an_error_not_a_partial_page(monkeypatch):
+    import gzip
+
+    data = gzip.compress(b"x" * 5000)[:-10]
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, data, content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100_000)
+
+
+async def test_the_request_only_offers_gzip(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(req.headers["accept-encoding"])
+        return _raw_response(req, b"ok")
+
+    _patch_for_streaming(monkeypatch, handler)
+    await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100,
+                             headers={"accept-encoding": "gzip, deflate, br, zstd", "User-Agent": "x"})
+    assert seen == ["gzip"]
+
+
+async def test_safe_get_with_max_bytes_still_follows_and_validates_redirects(monkeypatch):
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/a":
+            return _raw_response(req, status=301, location="https://example.com/b")
+        return _raw_response(req, b"final")
+
+    _patch_for_streaming(monkeypatch, handler)
+    resp = await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)
+    assert resp.content == b"final" and seen == ["https://example.com/a", "https://example.com/b"]
+
+
+async def test_safe_get_with_max_bytes_refuses_a_redirect_into_a_private_network(monkeypatch):
+    def handler(req):
+        return _raw_response(req, status=302, location="http://169.254.169.254/x")
+
+    _patch_for_streaming(monkeypatch, handler)
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo",
+                        lambda host, *a, **kw: [(0, 0, 0, "", (host if host[0].isdigit() else "93.184.216.34", 0))])
+    with pytest.raises(SsrfBlocked):
+        await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)
+
+
+async def test_redirect_ok_is_asked_before_following_each_location(monkeypatch):
+    seen, asked = [], []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.host == "example.com":
+            return _raw_response(req, status=301, location="https://otro-sitio.com/x")
+        return _raw_response(req, b"no deberia llegar")
+
+    _patch_for_streaming(monkeypatch, handler)
+
+    def ok(url):
+        asked.append(url)
+        return "example.com" in url
+
+    with pytest.raises(net_guard.RedirectBlocked):
+        await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100, redirect_ok=ok)
+    assert asked == ["https://otro-sitio.com/x"] and seen == ["https://example.com/a"], "no se pidió la URL ajena"
+
+
+async def test_redirect_ok_also_applies_without_a_byte_cap(monkeypatch):
+    def handler(req):
+        return httpx.Response(302, headers={"location": "https://otro.com/"}, request=req)
+
+    monkeypatch.setattr(net_guard.httpx, "AsyncClient", _client_factory(handler))
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", lambda host, *a, **kw: [(0, 0, 0, "", ("93.184.216.34", 0))])
+    with pytest.raises(net_guard.RedirectBlocked):
+        await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), redirect_ok=lambda u: False)
+
+
+async def test_dns_resolution_does_not_block_the_event_loop(monkeypatch):
+    """getaddrinfo es bloqueante: corre en un thread, así un DNS lento no congela el resto."""
+    import asyncio
+    import threading
+    import time
+
+    main = threading.get_ident()
+    seen = {}
+
+    def slow_dns(host, *a, **kw):
+        seen["thread"] = threading.get_ident()
+        time.sleep(0.3)
+        return [(0, 0, 0, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(net_guard.httpx, "AsyncClient", _client_factory(lambda req: _raw_response(req, b"ok")))
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", slow_dns)
+    monkeypatch.setattr(net_guard, "assert_peer_public", lambda resp: None)
+    ticks = []
+
+    async def ticker():
+        for _ in range(5):
+            await asyncio.sleep(0.05)
+            ticks.append(1)
+
+    task = asyncio.create_task(ticker())
+    await net_guard.safe_get("https://example.com/a", timeout=httpx.Timeout(2.0), max_bytes=100)
+    await task
+    assert seen["thread"] != main and len(ticks) == 5
+
+
+# ─── gzip roto, vacío o de varios miembros; headers no ASCII ────────────────
+
+
+async def test_a_body_that_claims_gzip_but_is_not_raises_bad_encoding_not_zlib_error(monkeypatch):
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, b"<html>esto no es gzip</html>", content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+async def test_a_corrupt_gzip_raises_bad_encoding(monkeypatch):
+    import gzip
+
+    data = bytearray(gzip.compress(b"hola " * 1000))
+    data[20:30] = b"\xff" * 10
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, bytes(data), content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=100_000)
+
+
+@pytest.mark.parametrize("status", [204, 304, 404])
+async def test_an_empty_body_declared_as_gzip_is_accepted(monkeypatch, status):
+    """Un 404/204 sin cuerpo puede venir igual con `Content-Encoding: gzip`."""
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, status=status, content_encoding="gzip"))
+    resp = await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+    assert resp.status_code == status and resp.content == b""
+
+
+@pytest.mark.parametrize("split", [False, True])
+async def test_a_multi_member_gzip_is_refused_instead_of_silently_truncated(monkeypatch, split):
+    import gzip
+
+    first = gzip.compress(b"primero ")
+    two = first + gzip.compress(b"segundo")
+    chunks = (two[:len(first)], two[len(first):]) if split else (two,)
+    _patch_for_streaming(monkeypatch, lambda req: _raw_response(req, *chunks, content_encoding="gzip"))
+    with pytest.raises(net_guard.BadEncoding):
+        await net_guard.safe_get("https://example.com/p", timeout=httpx.Timeout(2.0), max_bytes=1000)
+
+
+HEADERS_8BIT = [(b"content-disposition", 'attachment; filename="ácido.jpg"'.encode("latin-1")), (b"etag", b'"\xff\xfe"'),
+                (b"x-raro", "ñandú".encode("utf-8")), (b"content-type", b"text/html; charset=latin-1")]
+
+
+@pytest.mark.parametrize("path", ["plain", "gzip", "redirect_target", "consumed"])
+async def test_headers_that_are_not_ascii_do_not_break_any_route_of_safe_get(monkeypatch, path):
+    """Reconstruir la Response desde strings los re-codificaba en ASCII: UnicodeEncodeError con un
+    Content-Disposition con acento o un ETag con 0xFF (rompía las fotos de todo Hugo)."""
+    import gzip
+
+    def handler(req):
+        if path == "plain":
+            return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"cuerpo"), request=req)
+        if path == "gzip":
+            return httpx.Response(200, headers=[*HEADERS_8BIT, (b"content-encoding", b"gzip")],
+                                  stream=_Raw(gzip.compress(b"cuerpo")), request=req)
+        if path == "redirect_target":
+            if req.url.path == "/a":
+                return httpx.Response(301, headers=[*HEADERS_8BIT, (b"location", b"https://example.com/b")], stream=_Raw(), request=req)
+            return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"cuerpo"), request=req)
+        return httpx.Response(200, headers=HEADERS_8BIT, content=b"cuerpo", request=req)       # ya leída (MockTransport)
+
+    _patch_for_streaming(monkeypatch, handler)
+    url = "https://example.com/a" if path == "redirect_target" else "https://example.com/p"
+    resp = await net_guard.safe_get(url, timeout=httpx.Timeout(2.0), max_bytes=1000)
+    assert resp.content == b"cuerpo" and resp.status_code == 200
+    assert dict(resp.headers.raw)[b"etag"] == b'"\xff\xfe"'
+    assert dict(resp.headers.raw)[b"content-disposition"] == 'attachment; filename="ácido.jpg"'.encode("latin-1")
+    assert b"content-encoding" not in dict(resp.headers.raw)
+
+
+async def test_image_download_survives_8bit_headers(monkeypatch):
+    """El mismo camino que usa image_hash._fetch para todas las fotos de Hugo."""
+    from app.dedup import image_hash
+
+    def handler(req):
+        return httpx.Response(200, headers=HEADERS_8BIT, stream=_Raw(b"\x89PNG-bytes"), request=req)
+
+    _patch_for_streaming(monkeypatch, handler)
+    assert await image_hash._fetch("https://acdn-us.mitiendanube.com/a.png") == b"\x89PNG-bytes"

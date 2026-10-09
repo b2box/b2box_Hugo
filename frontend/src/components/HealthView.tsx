@@ -4,6 +4,7 @@ import { Card } from "@/components/ui/card";
 import { IconActivity } from "../icons";
 import { fmtPct, fmtTime, nfmt } from "../lib/format";
 import { COLOR_META, RUN_STATUS_LABEL } from "./SemaforoView";
+import { SourcesStats } from "./SourceCells";
 import type { PriceMonitorSummary, SemaforoColor } from "../types";
 
 // Página de salud del sistema: budget OTAPI, tasa Paco, últimas auditorías, cache.
@@ -207,6 +208,7 @@ function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
               </ul>
             </div>
           </div>
+          <SourcesStats run={run} stores={pm.stores} />
           {run.error && <p className="text-xs text-destructive mt-3">Error: {run.error}</p>}
         </>
       )}

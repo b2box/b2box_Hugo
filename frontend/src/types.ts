@@ -211,6 +211,8 @@ export interface PriceMonitorRun {
   // Color ESTIMADO por similares (aparte del real) y productos con solo diferentes.
   estimated?: { verde: number; amarillo: number; rojo: number };
   solo_diferentes?: number;
+  // Por fuente (Mercado Libre y cada tienda): productos con idéntico / similar / solo diferentes / nada.
+  sources?: Record<string, SourceStats>;
 }
 
 // De dónde salió una publicación y cómo se decidió que es (o se parece a) lo nuestro.
@@ -323,6 +325,13 @@ export interface PriceMonitorSnapshot {
   est_margin_pct: number | null;
   color: SemaforoColor;
   prev_color: SemaforoColor | null;
+  // Tiendas (Gadnic, Casa Perfecta…): la mejor coincidencia por fuente, el detalle por
+  // tienda y el precio idéntico más bajo de afuera. Faltan en servidores viejos.
+  cells?: Record<string, SourceCell>;
+  stores?: Record<string, { label: string; matches: StoreMatchRow[] }>;
+  cheapest_outside?: CheapestOutside | null;
+  // De qué precios sale el color: ml | ml+tiendas | tiendas.
+  price_basis?: "ml" | "ml+tiendas" | "tiendas";
 }
 
 export interface PriceMonitorSnapshotsResponse {
@@ -336,6 +345,10 @@ export interface PriceMonitorSnapshotsResponse {
   // Aparte del color real: productos con color estimado y cuántos hay en cada estado.
   estimated_colors?: Partial<Record<"verde" | "amarillo" | "rojo", number>>;
   states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;
+  // Las columnas de fuente de la tabla: Mercado Libre y las tiendas activas.
+  sources?: SourceMeta[];
+  // ¿Las tiendas cuentan para el color? (ajuste «Tiendas cuentan para el color»)
+  stores_affect_color?: boolean;
 }
 
 export interface PriceMonitorSummary {
@@ -348,4 +361,132 @@ export interface PriceMonitorSummary {
   include_disabled?: boolean;
   // Cupo del día de la búsqueda web y, si hoy no corre, por qué (p. ej. falta BROWSER_PROXY).
   web?: { used: number; budget: number; remaining: number; off_reason: string | null };
+  // Índice de cada tienda (cuánto hay leído, cuánto muerto, cupo de hoy) y si las tiendas cuentan para el color.
+  stores?: StoreIndexStatus[];
+  stores_affect_color?: boolean;
 }
+
+// ─── Tiendas como fuentes de comparación ───────────────────────────
+
+export type StoreCategory = "igual" | "similar" | "diferente";
+
+export interface SourceMeta {
+  key: string; // "ml" | "store:<id>"
+  label: string;
+}
+
+// El mejor resultado de una fuente para un producto: el idéntico; si no hay, el similar;
+// si no, el más parecido (diferente).
+export interface SourceCell {
+  key: string;
+  label: string;
+  category: StoreCategory | null;
+  counts: Record<StoreCategory, number>;
+  price_cents?: number | null;
+  price_doubtful?: boolean;
+  price_note?: string | null;
+  title?: string | null;
+  url?: string | null;
+  image_url?: string | null;
+  match_id?: number;
+  human_label?: "es" | "no_es" | null;
+  // 0 = agotado (se muestra con «sin stock» y no cuenta para el color ni para «más barato afuera»).
+  stock?: number | null;
+}
+
+export interface CheapestOutside {
+  key: string;
+  label: string;
+  price_cents: number;
+  title: string | null;
+  url: string | null;
+  // Lo único idéntico que hay afuera está agotado: se muestra como dato, no como «más barato».
+  out_of_stock?: boolean;
+}
+
+export interface StoreMatchRow {
+  id: number;
+  store_id: number;
+  store: string;
+  rank: number;
+  category: StoreCategory;
+  auto_category: StoreCategory;
+  source: string | null;
+  title: string;
+  url: string | null;
+  image_url: string | null;
+  brand: string | null;
+  price_cents: number | null;
+  price_doubtful: boolean;
+  price_note: string | null;
+  stock: number | null;
+  image_score: number | null;
+  name_score: number | null;
+  confidence: number | null;
+  differences: string[];
+  reason: string | null;
+  notes: string | null;
+  human_label: "es" | "no_es" | null;
+  // ¿Este similar entra al color ESTIMADO (cuando las tiendas cuentan)? Confirmado, sin diferencia de
+  // cantidad ni capacidad y con precio creíble: el mismo criterio que en Mercado Libre.
+  in_estimate?: boolean;
+}
+
+export interface SourceStats {
+  label: string;
+  total: number;
+  igual: number;
+  similar: number;
+  diferente: number;
+  nada: number;
+  // Si la corrida dejó de comparar con esta tienda a mitad de camino (timeouts seguidos), el motivo.
+  skipped?: string;
+}
+
+export interface StoreIndexStatus {
+  id: number;
+  name: string;
+  enabled: boolean;
+  urls: number;
+  indexed: number;
+  dead: number;
+  never_read: number;
+  doubtful_price: number;
+  // Fichas que vienen fallando (todavía no se dan por muertas) y cuántas dieron 5xx: una tienda caída aparece acá.
+  failing?: number;
+  errors_5xx?: number;
+  // ok | degradada (la mitad o más dio 5xx) | caida (todas, ninguna bien: se corta la pasada)
+  health?: StoreHealth | null;
+  pages_today: number;
+  max_pages_per_day: number;
+  last_indexed_at: string | null;
+  last_index_status: string | null;
+}
+
+export type StorePlatform = "tiendanube" | "jsonld_sitemap";
+export type StoreHealth = "ok" | "degradada" | "caida";
+
+export interface MarketStore {
+  id: number;
+  name: string;
+  base_url: string;
+  platform: StorePlatform;
+  enabled: boolean;
+  refresh_days: number;
+  max_pages_per_day: number;
+  sitemap_url: string | null;
+  image_hosts: string | null;
+  house_brand: string | null;
+  notes: string | null;
+  last_indexed_at: string | null;
+  last_index_status: string | null;
+  health?: StoreHealth | null;
+  index?: StoreIndexStatus | null;
+}
+
+export type MarketStoreInput = Partial<
+  Pick<
+    MarketStore,
+    "name" | "base_url" | "platform" | "enabled" | "refresh_days" | "max_pages_per_day" | "sitemap_url" | "image_hosts" | "house_brand" | "notes"
+  >
+>;

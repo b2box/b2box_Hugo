@@ -408,6 +408,43 @@ class Settings(BaseSettings):
     # por eso, ponerlo en 0 desde el dashboard.
     pm_ml_web_block_scripts: int = 1
 
+    # ── Tiendas como fuentes de comparación (Casa Perfecta, Gadnic…) ──
+    # Ver app/pricing/store_catalog.py. El catálogo de cada tienda se indexa en un
+    # job aparte, de madrugada y ANTES del semáforo; la corrida solo lo lee. Las
+    # tiendas se cargan en la tabla `market_store` (dashboard → Configuración).
+    store_index_cron_utc: str = Field(
+        default="20 3 * * *",
+        description="Cron (UTC) del indexador de tiendas. 03:20 UTC = 00:20 ART, antes del semáforo",
+    )
+    # Identificación honesta de Hugo ante las tiendas (sin disfrazarse de navegador).
+    store_user_agent: str = Field(
+        default="HugoPriceBot/1.0 (+https://b2box.pro)",
+        description="User-Agent con que Hugo pide páginas de las tiendas",
+    )
+    # Pausa entre dos páginas de la MISMA tienda (al azar entre los dos valores).
+    store_request_delay_min_s: float = 2.0
+    store_request_delay_max_s: float = 3.0
+    # Una página que dio 404/500 dos veces no se vuelve a pedir por estos días.
+    store_dead_retry_days: int = 30
+    # Días que tienen que pasar desde el primer fallo para dar por muerta una ficha que da 5xx.
+    store_dead_min_days_5xx: int = 3
+    # Dominios de fotos EXTRA que se pueden poner al cargar una tienda desde el dashboard (además de los
+    # de la tienda misma y de su plataforma). Los pone un administrador, no quien carga la tienda.
+    store_trusted_image_hosts: str = "*.bidcom.com.ar"
+    # Tope de tiendas cargadas: cada una es un rastreador más.
+    store_max_stores: int = 20
+    # 1 = la mediana de los idénticos de ML Y de las tiendas manda el color (decisión de Nico, 08-oct-2026:
+    # un idéntico de Gadnic o Casa Perfecta cambia el color real, igual que en ML). Un idéntico de tienda solo
+    # cuenta si lo confirman la foto + el nombre, el chequeo de medidas o una persona (no el juez IA solo), con
+    # precio creíble y con stock. 0 = las tiendas solo se muestran como referencia.
+    pm_stores_affect_color: int = 1
+    # Si al empezar la corrida el índice de una tienda está viejo, se refresca
+    # hasta este tiempo antes de comparar. 0 = no se refresca ahí (solo el job).
+    pm_stores_topup_minutes: int = 15
+    # Tope diario PROPIO de llamadas al juez IA para las tiendas (separado de pm_vision_max_calls, el de ML).
+    # Solo corre si el juez de ML está prendido; 0 = las tiendas se comparan sin juez.
+    pm_stores_vision_max_calls: int = 500
+
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.
     # Proveedor por defecto: Qwen (Alibaba Model Studio, modelo qwen3-vl-plus).

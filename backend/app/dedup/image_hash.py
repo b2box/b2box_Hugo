@@ -76,6 +76,30 @@ def _db_put(url: str, h: imagehash.ImageHash) -> None:
 _HTTP_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 # Tope de bytes por imagen (evita descargar archivos gigantes → memoria/DoS).
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# Tope de píxeles ANTES de decodificar (mismo criterio que judge_images): un PNG de pocos MB puede
+# ser de cientos de millones de píxeles y comerse la RAM del container al convertirlo.
+MAX_PIXELS = 16_000_000
+MAX_PIXELS_JPEG = 40_000_000
+# Un JPEG grande se decodifica ya reducido (draft): igual alcanza de sobra para CLIP y pHash.
+_JPEG_DRAFT_FROM = 8_000_000
+_JPEG_DRAFT_SIZE = (1024, 1024)
+
+
+class ImageTooBig(ValueError):
+    """La imagen declara más píxeles de los que se aceptan decodificar."""
+
+
+def open_checked(raw: bytes) -> Image.Image:
+    """Abre la imagen mirando solo el header y rechaza la que declara demasiados píxeles. Las
+    fotos que llegan de hosts de terceros (tiendas) no son de confianza."""
+    img = Image.open(BytesIO(raw))
+    width, height = img.size
+    limit = MAX_PIXELS_JPEG if img.format == "JPEG" else MAX_PIXELS
+    if width <= 0 or height <= 0 or width * height > limit:
+        raise ImageTooBig(f"dimensiones fuera de rango ({width}x{height})")
+    if img.format == "JPEG" and width * height > _JPEG_DRAFT_FROM:
+        img.draft("RGB", _JPEG_DRAFT_SIZE)
+    return img
 
 # Cabeceras de cliente normal. Sin esto httpx se anuncia como "python-httpx/0.x"
 # y varios CDN de marketplace (mlstatic entre ellos) cortan o tiran 403. No es
@@ -115,7 +139,23 @@ def _cache_put(url: str, h: imagehash.ImageHash) -> None:
         _HASH_CACHE.popitem(last=False)
 
 
+# Tope TOTAL de una descarga (todos los intentos juntos). El timeout de httpx es por chunk: un host que
+# gotea un byte cada 19 s estiraba una foto para siempre y dejaba trabado el slot de la corrida.
+_DEADLINE_S = 30.0
+_INTERACTIVE_DEADLINE_S = 12.0
+
+
 async def _fetch(url: str, *, interactive: bool = False) -> bytes:
+    """Descarga una imagen con un tope de tiempo total (`_DEADLINE_S`; 12 s si hay un cliente esperando)."""
+    budget = _INTERACTIVE_DEADLINE_S if interactive else _DEADLINE_S
+    try:
+        return await asyncio.wait_for(_fetch_with_retries(url, interactive=interactive), timeout=budget)
+    except asyncio.TimeoutError:
+        log.info("No se pudo descargar %s: pasó el tope de %.0f s", url[:160], budget)
+        raise
+
+
+async def _fetch_with_retries(url: str, *, interactive: bool = False) -> bytes:
     """Descarga una imagen, reintentando los fallos transitorios.
 
     safe_get valida scheme + IP pública y cada redirect (anti-SSRF); el guard
@@ -130,7 +170,8 @@ async def _fetch(url: str, *, interactive: bool = False) -> bytes:
     last_error: Exception | None = None
     for attempt in range(attempts):
         try:
-            r = await safe_get(url, timeout=timeout, headers=_IMAGE_HEADERS)
+            # max_bytes: el cuerpo se corta en streaming (también un gzip bomba); antes se leía entero.
+            r = await safe_get(url, timeout=timeout, headers=_IMAGE_HEADERS, max_bytes=_MAX_IMAGE_BYTES)
             if r.status_code in _RETRYABLE_STATUS:
                 raise httpx.HTTPStatusError(
                     f"HTTP {r.status_code}", request=r.request, response=r
@@ -176,7 +217,7 @@ async def hash_image(url: str) -> imagehash.ImageHash | None:
         return db_hash
     try:
         raw = await _fetch(url)
-        img = Image.open(BytesIO(raw)).convert("RGB")
+        img = open_checked(raw).convert("RGB")
         h = imagehash.phash(img)
         _cache_put(url, h)
         await asyncio.to_thread(_db_put, url, h)

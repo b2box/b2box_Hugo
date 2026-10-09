@@ -68,6 +68,8 @@ from app.pricing import (
     market_ml_web,
     market_specs,
     semaforo,
+    store_catalog,
+    store_match,
 )
 from app.pricing.market_ml import (
     ORIGIN_API,
@@ -349,6 +351,7 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.match_state == STATE_DIFFERENT)
     ).one() or 0)
+    run.source_stats = json.dumps(store_match.source_stats(s, run_id))
     run.processed = sum(by_status.values())
 
 
@@ -437,6 +440,9 @@ Listings = tuple[list[MlListing], dict]
 _GENERIC_BRANDS = frozenset({
     "generica", "generico", "sin marca", "no aplica", "n/a", "na", "otra", "otras", "otros",
     "no especificada", "no especificado", "importado", "oem", "marca generica",
+    # Decisión de Nico (08-oct-2026): «Gadnic» es marca de importador, como la nuestra; no es una marca conocida
+    # con valor propio. Vale en TODAS las fuentes (una publicación de ML o de otra tienda que la declare incluida).
+    "gadnic",
 })
 
 
@@ -462,12 +468,14 @@ class _Work:
     igual_unpriced: list[dict[str, Any]] = field(default_factory=list)
 
 
-async def _judge_will_answer(ctx: RunContext) -> bool:
-    """¿Vale la pena preparar la consulta? Juez configurado y con cupo hoy."""
-    if ctx.judge_max_calls <= 0 or not market_judge.enabled():
+async def _judge_will_answer(ctx: RunContext, counter_key: str = market_judge.LLM_COUNTER_KEY,
+                             max_calls: int | None = None) -> bool:
+    """¿Vale la pena preparar la consulta? Juez configurado y con cupo hoy (en el contador que corresponda)."""
+    cap = ctx.judge_max_calls if max_calls is None else max_calls
+    if cap <= 0 or not market_judge.enabled():
         return False
-    used = await asyncio.to_thread(daily_budget.used_today, market_judge.LLM_COUNTER_KEY)
-    return used < ctx.judge_max_calls
+    used = await asyncio.to_thread(daily_budget.used_today, counter_key)
+    return used < cap
 
 
 def _ars_median(listings: list[MlListing]) -> int | None:
@@ -496,12 +504,18 @@ async def _prefetch_prices(ctx: RunContext, ambiguous: list[market_match.Decisio
 
 async def _consult_judge(ctx: RunContext, product: VendureProduct,
                          targets: list[market_match.Decision],
-                         prefetched: dict[str, Listings]) -> None:
+                         prefetched: dict[str, Listings], *,
+                         counter_key: str = market_judge.LLM_COUNTER_KEY,
+                         max_calls: int | None = None) -> None:
     """Le pregunta al juez por la banda ambigua (y, en la web, por los matches
     con marca declarada, para aplicar la regla de marca) y aplica su veredicto
-    de tres valores. Nunca lanza."""
+    de tres valores. Nunca lanza. `counter_key` / `max_calls`: el contador y el tope
+    diarios que corresponden (las tiendas tienen los suyos, separados de los de ML)."""
+    cap = ctx.judge_max_calls if max_calls is None else max_calls
+    # Solo se pasa `counter_key` si no es el de siempre (los dobles de los tests no lo conocen).
+    extra = {} if counter_key == market_judge.LLM_COUNTER_KEY else {"counter_key": counter_key}
     prices: dict[str, int | None] = {}
-    if await _judge_will_answer(ctx):
+    if await _judge_will_answer(ctx, counter_key, cap):
         api_targets = [d for d in targets if d.candidate.origin == ORIGIN_API]
         if api_targets:
             prices = await _prefetch_prices(ctx, api_targets, prefetched)
@@ -518,10 +532,10 @@ async def _consult_judge(ctx: RunContext, product: VendureProduct,
     ]
     try:
         result = await ctx.judge_fn(
-            product.name, _our_photos(product), cands, max_calls=ctx.judge_max_calls,
+            product.name, _our_photos(product), cands, max_calls=cap,
             client=ctx.judge_client,
             # La llamada se cuenta al reservar el cupo, aunque después falle.
-            on_reserve=_usage_increment(ctx.run_id, llm_calls=1),
+            on_reserve=_usage_increment(ctx.run_id, llm_calls=1), **extra,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Juez LLM reventó para %s: %s", product.id, exc)
@@ -1053,7 +1067,15 @@ def _store_listings(snap: MarketPriceSnapshot, igual: list[dict[str, Any]], unpr
 
 
 async def evaluate_product(ctx: RunContext, product: VendureProduct) -> MarketPriceSnapshot:
-    """Todo el camino de UN producto → snapshot (sin guardar).
+    """Todo el camino de UN producto → snapshot (sin guardar): Mercado Libre y, en la
+    MISMA corrida, las tiendas (Casa Perfecta, Gadnic…). Las tiendas son referencia: no
+    cambian el color salvo `pm_stores_affect_color` (ver store_match)."""
+    snap = await _evaluate_ml(ctx, product)
+    return await store_match.attach(ctx, product, snap, judge=_consult_judge, brand_of=_declared_brand)
+
+
+async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceSnapshot:
+    """El camino de ML para UN producto.
 
     1. Fichas de catálogo por la API de ML. Con un IGUAL con precio, listo.
     2. Si no, el título en la web de ML (si la fuente está prendida).
@@ -1252,6 +1274,8 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
                 "counts": {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}}
 
     await _ensure_clip_index()
+    # Tiendas: si su índice está viejo se refresca (dentro del cupo) y se carga para comparar.
+    stores = await store_match.prepare()
 
     budget = int(budget_now["budget"])
     concurrency = max(1, int(runtime.get("pm_ml_concurrency")))
@@ -1262,6 +1286,7 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     promoted = await asyncio.to_thread(match_feedback.load_promoted)
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml, web, excluded, promoted)
+        ctx.extra["stores"] = stores
         try:
             sem = asyncio.Semaphore(concurrency)
 
@@ -1522,6 +1547,8 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         # devolvió publicaciones diferentes.
         "estimated": {"verde": run.n_est_verde, "amarillo": run.n_est_amarillo, "rojo": run.n_est_rojo},
         "solo_diferentes": run.n_solo_diferentes,
+        # Por fuente (ML y cada tienda): productos con idéntico / similar / solo diferentes / nada.
+        "sources": store_match.run_sources(run),
     }
 
 
@@ -1630,6 +1657,8 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "est_margin_pct": snap.est_margin_pct,
         "color": snap.color,
         "prev_color": snap.prev_color,
+        # De qué precios sale el color: ml | ml+tiendas | tiendas.
+        "price_basis": snap.price_basis or "ml",
     }
 
 
@@ -1650,4 +1679,6 @@ def summary() -> dict[str, Any]:
         "cron_utc": get_settings().price_monitor_cron_utc,
         "include_disabled": bool(int(runtime.get("pm_include_disabled") or 0)),
         "web": {**market_ml_web.web_budget_status(), "off_reason": market_ml_web.disabled_reason()},
+        "stores": store_catalog.index_status(),
+        "stores_affect_color": store_match.affect_color_enabled(),
     }

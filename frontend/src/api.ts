@@ -10,6 +10,8 @@ import type {
   BulkConfirmResult,
   HealthMetrics,
   HistoryResponse,
+  MarketStore,
+  MarketStoreInput,
   MatchOrigin,
   PriceMonitorSnapshot,
   PriceMonitorSnapshotsResponse,
@@ -18,6 +20,7 @@ import type {
   SemaforoColor,
   Setting,
   StatusResponse,
+  StoreMatchRow,
   VisionCompare,
 } from "./types";
 
@@ -209,6 +212,10 @@ export interface SnapshotQuery {
   origin?: MatchOrigin | null;
   // Color estimado por similares.
   estimated?: EstimatedFilter | null;
+  // Por fuente: "ml" o "store:<id>" (productos con algo de esa fuente), y las fuentes donde
+  // tiene que haber un idéntico (cualquiera de ellas).
+  source?: string | null;
+  igualIn?: string[];
 }
 
 export type EnabledFilter = "all" | "enabled" | "disabled";
@@ -224,6 +231,8 @@ export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<Pr
   if (query.match) params.set("match", query.match);
   if (query.origin) params.set("origin", query.origin);
   if (query.estimated) params.set("estimated", query.estimated);
+  if (query.source) params.set("source", query.source);
+  if (query.igualIn && query.igualIn.length > 0) params.set("igual_in", query.igualIn.join(","));
   return asJson<PriceMonitorSnapshotsResponse>(await apiFetch("/api/price-monitor/snapshots?" + params));
 }
 
@@ -281,4 +290,55 @@ export async function undoFeedback(productId: string, mlId: string): Promise<Und
 
 export async function getPriceMonitorSummary(): Promise<PriceMonitorSummary> {
   return asJson<PriceMonitorSummary>(await apiFetch("/api/price-monitor/summary"));
+}
+
+
+// ─── Tiendas (Casa Perfecta, Gadnic…) ──────────────────────────────
+
+// "Es el mismo" (es) / "No es el mismo" (no_es) sobre un candidato de una tienda. Recalcula las
+// cuentas y, si las tiendas cuentan, el color; la próxima corrida lo respeta.
+export async function labelStoreMatch(matchId: number, label: "es" | "no_es"): Promise<{ match: StoreMatchRow }> {
+  return asJson(
+    await apiFetch(`/api/price-monitor/store-matches/${matchId}/label`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    }),
+  );
+}
+
+export async function unlabelStoreMatch(matchId: number): Promise<{ match: StoreMatchRow }> {
+  return asJson(await apiFetch(`/api/price-monitor/store-matches/${matchId}/label`, { method: "DELETE" }));
+}
+
+export async function getStores(): Promise<{ items: MarketStore[]; platforms: string[]; affect_color: boolean }> {
+  return asJson(await apiFetch("/api/stores"));
+}
+
+export async function createStore(input: MarketStoreInput): Promise<MarketStore> {
+  return asJson(
+    await apiFetch("/api/stores", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function updateStore(id: number, input: MarketStoreInput): Promise<MarketStore> {
+  return asJson(
+    await apiFetch(`/api/stores/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function deleteStore(id: number): Promise<void> {
+  await asJson(await apiFetch(`/api/stores/${id}`, { method: "DELETE" }));
+}
+
+export async function indexStoreNow(id: number): Promise<void> {
+  await asJson(await apiFetch(`/api/stores/${id}/index`, { method: "POST" }));
 }
