@@ -432,8 +432,10 @@ def test_sigint_behaves_like_sigterm(box, ml):
     _seed(12)
     ml.delay = 0.35
     proc = box.popen(extra_env={"QA3_REAL_WAIT": "0.2"})
-    while len(ml.hits) < 3:
+    deadline = time.time() + 40
+    while len(ml.hits) < 3 and time.time() < deadline:
         time.sleep(0.05)
+    assert len(ml.hits) >= 3, "el runner no arrancó"
     proc.send_signal(signal.SIGINT)
     out, _ = proc.communicate(timeout=20)
     assert proc.returncode in (0, 130) and "Traceback" not in out.replace("KeyboardInterrupt", "")
@@ -450,8 +452,10 @@ def test_a_second_runner_refuses_to_start_while_another_one_is_running(box, ml):
     _seed(10)
     ml.delay = 0.3
     first = box.popen("--max", "6", extra_env={"QA3_REAL_WAIT": "0.2"})
-    while len(ml.hits) < 2:
+    deadline = time.time() + 40
+    while len(ml.hits) < 2 and time.time() < deadline:
         time.sleep(0.05)
+    assert len(ml.hits) >= 2, "el primer runner no arrancó"
     before = len(ml.hits)
     second = box.popen("--max", "6", extra_env={"QA3_REAL_WAIT": "0.2"})
     out2, _ = second.communicate(timeout=60)
