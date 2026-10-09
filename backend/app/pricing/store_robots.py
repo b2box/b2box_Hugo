@@ -24,7 +24,10 @@ from urllib.parse import urlsplit
 
 # Google lee los primeros 500 KiB: lo que viene después se ignora.
 MAX_ROBOTS_BYTES = 500 * 1024
-# Un robots.txt razonable tiene decenas de reglas; esto frena uno malicioso.
+# Un robots.txt razonable tiene decenas de reglas; esto frena uno malicioso. Se cuenta SOLO sobre las reglas
+# de los grupos que nos aplican (el nuestro, o el `*`): las de otros bots no son nuestras y no pueden
+# desplazarlas. Si lo nuestro se pasa, no se rastrea nada (fail-closed): descartar reglas dejaría pasar
+# justo lo que la tienda prohíbe.
 MAX_RULES = 2000
 _MAX_PATTERN_LEN = 400
 # Un Crawl-delay absurdo no puede dejar al indexador esperando horas.
@@ -69,8 +72,10 @@ class Robots:
     rules: tuple[Rule, ...] = ()
     crawl_delay: float | None = None
     sitemaps: tuple[str, ...] = ()
-    # "all" = no se pudo confirmar nada y se prohíbe todo (robots caído, 5xx).
+    # "all" = no se pudo confirmar nada y se prohíbe todo (robots caído, 5xx, o un archivo que no se puede
+    # leer entero sin descartar reglas).
     blocked_all: bool = False
+    reason: str = ""
 
     def allows(self, url_or_path: str) -> bool:
         """¿Puede un bot pedir esta URL (o este `path?query`)?"""
@@ -104,8 +109,8 @@ def allow_all() -> Robots:
     return Robots()
 
 
-def disallow_all() -> Robots:
-    return Robots(blocked_all=True)
+def disallow_all(reason: str = "") -> Robots:
+    return Robots(blocked_all=True, reason=reason)
 
 
 # 401/403 (no nos dejan leerlo) y 429 (nos pidieron frenar) no son «no existe»: no se rastrea.
@@ -144,11 +149,11 @@ def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
     token = m.group(1) if m else ""
     groups: list[tuple[list[str], list[tuple[bool, str]], list[float]]] = []
     sitemaps: list[str] = []
-    total_rules = 0
     agents: list[str] = []
     rules: list[tuple[bool, str]] = []
     delays: list[float] = []
     reading_agents = False
+    applies = False
 
     for line in (text or "")[:MAX_ROBOTS_BYTES].splitlines():
         line = line.split("#", 1)[0].strip()
@@ -162,20 +167,31 @@ def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
                 groups.append((agents, rules, delays))
                 reading_agents = True
             agents.append(value)
-        elif field in ("allow", "disallow"):
+            continue
+        if field not in ("allow", "disallow", "crawl-delay", "sitemap"):
+            continue
+        if field == "sitemap":
+            if value:
+                sitemaps.append(value)
+            continue
+        if reading_agents:
+            # Terminó la lista de User-agent del grupo: ¿es para nosotros (nuestro token, o `*`)?
+            applies = any(_agent_matches(a, token) for a in agents)
             reading_agents = False
-            # Tope por grupo y TOTAL: un robots con miles de grupos de una regla no puede crecer sin techo.
-            if groups and len(rules) < MAX_RULES and total_rules < MAX_RULES and len(value) <= _MAX_PATTERN_LEN:
-                rules.append((field == "allow", value))
-                total_rules += 1
-        elif field == "crawl-delay":
-            reading_agents = False
+        if not groups or not applies:
+            continue  # sin grupo, o de otro bot: no se guarda (no puede desplazar lo nuestro)
+        if field == "crawl-delay":
             try:
                 delays.append(float(value))
             except ValueError:
                 pass
-        elif field == "sitemap" and value:
-            sitemaps.append(value)
+            continue
+        if len(value) > _MAX_PATTERN_LEN:
+            if field == "allow":
+                continue  # descartar un Allow solo achica lo permitido
+            # Un Disallow larguísimo se acorta: el prefijo prohíbe lo mismo y algo más, nunca menos.
+            value = value[:_MAX_PATTERN_LEN].rstrip("$")
+        rules.append((field == "allow", value))
 
     best = 0
     for declared, _, _ in groups:
@@ -187,6 +203,8 @@ def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
             if max((_agent_matches(a, token) for a in declared), default=0) == best:
                 chosen_rules += group_rules
                 chosen_delays += group_delays
+    if len(chosen_rules) > MAX_RULES:
+        return disallow_all(f"robots.txt con más de {MAX_RULES} reglas para nosotros")
 
     compiled = tuple(
         _compile(allow, pattern)

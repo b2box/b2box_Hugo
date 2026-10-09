@@ -208,10 +208,47 @@ def test_a_group_for_another_token_is_not_ours(declared):
     assert robots.allows("/nada/x") and not robots.allows("/star/x")
 
 
-def test_the_total_number_of_robots_rules_is_capped_across_groups():
-    text = "".join(f"User-agent: bot{i}\nDisallow: /a{i}/\n\n" for i in range(5000)) + "User-agent: *\n" + "".join(
-        f"Disallow: /p{i}/\n" for i in range(5000))
-    assert len(store_robots.parse(text).rules) <= store_robots.MAX_RULES
+def test_the_rules_cap_counts_only_the_groups_that_apply_to_us():
+    """Las reglas de otros bots no son nuestras: 2500 de «badbot» antes del `*` no pueden desplazarlo."""
+    text = "User-agent: badbot\n" + "".join(f"Disallow: /bad{i}/\n" for i in range(2500)) + \
+           "\nUser-agent: *\nDisallow: /secret\n"
+    robots = store_robots.parse(text, agent="HugoPriceBot/1.0")
+    assert not robots.blocked_all
+    assert not robots.allows("/secret") and robots.allows("/ok") and robots.allows("/bad1/")
+
+
+def test_many_groups_of_other_bots_do_not_displace_the_wildcard_group():
+    text = "".join(f"User-agent: bot{b}\n" + "".join(f"Disallow: /b{b}/{i}\n" for i in range(300)) + "\n"
+                   for b in range(10)) + "User-agent: *\nDisallow: /secret\n"
+    robots = store_robots.parse(text, agent="HugoPriceBot/1.0")
+    assert not robots.allows("/secret") and robots.allows("/b3/5")
+
+
+def test_more_rules_for_us_than_the_cap_is_fail_closed_not_fail_open():
+    """Antes se descartaban las que pasaban el tope y /secret quedaba permitido."""
+    text = "User-agent: *\n" + "".join(f"Disallow: /p{i}/\n" for i in range(store_robots.MAX_RULES)) + "Disallow: /secret\n"
+    robots = store_robots.parse(text, agent="HugoPriceBot/1.0")
+    assert robots.blocked_all and not robots.allows("/secret") and not robots.allows("/cualquiera")
+    assert "reglas" in robots.reason
+
+
+def test_exactly_the_cap_of_rules_is_still_read():
+    text = "User-agent: *\n" + "".join(f"Disallow: /p{i}/\n" for i in range(store_robots.MAX_RULES - 1)) + "Disallow: /secret\n"
+    robots = store_robots.parse(text)
+    assert not robots.blocked_all and not robots.allows("/secret") and robots.allows("/otra")
+
+
+def test_a_very_long_disallow_is_shortened_not_dropped():
+    long_path = "/" + "a" * 600
+    robots = store_robots.parse(f"User-agent: *\nDisallow: {long_path}$\nAllow: /{'b' * 600}\n")
+    assert not robots.allows(long_path) and not robots.allows(long_path + "/mas")
+    assert robots.allows("/" + "b" * 600), "un Allow larguísimo se descarta: solo achica lo permitido"
+
+
+def test_our_own_group_wins_over_the_wildcard_even_with_other_groups_in_between():
+    text = "User-agent: *\nDisallow: /todo\n\nUser-agent: otro\nDisallow: /\n\nUser-agent: HugoPriceBot\nDisallow: /solo-esto\n"
+    robots = store_robots.parse(text, agent="HugoPriceBot/1.0")
+    assert not robots.allows("/solo-esto") and robots.allows("/todo")
 
 
 # ─── B2: sufijos públicos ────────────────────────────────────────────────────────
