@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, or_
+from sqlalchemy import case, delete, distinct, or_
 from sqlmodel import Session, func, select
 
 from app.clock import utcnow
@@ -34,6 +34,7 @@ from app.db.session import engine
 from app.seo import lists as seo_lists
 from app.seo import text_rules as rules
 from app.vendure.client import ProductTexts, TextsRead, VendureClient
+from gql.transport.exceptions import TransportError
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ CHANNEL_DEFAULT = "default"
 KEEP_RUNS = 8                               # corridas que se conservan
 STALE_RUN_AFTER = timedelta(minutes=30)     # una "running" más vieja quedó huérfana
 READ_TIMEOUT_S = 270.0                      # por canal; el pedido es terminar en menos de 5 min
+EVAL_TIMEOUT_S = 240.0                      # evaluar las reglas de todo el catálogo
 MANUAL_COOLDOWN_S = 60
 EXPORT_MAX_ROWS = 20_000
 
@@ -105,14 +107,16 @@ def merge_channels(reads: dict[str, TextsRead]) -> list[MergedProduct]:
 
 
 def _row(m: MergedProduct, language: str, name: str, slug: str, description: str) -> TextAuditItem:
+    # Topes: nombres y slugs de miles de caracteres no se guardan enteros, y los códigos y el
+    # idioma entran en columnas de ancho fijo (Postgres rechaza lo que no cabe).
     return TextAuditItem(
         run_id=0,
-        product_id=m.product.id,
-        language_code=language,
-        name=name,
-        slug=slug,
+        product_id=m.product.id[:64],
+        language_code=language[:16],
+        name=name[:rules.MAX_NAME_CHARS],
+        slug=slug[:rules.MAX_SLUG_CHARS],
         enabled=m.product.enabled,
-        product_code=m.product.product_code,
+        product_code=m.product.product_code[:64] if m.product.product_code else None,
         in_ar=m.in_ar,
         in_default=m.in_default,
         name_len=len(name.strip()),
@@ -120,34 +124,37 @@ def _row(m: MergedProduct, language: str, name: str, slug: str, description: str
     )
 
 
-def evaluate(merged: Iterable[MergedProduct], lists: seo_lists.TextLists) -> list[TextAuditItem]:
-    """Una fila por producto e idioma, con las reglas que saltaron."""
+def evaluate(
+    merged: Iterable[MergedProduct],
+    lists: seo_lists.TextLists,
+    deadline: float | None = None,
+    problems: list[str] | None = None,
+) -> list[TextAuditItem]:
+    """Una fila por producto e idioma, con las reglas que saltaron.
+
+    Un producto que no se puede evaluar (dato raro, bug de una regla) se saltea y queda en
+    `problems` (solo su id): no tira la corrida. Una traducción cuyo idioma ya apareció (es_AR y
+    es-ar) se ignora. `deadline` (monotonic) corta con `rules.AuditTimeout`."""
+    problems = problems if problems is not None else []
     technical = frozenset(t.upper() for t in lists.technical)
     rows: list[TextAuditItem] = []
     found: dict[int, dict[str, str]] = {}   # id(fila) -> {regla: detalle}
-    for m in merged:
+    for step, m in enumerate(merged):
+        if deadline is not None and step % 64 == 0 and time.monotonic() > deadline:
+            raise rules.AuditTimeout("la evaluación de los productos pasó su plazo")
         p = m.product
-        matcher = rules.SupplierMatcher(
-            rules.SupplierRefs(p.supplier_business, p.supplier_size_model, p.supplier_link), technical,
-        )
-        translations = p.translations or []
-        langs = [rules.normalize_lang(t.language) for t in translations]
-        missing = None if "es_AR" in langs else rules.missing_es_ar_detail(langs)
-        product_rows: list[TextAuditItem] = []
-        if not translations:
-            product_rows.append(_row(m, "", "", "", ""))
-            found[id(product_rows[0])] = rules.audit_translation(
-                "", "", "", product_code=p.product_code, lists=lists, matcher=matcher)
-        for t, lang in zip(translations, langs):
-            row = _row(m, lang, t.name, t.slug, t.description)
-            product_rows.append(row)
-            found[id(row)] = rules.audit_translation(
-                t.name, t.slug, t.description,
-                product_code=p.product_code, lists=lists, matcher=matcher,
-            )
-        if missing:
-            for row in product_rows:
-                found[id(row)]["SIN_ES_AR"] = missing
+        try:
+            product_rows, product_found = _evaluate_product(m, lists, technical)
+        except rules.AuditTimeout:
+            raise
+        except Exception as exc:  # noqa: BLE001  (un producto raro no puede tirar los demás)
+            log.warning("seo_text_audit: no se pudo evaluar el producto %s: %s", p.id, _short(exc))
+            problems.append(f"producto {p.id[:40]}: no se pudo evaluar ({type(exc).__name__})")
+            continue
+        if product_found["repeated"]:
+            problems.append(f"producto {p.id[:40]}: {product_found['repeated']} traducción(es) con el idioma repetido (se ignoró)")
+        for row in product_rows:
+            found[id(row)] = product_found["rules"][id(row)]
         rows.extend(product_rows)
 
     # Duplicados: entre productos habilitados, dentro de cada idioma.
@@ -160,7 +167,7 @@ def evaluate(merged: Iterable[MergedProduct], lists: seo_lists.TextLists) -> lis
         row_by_key[key] = row
         by_lang.setdefault(row.language_code, []).append((key, row.product_id, row.name))
     for entries in by_lang.values():
-        for key, dups in rules.find_duplicates(entries).items():
+        for key, dups in rules.find_duplicates(entries, deadline=deadline).items():
             found[id(row_by_key[key])].update(dups)
 
     for row in rows:
@@ -169,6 +176,44 @@ def evaluate(merged: Iterable[MergedProduct], lists: seo_lists.TextLists) -> lis
         row.issues = f",{','.join(ordered)}," if ordered else ""
         row.details = json.dumps({r: found[id(row)][r] for r in ordered}, ensure_ascii=False) if ordered else None
     return rows
+
+
+def _evaluate_product(
+    m: MergedProduct, lists: seo_lists.TextLists, technical: frozenset[str],
+) -> tuple[list[TextAuditItem], dict[str, Any]]:
+    """Las filas de un producto (una por idioma distinto) y las reglas que saltaron en cada una."""
+    p = m.product
+    matcher = rules.SupplierMatcher(
+        rules.SupplierRefs(p.supplier_business, p.supplier_size_model, p.supplier_link), technical,
+    )
+    seen_langs: set[str] = set()
+    translations = []
+    repeated = 0
+    for t in p.translations or []:
+        lang = rules.normalize_lang(t.language)
+        if lang in seen_langs:
+            repeated += 1
+            continue
+        seen_langs.add(lang)
+        translations.append((t, lang))
+    product_rows: list[TextAuditItem] = []
+    per_row: dict[int, dict[str, str]] = {}
+    if not translations:
+        row = _row(m, "", "", "", "")
+        product_rows.append(row)
+        per_row[id(row)] = rules.audit_translation(
+            "", "", "", product_code=p.product_code, lists=lists, matcher=matcher)
+    for t, lang in translations:
+        row = _row(m, lang, t.name, t.slug, t.description)
+        product_rows.append(row)
+        per_row[id(row)] = rules.audit_translation(
+            t.name, t.slug, t.description, product_code=p.product_code, lists=lists, matcher=matcher,
+        )
+    if "es_AR" not in seen_langs:
+        missing = rules.missing_es_ar_detail(seen_langs)
+        for row in product_rows:
+            per_row[id(row)]["SIN_ES_AR"] = missing
+    return product_rows, {"rules": per_row, "repeated": repeated}
 
 
 def rule_counts(rows: Iterable[TextAuditItem]) -> dict[str, int]:
@@ -195,6 +240,27 @@ def _short(exc: BaseException) -> str:
     msg = _SECRET_RES[0].sub("Bearer …", msg)
     msg = _SECRET_RES[1].sub(r"\1 …", msg)
     return f"{type(exc).__name__}: {msg}"[:300] if msg else type(exc).__name__
+
+
+class AuditFailed(Exception):
+    """Falla de la auditoría con un mensaje ya pensado para mostrarse (sin datos del servidor)."""
+
+
+def _failure_reason(exc: BaseException, channel: str | None = None) -> str:
+    """El motivo de un fallo que se guarda y se muestra en el dashboard: el tipo de la excepción
+    y una frase fija. El texto de la excepción (que puede traer una respuesta del servidor, una
+    URL o un id) queda solo en el log del servidor."""
+    if isinstance(exc, AuditFailed):
+        return str(exc)[:300]
+    name = type(exc).__name__
+    where = f" (canal {channel})" if channel else ""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        if isinstance(exc, rules.AuditTimeout):
+            return f"{name}: la evaluación de las reglas pasó el plazo de {EVAL_TIMEOUT_S:g} s"
+        return f"{name}: Vendure no respondió en {READ_TIMEOUT_S:g} s{where}"
+    if isinstance(exc, (TransportError, OSError)) or type(exc).__module__.startswith(("httpx", "httpcore", "gql")):
+        return f"{name}: no se pudo leer Vendure{where}"
+    return f"{name}: error inesperado{where}; el detalle está en el log del servidor"
 
 
 def _fail_orphans(session: Session) -> None:
@@ -234,8 +300,8 @@ async def _read_all(reader: Reader) -> tuple[dict[str, TextsRead], dict[str, str
         if isinstance(res, BaseException):
             if isinstance(res, asyncio.CancelledError):
                 raise res
-            failed[label] = _short(res)
-            log.error("Auditoría de textos: no pude leer el canal %s: %s", label, failed[label])
+            failed[label] = _failure_reason(res, label)
+            log.error("Auditoría de textos: no pude leer el canal %s: %s", label, _short(res))
         else:
             ok[label] = res
     return ok, failed
@@ -248,6 +314,33 @@ def _utc_iso(dt: datetime | None) -> str | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat() + "Z"
+
+
+def _insert_items(session: Session, items: list[TextAuditItem]) -> int:
+    """Inserta todas las filas en una transacción; si el lote falla (un dato que la base no
+    acepta) reintenta fila por fila y se saltea solo las que no entran. Devuelve cuántas salteó."""
+    try:
+        session.add_all(items)
+        session.flush()
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("seo_text_audit: el lote de filas falló (%s); se reintenta una por una", _short(exc))
+        session.rollback()
+    skipped = 0
+    for item in items:
+        item.id = None
+        try:
+            with session.begin_nested():
+                session.add(item)
+                session.flush()
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            log.warning("seo_text_audit: se salteó la fila del producto %s (%s): %s",
+                        item.product_id, item.language_code, _short(exc))
+            if item in session:
+                session.expunge(item)
+            item.id = None
+    return skipped
 
 
 def _save_results(
@@ -266,7 +359,11 @@ def _save_results(
         assert run is not None
         for item in items:
             item.run_id = run_id
-        session.add_all(items)
+        skipped = _insert_items(session, items)
+        if skipped:
+            notes = [*notes, f"{skipped} fila(s) no se pudieron guardar (ver el log del servidor)."]
+            items = [i for i in items if i.id is not None]
+            counts = rule_counts(items)
         run.products_total = len(merged)
         run.products_enabled = sum(1 for m in merged if m.product.enabled)
         run.rows_total = len(items)
@@ -327,8 +424,8 @@ async def run_text_audit(trigger: str = "cron", reader: Reader | None = None) ->
         try:
             reads, failed = await _read_all(reader or read_channel)
             if not reads:
-                raise RuntimeError("no se pudo leer ningún canal de Vendure: "
-                                   + "; ".join(f"{k}: {v}" for k, v in failed.items()))
+                raise AuditFailed("no se pudo leer ningún canal de Vendure: "
+                                  + "; ".join(f"{k}: {v}" for k, v in failed.items()))
             if not any(c == CHANNEL_AR for c, _ in channels_to_read()):
                 notes.append("VENDURE_CHANNEL_TOKEN vacío: solo se leyó el canal por defecto "
                              "y «canal AR» queda sin dato.")
@@ -338,24 +435,32 @@ async def run_text_audit(trigger: str = "cron", reader: Reader | None = None) ->
             merged = merge_channels(reads)
             # La evaluación y el guardado son CPU y base: en un hilo, para no frenar el
             # event loop (dashboard, scheduler) mientras se procesan miles de filas.
-            items = await asyncio.to_thread(evaluate, merged, lists)
+            # El plazo va por dentro (la evaluación se corta sola); el wait_for es el respaldo.
+            problems: list[str] = []
+            deadline = time.monotonic() + EVAL_TIMEOUT_S
+            items = await asyncio.wait_for(
+                asyncio.to_thread(evaluate, merged, lists, deadline, problems), EVAL_TIMEOUT_S + 30)
+            if problems:
+                shown = "; ".join(problems[:3]) + (f" (+{len(problems) - 3})" if len(problems) > 3 else "")
+                notes.append(f"{len(problems)} aviso(s) al evaluar: {shown}.")
             result = await asyncio.to_thread(
                 _save_results, run_id, merged, items, reads, failed, notes, time.monotonic() - t0,
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("seo_text_audit falló")
+            reason = _failure_reason(exc)
             with Session(engine) as session:
                 run = session.get(TextAuditRun, run_id)
                 if run is not None:
                     run.status = RUN_FAILED
-                    run.error = _short(exc)
+                    run.error = reason
                     run.finished_at = utcnow()
                     run.duration_s = round(time.monotonic() - t0, 1)
                     session.add(run)
                     session.commit()
                     result = run_to_dict(run)
                 else:  # pragma: no cover - la fila la creamos arriba
-                    result = {"id": run_id, "status": RUN_FAILED, "error": _short(exc)}
+                    result = {"id": run_id, "status": RUN_FAILED, "error": reason}
             return result
         log.info("seo_text_audit terminado: %d productos, %d filas, %d con problemas, %.1f s",
                  result["products_total"], result["rows_total"],
@@ -404,6 +509,15 @@ class Filters:
     only_issues: bool = True
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_query(q: str | None) -> str:
+    """El texto de búsqueda sin caracteres de control: un NUL no entra en un parámetro de
+    texto de Postgres (daba un 500) y en una búsqueda no significa nada."""
+    return _CONTROL_RE.sub("", q or "").strip()
+
+
 def _filtered(stmt, run_id: int, f: Filters, *, with_rule: bool):
     stmt = stmt.where(TextAuditItem.run_id == run_id)
     if f.only_issues:
@@ -415,18 +529,19 @@ def _filtered(stmt, run_id: int, f: Filters, *, with_rule: bool):
     elif f.enabled == "disabled":
         stmt = stmt.where(TextAuditItem.enabled == False)  # noqa: E712
     if f.lang:
-        stmt = stmt.where(TextAuditItem.language_code == ("" if f.lang == NO_LANGUAGE else f.lang))
+        stmt = stmt.where(TextAuditItem.language_code == ("" if f.lang == NO_LANGUAGE else _CONTROL_RE.sub("", f.lang)))
     if f.channel == "ar":
         stmt = stmt.where(TextAuditItem.in_ar == True)  # noqa: E712
     elif f.channel == "solo_default":
         stmt = stmt.where(TextAuditItem.in_default == True, TextAuditItem.in_ar == False)  # noqa: E712
-    if f.q and f.q.strip():
-        needle = f.q.strip().lower()
+    q = clean_query(f.q)
+    if q:
+        needle = q.lower()
         stmt = stmt.where(or_(
             func.lower(TextAuditItem.name).contains(needle, autoescape=True),
             func.lower(TextAuditItem.slug).contains(needle, autoescape=True),
             func.lower(TextAuditItem.product_code).contains(needle, autoescape=True),
-            TextAuditItem.product_id == f.q.strip(),
+            TextAuditItem.product_id == q,
         ))
     return stmt
 
@@ -451,6 +566,21 @@ def item_to_dict(item: TextAuditItem) -> dict[str, Any]:
     }
 
 
+def facet_counts(session: Session, run_id: int, f: Filters) -> tuple[dict[str, int], int]:
+    """({regla: productos distintos}, productos distintos) bajo los filtros menos el de regla,
+    para los chips. Una sola consulta que agrega en SQL: no trae las filas a memoria."""
+    cols = [func.count(distinct(TextAuditItem.product_id))]
+    cols += [
+        func.count(distinct(case(
+            (TextAuditItem.issues.contains(f",{rule},", autoescape=True), TextAuditItem.product_id),  # type: ignore[attr-defined]
+        )))
+        for rule in rules.RULE_IDS
+    ]
+    row = session.execute(_filtered(select(*cols), run_id, f, with_rule=False)).one()
+    counts = {rule: int(n) for rule, n in zip(rules.RULE_IDS, row[1:]) if n}
+    return counts, int(row[0])
+
+
 def query_items(
     session: Session, run_id: int, f: Filters, page: int, page_size: int,
 ) -> dict[str, Any]:
@@ -460,8 +590,7 @@ def query_items(
         .order_by(TextAuditItem.n_issues.desc(), TextAuditItem.id)  # type: ignore[attr-defined]
         .offset(page * page_size).limit(page_size)
     ).all()
-    # Conteos por regla bajo los demás filtros (sin el de regla), para los chips.
-    facet = session.exec(_filtered(select(TextAuditItem), run_id, f, with_rule=False)).all()
+    counts, facet_products = facet_counts(session, run_id, f)
     languages = [
         (code or NO_LANGUAGE) for code in session.exec(
             select(TextAuditItem.language_code).where(TextAuditItem.run_id == run_id).distinct()
@@ -471,8 +600,8 @@ def query_items(
     return {
         "total": int(total),
         "items": [item_to_dict(r) for r in rows],
-        "counts": rule_counts(facet),
-        "facet_products": len({r.product_id for r in facet}),
+        "counts": counts,
+        "facet_products": facet_products,
         "languages": languages,
     }
 
@@ -482,28 +611,46 @@ CSV_COLUMNS = (
     "producto_id", "codigo", "idioma", "habilitado", "canal_ar", "canal_default", "nombre",
     "largo_nombre", "slug", "cantidad_problemas", "problemas", "detalle",
 )
+# Excel en es-AR separa las columnas con «;» (la coma es el separador decimal): un CSV con comas
+# se abre en una sola columna. Para otras herramientas, ?sep=, o ?sep=tab.
+CSV_SEPARATORS = {";": ";", ",": ",", "tab": "\t"}
+DEFAULT_CSV_SEP = ";"
 
 
 def csv_safe(value: object) -> str:
-    """Texto de una celda sin que una planilla lo tome por fórmula."""
+    """Texto de una celda sin que una planilla lo tome por fórmula (también si antes del «=»
+    hay espacios o caracteres de control, que Excel ignora)."""
     text = "" if value is None else str(value)
-    return "'" + text if text.startswith(_FORMULA_PREFIXES) else text
+    if text.startswith(_FORMULA_PREFIXES) or _CONTROL_RE.sub("", text).lstrip().startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def _yes_no(v: bool | None) -> str:
     return "" if v is None else ("si" if v else "no")
 
 
-def export_csv(session: Session, run_id: int, f: Filters) -> str:
-    """CSV (coma, UTF-8 con BOM para Excel) de todo lo que cumple los filtros."""
+@dataclass(frozen=True, slots=True)
+class CsvExport:
+    text: str
+    total: int          # filas que cumplen los filtros
+    truncated: bool     # hay más que EXPORT_MAX_ROWS
+
+
+def export_csv(session: Session, run_id: int, f: Filters, sep: str = DEFAULT_CSV_SEP) -> CsvExport:
+    """CSV (UTF-8 con BOM para Excel, separador `sep`) de lo que cumple los filtros, hasta
+    EXPORT_MAX_ROWS filas; dice cuántas había en total y si se cortó."""
+    delimiter = CSV_SEPARATORS.get(sep, DEFAULT_CSV_SEP)
+    total = int(session.exec(
+        _filtered(select(func.count()).select_from(TextAuditItem), run_id, f, with_rule=True)).one())
     items = session.exec(
         _filtered(select(TextAuditItem), run_id, f, with_rule=True)
         .order_by(TextAuditItem.n_issues.desc(), TextAuditItem.id)  # type: ignore[attr-defined]
         .limit(EXPORT_MAX_ROWS)
     ).all()
     buf = io.StringIO()
-    buf.write("﻿")
-    writer = csv.writer(buf, lineterminator="\r\n")
+    buf.write("\ufeff")
+    writer = csv.writer(buf, delimiter=delimiter, lineterminator="\r\n")
     writer.writerow(CSV_COLUMNS)
     for item in items:
         d = item_to_dict(item)
@@ -514,4 +661,4 @@ def export_csv(session: Session, run_id: int, f: Filters) -> str:
             " ".join(i["rule"] for i in d["issues"]),
             csv_safe(" | ".join(f"{i['rule']}: {i['detail']}" for i in d["issues"])),
         ])
-    return buf.getvalue()
+    return CsvExport(buf.getvalue(), total, total > EXPORT_MAX_ROWS)
