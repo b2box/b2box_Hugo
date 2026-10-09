@@ -613,6 +613,18 @@ backend/tools/oficina_ml_search.py
     persona con su clave de administrador: `sudo pmset repeat wakeorpoweron MTWRFSU 00:55:00` (y la Mac enchufada, con la tapa
     abierta o en modo clamshell con monitor). Ningún script del repo lo ejecuta.
 
+**Migración y rollback.** Es automática en el arranque (`init_db`): la tabla `ml_web_result` (con su índice único
+`ix_mwr_product_fetched`) y cinco columnas nuevas **sin NOT NULL** (`market_price_snapshot.ml_variant` y `web_via`;
+`price_monitor_run.variant_stats`, `oficina_fresh` y `n_oficina_ok`, estas dos con backfill a 0). El código anterior sigue
+insertando sobre el esquema nuevo (hay un test sobre Postgres 16). Para volver el esquema atrás, si hiciera falta:
+
+```sql
+DROP TABLE IF EXISTS ml_web_result;
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS ml_variant, DROP COLUMN IF EXISTS web_via;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS variant_stats, DROP COLUMN IF EXISTS oficina_fresh,
+    DROP COLUMN IF EXISTS n_oficina_ok;
+```
+
 **Cobertura.** Con 250 productos por noche y 1.800 "sin dato", una vuelta completa son ~8 noches; con el TTL de 7 días el
 régimen no alcanza a refrescar todo antes de que venza (necesitaría ~265 por noche). Subir `--max` en el plist (hasta 500) o
 `OFICINA_RESULT_TTL_DAYS` lo resuelve. A ~12 s por búsqueda, 250 productos son ~1 hora (más si la primera consulta viene vacía).
