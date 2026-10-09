@@ -21,7 +21,7 @@ from app import runtime  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.db.models import Setting  # noqa: E402
 from app.db.session import engine  # noqa: E402
-from app.pricing import daily_budget, market_match, market_ml, market_query, price_monitor  # noqa: E402
+from app.pricing import daily_budget, market_match, market_ml, price_monitor  # noqa: E402
 from tests import qa2_world as qw  # noqa: E402
 from tests.store_fixtures import store_db  # noqa: E402,F401  (fixture)
 from tests.test_price_monitor import (  # noqa: E402,F401

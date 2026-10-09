@@ -3,7 +3,6 @@ bloqueo, lotes, dry-run, y de punta a punta contra el Hugo de verdad (con ML y e
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -168,7 +167,7 @@ def test_load_config_reads_key_and_url(tmp_path):
 
 
 @pytest.mark.parametrize("text, mode, expect", [
-    (f"HUGO_URL=https://h.example\n", 0o600, "Falta OFICINA_SEARCH_KEY"),
+    ("HUGO_URL=https://h.example\n", 0o600, "Falta OFICINA_SEARCH_KEY"),
     (f"OFICINA_SEARCH_KEY={SECRET}\n", 0o600, "Falta HUGO_URL"),
     ("OFICINA_SEARCH_KEY=corta\nHUGO_URL=https://h.example\n", 0o600, "muy corta"),
     (f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://h.example\n", 0o644, "chmod 600"),
@@ -419,7 +418,8 @@ async def test_end_to_end_the_queue_comes_from_hugo_and_the_results_are_sanitize
 
 
 async def test_end_to_end_a_block_is_stored_as_blocked_and_the_product_stays_in_the_queue(api):
-    _snap("1"); _snap("2"); _snap("3")
+    for pid in ("1", "2", "3"):
+        _snap(pid)
     hugo = HugoClient(runner.Config(key=KEY, hugo_url="https://hugo.example"), client=_bridge(api))
     ml = FakeML({"organizador-cocina": _ok("MLA901")}, default=page(ANTIBOT_HTML))
     items = [{"product_id": str(i), "queries": ["organizador cocina" if i == 1 else "otra cosa"]} for i in (1, 2, 3)]

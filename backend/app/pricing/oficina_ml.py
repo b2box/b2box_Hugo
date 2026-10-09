@@ -288,27 +288,32 @@ def ingest(items: list[Any], *, now: datetime | None = None) -> IngestReport:
             else:
                 taken.add(key)
                 fresh.append(r)
-        for r in fresh:
-            s.add(_row(r))
-        try:
-            s.commit()
-            report.stored = len(fresh)
-        except IntegrityError:
-            # Otro lote llegó entre el chequeo y el guardado: se guarda de a uno y se saltea lo repetido.
-            s.rollback()
-            for r in fresh:
-                try:
-                    s.add(_row(r))
-                    s.commit()
-                    report.stored += 1
-                except IntegrityError:
-                    s.rollback()
-                    report.duplicates += 1
+        _insert(s, fresh, report)
         _prune(s, {r.product_id for r in fresh})
     for r in cleaned:
         if r.status == ST_BLOCKED:
             log.warning("oficina: la Mac reportó que ML bloqueó la búsqueda (producto %s)", r.product_id)
     return report
+
+
+def _insert(s: Session, fresh: list[CleanResult], report: IngestReport) -> None:
+    """Guarda los resultados nuevos. Si otro lote se coló entre el chequeo de repetidos y el guardado (el
+    índice único lo frena), se guarda de a uno y se cuenta como repetido lo que ya estaba."""
+    for r in fresh:
+        s.add(_row(r))
+    try:
+        s.commit()
+        report.stored += len(fresh)
+    except IntegrityError:
+        s.rollback()
+        for r in fresh:
+            try:
+                s.add(_row(r))
+                s.commit()
+                report.stored += 1
+            except IntegrityError:
+                s.rollback()
+                report.duplicates += 1
 
 
 def _prune(s: Session, product_ids: set[str]) -> None:

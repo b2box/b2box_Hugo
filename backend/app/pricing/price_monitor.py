@@ -1373,7 +1373,11 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     counts: dict[str, int] = {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}
 
     web, web_status = _make_web(run_id)
-    oficina = await asyncio.to_thread(oficina_ml.load_fresh)
+    try:
+        oficina = await asyncio.to_thread(oficina_ml.load_fresh)
+    except Exception as exc:  # noqa: BLE001  (un problema con la tabla de la oficina no puede tirar la corrida)
+        log.warning("price_monitor #%s: no se pudieron leer los resultados de la oficina: %s", run_id, exc)
+        oficina = {}
     if oficina:
         _update_run(run_id, oficina_fresh=len(oficina))
     excluded = await asyncio.to_thread(match_feedback.load_excluded)
@@ -1650,7 +1654,7 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         "n_con_similares": run.n_con_similares,
         # Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar y los que
         # terminaron con precio gracias a eso.
-        "oficina": {"fresh": run.oficina_fresh, "n_ok": run.n_oficina_ok},
+        "oficina": {"fresh": run.oficina_fresh or 0, "n_ok": run.n_oficina_ok or 0},
         # Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML.
         "variants": _json_dict(run.variant_stats),
         # Color ESTIMADO por similares (aparte del real) y productos donde ML solo
@@ -1774,6 +1778,14 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
     }
 
 
+def _oficina_status() -> dict[str, Any]:
+    try:
+        return oficina_ml.status()
+    except Exception as exc:  # noqa: BLE001  (la card de Salud no se cae por esto)
+        log.warning("no se pudo leer el estado del buscador de la oficina: %s", exc)
+        return {"enabled": False, "error": "no disponible"}
+
+
 def summary() -> dict[str, Any]:
     """Tarjeta de Salud: última corrida + budget ML del día."""
     with Session(engine) as s:
@@ -1791,7 +1803,7 @@ def summary() -> dict[str, Any]:
         "cron_utc": get_settings().price_monitor_cron_utc,
         "include_disabled": bool(int(runtime.get("pm_include_disabled") or 0)),
         "web": {**market_ml_web.web_budget_status(), "off_reason": market_ml_web.disabled_reason()},
-        "oficina": oficina_ml.status(),
+        "oficina": _oficina_status(),
         "stores": store_catalog.index_status(),
         "stores_affect_color": store_match.affect_color_enabled(),
     }

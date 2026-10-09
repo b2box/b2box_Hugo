@@ -14,7 +14,6 @@ os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 import pytest  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
-from app import runtime  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.db.models import MarketMatchFeedback, MlWebResult  # noqa: E402
 from app.db.session import engine, init_db  # noqa: E402
@@ -267,3 +266,23 @@ def test_the_status_of_the_card_when_nothing_ever_came_in():
     status = oficina_ml.status()
     assert status["fresh_products"] == 0 and status["last_received_at"] is None
     assert status["last_24h"] == {"ok": 0, "empty": 0, "blocked": 0, "error": 0}
+
+
+async def test_a_failure_reading_the_oficina_table_does_not_take_the_run_down(webw, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("tabla rota")
+
+    monkeypatch.setattr(oficina_ml, "load_fresh", boom)
+    webw.web.pages["producto-raro"] = _web_page(_card("MLA777", "Producto Raro", 400.0))
+    _score(webw, "MLA777", 0.95)
+    await price_monitor.run_price_monitor()
+    assert _runs()[0].status == "ok" and _snaps()["3"].match_origin == "web"       # siguió como antes
+
+
+def test_the_health_card_survives_a_broken_oficina_status(client, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("tabla rota")
+
+    monkeypatch.setattr(oficina_ml, "status", boom)
+    r = client.get("/api/price-monitor/summary")
+    assert r.status_code == 200 and r.json()["oficina"]["enabled"] is False

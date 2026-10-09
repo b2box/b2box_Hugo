@@ -192,13 +192,19 @@ def test_the_queue_is_prioritized_and_leaves_out_what_does_not_need_a_search(api
     _snap("3", "failed")                                       # la API falló: también
     _snap("4", "ok", origin="api")                             # ya tiene idéntico con precio
     _snap("5", "skipped")                                      # no se pudo evaluar (sin foto/precio): buscar no ayuda
-    _snap("6"); _result("6", timedelta(hours=2))               # ya buscado hace poco
-    _snap("7"); _result("7", timedelta(days=9))                # resultado vencido
-    _snap("8", "ok", origin="oficina"); _result("8", timedelta(days=8))   # hoy tiene precio por la oficina y vence
-    _snap("9"); _result("9", timedelta(hours=2), status="empty")  # buscado y vacío: gastado
-    _snap("10"); _result("10", timedelta(days=30), status="blocked")  # solo un bloqueo: no cuenta como resultado
+    _snap("6")
+    _result("6", timedelta(hours=2))               # ya buscado hace poco
+    _snap("7")
+    _result("7", timedelta(days=9))                # resultado vencido
+    _snap("8", "ok", origin="oficina")
+    _result("8", timedelta(days=8))   # hoy tiene precio por la oficina y vence
+    _snap("9")
+    _result("9", timedelta(hours=2), status="empty")  # buscado y vacío: gastado
+    _snap("10")
+    _result("10", timedelta(days=30), status="blocked")  # solo un bloqueo: no cuenta como resultado
     _snap("11", name=None)                                     # sin nombre no hay qué buscar
-    _snap("12"); _result("12", timedelta(days=20))             # el más viejo de los vencidos
+    _snap("12")
+    _result("12", timedelta(days=20))             # el más viejo de los vencidos
     ids = [i["product_id"] for i in _queue(api)["items"]]
     assert ids == ["1", "3", "10", "2", "12", "7", "8"]
     # los 4, 5, 6, 9 y 11 no están
@@ -206,8 +212,10 @@ def test_the_queue_is_prioritized_and_leaves_out_what_does_not_need_a_search(api
 
 
 def test_the_queue_asks_again_one_day_before_a_result_expires(api):
-    _snap("1"); _result("1", timedelta(days=5, hours=20))        # 5,8 días con TTL de 7: todavía no
-    _snap("2"); _result("2", timedelta(days=6, hours=2))         # 6,1 días: se renueva ya, para que la corrida de la noche lo encuentre fresco
+    _snap("1")
+    _result("1", timedelta(days=5, hours=20))        # 5,8 días con TTL de 7: todavía no
+    _snap("2")
+    _result("2", timedelta(days=6, hours=2))         # 6,1 días: se renueva ya, para que la corrida de la noche lo encuentre fresco
     assert [i["product_id"] for i in _queue(api)["items"]] == ["2"]
 
 
@@ -270,7 +278,8 @@ def test_a_good_result_is_stored_with_its_sanitized_candidates(api):
 
 
 def test_posting_the_same_batch_twice_changes_nothing(api):
-    _snap("1"); _snap("2")
+    _snap("1")
+    _snap("2")
     batch = [_res("1"), _res("2", [_card("MLA9")])]
     assert _post(api, batch).json()["stored"] == 2
     again = _post(api, batch).json()
@@ -282,6 +291,20 @@ def test_posting_the_same_batch_twice_changes_nothing(api):
     # y repetido dentro del mismo lote: uno solo
     twin = _res("2", fetched_at=_iso(-timedelta(minutes=2)))
     assert _post(api, [twin, dict(twin)]).json()["stored"] == 1
+
+
+def test_a_lost_race_on_the_unique_index_counts_as_a_duplicate_and_the_rest_is_stored(api):
+    """Otro lote se coló entre el chequeo de repetidos y el guardado: lo repetido se cuenta, lo nuevo entra."""
+    _snap("1")
+    same = _iso(-timedelta(minutes=9))
+    assert _post(api, [_res("1", fetched_at=same)]).json()["stored"] == 1
+    now = utcnow()
+    a = oficina_ml.clean_result(_res("1", fetched_at=same), now=now, max_candidates=8)
+    b = oficina_ml.clean_result(_res("1", fetched_at=_iso(-timedelta(minutes=3))), now=now, max_candidates=8)
+    report = oficina_ml.IngestReport()
+    with Session(engine) as s:
+        oficina_ml._insert(s, [a, b], report)
+    assert (report.stored, report.duplicates) == (1, 1) and len(_rows()) == 2
 
 
 def test_only_the_last_results_of_each_product_are_kept(api):
@@ -412,7 +435,8 @@ def test_sold_quantity_that_makes_no_sense_is_dropped(api, sold):
 
 
 def test_candidates_that_are_not_objects_or_not_a_list(api):
-    _snap("1"); _snap("2")
+    _snap("1")
+    _snap("2")
     _post(api, [_res("1", [1, "MLA1", None, [], _card("MLA3")]), _res("2", "MLA1")])
     rows = {r.product_id: r for r in _rows()}
     assert [c["id"] for c in json.loads(rows["1"].candidates)] == ["MLA3"]
@@ -443,7 +467,8 @@ def test_only_ok_keeps_candidates(api, status):
     ({"query": None}, "consulta"),
 ])
 def test_a_bad_result_is_rejected_alone_and_the_good_one_still_goes_in(api, patch, why):
-    _snap("1"); _snap("2")
+    _snap("1")
+    _snap("2")
     r = _post(api, [_res("1", **patch), _res("2")])
     body = r.json()
     assert r.status_code == 200 and body["stored"] == 1 and len(body["rejected"]) == 1
@@ -535,3 +560,14 @@ def test_the_sanitizer_never_returns_a_field_outside_the_whitelists(api):
         assert cand.permalink.startswith(("https://articulo.mercadolibre.com.ar/", "https://www.mercadolibre.com.ar/"))
         assert all(u.startswith("https://") and "mlstatic.com" in u.split("/")[2] for u in cand.image_urls)
         assert oficina_ml.valid_ref(cand.id) and cand.origin == "oficina"
+
+
+def test_the_ip_tables_do_not_grow_without_bound(api, monkeypatch):
+    clock = {"t": 10.0}
+    monkeypatch.setattr(oficina_routes, "_now", lambda: clock["t"])
+    for i in range(oficina_routes._MAX_TRACKED_IPS + 50):
+        oficina_routes._fails[f"10.0.{i // 250}.{i % 250}"].append(clock["t"])
+        oficina_routes._locked_until[f"10.1.{i // 250}.{i % 250}"] = clock["t"] + 1
+    clock["t"] += oficina_routes.FAIL_WINDOW_S + oficina_routes.LOCK_S + 5
+    api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala"})            # una pasada con todo vencido
+    assert len(oficina_routes._fails) <= 2 and len(oficina_routes._locked_until) <= 1

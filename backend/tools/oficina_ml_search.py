@@ -96,7 +96,7 @@ def normalize_hugo_url(raw: str) -> str:
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
-        port = parts.port
+        _ = parts.port          # accederlo valida el puerto (ValueError si es raro)
     except ValueError:
         raise ConfigError(f"{URL_VAR} no es una URL válida") from None
     local = host in ("localhost", "127.0.0.1", "::1")

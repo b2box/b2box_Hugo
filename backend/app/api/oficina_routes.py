@@ -58,7 +58,13 @@ def reset_limits() -> None:
     _locked_until.clear()
 
 
+_MAX_TRACKED_IPS = 2000
+
+
 def _window(store: dict[str, deque[float]], ip: str, span: float, now: float) -> deque[float]:
+    if len(store) > _MAX_TRACKED_IPS:             # nadie tiene 2.000 IPs distintas de la oficina: limpiar lo vencido
+        for key in [k for k, v in store.items() if not v or v[-1] <= now - span]:
+            del store[key]
     hits = store[ip]
     while hits and hits[0] <= now - span:
         hits.popleft()
@@ -79,6 +85,9 @@ def guard(request: Request) -> None:
         raise HTTPException(status_code=404, detail="Not Found")
     ip = client_ip(request)
     now = _now()
+    if len(_locked_until) > _MAX_TRACKED_IPS:
+        for key in [k for k, until in _locked_until.items() if until <= now]:
+            del _locked_until[key]
     if _locked_until.get(ip, 0.0) > now:
         raise HTTPException(status_code=429, detail="Demasiados intentos con una key inválida",
                             headers={"Retry-After": str(int(_locked_until[ip] - now) + 1)})
