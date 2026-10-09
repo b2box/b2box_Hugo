@@ -438,14 +438,14 @@ def test_export_csv(monkeypatch, client):
     assert resp.headers["content-type"].startswith("text/csv")
     assert resp.headers["content-disposition"].startswith('attachment; filename="auditoria-textos-')
     assert resp.content.startswith(b"\xef\xbb\xbf")                                # BOM para Excel
-    rows = list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+    rows = list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig")), delimiter=";"))
     assert rows[0] == list(text_audit.CSV_COLUMNS)
     body = rows[1:]
     assert {r[0] for r in body} == {"2", "9"}
     assert all("MAR" in r[10].split() for r in body)
     assert all("MAR: " in r[11] for r in body)
     everything = client.get(f"/api/seo/text-audit/export.csv?run_id={result['id']}&only_issues=false").content.decode("utf-8-sig")
-    assert "'=HYPERLINK" in everything and ",=HYPERLINK" not in everything and "\n=HYPERLINK" not in everything
+    assert "'=HYPERLINK" in everything and ";=HYPERLINK" not in everything and "\n=HYPERLINK" not in everything
 
 
 # ─── Disparo manual ────────────────────────────────────────────────

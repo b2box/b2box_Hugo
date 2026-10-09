@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 
@@ -158,7 +159,7 @@ def test_un_canal_con_error_http_deja_la_corrida_incompleta_con_motivo(monkeypat
         "el canal caído no se puede contar como 'el producto no está en AR'"
 
 
-def test_un_error_graphql_en_un_canal_tambien_es_incompleta(monkeypatch):
+def test_un_error_graphql_en_un_canal_tambien_es_incompleta(monkeypatch, caplog):
     class GraphqlError(FakeVendure):
         def handler(self, request):
             if request.headers.get("vendure-token") is None:
@@ -167,12 +168,16 @@ def test_un_error_graphql_en_un_canal_tambien_es_incompleta(monkeypatch):
                 return _httpx.Response(200, json={"errors": [{"message": "Internal server error"}], "data": None})
             return super().handler(request)
 
-    result = run(monkeypatch, GraphqlError({"ar": _catalog(4), None: _catalog(4)}))
+    with caplog.at_level(logging.ERROR):
+        result = run(monkeypatch, GraphqlError({"ar": _catalog(4), None: _catalog(4)}))
     assert result["status"] == "degraded" and set(result["channels_failed"]) == {"default"}
-    assert "Internal server error" in result["channels_failed"]["default"]
+    # Lo que se guarda y se muestra: el tipo y una frase fija. El texto del servidor queda en el log.
+    assert result["channels_failed"]["default"] == "TransportQueryError: no se pudo leer Vendure (canal default)"
+    assert "Internal server error" not in result["channels_failed"]["default"]
+    assert "Internal server error" in "\n".join(r.getMessage() for r in caplog.records)
 
 
-def test_si_la_pagina_2_falla_el_canal_queda_caido_entero_y_no_con_datos_a_medias(monkeypatch):
+def test_si_la_pagina_2_falla_el_canal_queda_caido_entero_y_no_con_datos_a_medias(monkeypatch, caplog):
     class Page2Fails(FakeVendure):
         def handler(self, request):
             body = json.loads(request.content)
@@ -183,9 +188,12 @@ def test_si_la_pagina_2_falla_el_canal_queda_caido_entero_y_no_con_datos_a_media
             return super().handler(request)
 
     fake = Page2Fails({"ar": _catalog(250), None: _catalog(250)})
-    result = run(monkeypatch, fake)
+    with caplog.at_level(logging.ERROR):
+        result = run(monkeypatch, fake)
     assert result["status"] == "degraded"
-    assert set(result["channels_failed"]) == {"ar"} and "503" in result["channels_failed"]["ar"]
+    assert set(result["channels_failed"]) == {"ar"}
+    assert result["channels_failed"]["ar"] == "TransportServerError: no se pudo leer Vendure (canal ar)"
+    assert "503" in "\n".join(r.getMessage() for r in caplog.records)
     rows = rows_of(result["id"])
     assert len(rows) == 250 and all(r.in_ar is None for r in rows.values())
     assert result["products_total"] == 250
@@ -235,11 +243,6 @@ def test_una_corrida_fallida_no_pisa_a_la_ultima_buena_en_el_dashboard(monkeypat
 
 # ─── Datos raros que no deberían tirar toda la auditoría ───────────
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG (bajo): un producto con dos traducciones que normalizan al mismo idioma («es_AR» y «es-AR», o el mismo código "
-    "repetido) viola el índice único (run, producto, idioma) al guardar y TODA la corrida queda `failed`; además el "
-    "motivo que ve el dashboard trae el INSERT crudo. Vendure no debería devolverlo (languageCode es un enum), pero "
-    "evaluate() ya normaliza «es-ar», o sea que lo contempla. Debería quedarse con una y seguir."))
 def test_una_traduccion_repetida_no_tira_la_corrida_entera(monkeypatch):
     weird = raw_product(7, translations=[("es_AR", "Taza uno", "taza-uno", "Taza larga y descriptiva para todos."),
                                          ("es-AR", "Taza dos", "taza-dos", "Otra taza larga y descriptiva.")])

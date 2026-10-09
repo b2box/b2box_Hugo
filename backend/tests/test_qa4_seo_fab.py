@@ -108,9 +108,6 @@ def test_la_base_no_guarda_la_descripcion_ni_columnas_de_proveedor(monkeypatch):
             assert not [x for x in cols if re.search(r"supplier|provee|fabric|descr(?!_chars)|html", x, re.I)], (table, cols)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG (bajo): con LOG_LEVEL=DEBUG el transporte de gql loguea la respuesta completa (`<<< ...`) y ahí viajan "
-    "supplierBusiness/supplierSizeModel/supplierLink de todos los productos. Con INFO (el default) no sale nada."))
 def test_con_log_debug_tampoco_se_loguean_los_valores_del_proveedor(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG):
         run(monkeypatch, FakeVendure(_catalog()))

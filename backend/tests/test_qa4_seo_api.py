@@ -263,7 +263,7 @@ def test_cada_combinacion_de_filtros_da_exactamente_lo_esperado(monkeypatch, cli
         assert got == want, (rule, enabled, lang, channel, only, got, want)
         assert data["total"] == len(want)
         checked += 1
-    assert checked == 15 * 3 * 5 * 3 * 2
+    assert checked == (len(rules.RULE_IDS) + 1) * 3 * 5 * 3 * 2
 
 
 def test_el_filtro_COD_no_trae_a_NOMBRE_ES_CODIGO_ni_DUP_CASI_a_DUP_EXACTO(monkeypatch, client):
@@ -378,7 +378,7 @@ def test_ninguna_celda_de_texto_del_csv_empieza_con_un_prefijo_de_formula(monkey
     result = run(monkeypatch, FakeVendure(_injection_catalog()))
     rid = result["id"]
     raw = client.get(f"{BASE}/export.csv?run_id={rid}&only_issues=false").content.decode("utf-8-sig")
-    table = list(csv.reader(io.StringIO(raw, newline="")))
+    table = list(csv.reader(io.StringIO(raw, newline=""), delimiter=";"))
     header, body = table[0], table[1:]
     assert len(body) == len(PAYLOADS) + 1
     bad = []
@@ -396,15 +396,18 @@ def test_el_csv_con_filtros_tambien_neutraliza_y_no_tiene_saltos_que_rompan_fila
     prods = [raw_product(1, translations=[("es_AR", "Funda\niPhone\r\n=1+1 Rosa", "funda-iphone", "")])]
     result = run(monkeypatch, FakeVendure({"ar": prods, None: prods}))
     raw = client.get(f"{BASE}/export.csv?run_id={result['id']}&rule=MAR").content.decode("utf-8-sig")
-    rows = list(csv.reader(io.StringIO(raw, newline="")))
+    rows = list(csv.reader(io.StringIO(raw, newline=""), delimiter=";"))
     assert len(rows) == 2 and len(rows[1]) == len(rows[0]) == len(text_audit.CSV_COLUMNS)
 
 
 def test_csv_safe_cubre_los_seis_prefijos_de_la_guia_owasp():
     for prefix in ("=", "+", "-", "@", "\t", "\r"):
         assert text_audit.csv_safe(prefix + "x").startswith("'"), repr(prefix)
-    for harmless in ("hola", "1+1", "x=1", "'=1", "", "Ñandú", " =x"):
+    for harmless in ("hola", "1+1", "x=1", "'=1", "", "Ñandú", "a -b"):
         assert text_audit.csv_safe(harmless) == harmless
+    # Excel ignora los espacios y los caracteres de control antes del «=»: también se neutralizan.
+    for sneaky in (" =x", "  +1", "\x00=1", "\x01@A1", " \t-2"):
+        assert text_audit.csv_safe(sneaky).startswith("'"), repr(sneaky)
     assert text_audit.csv_safe(None) == "" and text_audit.csv_safe(0) == "0"
 
 
@@ -414,7 +417,7 @@ def test_el_csv_tiene_bom_y_cabecera_estable_y_el_nombre_de_archivo_es_seguro(mo
     assert r.content[:3] == b"\xef\xbb\xbf"
     assert r.headers["content-disposition"].count('"') == 2
     assert all(c not in r.headers["content-disposition"] for c in ("\n", "\r", "/", "\\"))
-    assert r.content.decode("utf-8-sig").splitlines()[0] == ",".join(text_audit.CSV_COLUMNS)
+    assert r.content.decode("utf-8-sig").splitlines()[0] == ";".join(text_audit.CSV_COLUMNS)
 
 
 # ─── Listas editables ──────────────────────────────────────────────
@@ -473,12 +476,19 @@ def test_cada_lista_es_independiente(client):
     client.delete(f"{BASE}/lists/marcas")
 
 
-def test_vaciar_la_lista_de_marcas_apaga_la_regla_MAR_en_silencio(monkeypatch, client):
-    """Comportamiento a conocer: PUT con `items: []` (o todo en blanco) se guarda y desactiva la regla; el dashboard
-    no avisa. Es válido por diseño (la lista guardada reemplaza a la de fábrica) pero es fácil de hacer sin querer."""
+def test_vaciar_la_lista_de_marcas_pide_confirmacion_explicita(monkeypatch, client):
+    """Un PUT con `items: []` (o todo en blanco) apagaba la regla MAR en silencio. Ahora es 422 salvo que
+    venga `allow_empty: true`; la lista vigente no cambia con el rechazo."""
     cat = {"ar": [], None: [raw_product(1, translations=[("es_AR", "Funda iPhone Rosa", "funda-iphone-rosa", "")])]}
     assert any("MAR" in rules_ for rules_ in [r.issues for r in rows_of(run(monkeypatch, FakeVendure(cat))["id"]).values()])
-    r = _put(client, "marcas", ["   ", ""])
+    for empty in ([], ["   ", ""]):
+        r = _put(client, "marcas", empty)
+        assert r.status_code == 422 and "allow_empty" in r.json()["detail"], r.text
+    assert client.get(f"{BASE}/lists").json()["lists"]["marcas"]["modified"] is False
+    still = run(monkeypatch, FakeVendure(cat))
+    assert any("MAR" in r.issues for r in rows_of(still["id"]).values())
+
+    r = client.put(f"{BASE}/lists/marcas", json={"items": [], "allow_empty": True})
     assert r.status_code == 200 and r.json()["items"] == []
     after = run(monkeypatch, FakeVendure(cat))
     assert all("MAR" not in r.issues for r in rows_of(after["id"]).values())
@@ -493,11 +503,6 @@ def test_el_valor_guardado_en_la_base_es_json_chico_y_con_su_clave(client):
     client.delete(f"{BASE}/lists/marcas")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG (medio): cambiar o restablecer una lista no deja ningún rastro de QUIÉN lo hizo (ni en `settings`, ni en "
-    "`audit_log`, ni en el log, ni en la respuesta). El resto de las ediciones del dashboard (semáforo, tiendas) anota "
-    "al actor con auth.session_username(). Las listas cambian el resultado de la auditoría y, más adelante, las reglas "
-    "duras de HG4."))
 def test_quien_cambio_la_lista_queda_anotado(client, caplog):
     import logging
 
@@ -513,9 +518,6 @@ def test_quien_cambio_la_lista_queda_anotado(client, caplog):
     assert "qa-pao@b2box.test" in seen
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG (bajo, UX): si un canal no contesta, el motivo que ve el usuario en el dashboard es solo «TimeoutError» "
-    "(asyncio.TimeoutError no trae mensaje): no dice cuánto esperó ni de qué canal se trata el tiempo."))
 def test_el_motivo_de_un_canal_que_no_contesta_dice_que_fue_por_tiempo(monkeypatch):
     monkeypatch.setattr(text_audit, "READ_TIMEOUT_S", 0.2)
 

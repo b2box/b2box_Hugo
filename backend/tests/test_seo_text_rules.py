@@ -208,7 +208,8 @@ def test_mar_detecta_marcas_y_personajes(title, brand):
 def test_mar_por_palabra_entera():
     assert "MAR" not in rules_of("Guiderail Metálico Cortina")
     assert "MAR" not in rules_of("Manzana Roja Decorativa")
-    assert "MAR" not in rules_of("Funda iPhone15 Rosa")              # «iphone15» es otra palabra
+    assert "iPhone" in audit("Funda iPhone15 Rosa")["MAR"]           # marca pegada al número
+    assert "MAR" not in rules_of("Funda Guiderail15 Rosa")           # otra palabra que empieza igual
     assert "MAR" not in rules_of("Cámara Hello Rosa Kitty")          # las palabras tienen que ir seguidas
 
 

@@ -4,8 +4,8 @@ Los nombres y slugs de abajo son literales del listado público `/ar/api/latest-
 completos para medir). Cada caso trae el id público para poder buscarlo.
 
   * Parte 1: acuerdo con la clasificación manual del diseño (filas 21, 30-34, 36, 37, 38-40) sobre los títulos vivos.
-  * Parte 2: falsos positivos y falsos negativos encontrados. Son `xfail(strict=True)`: el día que se ajusten las listas
-    pasan a XPASS, fallan y obligan a sacar la marca.
+  * Parte 2: falsos positivos y falsos negativos encontrados con esos títulos (estaban como `xfail(strict=True)`; se
+    ajustaron las listas y reglas y pasaron a tests normales).
 
 Cifras sobre los 1.077 títulos vivos con las listas de fábrica: LARGO 286 (26,6 %), RELLENO 94, COD 10, MAR 7,
 SLUG_NO_COINCIDE 49, DUP_EXACTO 4 (2 pares), DUP_CASI 60, ESPACIOS 7, NOMBRE_ES_CODIGO 1.
@@ -126,7 +126,7 @@ def test_los_titulos_ok_de_la_muestra_del_diseno_no_saltan_ninguna_regla_de_titu
     assert got <= {"LARGO"}, got
 
 
-# ─── Parte 2: falsos positivos (xfail estricto) ────────────────────
+# ─── Parte 2: falsos positivos (arreglados) ────────────────────────
 
 _FP_COD = [
     ("IA", "Impresora Térmica Infantil Portátil con IA- Imprime tus Dibujos", "IA = inteligencia artificial (real, id 5037)"),
@@ -153,19 +153,14 @@ _FP_COD = [
 
 
 @pytest.mark.parametrize("label,name,why", _FP_COD, ids=[x[0] for x in _FP_COD])
-@pytest.mark.xfail(strict=True, reason="Falso positivo de COD: sigla técnica legítima que falta en DEFAULT_TECHNICAL / TECH_PATTERN")
 def test_sigla_tecnica_legitima_no_es_un_codigo_de_proveedor(label, name, why):
     assert "COD" not in audit(name), why
 
 
-@pytest.mark.xfail(strict=True, reason="Falso positivo de RELLENO: «Elegante» es un adjetivo de producto en «Traje Elegante» (id 1095)")
 def test_traje_elegante_es_una_prenda_no_relleno():
     assert "RELLENO" not in audit("Bolso de Viaje Plegable con Compartimento para Traje Elegante")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Falso positivo de DUP_CASI: tres juguetes distintos (ids 4909, 4570, 4415) comparten 3 de 5 palabras genéricas "
-    "(juguete, interactivo, mascotas) y llegan justo al umbral de 0,6"))
 def test_juguetes_distintos_para_mascotas_no_son_casi_duplicados():
     names = [("4909|es_AR", "4909", "Juguete Interactivo Tambaleante Para Mascotas"),
              ("4570|es_AR", "4570", "Juguete Interactivo de Colores para Mascotas"),
@@ -173,27 +168,30 @@ def test_juguetes_distintos_para_mascotas_no_son_casi_duplicados():
     assert R.find_duplicates(names) == {}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Falso positivo de FAB: la medida «25x30cm» (dimensión) está en supplierSizeModel Y en el título, de forma legítima; "
-    "_MEASURE_RE solo reconoce una medida simple («25cm»), no «25x30cm» ni «5V2A»"))
 def test_una_medida_compuesta_en_el_modelo_del_proveedor_no_delata_al_proveedor():
     m = R.SupplierMatcher(R.SupplierRefs(size_model="25x30cm"), frozenset())
     assert R.check_proveedor("Bolsa de Tela 25x30cm", "bolsa-de-tela", "", m) is None
 
 
-# ─── Parte 2: falsos negativos (xfail estricto) ────────────────────
+# ─── Parte 2: falsos negativos (arreglados) ────────────────────────
 
 @pytest.mark.parametrize("pid,name,brand", [
     ("4422", "Conservadora al Vacío Inteligente everyU", "everyU (marca china, id 4422)"),
     ("649", "Masajeador Íntimo Rosen bienestar y placer en tus manos", "Rosen (marca, id 649)"),
     ("2206", "Juguete Musical Otamatone Melodía Lúdica Interactivo", "Otamatone (marca registrada, id 2206)"),
-    ("58", "Estante Organizador B2BOX para Baño - Practicidad y Orden sin Esfuerzo", "B2BOX: nombre propio en el título (id 58)"),
     (None, "Funda iPhone15 Transparente", "iPhone pegado al número"),
     (None, "Mangas Lets Slim Protección Solar", "Let's Slim sin apóstrofo"),
 ])
-@pytest.mark.xfail(strict=True, reason="Falso negativo de MAR: marca real que no está en DEFAULT_BRANDS (o variante ortográfica)")
 def test_marca_real_en_el_titulo_se_detecta(pid, name, brand):
     assert "MAR" in audit(name), brand
+
+
+def test_b2box_en_el_titulo_tiene_su_propia_regla_informativa_y_no_es_una_marca_de_terceros():
+    """id 58: el storefront ya agrega « - B2BOX» al título, así que nombrarlo adentro lo repite."""
+    got = audit("Estante Organizador B2BOX para Baño - Practicidad y Orden sin Esfuerzo")
+    assert "MARCA_PROPIA" in got and "MAR" not in got
+    assert "MARCA_PROPIA" not in audit("Estante Organizador para Baño")
+    assert "MARCA_PROPIA" in audit("Estante b2-box para Baño") and "MARCA_PROPIA" not in audit("Estante B2BOXES")
 
 
 @pytest.mark.parametrize("pid,name", [
@@ -204,9 +202,6 @@ def test_marca_real_en_el_titulo_se_detecta(pid, name, brand):
     ("33", "Organizador de Brochas 360°: Elegancia y Orden para tu Tocador"),
     ("67", "Cajón Oculto Bajo Escritorio - Solución Práctica y Discreta para Organizar"),
 ])
-@pytest.mark.xfail(strict=True, reason=(
-    "Falso negativo de RELLENO: práctico/a, practicidad, comodidad, elegancia, «sin igual», solución, cautivadora, "
-    "impactante, novedoso no están en DEFAULT_FILLER (≈40 títulos vivos más)"))
 def test_relleno_de_marketing_real_se_detecta(pid, name):
     assert "RELLENO" in audit(name)
 

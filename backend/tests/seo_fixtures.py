@@ -74,8 +74,14 @@ class FakeVendure:
                 "message": 'Cannot query field "supplierBusiness" on type "ProductCustomFields".'}]})
         items = self.channels[token]
         skip, take = body["variables"]["skip"], body["variables"]["take"]
-        return _httpx.Response(200, json={"data": {"products": {
-            "items": items[skip:skip + take], "totalItems": len(items)}}})
+        page = [self._only_requested(it, body["query"]) for it in items[skip:skip + take]]
+        return _httpx.Response(200, json={"data": {"products": {"items": page, "totalItems": len(items)}}})
+
+    @staticmethod
+    def _only_requested(item: dict[str, Any], query: str) -> dict[str, Any]:
+        """Como un GraphQL de verdad: los custom fields que la query no pidió no vuelven."""
+        custom = {k: v for k, v in (item.get("customFields") or {}).items() if k in query}
+        return {**item, "customFields": custom}
 
     # ── lo que miran las pruebas ──
     def queries(self, token: str | None = ...) -> list[dict[str, Any]]:  # type: ignore[assignment]
@@ -105,5 +111,4 @@ def install(monkeypatch, fake: FakeVendure) -> None:
 
     monkeypatch.setattr(VendureClient, "_new_client", _new_client)
     monkeypatch.setattr(VendureClient, "_shared_bearer", "bearer-de-prueba")
-    monkeypatch.setattr(VendureClient, "_supplier_fields_supported", True)
     monkeypatch.setattr(vendure_client.asyncio, "sleep", _no_sleep)   # los reintentos no esperan

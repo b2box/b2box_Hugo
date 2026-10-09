@@ -34,10 +34,6 @@ def _client() -> TestClient:
     return c
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG (bajo): `?q=%00` (un NUL en el texto de búsqueda) llega tal cual al LIKE; Postgres no acepta NUL en un "
-    "parámetro de texto y la API responde 500 (en SQLite devuelve todo). Debería ser 422 o ignorarse. Lo mismo vale "
-    "para el CSV. Requiere sesión del dashboard, así que es robustez y no un agujero."))
 def test_un_nul_en_la_busqueda_no_rompe_la_api_en_postgres(monkeypatch, old_schema):  # noqa: F811
     session.init_db()
     result = run(monkeypatch, FakeVendure({"ar": [raw_product(1)], None: [raw_product(1)]}))
