@@ -66,14 +66,18 @@ from app.pricing import (
     market_match,
     market_ml,
     market_ml_web,
+    market_query,
     market_specs,
+    oficina_ml,
     semaforo,
     store_catalog,
     store_match,
 )
 from app.pricing.market_ml import (
     ORIGIN_API,
+    ORIGIN_OFICINA,
     ORIGIN_WEB,
+    WEB_ORIGINS,
     PROBE_LISTING_PRICES_KEY,
     PROBE_SOLD_QUANTITY_KEY,
     BudgetExhausted,
@@ -150,12 +154,17 @@ class RunContext:
     weight_tol_pct: float = 15.0
     # Fuente "ML web": None = apagada (sin proxy, cupo 0, sin browser).
     web: market_ml_web.MlWebSource | None = None
+    # Búsquedas web de ML hechas por la Mac de la oficina que siguen frescas, por producto
+    # (oficina_ml.load_fresh). Si hay una, se usa en lugar de buscar desde el servidor.
+    oficina: dict[str, oficina_ml.FreshResult] = field(default_factory=dict)
     # Publicaciones que una persona marcó "No es el mismo" (quedan DIFERENTES) y
     # "Es el mismo" (quedan IGUALES), por producto.
     excluded: dict[str, frozenset[str]] = field(default_factory=dict)
     promoted: dict[str, frozenset[str]] = field(default_factory=dict)
     # Cuántas publicaciones se guardan por producto (pm_ml_keep_listings).
     keep_listings: int = 8
+    # Búsquedas por producto en la API de ML (pm_ml_query_variants). 1 = como siempre.
+    query_variants: int = 1
     scorer: market_match.ImageScorer = market_match.clip_index_scorer
     # ¿Se puede puntuar este producto por imagen? Se chequea antes de gastar
     # el request de búsqueda (ver market_match.indexed).
@@ -333,6 +342,11 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
                MarketPriceSnapshot.match_origin == ORIGIN_WEB)
     ).one() or 0)
+    run.n_oficina_ok = int(s.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
+               MarketPriceSnapshot.match_origin == ORIGIN_OFICINA)
+    ).one() or 0)
     run.n_con_similares = int(s.exec(
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.similar_count > 0)
@@ -351,6 +365,13 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.match_state == STATE_DIFFERENT)
     ).one() or 0)
+    by_variant = dict(s.exec(
+        select(MarketPriceSnapshot.ml_variant, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
+               MarketPriceSnapshot.ml_variant.is_not(None))  # type: ignore[union-attr]
+        .group_by(MarketPriceSnapshot.ml_variant)
+    ).all())
+    run.variant_stats = json.dumps({k: int(v) for k, v in sorted(by_variant.items())}) if by_variant else None
     run.source_stats = json.dumps(store_match.source_stats(s, run_id))
     run.processed = sum(by_status.values())
 
@@ -463,6 +484,8 @@ class _Work:
     excluded: frozenset[str]
     specs: market_specs.OurSpecs | None
     promoted: frozenset[str] = frozenset()
+    # Las búsquedas de la API de ML de este producto, en orden (market_query.query_plan).
+    plan: list[market_query.QueryStep] = field(default_factory=list)
     similars: list[dict[str, Any]] = field(default_factory=list)
     others: list[dict[str, Any]] = field(default_factory=list)
     igual_unpriced: list[dict[str, Any]] = field(default_factory=list)
@@ -615,7 +638,7 @@ def _feeds_estimate(d: market_match.Decision) -> bool:
 
 
 def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
-               prefetched: dict[str, Listings]) -> dict[str, Any]:
+               prefetched: dict[str, Listings], our_price: int | None = None) -> dict[str, Any]:
     """Una publicación SIMILAR o DIFERENTE para mostrar: con su precio de
     referencia (sin filtrar por vendedores), que no entra a ningún cálculo real.
     `est_ok` dice si ese precio cuenta para el color ESTIMADO: similar confirmado
@@ -627,7 +650,9 @@ def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
     if price is None and c.id in prefetched:
         price = _ars_median(prefetched[c.id][0])
     in_pesos = price is not None and price > 0 and (not c.currency or c.currency.upper() == CURRENCY)
-    price_ok = _web_price(ctx, c) is not None if c.origin == ORIGIN_WEB else in_pesos
+    price_ok = _web_price(ctx, c, our_price) is not None if c.origin in WEB_ORIGINS else in_pesos
+    if _implausible_price(c, our_price):
+        entry["notes"] = [*entry["notes"], PRICE_DOUBT_NOTE]
     entry.update(price_cents=price if in_pesos else None,
                  est_ok=bool(category == "similar" and _feeds_estimate(d) and price_ok and in_pesos),
                  seller=c.seller[:60] or None, sold_quantity=c.sold_quantity)
@@ -672,6 +697,7 @@ def _clear_prices(snap: MarketPriceSnapshot) -> None:
     snap.ml_listing_count = snap.ml_seller_count = 0
     snap.match_source = snap.match_origin = None
     snap.match_confidence = None
+    snap.ml_variant = None
 
 
 def _score_summary(snap: MarketPriceSnapshot, decisions: list[market_match.Decision]) -> bool:
@@ -727,7 +753,7 @@ async def _decide(ctx: RunContext, product: VendureProduct, w: _Work, snap: Mark
         # se parecen: el producto no se evalúa, pero lo que devolvió ML se muestra.
         for d in decisions:
             d.reason = market_match.explain_different(d, ctx.thresholds)
-            w.others.append(_ref_entry(ctx, d, "diferente", prefetched))
+            w.others.append(_ref_entry(ctx, d, "diferente", prefetched, snap.our_price_cents))
         return None
     for d in decisions:
         if d.candidate.id in w.promoted:
@@ -749,91 +775,131 @@ async def _decide(ctx: RunContext, product: VendureProduct, w: _Work, snap: Mark
             d.reason = market_match.explain_different(d, ctx.thresholds)
     for d in decisions:
         if d.verdict == market_match.SIMILAR:
-            w.similars.append(_ref_entry(ctx, d, "similar", prefetched))
+            w.similars.append(_ref_entry(ctx, d, "similar", prefetched, snap.our_price_cents))
         elif d.verdict == market_match.NO:
-            w.others.append(_ref_entry(ctx, d, "diferente", prefetched))
+            w.others.append(_ref_entry(ctx, d, "diferente", prefetched, snap.our_price_cents))
     return decisions
+
+
+@dataclass(slots=True)
+class _ApiPass:
+    """Lo que se junta de las búsquedas de la API de ML de UN producto (una por variante)."""
+    # Ids ya vistos en las variantes anteriores: cada ficha se juzga una sola vez.
+    seen: set[str] = field(default_factory=set)
+    # ¿Alguna variante llegó a puntuar fichas por imagen?
+    decided: bool = False
+    has_matches: bool = False
+    prices: list[int] = field(default_factory=list)
+    sellers: set[str] = field(default_factory=set)
+    matched_json: list[dict[str, Any]] = field(default_factory=list)
+    ml_errors: list[str] = field(default_factory=list)
+    # Etiqueta de la variante que dio el IGUAL con precio.
+    variant: str | None = None
+
+
+async def _price_matches(ctx: RunContext, matches: list[market_match.Decision],
+                         prefetched: dict[str, Listings], acc: _ApiPass, why: dict[str, str]) -> None:
+    """Vendedores (y su precio) de las fichas IGUAL de esta variante, hasta MAX_MATCHED_PRODUCTS.
+    Anota en `why` por qué cada una quedó sin precio. Puede lanzar BudgetExhausted (con `why`
+    al día hasta ahí)."""
+    for d in matches[:MAX_MATCHED_PRODUCTS]:
+        try:
+            listings, raw = prefetched.get(d.candidate.id) or await ctx.ml.listings(d.candidate.id)
+        except meli.MeliError as exc:
+            acc.ml_errors.append(str(exc))
+            why[d.candidate.id] = "no se pudo consultar su precio (ML falló)"
+            continue
+        if not ctx.sold_quantity_probed and raw.get("results"):
+            ctx.sold_quantity_probed = True
+            if not await asyncio.to_thread(probe_recorded, PROBE_SOLD_QUANTITY_KEY):
+                await asyncio.to_thread(
+                    record_probe, PROBE_SOLD_QUANTITY_KEY,
+                    {"present": payload_has_sold_quantity(raw), "product": d.candidate.id},
+                )
+        accepted = await _accepted_prices(ctx, listings)
+        if not accepted:
+            why[d.candidate.id] = "sin vendedores que cuenten (pocas ventas o sin precio en pesos)"
+            continue
+        cents = [p for p, _ in accepted]
+        acc.prices.extend(cents)
+        acc.sellers.update(sid for _, sid in accepted if sid)
+        acc.matched_json.append({
+            **_listing_entry(d, "igual"),
+            "listings": len(accepted),
+            "min_cents": min(cents),
+            "median_cents": semaforo.median_cents(cents),
+            "prices_cents": cents[:20],
+            "sellers": sorted({sid for _, sid in accepted if sid})[:20],
+        })
 
 
 async def _match_via_api(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
                          w: _Work) -> MarketPriceSnapshot:
-    """Fichas de catálogo por la API de ML (como hasta ahora)."""
-    try:
-        candidates = await ctx.ml.search(w.query)
+    """Fichas de catálogo por la API de ML.
+
+    Se prueban las búsquedas de `w.plan` en orden (ver market_query) y se corta en la
+    primera que da un IGUAL con precio. Las fichas de todas las variantes probadas se
+    juntan sin repetir (cada una se juzga UNA vez, en la variante que la trajo) y pasan
+    por el mismo filtro (CLIP, nombre, juez, medidas). Cada búsqueda cuenta contra el
+    budget diario de ML. Con una sola variante es lo de siempre."""
+    acc = _ApiPass()
+    for step in w.plan:
+        if step.only_if_empty and acc.seen:
+            continue                  # el fallback de siempre: solo si no trajo NADA
+        try:
+            found = await ctx.ml.search(step.query)
+        except BudgetExhausted as exc:
+            return _mark(snap, SKIPPED, f"budget ML agotado: {exc}")
+        except meli.MeliError as exc:
+            return _mark(snap, FAILED, f"búsqueda ML: {exc}")
+        earlier = set(acc.seen)
+        acc.seen.update(c.id for c in found)
+        candidates = _split_excluded(ctx, product, w, [c for c in found if c.id not in earlier])
+        snap.candidates_count += len(candidates)
         if not candidates:
-            shorter = market_match.fallback_query(product.name)
-            if shorter:
-                candidates = await ctx.ml.search(shorter)
-    except BudgetExhausted as exc:
-        return _mark(snap, SKIPPED, f"budget ML agotado: {exc}")
-    except meli.MeliError as exc:
-        return _mark(snap, FAILED, f"búsqueda ML: {exc}")
-    candidates = _split_excluded(ctx, product, w, candidates)
-    snap.candidates_count = len(candidates)
-    if not candidates:
+            continue
+
+        prefetched: dict[str, Listings] = {}
+        decisions = await _decide(ctx, product, w, snap, candidates, prefetched, web=False)
+        if decisions is None:
+            if not acc.decided:
+                return _mark(snap, SKIPPED, "sin score de imagen (CLIP o índice no disponibles)")
+            continue
+        acc.decided = True
+
+        matches = [d for d in decisions if d.verdict == market_match.MATCH]
+        if not matches:
+            continue
+        acc.has_matches = True
+        matches.sort(key=lambda d: (d.image_score or 0.0), reverse=True)
+        snap.match_source = matches[0].source
+        snap.match_confidence = matches[0].confidence
+        why = {d.candidate.id: "no se consultó su precio (tope de fichas por producto)"
+               for d in matches[MAX_MATCHED_PRODUCTS:]}
+        try:
+            await _price_matches(ctx, matches, prefetched, acc, why)
+        except BudgetExhausted as exc:
+            _record_unpriced(w, matches, acc.matched_json, why, "se agotó el cupo de ML antes de pedir su precio")
+            return _mark(snap, SKIPPED, f"budget ML agotado: {exc}")
+        _record_unpriced(w, matches, acc.matched_json, why)
+        if acc.prices:
+            acc.variant = step.label
+            break
+
+    if acc.has_matches:
+        snap.matched_listings = json.dumps(acc.matched_json, ensure_ascii=False)
+    if not acc.prices:
+        if acc.ml_errors and not acc.matched_json:
+            return _mark(snap, FAILED, f"vendedores ML: {acc.ml_errors[0]}")
+        if acc.has_matches:
+            return _mark(snap, NO_DATA, "las fichas no tienen vendedores que cuenten")
+        if acc.decided:
+            return _mark(snap, NO_DATA, "ninguna ficha es el mismo producto")
         return _mark(snap, NO_DATA, "ML no devolvió fichas para el título")
 
-    prefetched: dict[str, Listings] = {}
-    decisions = await _decide(ctx, product, w, snap, candidates, prefetched, web=False)
-    if decisions is None:
-        return _mark(snap, SKIPPED, "sin score de imagen (CLIP o índice no disponibles)")
-
-    matches = [d for d in decisions if d.verdict == market_match.MATCH]
-    if not matches:
-        return _mark(snap, NO_DATA, "ninguna ficha es el mismo producto")
-    matches.sort(key=lambda d: (d.image_score or 0.0), reverse=True)
-    snap.match_source = matches[0].source
-    snap.match_confidence = matches[0].confidence
-
-    prices: list[int] = []
-    sellers: set[str] = set()
-    matched_json: list[dict[str, Any]] = []
-    ml_errors: list[str] = []
-    why: dict[str, str] = {d.candidate.id: "no se consultó su precio (tope de fichas por producto)"
-                           for d in matches[MAX_MATCHED_PRODUCTS:]}
-    try:
-        for d in matches[:MAX_MATCHED_PRODUCTS]:
-            try:
-                listings, raw = prefetched.get(d.candidate.id) or await ctx.ml.listings(d.candidate.id)
-            except meli.MeliError as exc:
-                ml_errors.append(str(exc))
-                why[d.candidate.id] = "no se pudo consultar su precio (ML falló)"
-                continue
-            if not ctx.sold_quantity_probed and raw.get("results"):
-                ctx.sold_quantity_probed = True
-                if not await asyncio.to_thread(probe_recorded, PROBE_SOLD_QUANTITY_KEY):
-                    await asyncio.to_thread(
-                        record_probe, PROBE_SOLD_QUANTITY_KEY,
-                        {"present": payload_has_sold_quantity(raw), "product": d.candidate.id},
-                    )
-            accepted = await _accepted_prices(ctx, listings)
-            if not accepted:
-                why[d.candidate.id] = "sin vendedores que cuenten (pocas ventas o sin precio en pesos)"
-                continue
-            cents = [p for p, _ in accepted]
-            prices.extend(cents)
-            sellers.update(sid for _, sid in accepted if sid)
-            matched_json.append({
-                **_listing_entry(d, "igual"),
-                "listings": len(accepted),
-                "min_cents": min(cents),
-                "median_cents": semaforo.median_cents(cents),
-                "prices_cents": cents[:20],
-                "sellers": sorted({sid for _, sid in accepted if sid})[:20],
-            })
-    except BudgetExhausted as exc:
-        _record_unpriced(w, matches, matched_json, why, "se agotó el cupo de ML antes de pedir su precio")
-        return _mark(snap, SKIPPED, f"budget ML agotado: {exc}")
-
-    _record_unpriced(w, matches, matched_json, why)
-    snap.matched_listings = json.dumps(matched_json, ensure_ascii=False)
-    if not prices:
-        if ml_errors and not matched_json:
-            return _mark(snap, FAILED, f"vendedores ML: {ml_errors[0]}")
-        return _mark(snap, NO_DATA, "las fichas no tienen vendedores que cuenten")
-
     snap.match_origin = ORIGIN_API
-    _apply_prices(snap, prices, len(sellers), green_min=ctx.green_min, yellow_min=ctx.yellow_min)
+    snap.ml_variant = acc.variant
+    _apply_prices(snap, acc.prices, len(acc.sellers), green_min=ctx.green_min, yellow_min=ctx.yellow_min)
     return snap
 
 
@@ -868,15 +934,38 @@ def _record_unpriced(w: _Work, matches: list[market_match.Decision], priced: lis
         w.igual_unpriced.append(entry)
 
 
-def _web_price(ctx: RunContext, c: MlCandidate) -> int | None:
-    """Precio de una publicación de la web si cuenta: en pesos y con ventas
+PRICE_DOUBT_NOTE = "precio dudoso: 10 veces más chico o más grande que el nuestro"
+
+
+def _implausible_price(c: MlCandidate, our_price: int | None) -> bool:
+    """¿Un precio de la OFICINA que no se puede creer? Mismo criterio que las tiendas (`store_match.PRICE_RATIO_LIMIT`): 10
+    veces más chico o más grande que el nuestro. Es la defensa contra una key robada o una Mac comprometida: una publicación
+    con el título nuestro, una foto real de mlstatic y el precio que quiera quien manda no puede decidir el color. Solo
+    para la oficina: la web que lee el servidor sale de la página de ML directamente. (La "mediana de la API" no entra
+    acá: a la oficina solo se llega cuando la API NO tuvo un IGUAL con precio, así que no hay mediana de la API.)"""
+    if c.origin != ORIGIN_OFICINA or not c.price_cents or c.price_cents <= 0 or not our_price or our_price <= 0:
+        return False
+    ratio = c.price_cents / our_price
+    return ratio < 1 / store_match.PRICE_RATIO_LIMIT or ratio > store_match.PRICE_RATIO_LIMIT
+
+
+def _only_doubtful(ctx: RunContext, c: MlCandidate, our_price: int | None) -> bool:
+    """¿Contaría (pesos, ventas) si su precio fuera creíble? Para decir el motivo correcto."""
+    return _web_price(ctx, c) is not None and _implausible_price(c, our_price)
+
+
+def _web_price(ctx: RunContext, c: MlCandidate, our_price: int | None = None) -> int | None:
+    """Precio de una publicación de la web si cuenta: en pesos, con ventas
     suficientes (la web publica las ventas del ÍTEM, en baldes; ventas
-    desconocidas no descartan, igual que con la API)."""
+    desconocidas no descartan, igual que con la API) y, si viene de la oficina,
+    creíble frente a nuestro precio."""
     if c.price_cents is None or c.price_cents <= 0:
         return None
     if c.currency and c.currency.upper() != CURRENCY:
         return None
     if c.sold_quantity is not None and c.sold_quantity < ctx.min_seller_sales:
+        return None
+    if _implausible_price(c, our_price):
         return None
     return c.price_cents
 
@@ -917,13 +1006,33 @@ async def _match_via_web(ctx: RunContext, product: VendureProduct, snap: MarketP
     res = await _web_search(ctx, product, snap, w.query)
     if res.kind != "ok":
         return _with_note(snap, f"ML web: {res.reason}")
+    return await _match_web_candidates(ctx, product, snap, w, res.candidates, ORIGIN_WEB, "ML web")
 
-    candidates = _split_excluded(ctx, product, w, res.candidates)
+
+async def _match_via_oficina(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
+                             w: _Work, fresh: oficina_ml.FreshResult) -> MarketPriceSnapshot:
+    """Lo que la Mac de la oficina encontró en la web de ML (todavía fresco), en lugar de buscar desde
+    el servidor. Pasa por el mismo filtro que la web; el servidor no gasta ni una búsqueda."""
+    snap.web_via = ORIGIN_OFICINA
+    if not fresh.candidates:
+        snap.web_state = oficina_ml.ST_EMPTY
+        return _with_note(snap, "ML web (oficina): ML no tiene publicaciones para el título")
+    snap.web_state = oficina_ml.ST_OK
+    return await _match_web_candidates(ctx, product, snap, w, fresh.candidates, ORIGIN_OFICINA, "ML web (oficina)")
+
+
+async def _match_web_candidates(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
+                                w: _Work, found: list[MlCandidate], origin: str,
+                                label: str) -> MarketPriceSnapshot:
+    """Publicaciones de la web de ML (las del servidor o las de la oficina) → igual / similar /
+    diferente. `origin` es lo que queda en el snapshot si de ahí sale el precio; `label` encabeza
+    las notas de `ml_error`."""
+    candidates = _split_excluded(ctx, product, w, found)
     snap.candidates_count += len(candidates)
     prefetched: dict[str, Listings] = {}
     decisions = await _decide(ctx, product, w, snap, candidates, prefetched, web=True) if candidates else None
     if decisions is None:
-        return _with_note(snap, "ML web: sin score de imagen" if candidates else "ML web: sin publicaciones nuevas")
+        return _with_note(snap, f"{label}: sin score de imagen" if candidates else f"{label}: sin publicaciones nuevas")
 
     matches = [d for d in decisions if d.verdict == market_match.MATCH]
     matches.sort(key=lambda d: (d.image_score or 0.0), reverse=True)
@@ -931,10 +1040,14 @@ async def _match_via_web(ctx: RunContext, product: VendureProduct, snap: MarketP
     sellers: set[str] = set()
     matched_json: list[dict[str, Any]] = []
     why: dict[str, str] = {}
+    our_price = snap.our_price_cents
     for d in matches:
-        price = _web_price(ctx, d.candidate)
+        # Una persona que marcó «Es el mismo» manda sobre la plausibilidad: ella sí sabe si el precio es ese.
+        check = None if d.source == market_match.SOURCE_MANUAL else our_price
+        price = _web_price(ctx, d.candidate, check)
         if price is None:
-            why[d.candidate.id] = "sin precio en pesos o con pocas ventas"
+            why[d.candidate.id] = (PRICE_DOUBT_NOTE if _only_doubtful(ctx, d.candidate, check)
+                                   else "sin precio en pesos o con pocas ventas")
             continue
         prices.append(price)
         if d.candidate.seller:
@@ -949,15 +1062,19 @@ async def _match_via_web(ctx: RunContext, product: VendureProduct, snap: MarketP
         })
     _record_unpriced(w, matches, matched_json, why)
     if not prices:
-        note = ("las publicaciones iguales no tienen ventas suficientes" if matches
+        doubtful = bool(matches) and all(_only_doubtful(ctx, d.candidate, our_price) for d in matches
+                                         if d.source != market_match.SOURCE_MANUAL)
+        note = (f"las publicaciones iguales tienen un {PRICE_DOUBT_NOTE}" if doubtful
+                else "las publicaciones iguales no tienen ventas suficientes" if matches
                 else f"ninguna publicación es igual ({len(w.similars)} similares)" if w.similars
                 else "ninguna publicación es igual")
-        return _with_note(snap, f"ML web: {note}")
+        return _with_note(snap, f"{label}: {note}")
 
-    best = next(d for d in matches if _web_price(ctx, d.candidate) is not None)
+    best = next(d for d in matches
+                if _web_price(ctx, d.candidate, None if d.source == market_match.SOURCE_MANUAL else our_price) is not None)
     snap.matched_listings = json.dumps(matched_json, ensure_ascii=False)
     snap.match_source, snap.match_confidence = best.source, best.confidence
-    snap.match_origin = ORIGIN_WEB
+    snap.match_origin = origin
     _apply_prices(snap, prices, len(sellers), green_min=ctx.green_min, yellow_min=ctx.yellow_min)
     return snap
 
@@ -1078,7 +1195,8 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
     """El camino de ML para UN producto.
 
     1. Fichas de catálogo por la API de ML. Con un IGUAL con precio, listo.
-    2. Si no, el título en la web de ML (si la fuente está prendida).
+    2. Si no, la web de ML: lo que la Mac de la oficina encontró (si está fresco) o, si no hay,
+       el título buscado desde el servidor (si la fuente está prendida).
     3. Siempre se guarda lo que devolvió ML, clasificado: idénticos, similares y
        diferentes. El color real sale solo de los idénticos; sin idénticos pero con
        similares hay un color estimado aparte.
@@ -1105,11 +1223,16 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
     if specs is not None:
         snap.our_specs = json.dumps(specs.as_dict())
     w = _Work(query=query, excluded=ctx.excluded.get(product.id, frozenset()), specs=specs,
-              promoted=ctx.promoted.get(product.id, frozenset()))
+              promoted=ctx.promoted.get(product.id, frozenset()),
+              plan=market_query.query_plan(product.name, ctx.query_variants))
 
     snap = await _match_via_api(ctx, product, snap, w)
-    if snap.ml_status != OK and ctx.web is not None:
-        snap = await _match_via_web(ctx, product, snap, w)
+    if snap.ml_status != OK:
+        fresh = ctx.oficina.get(product.id)
+        if fresh is not None:
+            snap = await _match_via_oficina(ctx, product, snap, w, fresh)
+        elif ctx.web is not None:
+            snap = await _match_via_web(ctx, product, snap, w)
     _store_listings(snap, _json_list(snap.matched_listings), w.igual_unpriced, w.similars, w.others,
                     keep=ctx.keep_listings, green_min=ctx.green_min, yellow_min=ctx.yellow_min)
     return snap
@@ -1138,6 +1261,7 @@ def _context(run_id: int, ml: MlMarket, web: market_ml_web.MlWebSource | None = 
         excluded=excluded or {},
         promoted=promoted or {},
         keep_listings=int(runtime.get("pm_ml_keep_listings")),
+        query_variants=market_query.clamp_variants(runtime.get("pm_ml_query_variants")),
         spec_check=bool(int(runtime.get("pm_spec_check"))),
         dim_tol_pct=float(runtime.get("pm_dim_tol_pct")),
         weight_tol_pct=float(runtime.get("pm_weight_tol_pct")),
@@ -1282,10 +1406,18 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     counts: dict[str, int] = {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}
 
     web, web_status = _make_web(run_id)
+    try:
+        oficina = await asyncio.to_thread(oficina_ml.load_fresh)
+    except Exception as exc:  # noqa: BLE001  (un problema con la tabla de la oficina no puede tirar la corrida)
+        log.warning("price_monitor #%s: no se pudieron leer los resultados de la oficina: %s", run_id, exc)
+        oficina = {}
+    if oficina:
+        _update_run(run_id, oficina_fresh=len(oficina))
     excluded = await asyncio.to_thread(match_feedback.load_excluded)
     promoted = await asyncio.to_thread(match_feedback.load_promoted)
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml, web, excluded, promoted)
+        ctx.oficina = oficina
         ctx.extra["stores"] = stores
         try:
             sem = asyncio.Semaphore(concurrency)
@@ -1369,6 +1501,14 @@ def prune_snapshots(retention_days: int) -> tuple[int, int]:
 # ─── "No es el mismo" ─────────────────────────────────────────────
 
 
+def _json_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _json_list(raw: str | None) -> list[dict[str, Any]]:
     try:
         data = json.loads(raw) if raw else []
@@ -1432,6 +1572,8 @@ def _rebuild(snap: MarketPriceSnapshot, priced: list[dict], unpriced: list[dict]
             best = priced[0]
             snap.match_source, snap.match_confidence = best.get("source"), best.get("confidence")
             snap.match_origin = best.get("origin")
+            if snap.match_origin != ORIGIN_API:
+                snap.ml_variant = None
             n_sellers = len(sellers) or min(snap.ml_seller_count or 1, len(prices))
             _apply_prices(snap, prices, n_sellers, green_min=green, yellow_min=yellow)
         else:
@@ -1543,6 +1685,11 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
             "bytes_per_search": round(run.web_bytes / run.web_searches) if run.web_searches else None,
         },
         "n_con_similares": run.n_con_similares,
+        # Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar y los que
+        # terminaron con precio gracias a eso.
+        "oficina": {"fresh": run.oficina_fresh or 0, "n_ok": run.n_oficina_ok or 0},
+        # Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML.
+        "variants": _json_dict(run.variant_stats),
         # Color ESTIMADO por similares (aparte del real) y productos donde ML solo
         # devolvió publicaciones diferentes.
         "estimated": {"verde": run.n_est_verde, "amarillo": run.n_est_amarillo, "rojo": run.n_est_rojo},
@@ -1640,7 +1787,9 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "estimated_listing_count": snap.estimated_listing_count or 0,
         "estimated_from": snap.estimated_from,
         "match_origin": snap.match_origin,
+        "ml_variant": snap.ml_variant,
         "web_state": snap.web_state,
+        "web_via": snap.web_via,
         "web_searches": snap.web_searches or 0,
         "web_bytes": snap.web_bytes or 0,
         "our_specs": our_specs if isinstance(our_specs, dict) else None,
@@ -1662,6 +1811,14 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
     }
 
 
+def _oficina_status() -> dict[str, Any]:
+    try:
+        return oficina_ml.status()
+    except Exception as exc:  # noqa: BLE001  (la card de Salud no se cae por esto)
+        log.warning("no se pudo leer el estado del buscador de la oficina: %s", exc)
+        return {"enabled": False, "error": "no disponible"}
+
+
 def summary() -> dict[str, Any]:
     """Tarjeta de Salud: última corrida + budget ML del día."""
     with Session(engine) as s:
@@ -1679,6 +1836,7 @@ def summary() -> dict[str, Any]:
         "cron_utc": get_settings().price_monitor_cron_utc,
         "include_disabled": bool(int(runtime.get("pm_include_disabled") or 0)),
         "web": {**market_ml_web.web_budget_status(), "off_reason": market_ml_web.disabled_reason()},
+        "oficina": _oficina_status(),
         "stores": store_catalog.index_status(),
         "stores_affect_color": store_match.affect_color_enabled(),
     }

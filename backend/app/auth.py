@@ -16,6 +16,7 @@ Lo que NO requiere login (allowlist):
 - `/health`                    → liveness probe (orquestadores/monitoreo)
 - `/static/*`                  → assets del build de React (JS/CSS)
 - `/verify`                    → lo consume Luis con su X-API-Key (auth propia)
+- `/api/oficina/*`             → la Mac de la oficina, con su x-oficina-key (auth propia)
 - `/favicon.ico`               → ruido del browser
 """
 
@@ -84,6 +85,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/static/",     # assets del build de React (JS/CSS)
     "/verify",
     "/app/",        # b2box app → /app/lookup (autentica por X-API-Key, no por cookie)
+    "/api/oficina/",  # buscador de la oficina: autentica por x-oficina-key, no por cookie
     "/favicon.ico",
 )
 

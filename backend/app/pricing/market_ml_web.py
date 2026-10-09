@@ -62,8 +62,14 @@ _PICTURE_ID = re.compile(r"^[0-9A-Za-z_-]{6,80}$", re.ASCII)
 _ANY_ML_ID = re.compile(r"MLAU?-?(\d{5,})", re.ASCII)
 _BRACES = re.compile(r"\{[^}]*\}")
 _WS = re.compile(r"\s+")
-_NORDIC_CTX = re.compile(r'<script[^>]*id="__NORDIC_RENDERING_CTX__"[^>]*>', re.I)
-_JSON_LD = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.I | re.S)
+# Los <script> se recorren UNA vez, de corrido (`_scripts`): el atributo se busca con un tope de largo y el cierre con `str.find`.
+# Antes cada patrón (`<script[^>]*…[^>]*>(.*?)</script>`) volvía a escanear hasta el final del HTML por cada `<script` sin
+# cerrar: 30.000 de esos tardaban más de 20 s (cuadrático) con la página de un tercero.
+_SCRIPT_OPEN = re.compile(r"<script\b([^>]{0,400})>", re.I)
+_NORDIC_ATTR = re.compile(r'\bid\s*=\s*"__NORDIC_RENDERING_CTX__"', re.I)
+_LD_ATTR = re.compile(r'\btype\s*=\s*"application/ld\+json"', re.I)
+_MAX_SCRIPT_TAGS = 3000
+_MAX_LD_SCRIPTS = 100
 _CTX_PREFIX = "_n.ctx.r="
 # Tope de HTML que se mira. Las páginas reales pesan 2,2 a 3,6 MB sin comprimir y
 # el JSON-LD (de donde sale la marca) puede quedar pasando los 3,0 MB: se corta
@@ -71,6 +77,8 @@ _CTX_PREFIX = "_n.ctx.r="
 MAX_HTML_CHARS = 5_000_000
 _PICTURE_URL = "https://http2.mlstatic.com/D_NQ_NP_{}-F.jpg"
 _MAX_PRICE_CENTS = 10**11
+# Tope de un precio que se acepta, en centavos (mil millones de pesos).
+MAX_PRICE_CENTS = _MAX_PRICE_CENTS
 
 # Marcas de una página anti-bot (la misma idea que image_from_url).
 _ANTIBOT_MARKERS = (
@@ -120,12 +128,29 @@ def _json_after(text: str, start: int) -> Any:
     return obj
 
 
+def _scripts(html: str):
+    """(atributos, inicio, fin) de cada `<script …>…</script>`, en orden y en tiempo lineal. Un script sin cerrar llega
+    hasta el final del HTML y es el último (después de él no hay nada que pueda cerrarse)."""
+    pos = 0
+    for _ in range(_MAX_SCRIPT_TAGS):
+        m = _SCRIPT_OPEN.search(html, pos)
+        if m is None:
+            return
+        end = html.find("</script>", m.end())
+        if end < 0:
+            yield m.group(1), m.end(), len(html)
+            return
+        yield m.group(1), m.end(), end
+        pos = end + len("</script>")
+
+
 def _nordic_state(html: str) -> dict | None:
-    m = _NORDIC_CTX.search(html)
-    if not m:
+    for attrs, start, end in _scripts(html):
+        if _NORDIC_ATTR.search(attrs):
+            body = html[start:end]
+            break
+    else:
         return None
-    end = html.find("</script>", m.end())
-    body = html[m.end(): end if end >= 0 else len(html)]
     at = body.find(_CTX_PREFIX)
     if at < 0:
         return None
@@ -157,10 +182,25 @@ def _find_results(state: dict) -> list | None:
     return None
 
 
-def _clean_text(value: object, limit: int) -> str:
+def clean_line(value: object, limit: int) -> str:
+    """Texto de terceros en UNA línea: sin las marcas `{…}` de ML, sin caracteres de
+    control, de formato (ancho cero, inversión de texto) ni sin asignar, con los
+    espacios colapsados y cortado a `limit`. Un título no puede traer saltos de línea
+    ni controles al dashboard, a un log ni al juez."""
     if not isinstance(value, str):
         return ""
-    return _WS.sub(" ", _BRACES.sub("", value)).strip()[:limit]
+    text = _BRACES.sub("", value[: limit * 4 + 64])
+    text = "".join(" " if c.isspace() else c for c in text
+                   if c.isspace() or unicodedata.category(c)[0] != "C")
+    return _WS.sub(" ", text).strip()[:limit]
+
+
+_clean_text = clean_line
+
+
+def valid_ref(value: object) -> bool:
+    """¿Es un id de publicación de ML (MLA123, MLAU123)? Solo dígitos ASCII."""
+    return isinstance(value, str) and len(value) <= 24 and bool(_REF.fullmatch(value))
 
 
 def _price_cents(value: object) -> int | None:
@@ -248,9 +288,15 @@ def _from_polycard(item: dict) -> MlCandidate | None:
 
 def _ld_products(html: str) -> list[dict]:
     out: list[dict] = []
-    for m in _JSON_LD.finditer(html):
+    seen = 0
+    for attrs, start, end in _scripts(html):
+        if not _LD_ATTR.search(attrs):
+            continue
+        seen += 1
+        if seen > _MAX_LD_SCRIPTS:
+            break
         try:
-            data = json.loads(m.group(1))
+            data = json.loads(html[start:end])
         except (ValueError, RecursionError):
             continue
         graph = data.get("@graph") if isinstance(data, dict) else data

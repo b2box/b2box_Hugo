@@ -156,6 +156,9 @@ def world(monkeypatch):
     # Estos tests describen la sombra de siempre (solo habilitados); los
     # deshabilitados tienen sus propios tests en test_semaforo_web.py.
     runtime.set_value("pm_include_disabled", 0)
+    # ... y con las búsquedas de siempre (título y, si no trae nada, sus 4 primeras palabras): las
+    # variantes tienen sus propios tests en test_ml_query_variants.py.
+    runtime.set_value("pm_ml_query_variants", 1)
 
     FakeVendure.products = [
         _product("1", "Organizador cocina"),
@@ -224,10 +227,11 @@ def world(monkeypatch):
     # Que no le pise el default a otros módulos. Se borra la fila a mano: reset_to_default()
     # llama a get_settings() y, con PM_LLM_* seteado por otro test, dejaba su cache pegado.
     with Session(engine) as s:
-        row = s.get(Setting, "pm_include_disabled")
-        if row is not None:
-            s.delete(row)
-            s.commit()
+        for key in ("pm_include_disabled", "pm_ml_query_variants"):
+            row = s.get(Setting, key)
+            if row is not None:
+                s.delete(row)
+        s.commit()
     runtime.invalidate()
 
 

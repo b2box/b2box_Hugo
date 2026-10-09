@@ -72,7 +72,14 @@ const MATCH_LABEL: Record<string, string> = {
 };
 
 // De dónde salió la publicación y cómo se decidió.
-const ORIGIN_LABEL: Record<MatchOrigin, string> = { api: "ficha API", web: "web" };
+const ORIGIN_LABEL: Record<MatchOrigin, string> = { api: "ficha API", web: "web", oficina: "Web (oficina)" };
+// Qué búsqueda de la API de ML encontró la ficha (pm_ml_query_variants).
+const VARIANT_LABEL: Record<string, string> = {
+  titulo: "título",
+  corto: "título corto",
+  claves: "palabras clave",
+  inicio: "primeras palabras",
+};
 const SOURCE_LABEL: Record<string, string> = {
   clip: "foto",
   "clip+nombre": "foto + nombre",
@@ -90,6 +97,11 @@ const DIFFERENCE_LABEL: Record<string, string> = {
   funcion: "función",
   accesorio: "accesorio",
   peso: "peso",
+};
+// Lo que dejó la búsqueda de la Mac de la oficina (solo "buscó" y "sin publicaciones" existen).
+const OFICINA_STATE_LABEL: Partial<Record<WebState, string>> = {
+  ok: "Web (oficina): buscó",
+  empty: "Web (oficina): sin publicaciones",
 };
 const WEB_STATE_LABEL: Record<WebState, string> = {
   ok: "ML web: buscó",
@@ -127,6 +139,7 @@ const ORIGIN_OPTIONS: { value: MatchOrigin | null; label: string }[] = [
   { value: null, label: "Todos" },
   { value: "api", label: "Ficha API" },
   { value: "web", label: "Web" },
+  { value: "oficina", label: "Web (oficina)" },
 ];
 
 const pct = (v: number | null | undefined): string => (v == null ? "—" : `${Math.round(v * 100)} %`);
@@ -374,8 +387,10 @@ export default function SemaforoView() {
 
       {summaryQ.data?.web?.off_reason && (
         <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
-          La búsqueda en la web de Mercado Libre está apagada: {summaryQ.data.web.off_reason}. Los productos sin
-          ficha de catálogo quedan sin dato.
+          La búsqueda en la web de Mercado Libre desde el servidor está apagada: {summaryQ.data.web.off_reason}.{" "}
+          {summaryQ.data.oficina?.enabled
+            ? `Los productos sin ficha de catálogo se resuelven solo con lo que busca la oficina (${nfmt(summaryQ.data.oficina.fresh_products)} con resultado fresco); el resto queda sin dato.`
+            : "Los productos sin ficha de catálogo quedan sin dato."}
         </p>
       )}
 
@@ -592,6 +607,24 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
           )}
         </span>
       )}
+      {run.oficina && run.oficina.fresh > 0 && (
+        <span className="block mt-0.5">
+          Buscador de la oficina:{" "}
+          <span className="num-tabular">
+            {nfmt(run.oficina.fresh)} productos con búsqueda fresca · {nfmt(run.oficina.n_ok)} con precio
+          </span>
+        </span>
+      )}
+      {run.variants && Object.keys(run.variants).length > 0 && (
+        <span className="block mt-0.5">
+          Fichas de la API, por la búsqueda que las encontró:{" "}
+          <span className="num-tabular">
+            {Object.entries(run.variants)
+              .map(([k, n]) => `${VARIANT_LABEL[k] ?? k} ${nfmt(n)}`)
+              .join(" · ")}
+          </span>
+        </span>
+      )}
       {run.web && (run.web.searches > 0 || run.web.status) && (
         <span className="block mt-0.5">
           ML web:{" "}
@@ -760,6 +793,7 @@ function SnapshotRow({
         {s.matched_listings.length > 0 && s.match_source && (
           <span className="block text-[11px] text-muted-foreground">
             idéntico · {s.match_origin ? `${ORIGIN_LABEL[s.match_origin]} · ` : ""}
+            {s.match_origin === "api" && s.ml_variant && s.ml_variant !== "titulo" && `búsqueda: ${VARIANT_LABEL[s.ml_variant] ?? s.ml_variant} · `}
             {MATCH_LABEL[s.match_source] ?? s.match_source}
             {s.match_confidence != null && ` (${Math.round(s.match_confidence * 100)}%)`}
           </span>
@@ -768,7 +802,7 @@ function SnapshotRow({
         <OtherChip s={s} />
         {s.web_state && s.web_state !== "ok" && s.ml_status !== "ok" && (
           <span className="block text-[11px] text-muted-foreground mt-0.5" title={s.ml_error ?? undefined}>
-            {WEB_STATE_LABEL[s.web_state]}
+            {(s.web_via === "oficina" && OFICINA_STATE_LABEL[s.web_state]) || WEB_STATE_LABEL[s.web_state]}
           </span>
         )}
       </td>

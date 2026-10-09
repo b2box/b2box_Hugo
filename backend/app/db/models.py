@@ -228,6 +228,13 @@ class PriceMonitorRun(SQLModel, table=True):
     # productos tienen, por fuente, un idéntico, solo similares, solo diferentes o
     # nada (ver pricing/store_match.source_stats).
     source_stats: str | None = Field(default=None)
+    # JSON {"titulo": n, "corto": n, "claves": n}: cuántos productos resolvió con un IGUAL
+    # con precio cada búsqueda de la API de ML (para medir si las variantes sirven).
+    variant_stats: str | None = Field(default=None)
+    # Búsquedas web de la Mac de la oficina (ver pricing/oficina_ml.py): productos con un
+    # resultado fresco al empezar la corrida y productos que quedaron con precio por eso.
+    oficina_fresh: int = Field(default=0)
+    n_oficina_ok: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -327,6 +334,11 @@ class MarketPriceSnapshot(SQLModel, table=True):
     # De qué precios sale el color: ml | ml+tiendas | tiendas. Solo cambia de "ml"
     # con `pm_stores_affect_color` prendido (ver pricing/store_match.apply_color).
     price_basis: str = Field(default="ml", max_length=12)
+    # Qué búsqueda de la API de ML encontró el IGUAL con precio: titulo | corto | claves |
+    # inicio (ver pricing/market_query.py). None = no salió de la API.
+    ml_variant: str | None = Field(default=None, max_length=12)
+    # "oficina" si `web_state` lo dejó la búsqueda de la Mac de la oficina (no el servidor).
+    web_via: str | None = Field(default=None, max_length=8)
 
 
 class MarketMatchFeedback(SQLModel, table=True):
@@ -372,6 +384,30 @@ class MlSellerCache(SQLModel, table=True):
     seller_id: str = Field(primary_key=True, max_length=32)
     completed_sales: int | None = Field(default=None)
     fetched_at: datetime = Field(default_factory=utcnow)
+
+
+class MlWebResult(SQLModel, table=True):
+    """Una búsqueda web de ML hecha por la Mac de la oficina para un producto (ver
+    pricing/oficina_ml.py). Hugo guarda lo que la Mac manda YA saneado; el semáforo lo
+    usa como fuente "web" mientras sea fresco. Idempotente por (product_id, fetched_at)."""
+    __tablename__ = "ml_web_result"
+    __table_args__ = (
+        Index("ix_mwr_product_fetched", "product_id", "fetched_at", unique=True),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    query: str = Field(max_length=200)
+    # Cuándo buscó la Mac (UTC, sin zona, a los segundos) y cuándo lo recibió Hugo.
+    fetched_at: datetime
+    received_at: datetime = Field(default_factory=utcnow)
+    origin: str = Field(default="oficina", max_length=8)
+    # JSON: lista de publicaciones (id, name, image_urls, permalink, price_cents…), ya saneadas.
+    candidates: str = Field(default="[]")
+    n_candidates: int = Field(default=0)
+    # ok | empty | blocked | error
+    status: str = Field(max_length=8)
+    reason: str | None = Field(default=None, max_length=300)
 
 
 # ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───

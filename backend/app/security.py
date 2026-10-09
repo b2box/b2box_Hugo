@@ -127,12 +127,17 @@ MIN_KEY_LEN = 24
 _PLACEHOLDER_KEYS = frozenset({"replace-me", "replaceme", "change-me", "changeme", "example"})
 
 
-def weak_key_reason(key: str) -> str | None:
-    """Por qué una key NO sirve en producción, o None si sirve."""
+def weak_key_reason(key: str, *, min_distinct: int = 0) -> str | None:
+    """Por qué una key NO sirve en producción, o None si sirve.
+
+    `min_distinct` > 0 exige además esa cantidad de caracteres distintos (una key "aaaaaaaa…" de 24 letras cumple el largo
+    y no vale nada). Por defecto no se exige: las keys de HUGO_API_KEYS que ya están en producción no se tocan."""
     if key.strip().lower() in _PLACEHOLDER_KEYS:
         return "es un placeholder del .env.example"
     if len(key) < MIN_KEY_LEN:
         return f"tiene menos de {MIN_KEY_LEN} caracteres"
+    if min_distinct and len(set(key)) < min_distinct:
+        return f"tiene menos de {min_distinct} caracteres distintos"
     return None
 
 

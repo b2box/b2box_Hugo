@@ -1,0 +1,91 @@
+"""Títulos realistas de bazar, ferretería y regalería (en el estilo del catálogo: medidas, packs, colores, códigos
+internos BX/PA, adjetivos de marketing, mayúsculas raras) para probar las variantes de búsqueda. NO son del catálogo real
+(no hay un volcado en el repo): se armaron a mano a partir de los nombres de los fixtures y de lo que se ve en ML."""
+
+BAZAR = [
+    "Set x6 Vasos de Vidrio 300ml Transparente",
+    "Frasco Hermético de Vidrio 500 ml con Tapa de Bambú",
+    "Organizador Doble Ajustable 3 Niveles 40x30 Blanco",
+    "Pack x3 Vaso Térmico Acero Inoxidable 500 ml BX0123",
+    "Sartén Antiadherente 28 cm Granito Negro",
+    "Juego de Ollas Aluminio 7 Piezas Rojo",
+    "Tabla de Picar Bambú 38x28 cm",
+    "Colador de Acero Inoxidable Mango Largo 20 cm",
+    "Set de Cuchillos de Cocina 6 Piezas con Soporte",
+    "Taza de Cerámica con Frase 350ml Blanca",
+    "Mate de Calabaza Forrado en Cuero Premium",
+    "Termo Acero Inoxidable 1 Litro con Pico Cebador",
+    "Bombilla Mate Acero Inoxidable Pico de Loro",
+    "Tupper Hermético Rectangular 1.5 L Pack x 4",
+    "Dispenser de Jabón Líquido Automático Sensor 400 ml",
+    "Escurridor de Platos 2 Niveles Cromado",
+    "Cesto de Ropa Plegable 50 L Gris",
+    "Percha Antideslizante Terciopelo Pack x 20 Negro",
+    "Caja Organizadora Plástica 32 Litros con Tapa y Ruedas",
+    "Pava Eléctrica 1.8 L 1500W Acero",
+]
+FERRETERIA = [
+    "Destornillador Philips PH2 x 100 mm Mango Bi-material",
+    "Juego de Llaves Combinadas 12 Piezas 8-22 mm",
+    "Taladro Percutor Inalámbrico 20V con 2 Baterías y Maletín",
+    "Cinta Métrica 5 m Profesional Autofrenante",
+    "Nivel de Burbuja Aluminio 60 cm",
+    "Pinza Pico de Loro 8 Pulgadas Aislada",
+    "Candado de Seguridad Latón 50 mm Llave x3",
+    "Mecha Widia 6 mm Hormigón Pack x 5",
+    "Tornillos Autoperforantes 8x1 Caja x 500 Unidades",
+    "Cinta Aisladora Negra 20 m x 18 mm Pack 10",
+    "Linterna LED Recargable USB 3 Modos CREE T6",
+    "Alargue Eléctrico 5 m 3 Tomas con Interruptor Blanco",
+    "Caja de Herramientas Plástica 17 Pulgadas Rojo",
+    "Guantes de Trabajo Nitrilo Talle L Par",
+    "Escalera Plegable Aluminio 4 Escalones",
+    "Manguera de Jardín Reforzada 20 m 1/2 Pulgada",
+    "Pistola de Silicona 40W con 10 Barras",
+    "Amoladora Angular 4 1/2 Pulgadas 850W",
+    "Soldadora Inverter 200A Portátil",
+]
+REGALERIA = [
+    "Peluche Oso Panda Gigante 80 cm",
+    "Taza Mágica Térmica Sublimable Negro 11oz",
+    "Globo Metalizado Número 5 Dorado 40 cm",
+    "Pack x 12 Globos Látex Metalizados Colores Surtidos",
+    "Caja de Regalo Corazón con Tapa 20x20 Rosa",
+    "Lámpara Luna 3D 15 cm Recargable USB Touch",
+    "Porta Retrato Madera 13x18 Pack x 3",
+    "Vela Aromática Soja 200 g Lavanda",
+    "Set de Té Cerámica 15 Piezas Estampado Floral",
+    "Cuaderno A5 Tapa Dura Rayado 100 Hojas Celeste",
+    "Llavero Personalizable Acrílico Pack 50",
+]
+OTROS = [
+    "Kit de Herramientas 108 Piezas con Maletín",
+    "Mini Ventilador USB Portátil Recargable Rosa",
+    "Auriculares Bluetooth Inalámbricos TWS i12 Blanco",
+    "Funda Silicona iPhone 13 Pro Max Transparente",
+    "Cargador Rápido 20W USB-C PD Cable Incluido",
+    "Reloj Digital Deportivo Sumergible Negro BX0456",
+    "Lámpara LED Escritorio Flexible USB Táctil",
+    "Alfombra Baño Antideslizante Gris Oscuro 40x60 Extra",
+    "Cafetera Italiana Aluminio 6 Pocillos Plateada",
+    "ORGANIZADOR DE CABLES ADHESIVO X 6 NEGRO",
+    "Taza (350ml) - Blanca/Negra, c/ cuchara",
+    "Mini Bluetooth Speaker Black 5W",
+]
+# Casos de borde: cortos, todo ruido, un solo término, solo medidas, solo código.
+BORDE = [
+    "Taza",
+    "Set 3 Bandejas",
+    "Pack x3 500 ml Blanco",
+    "40x30 cm",
+    "BX1234",
+    "Original Premium Nuevo Importado",
+    "Oferta Super Mega 2x1",
+    "x",
+    "Kit",
+    "Mini",
+    "Set de Juego",
+    "Doble",
+]
+REALISTAS = BAZAR + FERRETERIA + REGALERIA + OTROS
+TODOS = REALISTAS + BORDE

@@ -209,6 +209,25 @@ function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
             </div>
           </div>
           <SourcesStats run={run} stores={pm.stores} />
+          {pm.oficina?.enabled && (
+            <p className="text-xs text-muted-foreground mt-3">
+              Buscador de la oficina:{" "}
+              <span className="num-tabular">
+                {nfmt(pm.oficina.fresh_products)} productos con resultado fresco (vale {pm.oficina.ttl_days} días) ·{" "}
+                {pm.oficina.last_received_at ? `última carga ${fmtTime(pm.oficina.last_received_at)}` : "todavía no cargó nada"}
+              </span>
+              {pm.oficina.last_received_at && (
+                <span className="num-tabular">
+                  {" "}
+                  · últimas 24 h: {nfmt(pm.oficina.last_24h.ok)} con resultados · {nfmt(pm.oficina.last_24h.empty)} vacías ·{" "}
+                  <span className={pm.oficina.last_24h.blocked > 0 ? "text-warning font-semibold" : undefined}>
+                    {nfmt(pm.oficina.last_24h.blocked)} bloqueadas
+                  </span>{" "}
+                  · {nfmt(pm.oficina.last_24h.error)} con error
+                </span>
+              )}
+            </p>
+          )}
           {run.error && <p className="text-xs text-destructive mt-3">Error: {run.error}</p>}
         </>
       )}

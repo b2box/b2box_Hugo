@@ -8,6 +8,7 @@ import os
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
+import json  # noqa: E402
 import pytest  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
@@ -435,3 +436,40 @@ def test_a_verification_page_that_carries_an_empty_state_is_a_block_not_an_empty
 def test_the_url_decides_even_if_there_are_results():
     pg = page(listing_html(POLY), final_url="https://www.mercadolibre.com/gz/account-verification")
     assert web.page_problem(pg, web.parse_search(pg.html, 8))[0] == "blocked"
+
+
+# ─── páginas hostiles: el parseo es lineal (antes los <script> sin cerrar lo volvían cuadrático) ───────────
+
+
+@pytest.mark.parametrize("html", [
+    '<script type="application/ld+json">{' * 30_000,
+    '<script type="application/ld+json">' * 140_000,
+    "<script " * 100_000,
+    '<script a="b" ' * 100_000,
+    '<script id="__NORDIC_RENDERING_CTX__">' * 50_000,
+    '<script type="application/ld+json">{}</script>' * 50_000,
+], ids=["ld-sin-cerrar-con-llave", "ld-sin-cerrar", "script-sin-mayor", "script-con-atributos-sin-mayor",
+        "nordic-sin-cerrar", "ld-cerrados"])
+def test_hostile_script_soup_parses_in_linear_time(html):
+    import time
+
+    started = time.monotonic()
+    parsed = web.parse_search(html, 8)
+    assert time.monotonic() - started < 3.0 and parsed.candidates == []
+
+
+def test_the_state_and_the_ld_json_are_still_found_among_many_other_scripts():
+    noise = "<script>var a = 1;</script>" * 500
+    state = listing_html([polycard("MLA555", "Taza", 100.0, picture="555-MLA1_012025")],
+                         ld=[ld_product("Taza", "https://www.mercadolibre.com.ar/up/MLAU99", 100.0, brand="Marca")])
+    parsed = web.parse_search(state.replace("<head>", "<head>" + noise, 1), 8)
+    assert parsed.source == "state" and [c.id for c in parsed.candidates] == ["MLA555"]
+    ld_only = listing_html(None, with_state=False, ld=[ld_product("Taza", "https://www.mercadolibre.com.ar/up/MLAU99", 100.0)])
+    assert web.parse_search(ld_only.replace("<head>", "<head>" + noise, 1), 8).source == "jsonld"
+
+
+def test_only_the_first_hundred_ld_json_scripts_are_read():
+    scripts = "".join('<script type="application/ld+json">' + json.dumps({"@graph": [ld_product(
+        f"P{i}", f"https://www.mercadolibre.com.ar/up/MLAU{1000 + i}", 1.0)]}) + "</script>" for i in range(300))
+    parsed = web.parse_search(scripts, 500)
+    assert parsed.source == "jsonld" and len(parsed.candidates) == 100
