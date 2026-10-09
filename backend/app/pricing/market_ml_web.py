@@ -71,6 +71,8 @@ _CTX_PREFIX = "_n.ctx.r="
 MAX_HTML_CHARS = 5_000_000
 _PICTURE_URL = "https://http2.mlstatic.com/D_NQ_NP_{}-F.jpg"
 _MAX_PRICE_CENTS = 10**11
+# Tope de un precio que se acepta, en centavos (mil millones de pesos).
+MAX_PRICE_CENTS = _MAX_PRICE_CENTS
 
 # Marcas de una página anti-bot (la misma idea que image_from_url).
 _ANTIBOT_MARKERS = (
@@ -157,10 +159,25 @@ def _find_results(state: dict) -> list | None:
     return None
 
 
-def _clean_text(value: object, limit: int) -> str:
+def clean_line(value: object, limit: int) -> str:
+    """Texto de terceros en UNA línea: sin las marcas `{…}` de ML, sin caracteres de
+    control, de formato (ancho cero, inversión de texto) ni sin asignar, con los
+    espacios colapsados y cortado a `limit`. Un título no puede traer saltos de línea
+    ni controles al dashboard, a un log ni al juez."""
     if not isinstance(value, str):
         return ""
-    return _WS.sub(" ", _BRACES.sub("", value)).strip()[:limit]
+    text = _BRACES.sub("", value[: limit * 4 + 64])
+    text = "".join(" " if c.isspace() else c for c in text
+                   if c.isspace() or unicodedata.category(c)[0] != "C")
+    return _WS.sub(" ", text).strip()[:limit]
+
+
+_clean_text = clean_line
+
+
+def valid_ref(value: object) -> bool:
+    """¿Es un id de publicación de ML (MLA123, MLAU123)? Solo dígitos ASCII."""
+    return isinstance(value, str) and len(value) <= 24 and bool(_REF.fullmatch(value))
 
 
 def _price_cents(value: object) -> int | None:

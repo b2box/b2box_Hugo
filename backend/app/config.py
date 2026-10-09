@@ -287,6 +287,16 @@ class Settings(BaseSettings):
         default=75, ge=1, description="Páginas de listado antes de relanzar el browser"
     )
 
+    # ── Buscador de la oficina (búsqueda web de ML desde la Mac de la oficina) ──
+    # Ver app/pricing/oficina_ml.py y backend/tools/oficina_ml_search.py. La Mac busca en
+    # ML con la conexión de la oficina y le manda a Hugo lo que encontró; Hugo hace el
+    # matching. Sin OFICINA_SEARCH_KEY los endpoints /api/oficina/* no existen (404).
+    oficina_search_key: str = Field(
+        default="", description="Key del header x-oficina-key (>= 24 caracteres). Vacía = apagado")
+    # Un resultado de la oficina vale este tiempo; pasado esto el semáforo lo ignora y la
+    # cola lo vuelve a pedir.
+    oficina_result_ttl_days: int = Field(default=7, ge=1, le=90)
+
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")
 

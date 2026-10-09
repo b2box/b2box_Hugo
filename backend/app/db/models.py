@@ -380,6 +380,30 @@ class MlSellerCache(SQLModel, table=True):
     fetched_at: datetime = Field(default_factory=utcnow)
 
 
+class MlWebResult(SQLModel, table=True):
+    """Una búsqueda web de ML hecha por la Mac de la oficina para un producto (ver
+    pricing/oficina_ml.py). Hugo guarda lo que la Mac manda YA saneado; el semáforo lo
+    usa como fuente "web" mientras sea fresco. Idempotente por (product_id, fetched_at)."""
+    __tablename__ = "ml_web_result"
+    __table_args__ = (
+        Index("ix_mwr_product_fetched", "product_id", "fetched_at", unique=True),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    query: str = Field(max_length=200)
+    # Cuándo buscó la Mac (UTC, sin zona, a los segundos) y cuándo lo recibió Hugo.
+    fetched_at: datetime
+    received_at: datetime = Field(default_factory=utcnow)
+    origin: str = Field(default="oficina", max_length=8)
+    # JSON: lista de publicaciones (id, name, image_urls, permalink, price_cents…), ya saneadas.
+    candidates: str = Field(default="[]")
+    n_candidates: int = Field(default=0)
+    # ok | empty | blocked | error
+    status: str = Field(max_length=8)
+    reason: str | None = Field(default=None, max_length=300)
+
+
 # ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───
 # Ver app/pricing/store_catalog.py (indexador) y store_match.py (matching). Las
 # tiendas son una fila en `market_store`: agregar otra Tiendanube es cargarla

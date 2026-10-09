@@ -159,9 +159,13 @@ class MlUnavailable(meli.MeliError):
     """ML siguió en 429/5xx después de todos los reintentos."""
 
 
-# Origen de un candidato: la API de fichas de catálogo o la búsqueda web.
+# Origen de un candidato: la API de fichas de catálogo, la búsqueda web del servidor o la
+# búsqueda web hecha por la Mac de la oficina (ver oficina_ml.py). Los dos últimos son
+# "web": publicaciones de la página de ML, con precio y ventas en el propio resultado.
 ORIGIN_API = "api"
 ORIGIN_WEB = "web"
+ORIGIN_OFICINA = "oficina"
+WEB_ORIGINS = (ORIGIN_WEB, ORIGIN_OFICINA)
 
 
 @dataclass(slots=True)
