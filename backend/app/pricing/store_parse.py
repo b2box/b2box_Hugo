@@ -156,8 +156,8 @@ def decode_sitemap_body(body: bytes, limit: int = MAX_SITEMAP_BYTES) -> str:
             body = dec.decompress(body, limit + 1)
         except (zlib.error, EOFError, gzip.BadGzipFile):
             return ""
-        if len(body) > limit:
-            return ""
+        if len(body) > limit or dec.unused_data[:2] == b"\x1f\x8b":
+            return ""            # demasiado grande, o varios miembros gzip: solo se abriría el primero
     return body[:limit].decode("utf-8", errors="replace")
 
 

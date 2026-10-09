@@ -122,21 +122,29 @@ def from_status(status: int | None, text: str = "", agent: str = "HugoPriceBot")
     return disallow_all()
 
 
+# Token de producto: letras al principio y después nada, o un separador (`/1.0`, ` (+url)`, `;`). `HugoPriceBot2` no.
+_TOKEN_RE = re.compile(r"([a-z_-]+)(?:[/\s(;].*)?$", re.S)
+
+
 def _agent_matches(declared: str, token: str) -> int:
-    """Especificidad del grupo para nosotros: 0 = no aplica, 1 = `*`, 2 = nuestro token. Igualdad
-    (sin distinguir mayúsculas), no «contiene»: `User-agent: o` no es nuestro."""
+    """Especificidad del grupo para nosotros: 0 = no aplica, 1 = `*`, 2 = nuestro token. Se compara el
+    token de producto de lo declarado (sus letras iniciales: `HugoPriceBot/1.0` y `HugoPriceBot (+url)`
+    son `hugopricebot`) por igualdad, no por «contiene»: `User-agent: o` no es nuestro."""
     declared = declared.strip().lower()
     if declared == "*":
         return 1
-    return 2 if declared and declared == token else 0
+    m = _TOKEN_RE.match(declared)
+    return 2 if m and m.group(1) == token else 0
 
 
 def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
     """Texto de robots.txt → reglas que valen para `agent`."""
     # "HugoPriceBot/1.0 (+https://…)" → "hugopricebot": el token de producto del User-Agent.
-    token = re.split(r"[/\s(;]", agent.strip(), maxsplit=1)[0].lower()
+    m = _TOKEN_RE.match(agent.strip().lower())
+    token = m.group(1) if m else ""
     groups: list[tuple[list[str], list[tuple[bool, str]], list[float]]] = []
     sitemaps: list[str] = []
+    total_rules = 0
     agents: list[str] = []
     rules: list[tuple[bool, str]] = []
     delays: list[float] = []
@@ -156,8 +164,10 @@ def parse(text: str, agent: str = "HugoPriceBot") -> Robots:
             agents.append(value)
         elif field in ("allow", "disallow"):
             reading_agents = False
-            if groups and len(rules) < MAX_RULES and len(value) <= _MAX_PATTERN_LEN:
+            # Tope por grupo y TOTAL: un robots con miles de grupos de una regla no puede crecer sin techo.
+            if groups and len(rules) < MAX_RULES and total_rules < MAX_RULES and len(value) <= _MAX_PATTERN_LEN:
                 rules.append((field == "allow", value))
+                total_rules += 1
         elif field == "crawl-delay":
             reading_agents = False
             try:

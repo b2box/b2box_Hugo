@@ -53,10 +53,30 @@ MAX_HOST_LEN = 100
 MAX_URL_LEN = 500
 
 
+# Segundas etiquetas genéricas que, delante de un TLD de país de dos letras, forman un SUFIJO PÚBLICO donde
+# cualquiera registra su dominio: com.uy, com.pe, co.nz, org.uk, gob.ar, co.jp, ne.jp… No hay una lista
+# oficial en el lock (la Public Suffix List completa no es una dependencia nuestra), así que la regla es
+# estructural: «<genérica>.<país de 2 letras>». Alcanza para los países donde Hugo puede tener tiendas.
+_GENERIC_SLD = frozenset({
+    "com", "co", "net", "org", "gob", "gov", "gub", "edu", "mil", "ac", "go", "or", "ne", "nom", "sch", "int", "ltd",
+    "plc", "govt", "info", "biz", "tur", "blog", "mus", "ind", "adm", "adv", "arq", "bio", "eng", "fin", "jus", "leg",
+    "med", "psi", "tec", "coop", "gen", "iwi", "mod", "nhs", "k12", "pro", "me", "gouv", "gv", "lg", "ed", "id",
+})
+
+
+def is_public_suffix(domain: str) -> bool:
+    """¿Es un sufijo público (un TLD, o «com.uy» / «co.nz»), o sea no el dominio de UNA tienda?"""
+    labels = (domain or "").lower().strip(".").split(".")
+    if len(labels) == 1:
+        return True
+    return len(labels) == 2 and len(labels[1]) == 2 and labels[0] in _GENERIC_SLD
+
+
 def valid_hostname(host: str) -> bool:
     """¿Es un nombre de dominio común (con TLD de letras, hasta 100 caracteres) y no un sufijo
     público ni una plataforma multi-inquilino? Descarta IPs, `localhost` y nombres de una etiqueta."""
-    return bool(_HOST_RE.match(host or "")) and host not in _TOO_BROAD
+    host = host or ""
+    return bool(_HOST_RE.match(host)) and host not in _TOO_BROAD and not is_public_suffix(host)
 
 
 def host_of(url: object) -> str:
@@ -112,7 +132,11 @@ def host_matches(host: str, entry: str) -> bool:
         domain = entry[2:]
         return host == domain or host.endswith("." + domain)
     if "*" in entry:
-        return fnmatch.fnmatchcase(host, entry)
+        # El comodín vive en la primera etiqueta y NO cruza puntos: `acdn*.mitiendanube.com` es
+        # `acdn-us.mitiendanube.com`, no `acdn.cualquier-cosa.mitiendanube.com`.
+        pattern_first, _, pattern_rest = entry.partition(".")
+        first, _, rest = host.partition(".")
+        return rest == pattern_rest and fnmatch.fnmatchcase(first, pattern_first)
     return host == entry or host == "www." + entry or entry == "www." + host
 
 
