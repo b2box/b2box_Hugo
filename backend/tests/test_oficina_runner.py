@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import plistlib
+import signal
 import stat
 import subprocess
 import sys
@@ -29,6 +30,15 @@ from tools import oficina_ml_search as runner  # noqa: E402
 TOOLS = Path(runner.__file__).parent
 HugoClient = runner.HugoClient          # la de verdad: algunos tests reemplazan `runner.HugoClient`
 SECRET = "S3cr3t-" + "k" * 40
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_environment(monkeypatch):
+    """`main()` prepara el entorno de la Mac (sin proxy, DB de mentira…): que no se filtre a otros tests."""
+    for name in ("BROWSER_PROXY", "BROWSER_FETCH_ENABLED", "DATABASE_URL", "VENDURE_API_URL"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+        if name not in os.environ or os.environ[name] == "":
+            monkeypatch.delenv(name)
 
 
 def _cards(*refs: str):
@@ -484,6 +494,40 @@ def test_cli_an_empty_queue_is_a_normal_night(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "HugoClient", lambda cfg: FakeHugo([]).client())
     monkeypatch.setattr(runner, "_run_real", lambda *a, **k: pytest.fail("no hay nada que buscar"))
     assert runner.main(["--env-file", str(env), "--log-file", str(tmp_path / "l")]) == 0
+
+
+def test_sigterm_is_handled_like_ctrl_c_while_it_runs_and_restored_after(tmp_path, monkeypatch):
+    """launchd / el apagado de la Mac cortan con SIGTERM: durante la corrida se trata como Ctrl+C (lo ya buscado se
+    entrega) y al terminar se deja el manejador como estaba."""
+    env = _write_env(tmp_path / ".env", f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://hugo.example\n")
+    seen = {}
+
+    class Spy:
+        def queue(self, limit):
+            seen["during"] = signal.getsignal(signal.SIGTERM)
+            return {"items": [], "max_results": 8}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "HugoClient", lambda cfg: Spy())
+    before = signal.getsignal(signal.SIGTERM)
+    assert runner.main(["--env-file", str(env), "--log-file", str(tmp_path / "l")]) == 0
+    assert seen["during"] is signal.default_int_handler and signal.getsignal(signal.SIGTERM) == before
+
+
+async def test_an_interruption_in_the_middle_still_delivers_what_was_already_searched():
+    class Interrupting(FakeML):
+        async def fetch(self, url):
+            if len(self.urls) == 3:
+                raise KeyboardInterrupt
+            return await super().fetch(url)
+
+    ml, hugo = Interrupting(), FakeHugo()
+    s = _searcher(ml, hugo, batch_size=10)
+    with pytest.raises(KeyboardInterrupt):
+        await _go(s, _items(8))
+    assert [r["product_id"] for b in hugo.posts for r in b] == ["1", "2", "3"]
 
 
 def test_the_proxy_is_forced_off_even_if_the_repo_env_has_one():

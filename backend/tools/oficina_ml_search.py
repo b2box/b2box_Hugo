@@ -32,6 +32,7 @@ import random
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -506,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", exc)
         return EXIT_CONFIG
     prepare_environment()
+    # launchd (o el apagado de la Mac) corta con SIGTERM: se trata como Ctrl+C, así lo que ya se buscó se entrega.
+    previous_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     hugo = HugoClient(config)
     try:
         try:
@@ -530,9 +533,10 @@ def main(argv: list[str] | None = None) -> int:
             if awake is not None:
                 awake.terminate()
     except KeyboardInterrupt:
-        log.warning("interrumpido a mano")
+        log.warning("interrumpido (Ctrl+C o apagado): lo que ya estaba buscado se entregó")
         return EXIT_OK
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         hugo.close()
 
 

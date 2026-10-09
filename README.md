@@ -627,7 +627,8 @@ ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS variant_stats, DROP COLUMN I
 
 **Cobertura.** Con 250 productos por noche y 1.800 "sin dato", una vuelta completa son ~8 noches; con el TTL de 7 días el
 régimen no alcanza a refrescar todo antes de que venza (necesitaría ~265 por noche). Subir `--max` en el plist (hasta 500) o
-`OFICINA_RESULT_TTL_DAYS` lo resuelve. A ~12 s por búsqueda, 250 productos son ~1 hora (más si la primera consulta viene vacía).
+`OFICINA_RESULT_TTL_DAYS` lo resuelve. Medido en la prueba real (5 búsquedas desde esta Mac, sin proxy): 3 a 7 s de carga + la pausa de 8 a 15 s = ~16 s por producto, así que
+50 productos son ~13 minutos y 250 son ~1 hora 10 (más si la primera consulta viene vacía y hace falta otra).
 
 **Riesgos.** Es la misma fuente que la búsqueda web del servidor (`robots.txt` de `listado.mercadolibre.com.ar`: permite las
 búsquedas por palabra a los agentes genéricos) pero desde una IP de oficina, así que si ML la bloquea esa IP queda marcada: por eso
