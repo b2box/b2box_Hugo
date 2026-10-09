@@ -292,7 +292,7 @@ class Settings(BaseSettings):
     # ML con la conexión de la oficina y le manda a Hugo lo que encontró; Hugo hace el
     # matching. Sin OFICINA_SEARCH_KEY los endpoints /api/oficina/* no existen (404).
     oficina_search_key: str = Field(
-        default="", description="Key del header x-oficina-key (>= 24 caracteres). Vacía = apagado")
+        default="", description="Key del header x-oficina-key (>= 32 caracteres, la de --init). Vacía = apagado")
     # Un resultado de la oficina vale este tiempo; pasado esto el semáforo lo ignora y la
     # cola lo vuelve a pedir.
     oficina_result_ttl_days: int = Field(default=7, ge=1, le=90)

@@ -1493,7 +1493,7 @@ Ver `.env.example`. Las críticas:
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
   (default 180; siempre queda el último snapshot de cada producto; 0 = nunca).
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
-- `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 24 caracteres; `tools/oficina_ml_search.py --init` la genera). Sin ella
+- `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 32 caracteres; usá la que genera `tools/oficina_ml_search.py --init`). Sin ella
   los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
