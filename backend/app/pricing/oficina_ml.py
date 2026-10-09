@@ -64,6 +64,9 @@ FUTURE_SKEW = timedelta(minutes=5)
 QUEUE_REFRESH_MARGIN = timedelta(days=1)
 MIN_REFRESH_AGE = timedelta(hours=12)
 
+# Una key de `secrets.token_urlsafe(32)` tiene ~30 caracteres distintos; esto frena "aaaa…" o "abcabcabc…".
+MIN_KEY_DISTINCT_CHARS = 12
+
 _PRODUCT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$", re.ASCII)
 _CURRENCY = re.compile(r"^[A-Za-z]{3}$", re.ASCII)
 _DOMAIN_ID = re.compile(r"^[A-Za-z0-9_-]{1,60}$", re.ASCII)
@@ -81,7 +84,7 @@ def configured_key() -> str | None:
     key = (get_settings().oficina_search_key or "").strip()
     if not key:
         return None
-    reason = weak_key_reason(key)
+    reason = weak_key_reason(key, min_distinct=MIN_KEY_DISTINCT_CHARS)
     if reason:
         log.error("OFICINA_SEARCH_KEY %s: el buscador de la oficina queda apagado", reason)
         return None

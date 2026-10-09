@@ -145,7 +145,10 @@ def init_key(env_path: Path) -> str:
             os.chmod(env_path, 0o600)
         return (f"Ya hay una {KEY_VAR} en {env_path}: no toqué nada.\n"
                 f"Si hay que rotarla, borrá esa línea del archivo y volvé a correr --init.")
-    env_path.parent.mkdir(parents=True, exist_ok=True)
+    created_dir = not env_path.parent.exists()
+    env_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if created_dir:
+        os.chmod(env_path.parent, 0o700)          # (mkdir respeta el umask: se fuerza)
     lines = env_path.read_text().splitlines() if env_path.exists() else []
     # Una línea vacía (OFICINA_SEARCH_KEY=) se reemplaza: no se deja un duplicado.
     lines = [ln for ln in lines if not re.match(rf"^\s*(export\s+)?{KEY_VAR}\s*=", ln)]
@@ -436,12 +439,20 @@ def keep_awake() -> subprocess.Popen | None:
     return subprocess.Popen([exe, "-i", "-w", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """El log con permisos 600 (también el archivo nuevo después de rotar): no lo lee otra gente de la Mac."""
+
+    def _open(self):
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.chmod(self.baseFilename, 0o600)
+        return os.fdopen(fd, self.mode, encoding=self.encoding)
+
+
 def setup_logging(log_file: Path | None, verbose: bool = False) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.handlers.RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3,
-                                                             encoding="utf-8"))
+        handlers.append(_PrivateRotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"))
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=handlers, force=True,
                         format="%(asctime)s %(levelname)s %(message)s")
     # httpx loguea cada pedido con la URL: sin la key, pero tampoco hace falta.

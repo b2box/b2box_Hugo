@@ -559,3 +559,32 @@ def test_the_launchd_example_runs_at_one_am_and_holds_no_secret():
     assert data["KeepAlive"] is False and data["RunAtLoad"] is False
     assert not any("key" in str(a).lower() and "=" in str(a) for a in data["ProgramArguments"])
     assert "EnvironmentVariables" not in data                              # nada de secretos en el plist
+
+
+def test_init_creates_the_config_directory_private_and_leaves_an_existing_one_alone(tmp_path):
+    new = tmp_path / "cfg" / "bench"
+    runner.init_key(new / ".env")
+    assert stat.S_IMODE(new.stat().st_mode) == 0o700 and stat.S_IMODE((new / ".env").stat().st_mode) == 0o600
+    old = tmp_path / "ya-existia"
+    old.mkdir()
+    old.chmod(0o755)
+    runner.init_key(old / ".env")
+    assert stat.S_IMODE(old.stat().st_mode) == 0o755                  # no se le toca la carpeta a quien ya la tenía
+
+
+def test_the_run_log_is_private_also_after_rotating(tmp_path):
+    log_file = tmp_path / "logs" / "run.log"
+    log_file.parent.mkdir()
+    log_file.write_text("viejo\n")
+    log_file.chmod(0o644)
+    runner.setup_logging(log_file)
+    try:
+        runner.log.info("una línea")
+        assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+        handler = next(h for h in logging.getLogger().handlers if isinstance(h, runner._PrivateRotatingFileHandler))
+        handler.doRollover()
+        runner.log.info("otra línea")
+        assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(log_file.with_name("run.log.1").stat().st_mode) == 0o600
+    finally:
+        logging.getLogger().handlers.clear()

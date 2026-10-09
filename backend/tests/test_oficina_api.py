@@ -114,7 +114,8 @@ def test_without_the_variable_the_endpoints_do_not_exist(api, monkeypatch):
     assert api.get("/api/oficina/ml-queue?limit=abc", headers=H).status_code == 404
 
 
-@pytest.mark.parametrize("weak", ["corta", "replace-me", "x" * 23, "changeme"])
+@pytest.mark.parametrize("weak", ["corta", "replace-me", "x" * 23, "changeme", "a" * 40, "ab" * 30, "0123456789a" * 4,
+                                  "abcdefghijk" * 4])             # el largo solo no alcanza: 11 caracteres distintos
 def test_a_weak_key_counts_as_not_configured(api, monkeypatch, weak):
     monkeypatch.setattr(oficina_ml, "get_settings",
                         lambda: Settings(vendure_api_url="https://example.invalid/x", oficina_search_key=weak))
@@ -658,3 +659,14 @@ def test_an_unexpected_error_on_one_result_rejects_only_that_result(api, monkeyp
     r = _post(api, [_res("1", [_card("MLA666")]), _res("2", [_card("MLA888")])])
     body = r.json()
     assert r.status_code == 200 and body["stored"] == 1 and body["rejected"] == [{"product_id": "1", "reason": "no se pudo procesar"}]
+
+
+def test_a_key_needs_enough_distinct_characters_but_the_shared_check_is_unchanged(api, monkeypatch):
+    good = "0123456789ab" * 3                                      # 12 distintos
+    monkeypatch.setattr(oficina_ml, "get_settings",
+                        lambda: Settings(vendure_api_url="https://example.invalid/x", oficina_search_key=good))
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": good}).status_code == 200
+    from app import security
+    assert security.weak_key_reason("a" * 40) is None                       # las API keys de producción de siempre no cambian
+    assert "distintos" in security.weak_key_reason("a" * 40, min_distinct=12)
+    assert security.weak_key_reason(KEY, min_distinct=oficina_ml.MIN_KEY_DISTINCT_CHARS) is None
