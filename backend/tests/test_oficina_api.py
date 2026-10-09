@@ -696,7 +696,9 @@ def test_the_ip_tables_do_not_grow_without_bound(api, monkeypatch):
 # ─── largo de las URLs y surrogates sueltos ─────────────────────────────────
 
 
-def test_urls_have_a_length_cap_for_every_use_not_only_the_oficina():
+def test_ml_urls_have_a_length_cap_at_the_source():
+    """El tope de 512 es de las URLs de MERCADO LIBRE (`safe_permalink` / `safe_image_url`, que usan el dashboard, CLIP, el juez
+    y la oficina); las de tiendas y las nuestras (Vendure) tienen el suyo, más generoso (ver abajo)."""
     from app.pricing import market_ml
 
     ok = "https://articulo.mercadolibre.com.ar/MLA-1-" + "a" * 100
@@ -709,6 +711,45 @@ def test_urls_have_a_length_cap_for_every_use_not_only_the_oficina():
     assert market_ml.safe_image_url(img) == img
     assert market_ml.safe_image_url("https://http2.mlstatic.com/" + "a" * market_ml.MAX_URL_CHARS) is None
     assert market_ml.safe_image_url("https://http2.mlstatic.com/" + "a" * 400_000) is None
+
+
+def test_the_512_cap_does_not_touch_the_urls_of_stores_or_of_our_own_photos():
+    """Una URL firmada de un bucket (S3 / R2: foto de Vendure para el juez) o de una CDN de tienda mide fácil 600-1.500
+    caracteres: el tope de ML no puede tirarla. Solo la basura gigante se frena."""
+    from app.pricing import judge_images, market_ml
+
+    signed = "https://example.invalid/assets/preview/abc.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=" + "f" * 1400
+    assert 1000 < len(signed) < market_ml.MAX_ANY_URL_CHARS and judge_images.allowed_url(signed) == signed
+    assert judge_images.allowed_url("https://example.invalid/" + "a" * market_ml.MAX_ANY_URL_CHARS) is None
+    assert judge_images.allowed_url("https://example.invalid/" + "a" * 400_000) is None
+    assert market_ml._clean_https_parts("https://tienda.example/" + "a" * 2000) is not None
+    assert market_ml._clean_https_parts("https://tienda.example/" + "a" * 5000) is None
+
+
+def test_real_urls_of_the_fixtures_and_goldens_fit_under_the_caps():
+    """N7: las URLs reales (fichas de Gadnic y Casa Perfecta, fotos de bidcom / Tiendanube / mlstatic, links de ML) caben en los
+    topes. Medido: tiendas hasta 205 caracteres (fotos de Tiendanube), mlstatic 70, ML 97, bidcom 148. Si una tienda nueva
+    usara URLs más largas, el tope de las tiendas (4.096) sobra; el de ML (512) es solo de ML."""
+    import gzip
+    import re
+    from pathlib import Path
+
+    from app.pricing import market_ml
+
+    rx = re.compile(r"https?://[^\s\"'<>)\\]+")
+    longest: dict[str, int] = {}
+    for path in (Path(__file__).parent / "golden").iterdir():
+        if path.suffix not in (".html", ".xml", ".txt", ".json", ".gz"):
+            continue
+        raw = gzip.open(path, "rt", errors="ignore").read() if path.suffix == ".gz" else path.read_text(errors="ignore")
+        for url in rx.findall(raw):
+            host = re.match(r"https?://([^/]+)", url).group(1)
+            longest[host] = max(longest.get(host, 0), len(url))
+    assert len(longest) > 10
+    ml_hosts = [h for h in longest if h.endswith(("mercadolibre.com.ar", "mercadolibre.com", "mlstatic.com"))]
+    assert ml_hosts and all(longest[h] <= market_ml.MAX_URL_CHARS for h in ml_hosts), {h: longest[h] for h in ml_hosts}
+    assert all(n <= market_ml.MAX_ANY_URL_CHARS for n in longest.values())
+    assert max(longest.values()) < 300                                    # lo que hoy se ve en la realidad, con mucho margen
 
 
 def test_long_urls_from_the_mac_become_the_canonical_link_or_no_photo(api):

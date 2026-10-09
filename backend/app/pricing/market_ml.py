@@ -73,6 +73,10 @@ _RETRY_AFTER_CAP_S = 60.0
 _LINK_DOMAINS = ("mercadolibre.com.ar", "mercadolibre.com")
 # Un permalink o una foto reales de ML miden menos de 300 caracteres: más que esto es basura (o un ataque a la base).
 MAX_URL_CHARS = 512
+# Tope de cualquier otra URL que pasa por `_clean_https_parts` (tiendas, fotos nuestras de Vendure para el juez): ahí NO se usa
+# el de ML porque una URL firmada de un bucket (S3/R2 con query de firma) mide fácil 600-1.500 caracteres. Medido en los
+# fixtures reales: Gadnic / Casa Perfecta / bidcom hasta 205, mlstatic 70, ML 97. Esto solo frena la basura gigante.
+MAX_ANY_URL_CHARS = 4096
 _IMAGE_DOMAIN = "mlstatic.com"
 # re.ASCII: \d de Python acepta dígitos de otros alfabetos ("MLA١٢٣"), que no son ids de ML.
 _PRODUCT_ID = re.compile(r"^MLA\d+$", re.ASCII)    # fichas de catálogo e items
@@ -84,14 +88,14 @@ def _host_in(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
-def _clean_https_parts(url: object, *, allow_http: bool = False):
+def _clean_https_parts(url: object, *, allow_http: bool = False, max_chars: int = MAX_ANY_URL_CHARS):
     """urlsplit de una URL "limpia" o None. Rechaza lo que un navegador podría
     leer distinto que Python: backslash, espacios/controles y userinfo
     (`https://mercadolibre.com.ar@evil.com`)."""
-    if not isinstance(url, str) or len(url) > MAX_URL_CHARS + 64:
+    if not isinstance(url, str) or len(url) > max_chars + 64:
         return None
     raw = url.strip()
-    if not raw or len(raw) > MAX_URL_CHARS or "\\" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in raw):
+    if not raw or len(raw) > max_chars or "\\" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in raw):
         return None
     try:
         raw.encode("utf-8")
@@ -113,7 +117,7 @@ def _clean_https_parts(url: object, *, allow_http: bool = False):
 def safe_permalink(url: object) -> str:
     """Link a una ficha de ML apto para un href: https y host de Mercado Libre
     (o subdominio). Cualquier otra cosa ("javascript:", http, host ajeno) → ""."""
-    parts = _clean_https_parts(url)
+    parts = _clean_https_parts(url, max_chars=MAX_URL_CHARS)
     if parts is None or not any(_host_in(parts.hostname.lower(), d) for d in _LINK_DOMAINS):
         return ""
     if _looks_like_click_tracker(parts):
@@ -139,7 +143,7 @@ def safe_image_url(url: object) -> str | None:
     """Foto de ML apta para descargar (CLIP) o mandar al juez: host *.mlstatic.com
     por https. Las `http://` de mlstatic (las fichas de catálogo a veces vienen
     así) se suben a https; cualquier otro host o esquema → None."""
-    parts = _clean_https_parts(url, allow_http=True)
+    parts = _clean_https_parts(url, allow_http=True, max_chars=MAX_URL_CHARS)
     if parts is None or not _host_in(parts.hostname.lower(), _IMAGE_DOMAIN):
         return None
     return parts._replace(scheme="https").geturl()
