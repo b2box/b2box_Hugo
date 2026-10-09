@@ -52,7 +52,7 @@ ENABLED_FILTERS = ("enabled", "disabled", "all")
 # Qué devolvió ML: igual (tiene idéntico) | similar (tiene similares) | solo_similar |
 # diferente (tiene diferentes) | solo_diferente | ninguno (sin resultados).
 MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno")
-ORIGINS = ("api", "web")
+ORIGINS = ("api", "web", "oficina")
 # Color estimado por similares: uno concreto o cualquiera.
 ESTIMATED_FILTERS = ("verde", "amarillo", "rojo", "any")
 
@@ -206,7 +206,7 @@ async def list_snapshots(
     `enabled`: enabled | disabled | all (productos de Vendure). `match`: igual
     (tiene idéntico) | similar (tiene similares) | solo_similar | diferente (tiene
     diferentes) | solo_diferente | ninguno (ML no devolvió nada). `origin`: api |
-    web. `estimated`: verde | amarillo | rojo | any, el color ESTIMADO por similares
+    web | oficina. `estimated`: verde | amarillo | rojo | any, el color ESTIMADO por similares
     (los productos sin idéntico; no es el color real).
 
     Por fuente (Mercado Libre y las tiendas): `source` = "ml" o el id de una tienda (productos

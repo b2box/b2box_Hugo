@@ -68,13 +68,16 @@ from app.pricing import (
     market_ml_web,
     market_query,
     market_specs,
+    oficina_ml,
     semaforo,
     store_catalog,
     store_match,
 )
 from app.pricing.market_ml import (
     ORIGIN_API,
+    ORIGIN_OFICINA,
     ORIGIN_WEB,
+    WEB_ORIGINS,
     PROBE_LISTING_PRICES_KEY,
     PROBE_SOLD_QUANTITY_KEY,
     BudgetExhausted,
@@ -151,6 +154,9 @@ class RunContext:
     weight_tol_pct: float = 15.0
     # Fuente "ML web": None = apagada (sin proxy, cupo 0, sin browser).
     web: market_ml_web.MlWebSource | None = None
+    # Búsquedas web de ML hechas por la Mac de la oficina que siguen frescas, por producto
+    # (oficina_ml.load_fresh). Si hay una, se usa en lugar de buscar desde el servidor.
+    oficina: dict[str, oficina_ml.FreshResult] = field(default_factory=dict)
     # Publicaciones que una persona marcó "No es el mismo" (quedan DIFERENTES) y
     # "Es el mismo" (quedan IGUALES), por producto.
     excluded: dict[str, frozenset[str]] = field(default_factory=dict)
@@ -335,6 +341,11 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
                MarketPriceSnapshot.match_origin == ORIGIN_WEB)
+    ).one() or 0)
+    run.n_oficina_ok = int(s.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
+               MarketPriceSnapshot.match_origin == ORIGIN_OFICINA)
     ).one() or 0)
     run.n_con_similares = int(s.exec(
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
@@ -639,7 +650,7 @@ def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
     if price is None and c.id in prefetched:
         price = _ars_median(prefetched[c.id][0])
     in_pesos = price is not None and price > 0 and (not c.currency or c.currency.upper() == CURRENCY)
-    price_ok = _web_price(ctx, c) is not None if c.origin == ORIGIN_WEB else in_pesos
+    price_ok = _web_price(ctx, c) is not None if c.origin in WEB_ORIGINS else in_pesos
     entry.update(price_cents=price if in_pesos else None,
                  est_ok=bool(category == "similar" and _feeds_estimate(d) and price_ok and in_pesos),
                  seller=c.seller[:60] or None, sold_quantity=c.sold_quantity)
@@ -970,13 +981,33 @@ async def _match_via_web(ctx: RunContext, product: VendureProduct, snap: MarketP
     res = await _web_search(ctx, product, snap, w.query)
     if res.kind != "ok":
         return _with_note(snap, f"ML web: {res.reason}")
+    return await _match_web_candidates(ctx, product, snap, w, res.candidates, ORIGIN_WEB, "ML web")
 
-    candidates = _split_excluded(ctx, product, w, res.candidates)
+
+async def _match_via_oficina(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
+                             w: _Work, fresh: oficina_ml.FreshResult) -> MarketPriceSnapshot:
+    """Lo que la Mac de la oficina encontró en la web de ML (todavía fresco), en lugar de buscar desde
+    el servidor. Pasa por el mismo filtro que la web; el servidor no gasta ni una búsqueda."""
+    snap.web_via = ORIGIN_OFICINA
+    if not fresh.candidates:
+        snap.web_state = oficina_ml.ST_EMPTY
+        return _with_note(snap, "ML web (oficina): ML no tiene publicaciones para el título")
+    snap.web_state = oficina_ml.ST_OK
+    return await _match_web_candidates(ctx, product, snap, w, fresh.candidates, ORIGIN_OFICINA, "ML web (oficina)")
+
+
+async def _match_web_candidates(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
+                                w: _Work, found: list[MlCandidate], origin: str,
+                                label: str) -> MarketPriceSnapshot:
+    """Publicaciones de la web de ML (las del servidor o las de la oficina) → igual / similar /
+    diferente. `origin` es lo que queda en el snapshot si de ahí sale el precio; `label` encabeza
+    las notas de `ml_error`."""
+    candidates = _split_excluded(ctx, product, w, found)
     snap.candidates_count += len(candidates)
     prefetched: dict[str, Listings] = {}
     decisions = await _decide(ctx, product, w, snap, candidates, prefetched, web=True) if candidates else None
     if decisions is None:
-        return _with_note(snap, "ML web: sin score de imagen" if candidates else "ML web: sin publicaciones nuevas")
+        return _with_note(snap, f"{label}: sin score de imagen" if candidates else f"{label}: sin publicaciones nuevas")
 
     matches = [d for d in decisions if d.verdict == market_match.MATCH]
     matches.sort(key=lambda d: (d.image_score or 0.0), reverse=True)
@@ -1005,12 +1036,12 @@ async def _match_via_web(ctx: RunContext, product: VendureProduct, snap: MarketP
         note = ("las publicaciones iguales no tienen ventas suficientes" if matches
                 else f"ninguna publicación es igual ({len(w.similars)} similares)" if w.similars
                 else "ninguna publicación es igual")
-        return _with_note(snap, f"ML web: {note}")
+        return _with_note(snap, f"{label}: {note}")
 
     best = next(d for d in matches if _web_price(ctx, d.candidate) is not None)
     snap.matched_listings = json.dumps(matched_json, ensure_ascii=False)
     snap.match_source, snap.match_confidence = best.source, best.confidence
-    snap.match_origin = ORIGIN_WEB
+    snap.match_origin = origin
     _apply_prices(snap, prices, len(sellers), green_min=ctx.green_min, yellow_min=ctx.yellow_min)
     return snap
 
@@ -1131,7 +1162,8 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
     """El camino de ML para UN producto.
 
     1. Fichas de catálogo por la API de ML. Con un IGUAL con precio, listo.
-    2. Si no, el título en la web de ML (si la fuente está prendida).
+    2. Si no, la web de ML: lo que la Mac de la oficina encontró (si está fresco) o, si no hay,
+       el título buscado desde el servidor (si la fuente está prendida).
     3. Siempre se guarda lo que devolvió ML, clasificado: idénticos, similares y
        diferentes. El color real sale solo de los idénticos; sin idénticos pero con
        similares hay un color estimado aparte.
@@ -1162,8 +1194,12 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
               plan=market_query.query_plan(product.name, ctx.query_variants))
 
     snap = await _match_via_api(ctx, product, snap, w)
-    if snap.ml_status != OK and ctx.web is not None:
-        snap = await _match_via_web(ctx, product, snap, w)
+    if snap.ml_status != OK:
+        fresh = ctx.oficina.get(product.id)
+        if fresh is not None:
+            snap = await _match_via_oficina(ctx, product, snap, w, fresh)
+        elif ctx.web is not None:
+            snap = await _match_via_web(ctx, product, snap, w)
     _store_listings(snap, _json_list(snap.matched_listings), w.igual_unpriced, w.similars, w.others,
                     keep=ctx.keep_listings, green_min=ctx.green_min, yellow_min=ctx.yellow_min)
     return snap
@@ -1337,10 +1373,14 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     counts: dict[str, int] = {OK: 0, NO_DATA: 0, FAILED: 0, SKIPPED: 0}
 
     web, web_status = _make_web(run_id)
+    oficina = await asyncio.to_thread(oficina_ml.load_fresh)
+    if oficina:
+        _update_run(run_id, oficina_fresh=len(oficina))
     excluded = await asyncio.to_thread(match_feedback.load_excluded)
     promoted = await asyncio.to_thread(match_feedback.load_promoted)
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml, web, excluded, promoted)
+        ctx.oficina = oficina
         ctx.extra["stores"] = stores
         try:
             sem = asyncio.Semaphore(concurrency)
@@ -1608,6 +1648,9 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
             "bytes_per_search": round(run.web_bytes / run.web_searches) if run.web_searches else None,
         },
         "n_con_similares": run.n_con_similares,
+        # Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar y los que
+        # terminaron con precio gracias a eso.
+        "oficina": {"fresh": run.oficina_fresh, "n_ok": run.n_oficina_ok},
         # Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML.
         "variants": _json_dict(run.variant_stats),
         # Color ESTIMADO por similares (aparte del real) y productos donde ML solo
@@ -1709,6 +1752,7 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "match_origin": snap.match_origin,
         "ml_variant": snap.ml_variant,
         "web_state": snap.web_state,
+        "web_via": snap.web_via,
         "web_searches": snap.web_searches or 0,
         "web_bytes": snap.web_bytes or 0,
         "our_specs": our_specs if isinstance(our_specs, dict) else None,
@@ -1747,6 +1791,7 @@ def summary() -> dict[str, Any]:
         "cron_utc": get_settings().price_monitor_cron_utc,
         "include_disabled": bool(int(runtime.get("pm_include_disabled") or 0)),
         "web": {**market_ml_web.web_budget_status(), "off_reason": market_ml_web.disabled_reason()},
+        "oficina": oficina_ml.status(),
         "stores": store_catalog.index_status(),
         "stores_affect_color": store_match.affect_color_enabled(),
     }

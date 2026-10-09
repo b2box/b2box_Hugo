@@ -231,6 +231,10 @@ class PriceMonitorRun(SQLModel, table=True):
     # JSON {"titulo": n, "corto": n, "claves": n}: cuántos productos resolvió con un IGUAL
     # con precio cada búsqueda de la API de ML (para medir si las variantes sirven).
     variant_stats: str | None = Field(default=None)
+    # Búsquedas web de la Mac de la oficina (ver pricing/oficina_ml.py): productos con un
+    # resultado fresco al empezar la corrida y productos que quedaron con precio por eso.
+    oficina_fresh: int = Field(default=0)
+    n_oficina_ok: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -333,6 +337,8 @@ class MarketPriceSnapshot(SQLModel, table=True):
     # Qué búsqueda de la API de ML encontró el IGUAL con precio: titulo | corto | claves |
     # inicio (ver pricing/market_query.py). None = no salió de la API.
     ml_variant: str | None = Field(default=None, max_length=12)
+    # "oficina" si `web_state` lo dejó la búsqueda de la Mac de la oficina (no el servidor).
+    web_via: str | None = Field(default=None, max_length=8)
 
 
 class MarketMatchFeedback(SQLModel, table=True):

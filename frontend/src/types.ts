@@ -208,6 +208,9 @@ export interface PriceMonitorRun {
     bytes_per_search: number | null;
   };
   n_con_similares?: number;
+  // Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar la corrida y
+  // los que terminaron con precio por eso. Corridas viejas: sin campo.
+  oficina?: { fresh: number; n_ok: number };
   // Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML
   // (titulo | corto | claves | inicio). Corridas viejas: sin campo o vacío.
   variants?: Record<string, number>;
@@ -219,7 +222,7 @@ export interface PriceMonitorRun {
 }
 
 // De dónde salió una publicación y cómo se decidió que es (o se parece a) lo nuestro.
-export type MatchOrigin = "api" | "web";
+export type MatchOrigin = "api" | "web" | "oficina";
 export type MatchCategory = "igual" | "similar" | "diferente";
 // Qué devolvió ML para un producto: idéntico (con o sin precio que cuente), solo
 // similares, solo diferentes, o nada ("sin dato" de verdad).
@@ -314,6 +317,8 @@ export interface PriceMonitorSnapshot {
   // Qué búsqueda de la API de ML encontró el idéntico (titulo | corto | claves | inicio).
   ml_variant?: string | null;
   web_state?: WebState | null;
+  // "oficina" si el estado de la web lo dejó la búsqueda de la Mac de la oficina (no el servidor).
+  web_via?: "oficina" | null;
   web_searches?: number;
   web_bytes?: number;
   our_specs?: OurSpecs | null;
@@ -369,6 +374,17 @@ export interface PriceMonitorSummary {
   // Índice de cada tienda (cuánto hay leído, cuánto muerto, cupo de hoy) y si las tiendas cuentan para el color.
   stores?: StoreIndexStatus[];
   stores_affect_color?: boolean;
+  // Buscador de la oficina: ¿está prendido (OFICINA_SEARCH_KEY)?, cuántos productos tienen resultado
+  // fresco y cómo le fue a la Mac en el último día.
+  oficina?: OficinaStatus;
+}
+
+export interface OficinaStatus {
+  enabled: boolean;
+  ttl_days: number;
+  fresh_products: number;
+  last_received_at: string | null;
+  last_24h: { ok: number; empty: number; blocked: number; error: number };
 }
 
 // ─── Tiendas como fuentes de comparación ───────────────────────────
