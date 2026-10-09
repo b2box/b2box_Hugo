@@ -503,7 +503,9 @@ cuente tiene que cumplir TODO esto:
 
 Los similares de tienda dan el color *estimado* con las reglas de ML (`in_estimate`: confirmados por
 juez, medidas o una persona, sin diferencia de pack ni de capacidad, y con stock). La marca «Gadnic»
-es de importador, como la nuestra: cuenta como genérica (idéntico), no como marca conocida.
+es de importador, como la nuestra: cuenta como **genérica en todas las fuentes** (en ML y en las
+otras tiendas también, no solo en la tienda Gadnic): un producto «Gadnic» que coincide por foto y
+nombre es idéntico, no «marca conocida».
 
 En el dashboard (Semáforo): una columna por fuente (**Mercado Libre | Gadnic | Casa Perfecta**) con el
 mejor resultado de cada una (el precio del idéntico; si no hay, el del similar marcado «similar»; si
@@ -532,7 +534,8 @@ diferentes o nada, y el estado del índice de cada tienda.
    el mismo veredicto de tres valores que ML: reglas por foto + nombre, juez IA solo para la banda
    ambigua y para las marcas conocidas, y chequeo de medidas/cantidad/capacidad. Lo dudoso que nadie
    confirma (sin juez, sin cupo) queda **similar «sin confirmar»**, igual que en ML. La marca propia de
-   la tienda (Gadnic) se trata como genérica (regla de Nico: genérica = idéntico, conocida = similar).
+   la tienda (Gadnic) se trata como genérica en todas las fuentes (regla de Nico: genérica = idéntico,
+   conocida = similar).
    Los 6 candidatos quedan en `store_match`, también los diferentes. Lo que una persona marca «No es
    el mismo» sigue visible al día siguiente como diferente (sin volver a bajar su foto) y se puede
    dar vuelta; lo que marca «Es el mismo» entra como idéntico.
@@ -544,13 +547,34 @@ diferentes o nada, y el estado del índice de cada tienda.
   buscador); Casa Perfecta prohíbe `/search/` (el sitemap de Tiendanube trae `/ar/search/?q=…`: se
   descartan). Si el robots.txt no se puede bajar (5xx, 429, 401 o 403), no se rastrea nada; si no
   existe (404), todo permitido. Un `Crawl-delay` del robots alarga la pausa. El patrón se compara sin
-  regex (un robots hostil no puede colgar el proceso).
+  regex (un robots hostil no puede colgar el proceso) y hay un tope de reglas en total, sumando todos
+  los grupos. **Qué grupo es el nuestro**: se compara el *token* del User-Agent declarado en el robots
+  (las letras, `_` y `-` del principio, hasta la primera `/`, espacio, `(` o `;`). `HugoPriceBot`,
+  `HugoPriceBot/1.0` y `HugoPriceBot (+https://b2box.pro)` son nuestros; `HugoPriceBot2` o `o` no. Si
+  no hay grupo nuestro vale el `*`.
 - **Ritmo**: una página cada 2-3 segundos **por tienda**, el tope diario (se mira ANTES de bajar
   robots o sitemaps) y un tope de tiempo por pedido (robots 30 s, ficha 60 s, sitemap 180 s).
   `net_guard.safe_get` (httpx, sin navegador y sin proxy, anti-SSRF, tope de bytes: 3 MB por página,
-  25 MB por sitemap, ya descomprimido; solo se acepta sin comprimir o con UNA capa de gzip). Cada
-  redirect se valida contra el sitio de la tienda y contra robots.txt. «Indexar ahora» tiene 10
-  minutos de descanso entre pasadas.
+  25 MB por sitemap, ya descomprimido). **Compresión**: solo se acepta sin comprimir o con UNA capa de
+  gzip; el gzip lo descomprime Hugo con tope de tamaño. Un gzip roto, truncado, apilado o de varios
+  miembros (y `br`, `zstd` o `deflate`) se rechaza con un error propio (`BadEncoding`), y un cuerpo
+  vacío con `Content-Encoding: gzip` (un 204, 304 o 404) es válido. Los headers de la respuesta se
+  conservan como bytes: uno con acentos o latin-1 ya no rompe la descarga. Cada redirect se valida
+  contra el sitio de la tienda y contra robots.txt.
+- **Cupo y descanso por sitio, no por tienda**: el cupo diario de páginas y los 10 minutos de descanso
+  de «Indexar ahora» se cuentan por el dominio del sitio (sin el `www.`). Borrar y volver a crear la
+  tienda no los reinicia.
+- **Topes de tiempo en la comparación**: cada tienda tiene 120 s por producto y el producto entero
+  300 s (`STORE_MATCH_TIMEOUT_S` / `PRODUCT_MATCH_TIMEOUT_S` en `store_match.py`). Si una foto gotea o
+  el juez se cuelga, ese producto sigue sin esa tienda y la corrida no se traba. Cada foto tiene además
+  un tope **total** de 30 s (12 s cuando hay un cliente esperando, como en `/app/lookup`), no solo por
+  chunk.
+- **Una ficha rara no corta la pasada**: un charset inválido, un parser que falla o un error de red
+  inesperado en UNA ficha es el resultado de esa ficha (error de red = transitorio, no se guarda; error
+  de lectura = un fallo de esa ficha, con el motivo) y la pasada sigue con la siguiente. Si no se puede
+  leer el robots, la pasada de esa tienda queda «abortada» (no se rastrea) y no en «error». Si falla un
+  sitemap, queda anotado y la pasada sigue sin dar ninguna baja. Un sitemap (o uno hijo) sin ninguna
+  URL tampoco cuenta como completo: nunca da una URL por «ya no está».
 - **User-Agent honesto**: `HugoPriceBot/1.0 (+https://b2box.pro)` (`STORE_USER_AGENT`), sin
   disfrazarse de navegador y sin cookies.
 - **GET condicional**: se manda `If-None-Match` / `If-Modified-Since` con lo que dio la tienda. (Hoy
@@ -559,12 +583,17 @@ diferentes o nada, y el estado del índice de cada tienda.
 - **`dead`**: un 404/410 (o una página que ya no es un producto) dos veces la deja muerta por 30
   días (`STORE_DEAD_RETRY_DAYS`). Un **5xx** puede ser una caída de la tienda: se reintenta a 1, 2 y 4
   días y recién queda `dead` con dos fallos y 3 días desde el primero (`STORE_DEAD_MIN_DAYS_5XX`).
-  Si TODAS las fichas dan 5xx (25 seguidas) y no hubo una bien en la última semana, la pasada se corta
+  Las fechas se comparan con un **margen de 6 horas** (`DUE_MARGIN`): el job corre una vez por día y
+  la pasada de hoy empieza unos minutos antes que la de ayer; sin margen, un reintento que vence «a las
+  24 h» no estaba vencido todavía y se corría un día entero. Con el job diario las lecturas caen los
+  días 0, 1 y 3 y la ficha muere el día 3. Si TODAS las fichas dan 5xx (25 seguidas) y no hubo una bien en la última semana, la pasada se corta
   («caída») y no se marca nada muerto; en Gadnic, que tiene muchas muertas sueltas pero siempre alguna
   viva, no se corta. Salud muestra por tienda las fichas fallando, cuántas con 5xx y la salud
   (ok / degradada / caída). Un 429 corta la pasada de esa tienda por hoy; tres 403 o cinco errores de
   red seguidos, también. Nada de eso tira el job ni a las otras tiendas. Si borrás o apagás una
-  tienda mientras se la lee, la pasada se corta en la página siguiente.
+  tienda mientras se la lee, la pasada se corta en la página siguiente. (Caso real que motivó esta
+  tolerancia: el 08-oct-2026 las fichas de Casa Perfecta devolvieron 500 por un rato, del lado de la
+  tienda; el 09-oct volvían a responder 200.)
 
 #### Precios dudosos
 
@@ -587,13 +616,36 @@ para el color.
 Dashboard → **Configuración → Tiendas de comparación → Agregar tienda**: nombre, dirección
 (`https://…`) y plataforma. **Tiendanube** sirve para cualquier tienda hecha con Tiendanube (sitemap
 con `/productos/…`, `data-variants`, fotos en `mitiendanube.com`); **Sitio propio** lee el sitemap y
-el JSON-LD `Product` de cualquier otro sitio. La dirección tiene que ser un dominio común (nada de
-IPs, `localhost`, sufijos como `com.ar` ni plataformas como `github.io`) y hay una tienda por sitio.
+el JSON-LD `Product` de cualquier otro sitio. La dirección tiene que ser un dominio común y hay una
+tienda por sitio (no se repite el dominio, con o sin `www.`). No se aceptan IPs, `localhost`, nombres
+de una sola etiqueta, plataformas multi-inquilino (`github.io`, `myshopify.com`, `mitiendanube.com`…)
+ni **sufijos públicos**: `com`, `com.ar`, `com.uy`, `com.pe`, `co.nz`, `org.uk`, `gob.ar`, `co.jp`…
+Como Hugo no trae la Public Suffix List completa (no hay una dependencia para eso en el lock), la regla
+es estructural: es un sufijo público un TLD solo, o `<etiqueta genérica>.<país de 2 letras>` (`com`,
+`co`, `net`, `org`, `gob`, `gov`, `edu`, `ac`, `or`, `ne`…). `tienda.com.uy` y `mitienda.uy` sí son
+válidos. Un sufijo público de otro estilo que no calce con esa regla habría que sumarlo a `_TOO_BROAD`
+en `pricing/store_urls.py`.
+
 Opcionales: sitemap (del mismo sitio), dominios de las fotos, marca propia, días de relectura y páginas
-por día. **Fotos**: solo se aceptan de la tienda misma (su host y su `www.`) y de su plataforma
-(Tiendanube: `acdn*.mitiendanube.com`). Un dominio extra (el CDN de Gadnic es `*.bidcom.com.ar`) lo tiene
-que autorizar un administrador con `STORE_TRUSTED_IMAGE_HOSTS`: quien carga la tienda no puede sumar
-cualquier dominio (le abriría las fotos al juez a medio internet). «Indexar ahora» arranca la primera
+por día.
+
+**Fotos (`image_hosts`)**: lista separada por comas (o espacios) donde cada entrada tiene una de tres
+formas:
+
+| Entrada | Qué acepta |
+|---|---|
+| `gadnic.com.ar` | ese host exacto y su `www.` |
+| `*.bidcom.com.ar` | el dominio y todos sus subdominios |
+| `acdn*.mitiendanube.com` | un patrón con `*` **en la primera etiqueta**: `acdn-us.mitiendanube.com` sí; `acdn.evil.mitiendanube.com` no. El comodín no cruza puntos |
+
+La primera etiqueta del patrón lleva entre 3 y 30 letras, números o guiones, y el resto del dominio
+tiene que ser válido (no un sufijo público ni una plataforma). Siempre se aceptan las fotos de la
+tienda misma (su host y su `www.`) y las de su plataforma (Tiendanube: `acdn*.mitiendanube.com`). Un
+dominio extra solo si es de la tienda misma, de su plataforma o si un administrador lo autorizó en
+`STORE_TRUSTED_IMAGE_HOSTS` (default `*.bidcom.com.ar`, el CDN de Gadnic): quien carga la tienda no puede
+sumar cualquier dominio (le abriría las fotos al juez a medio internet). Lo que no se puede autorizar
+se rechaza al guardar, con el nombre de los dominios. Texto con caracteres de control (NUL) en el
+nombre, la marca propia o las notas se limpia al guardar. «Indexar ahora» arranca la primera
 pasada sin esperar a la madrugada. No hace falta deploy. Apagar una tienda la saca de la tabla y de la
 comparación; borrarla borra también lo que se leyó de ella (y quién la borró queda en el log).
 
@@ -754,7 +806,8 @@ las URLs de mlstatic y de nuestro Vendure, pero con otros hosts falló (400
 van achicadas y el mismo veredicto salió con ~45 % menos tokens de entrada.
 En base64:
 
-- solo se bajan fotos `https://` de `*.mlstatic.com` y del host de
+- solo se bajan fotos `https://` de `*.mlstatic.com`, de los hosts de foto de
+  las tiendas activas (ver "Tiendas") y del host de
   `VENDURE_API_URL` (de ahí salen las de nuestro catálogo); cada redirect se
   valida igual y el host tiene que resolver a una IP pública. Ya conectado y
   antes de leer el body se vuelve a validar la IP real del servidor (DNS
@@ -1184,6 +1237,17 @@ se abre pedido), `"no_image"` (no se pudo sacar ninguna foto) y `"site_blocked"`
   **solo** si Traefik acepta tráfico únicamente desde los rangos de Cloudflare;
   si no, quien le pegue directo con un header armado elige su propia IP. No
   subirlo "por las dudas".
+- **Descargas a servidores de terceros** (`net_guard.safe_get`: fotos de
+  catálogo, de ML y de tiendas para pHash y CLIP, y las páginas de las tiendas):
+  anti-SSRF (el host tiene que resolver a una IP pública, también en cada
+  redirect), tope de bytes leído en streaming, y solo se acepta sin comprimir o
+  con UNA capa de gzip (descomprimida por Hugo con tope; un gzip roto, truncado
+  o de varios miembros da `BadEncoding`). Los headers se conservan en bytes: uno
+  no ASCII ya no rompe la descarga. Las fotos pesan hasta 8 MB, se rechazan las
+  de más de 16 MP (JPEG: 40 MP, decodificado ya reducido) y cada una tiene un
+  tope **total** de 30 s (12 s con un cliente esperando, como `/app/lookup`);
+  el timeout de httpx es por chunk y un servidor que gotea un byte cada tanto
+  lo esquivaba.
 
 ## Variables de entorno
 
@@ -1202,8 +1266,9 @@ Ver `.env.example`. Las críticas:
 - `AUDIT_INTERVAL_HOURS` — cada cuánto corre la auditoría completa.
 - `STORE_INDEX_CRON_UTC` (default `20 3 * * *`), `STORE_USER_AGENT`, `STORE_REQUEST_DELAY_MIN_S` /
   `STORE_REQUEST_DELAY_MAX_S` (2 / 3), `STORE_DEAD_RETRY_DAYS` (30), `STORE_DEAD_MIN_DAYS_5XX` (3),
-  `STORE_MAX_STORES` (20), `STORE_TRUSTED_IMAGE_HOSTS` (`*.bidcom.com.ar`; dominios de fotos extra que un
-  administrador autoriza) — indexado de las tiendas.
+  `STORE_MAX_STORES` (20), `STORE_TRUSTED_IMAGE_HOSTS` (default `*.bidcom.com.ar`; dominios de fotos extra
+  que un administrador autoriza, separados por comas, con la misma sintaxis que `image_hosts`:
+  `host`, `*.dominio` o `acdn*.dominio`) — indexado de las tiendas.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
