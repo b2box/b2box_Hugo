@@ -209,3 +209,47 @@ def test_marca_real_en_el_titulo_se_detecta(pid, name, brand):
     "impactante, novedoso no están en DEFAULT_FILLER (≈40 títulos vivos más)"))
 def test_relleno_de_marketing_real_se_detecta(pid, name):
     assert "RELLENO" in audit(name)
+
+
+# ─── Correctitud del filtro por prefijo de DUP_CASI contra la fuerza bruta ──
+
+def _brute_force_dup_casi(entries):
+    toks = {rk: frozenset(R.name_tokens(name)) for rk, _pid, name in entries}
+    pid = {rk: p for rk, p, _ in entries}
+    out: dict[str, set[str]] = {}
+    keys = [rk for rk, _p, name in entries if len(toks[rk]) >= R.DUP_CASI_MIN_TOKENS]
+    exact = {}
+    for rk, _p, name in entries:
+        exact.setdefault(R._name_key(name), []).append(rk)
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if pid[a] == pid[b]:
+                continue
+            same_exact = len(R._name_key(next(n for k, _p, n in entries if k == a)) or "") >= 4 and \
+                R._name_key(next(n for k, _p, n in entries if k == a)) == R._name_key(next(n for k, _p, n in entries if k == b))
+            if same_exact:
+                continue
+            inter, union = len(toks[a] & toks[b]), len(toks[a] | toks[b])
+            if union and inter / union >= R.DUP_CASI_JACCARD:
+                out.setdefault(a, set()).add(b)
+                out.setdefault(b, set()).add(a)
+    return out
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
+def test_el_filtro_por_prefijo_de_DUP_CASI_encuentra_exactamente_lo_mismo_que_la_fuerza_bruta(seed):
+    import random
+
+    rnd = random.Random(seed)
+    vocab = ("organizador huevos heladera plegable cocina mini ventilador usb portátil recargable mopa balde "
+             "silicona vidrio acero baño adhesivo pared colgante transparente set kit giratorio apilable "
+             "negro rosa 2 3 360 con de para y el").split()
+    entries = []
+    for i in range(350):
+        words = [rnd.choice(vocab) for _ in range(rnd.randint(2, 9))]
+        entries.append((f"{i}|es_AR", str(i), " ".join(words).title()))
+    got = R.find_duplicates(entries)
+    flagged = {rk for rk, v in got.items() if "DUP_CASI" in v}
+    want = _brute_force_dup_casi(entries)
+    assert flagged == set(want), (sorted(flagged ^ set(want))[:10])
+    assert all("parecido al producto" in v["DUP_CASI"] for v in got.values() if "DUP_CASI" in v)
