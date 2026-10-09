@@ -6,6 +6,7 @@ Jobs:
   3. daily_digest        → email/webhook con el resumen de las últimas 24h.
   4. price_monitor       → semáforo de precios contra Mercado Libre y tiendas (sombra).
   5. store_index         → indexa las tiendas (Casa Perfecta, Gadnic…) de madrugada.
+  6. seo_text_audit      → audita los textos del catálogo (SEO); solo lee Vendure.
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -40,6 +41,7 @@ from app.pricing import price_monitor as price_monitor_mod
 from app.pricing import store_catalog, store_match
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
+from app.seo import text_audit as text_audit_mod
 from app.vendure.client import VendureClient, VendureProduct, VendureVariant
 
 log = logging.getLogger(__name__)
@@ -797,6 +799,35 @@ async def store_index() -> list[dict]:
     return [{"store": r.store, "status": r.status, "summary": r.summary()} for r in reports]
 
 
+# ─── Job 9: auditoría de textos del catálogo (SEO, solo lectura) ───
+
+SEO_TEXT_AUDIT_JOB_ID = text_audit_mod.JOB_ID
+# Con el nombre del día: en APScheduler el 1 de un cron es martes, no lunes.
+_SEO_TEXT_AUDIT_DEFAULT_CRON = "30 7 * * mon"
+
+
+async def seo_text_audit(trigger: str = "cron") -> dict | None:
+    """Corre la auditoría de textos (ver app/seo/text_audit.py): lee Vendure, no
+    escribe nada en él. Lo usan el cron y el botón del dashboard
+    (POST /api/seo/text-audit/run). Solo una corrida terminada mueve el marcador."""
+    result = await text_audit_mod.run_text_audit(trigger=trigger)
+    if result and result.get("status") in (text_audit_mod.RUN_OK, text_audit_mod.RUN_DEGRADED):
+        _mark_job_run(SEO_TEXT_AUDIT_JOB_ID)
+    return result
+
+
+def _seo_text_audit_trigger(expr: str) -> CronTrigger | None:
+    """None = sin corrida programada (SEO_TEXT_AUDIT_CRON_UTC vacío)."""
+    if not expr.strip():
+        return None
+    try:
+        return CronTrigger.from_crontab(expr, timezone="UTC")
+    except ValueError as exc:
+        log.error("SEO_TEXT_AUDIT_CRON_UTC=%r inválido (%s); uso %r",
+                  expr, exc, _SEO_TEXT_AUDIT_DEFAULT_CRON)
+        return CronTrigger.from_crontab(_SEO_TEXT_AUDIT_DEFAULT_CRON, timezone="UTC")
+
+
 def _price_monitor_trigger(expr: str) -> CronTrigger:
     try:
         return CronTrigger.from_crontab(expr, timezone="UTC")
@@ -914,6 +945,21 @@ def register_jobs() -> None:
         id=STORE_INDEX_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )
+    # Auditoría de textos del catálogo: semanal, solo lectura. Si el proceso estaba
+    # caído a la hora del cron, se recupera al arrancar (reloj persistente).
+    seo_trigger = _seo_text_audit_trigger(getattr(s, "seo_text_audit_cron_utc", None) or "")
+    if seo_trigger is not None:
+        seo_kwargs: dict = {}
+        if _cron_missed(seo_trigger, _last_job_run(SEO_TEXT_AUDIT_JOB_ID), now):
+            seo_kwargs["next_run_time"] = now + _STARTUP_GRACE
+            log.info("seo_text_audit: se perdió la corrida programada → corre en %s", _STARTUP_GRACE)
+        scheduler.add_job(
+            seo_text_audit,
+            seo_trigger,
+            id=SEO_TEXT_AUDIT_JOB_ID,
+            replace_existing=True, coalesce=True, max_instances=1,
+            **seo_kwargs,
+        )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:
     # el refresh es incremental (ver app/vendure/catalog.py).

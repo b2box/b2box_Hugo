@@ -22,6 +22,7 @@ from app.api.app_routes import router as app_router
 from app.api.oficina_routes import router as oficina_router
 from app.api.price_monitor_routes import router as price_monitor_router
 from app.api.routes import router
+from app.api.seo_routes import router as seo_router
 from app.api.store_routes import router as store_router
 from app.config import get_settings
 from app.db.session import init_db
@@ -251,6 +252,7 @@ app.include_router(app_router)
 app.include_router(price_monitor_router)
 app.include_router(oficina_router)
 app.include_router(store_router)
+app.include_router(seo_router)
 
 
 # ─── Dashboard estático ────────────────────────────────────────────
