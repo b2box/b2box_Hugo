@@ -180,6 +180,8 @@ async def test_only_similars_give_an_estimate_never_the_real_color(webw):
 
 
 async def test_people_corrections_apply_to_oficina_listings_too(webw):
+    """(Incluso sobre la plausibilidad de precios: una persona que marcó «Es el mismo» una publicación de 50 veces nuestro
+    precio sabe lo que hace; su precio cuenta.)"""
     with Session(engine) as s:
         s.add(MarketMatchFeedback(product_id="3", ml_id="MLA901", label=0, category="igual"))      # «No es el mismo»
         s.add(MarketMatchFeedback(product_id="3", ml_id="MLA903", label=1, category="diferente"))  # «Es el mismo»
@@ -193,8 +195,10 @@ async def test_people_corrections_apply_to_oficina_listings_too(webw):
     assert [m["ml_id"] for m in json.loads(s.other_listings)] == ["MLA901"]
 
 
-async def test_oficina_gives_column_by_column_what_the_server_search_would_have(webw):
-    """La misma página, leída por el servidor o traída por la Mac: el semáforo es el mismo salvo el origen."""
+async def test_oficina_gives_column_by_column_what_the_server_search_would_have(webw, monkeypatch):
+    """La misma página, leída por el servidor o traída por la Mac: el semáforo es el mismo salvo el origen (y salvo el chequeo
+    de plausibilidad de precios, que es solo de la oficina y tiene sus tests más abajo)."""
+    monkeypatch.setattr(price_monitor, "_implausible_price", lambda c, our_price: False)
     cards = [_card("MLA901", "Producto Raro", 250.0), _card("MLA902", "Pack X6 Producto Raro", 900.0, seller="Dos"),
              _card("MLA903", "Heladera no frost", 5000.0, seller="Tres"), _card("MLA904", "Producto Raro", 80.0, sold=2)]
     html_page = _web_page(*cards)
@@ -286,3 +290,62 @@ def test_the_health_card_survives_a_broken_oficina_status(client, monkeypatch):
     monkeypatch.setattr(oficina_ml, "status", boom)
     r = client.get("/api/price-monitor/summary")
     assert r.status_code == 200 and r.json()["oficina"]["enabled"] is False
+
+
+# ─── plausibilidad: una key robada no puede fijar el color ─────────────────
+
+
+async def test_an_oficina_price_ten_times_off_ours_is_doubtful_and_never_counts_for_the_color(webw):
+    """Nuestro precio es ARS 100. Un «idéntico» con el título nuestro, una foto que se parece y ARS 1.500 (o ARS 5) no mueve nada."""
+    _store("3", [_wire("MLA901", "Producto Raro", 1500.0), _wire("MLA902", "Producto Raro", 5.0, seller="Dos")])
+    _score(webw, "MLA901", 0.95)
+    _score(webw, "MLA902", 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.ml_status == "no_data" and s.color == "sin_dato" and s.ml_median_cents is None and s.match_origin is None
+    assert "precio dudoso" in s.ml_error
+    unpriced = {m["ml_id"]: m for m in json.loads(s.unpriced_listings)}
+    assert set(unpriced) == {"MLA901", "MLA902"}                       # se ven, con el aviso, pero sin precio que cuente
+    assert all(price_monitor.PRICE_DOUBT_NOTE in m["notes"] for m in unpriced.values())
+    assert s.match_state == "igual_sin_precio" and s.estimated_color is None
+
+
+@pytest.mark.parametrize("price, counts", [(1000.0, True), (1000.01, False), (10.0, True), (9.99, False), (250.0, True)])
+async def test_the_plausibility_edges_are_the_ones_of_the_stores(webw, price, counts):
+    _store("3", [_wire("MLA901", "Producto Raro", price)])
+    _score(webw, "MLA901", 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert (s.ml_status == "ok") is counts
+    if counts:
+        assert s.match_origin == "oficina" and s.ml_median_cents == round(price * 100)
+
+
+async def test_a_doubtful_listing_does_not_move_the_median_of_the_good_ones(webw):
+    _store("3", [_wire("MLA901", "Producto Raro", 250.0), _wire("MLA902", "Producto Raro", 9000.0, seller="Dos"),
+                 _wire("MLA903", "Producto Raro", 300.0, seller="Tres")])
+    for ref in ("MLA901", "MLA902", "MLA903"):
+        _score(webw, ref, 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.ml_status == "ok" and (s.ml_min_cents, s.ml_median_cents, s.ml_listing_count) == (25_000, 27_500, 2)
+    assert [m["ml_id"] for m in json.loads(s.unpriced_listings)] == ["MLA902"]
+
+
+async def test_a_doubtful_similar_does_not_feed_the_estimated_color(webw):
+    _store("3", [_wire("MLA902", "Pack X6 Producto Raro", 9000.0)])
+    _score(webw, "MLA902", 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.ml_status == "no_data" and s.estimated_color is None
+    [sim] = json.loads(s.similar_listings)
+    assert sim["est_ok"] is False and price_monitor.PRICE_DOUBT_NOTE in sim["notes"]
+
+
+async def test_the_server_web_is_not_subject_to_this_check_and_works_as_before(webw):
+    """Solo la oficina (la única fuente que llega por un canal con key) pasa por el chequeo de plausibilidad."""
+    webw.web.pages["producto-raro"] = _web_page(_card("MLA901", "Producto Raro", 1500.0))
+    _score(webw, "MLA901", 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert s.ml_status == "ok" and s.match_origin == "web" and s.ml_median_cents == 150_000

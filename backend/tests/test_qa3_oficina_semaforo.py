@@ -124,6 +124,9 @@ def _norm_listings(raw: str | None) -> list[dict]:
 @pytest.mark.parametrize("seed", [3, 77])
 async def test_oficina_is_the_server_web_search_column_by_column_except_the_origin(webw, monkeypatch, seed, config):
     _set("pm_ml_concurrency", 1)
+    # Este test compara el MISMO filtro con otra puerta de entrada; el chequeo de plausibilidad de precios de la oficina (que la
+    # web del servidor no tiene a propósito) se prueba aparte en test_oficina_semaforo.py.
+    monkeypatch.setattr(price_monitor, "_implausible_price", lambda c, our_price: False)
     judge_calls: list = []
     if config == "juez_prendido":
         _set("pm_vision_max_calls", 500)

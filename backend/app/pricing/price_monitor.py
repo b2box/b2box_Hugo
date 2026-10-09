@@ -638,7 +638,7 @@ def _feeds_estimate(d: market_match.Decision) -> bool:
 
 
 def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
-               prefetched: dict[str, Listings]) -> dict[str, Any]:
+               prefetched: dict[str, Listings], our_price: int | None = None) -> dict[str, Any]:
     """Una publicación SIMILAR o DIFERENTE para mostrar: con su precio de
     referencia (sin filtrar por vendedores), que no entra a ningún cálculo real.
     `est_ok` dice si ese precio cuenta para el color ESTIMADO: similar confirmado
@@ -650,7 +650,9 @@ def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
     if price is None and c.id in prefetched:
         price = _ars_median(prefetched[c.id][0])
     in_pesos = price is not None and price > 0 and (not c.currency or c.currency.upper() == CURRENCY)
-    price_ok = _web_price(ctx, c) is not None if c.origin in WEB_ORIGINS else in_pesos
+    price_ok = _web_price(ctx, c, our_price) is not None if c.origin in WEB_ORIGINS else in_pesos
+    if _implausible_price(c, our_price):
+        entry["notes"] = [*entry["notes"], PRICE_DOUBT_NOTE]
     entry.update(price_cents=price if in_pesos else None,
                  est_ok=bool(category == "similar" and _feeds_estimate(d) and price_ok and in_pesos),
                  seller=c.seller[:60] or None, sold_quantity=c.sold_quantity)
@@ -751,7 +753,7 @@ async def _decide(ctx: RunContext, product: VendureProduct, w: _Work, snap: Mark
         # se parecen: el producto no se evalúa, pero lo que devolvió ML se muestra.
         for d in decisions:
             d.reason = market_match.explain_different(d, ctx.thresholds)
-            w.others.append(_ref_entry(ctx, d, "diferente", prefetched))
+            w.others.append(_ref_entry(ctx, d, "diferente", prefetched, snap.our_price_cents))
         return None
     for d in decisions:
         if d.candidate.id in w.promoted:
@@ -773,9 +775,9 @@ async def _decide(ctx: RunContext, product: VendureProduct, w: _Work, snap: Mark
             d.reason = market_match.explain_different(d, ctx.thresholds)
     for d in decisions:
         if d.verdict == market_match.SIMILAR:
-            w.similars.append(_ref_entry(ctx, d, "similar", prefetched))
+            w.similars.append(_ref_entry(ctx, d, "similar", prefetched, snap.our_price_cents))
         elif d.verdict == market_match.NO:
-            w.others.append(_ref_entry(ctx, d, "diferente", prefetched))
+            w.others.append(_ref_entry(ctx, d, "diferente", prefetched, snap.our_price_cents))
     return decisions
 
 
@@ -932,15 +934,38 @@ def _record_unpriced(w: _Work, matches: list[market_match.Decision], priced: lis
         w.igual_unpriced.append(entry)
 
 
-def _web_price(ctx: RunContext, c: MlCandidate) -> int | None:
-    """Precio de una publicación de la web si cuenta: en pesos y con ventas
+PRICE_DOUBT_NOTE = "precio dudoso: 10 veces más chico o más grande que el nuestro"
+
+
+def _implausible_price(c: MlCandidate, our_price: int | None) -> bool:
+    """¿Un precio de la OFICINA que no se puede creer? Mismo criterio que las tiendas (`store_match.PRICE_RATIO_LIMIT`): 10
+    veces más chico o más grande que el nuestro. Es la defensa contra una key robada o una Mac comprometida: una publicación
+    con el título nuestro, una foto real de mlstatic y el precio que quiera quien manda no puede decidir el color. Solo
+    para la oficina: la web que lee el servidor sale de la página de ML directamente. (La "mediana de la API" no entra
+    acá: a la oficina solo se llega cuando la API NO tuvo un IGUAL con precio, así que no hay mediana de la API.)"""
+    if c.origin != ORIGIN_OFICINA or not c.price_cents or c.price_cents <= 0 or not our_price or our_price <= 0:
+        return False
+    ratio = c.price_cents / our_price
+    return ratio < 1 / store_match.PRICE_RATIO_LIMIT or ratio > store_match.PRICE_RATIO_LIMIT
+
+
+def _only_doubtful(ctx: RunContext, c: MlCandidate, our_price: int | None) -> bool:
+    """¿Contaría (pesos, ventas) si su precio fuera creíble? Para decir el motivo correcto."""
+    return _web_price(ctx, c) is not None and _implausible_price(c, our_price)
+
+
+def _web_price(ctx: RunContext, c: MlCandidate, our_price: int | None = None) -> int | None:
+    """Precio de una publicación de la web si cuenta: en pesos, con ventas
     suficientes (la web publica las ventas del ÍTEM, en baldes; ventas
-    desconocidas no descartan, igual que con la API)."""
+    desconocidas no descartan, igual que con la API) y, si viene de la oficina,
+    creíble frente a nuestro precio."""
     if c.price_cents is None or c.price_cents <= 0:
         return None
     if c.currency and c.currency.upper() != CURRENCY:
         return None
     if c.sold_quantity is not None and c.sold_quantity < ctx.min_seller_sales:
+        return None
+    if _implausible_price(c, our_price):
         return None
     return c.price_cents
 
@@ -1015,10 +1040,14 @@ async def _match_web_candidates(ctx: RunContext, product: VendureProduct, snap: 
     sellers: set[str] = set()
     matched_json: list[dict[str, Any]] = []
     why: dict[str, str] = {}
+    our_price = snap.our_price_cents
     for d in matches:
-        price = _web_price(ctx, d.candidate)
+        # Una persona que marcó «Es el mismo» manda sobre la plausibilidad: ella sí sabe si el precio es ese.
+        check = None if d.source == market_match.SOURCE_MANUAL else our_price
+        price = _web_price(ctx, d.candidate, check)
         if price is None:
-            why[d.candidate.id] = "sin precio en pesos o con pocas ventas"
+            why[d.candidate.id] = (PRICE_DOUBT_NOTE if _only_doubtful(ctx, d.candidate, check)
+                                   else "sin precio en pesos o con pocas ventas")
             continue
         prices.append(price)
         if d.candidate.seller:
@@ -1033,12 +1062,16 @@ async def _match_web_candidates(ctx: RunContext, product: VendureProduct, snap: 
         })
     _record_unpriced(w, matches, matched_json, why)
     if not prices:
-        note = ("las publicaciones iguales no tienen ventas suficientes" if matches
+        doubtful = bool(matches) and all(_only_doubtful(ctx, d.candidate, our_price) for d in matches
+                                         if d.source != market_match.SOURCE_MANUAL)
+        note = (f"las publicaciones iguales tienen un {PRICE_DOUBT_NOTE}" if doubtful
+                else "las publicaciones iguales no tienen ventas suficientes" if matches
                 else f"ninguna publicación es igual ({len(w.similars)} similares)" if w.similars
                 else "ninguna publicación es igual")
         return _with_note(snap, f"{label}: {note}")
 
-    best = next(d for d in matches if _web_price(ctx, d.candidate) is not None)
+    best = next(d for d in matches
+                if _web_price(ctx, d.candidate, None if d.source == market_match.SOURCE_MANUAL else our_price) is not None)
     snap.matched_listings = json.dumps(matched_json, ensure_ascii=False)
     snap.match_source, snap.match_confidence = best.source, best.confidence
     snap.match_origin = origin
