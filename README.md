@@ -180,6 +180,9 @@ mismo espacio centrado.
 3. **Fuente 2, web de ML** (solo si la API no dio un IGUAL con precio): el mismo
    título en `listado.mercadolibre.com.ar` con el navegador de Hugo. Ver
    ["Búsqueda web de ML"](#búsqueda-web-de-ml-fuente-2).
+   Si la Mac de la oficina ya buscó ese producto (resultado fresco), se usan esas
+   publicaciones en lugar de buscar desde el servidor: ver
+   ["Buscador de la oficina"](#buscador-de-la-oficina-fuente-2b-la-búsqueda-web-de-ml-hecha-desde-la-mac-de-la-oficina).
 4. Filtro "mismo producto" (`pricing/market_match.py`), igual para las dos
    fuentes: CLIP contra las fotos del producto (escala centrada) + similitud de
    nombre. Vetos, match por imagen fuerte o por imagen+nombre; lo que queda en
@@ -516,6 +519,108 @@ el color desde la próxima corrida". Esas filas son etiquetas para calibrar:
 (`run`, `not-same`) se apoyan en la cookie de sesión `SameSite=Lax` y no llevan
 token CSRF. `Lax` ya frena los POST entre sitios, pero conviene sumar un token (o
 validar `Origin`) para todos los endpoints que escriben, no solo estos.
+
+### Buscador de la oficina (fuente 2b: la búsqueda web de ML hecha desde la Mac de la oficina)
+
+**Por qué.** Desde el servidor, ML contesta con captcha a la IP del proxy residencial y Hugo corta la búsqueda web
+(eso está bien y **no se esquiva**). Desde la conexión de la oficina ML responde la búsqueda normal (probado 4 de 4
+con `ListingBrowser` sin proxy). Entonces: **la Mac busca de a poco y Hugo hace el matching**.
+
+```
+Mac de la oficina (01:00 ART)                       Hugo
+backend/tools/oficina_ml_search.py
+  GET  /api/oficina/ml-queue?limit=N   ───────▶  productos sin idéntico con precio + sus consultas
+  busca cada consulta en listado.mercadolibre.com.ar
+  (sin proxy, 1 a la vez, pausa 8-15 s)
+  POST /api/oficina/ml-results         ───────▶  re-sanea TODO y guarda en `ml_web_result`
+                                                  el semáforo de las 03:00 ART lo usa como fuente "web"
+                                                  (origen `oficina`, "Web (oficina)" en el dashboard)
+```
+
+**Lado Hugo** (`pricing/oficina_ml.py`, `api/oficina_routes.py`):
+
+- **Prender/apagar.** Variable `OFICINA_SEARCH_KEY` (>= 24 caracteres). Sin ella, o con una key floja/placeholder, los dos
+  endpoints dan **404** y no existen en la práctica. `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado.
+- **Auth.** Header `x-oficina-key` contra la variable, comparado en tiempo constante (se comparan los SHA-256). No usan la
+  cookie del dashboard (`/api/oficina/` está en las rutas públicas del middleware; la sesión del dashboard tampoco los abre).
+  Rate limit por IP (30 pedidos por minuto) y bloqueo de 5 minutos tras 10 intentos con key mala (`429`).
+- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500): primero los productos cuya última medición no tuvo un
+  IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados; después los
+  que tienen resultado de la oficina **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a la
+  oficina). Cada item trae solo `product_id` y `queries` (las mismas variantes que la API de ML, ver "Variantes de búsqueda");
+  nada de costos, proveedor ni precios nuestros. **Se vuelve a pedir un producto un día antes de que su resultado venza**
+  (a los 6 días con el TTL de 7): si no, la corrida de las 03:00 lo encontraría vencido y ese producto perdería el dato un día
+  por semana.
+- **Los resultados** (`POST /api/oficina/ml-results`, `{"results": [{product_id, query, fetched_at, status, reason, candidates}]}`).
+  Hugo no confía en lo que llega: cada campo se vuelve a sanear con las listas blancas de la búsqueda web del servidor:
+
+  | Campo | Regla |
+  |---|---|
+  | `product_id` | `[A-Za-z0-9_-]{1,64}` y tiene que existir en el semáforo (producto desconocido: rechazado) |
+  | `id` de la publicación | `MLA<dígitos>` / `MLAU<dígitos>`, solo ASCII (`re.ASCII`: `MLA١٢٣` no pasa) |
+  | `permalink` | https y host de Mercado Libre, sin usuario ni puerto raro ni click-trackers; si no cumple se reemplaza por el link canónico del id |
+  | fotos | solo `*.mlstatic.com` (http se sube a https); cualquier otro host se descarta |
+  | precio | entero en centavos, `0 < p < 10^11`; fuera de rango (o bool, NaN, texto) se descarta el precio, no la publicación; una moneda que no son 3 letras descarta el precio |
+  | título, vendedor, marca | una sola línea: sin controles, sin caracteres de formato/inversión de texto, sin las marcas `{…}` de ML; cortados a 200 / 60 / 40 |
+  | `fetched_at` | ISO 8601 (con o sin zona); en el futuro (más de 5 min) se rechaza: no puede mantener un resultado fresco para siempre |
+  | `status` | `ok` / `empty` / `blocked` / `error`; solo `ok` guarda publicaciones (un `ok` sin ninguna válida se guarda como `empty`) |
+
+  Topes: **512 KB** de body (también sin `Content-Length`), **50 productos** por lote, **`pm_ml_web_max_results`** publicaciones por
+  producto, sin repetir id. **Idempotente por `(product_id, fetched_at)`**: mandar dos veces el mismo lote no duplica nada. Un
+  resultado malo se rechaza solo (con el motivo en la respuesta) sin tirar el lote. Se conservan los últimos 5 resultados de cada producto.
+- **La corrida del semáforo.** Si un producto sin IGUAL de la API tiene un resultado `ok` o `empty` de la oficina de menos de
+  `OFICINA_RESULT_TTL_DAYS`, se usan esos candidatos **en lugar** de buscar desde el servidor, por el mismo filtro que la web
+  (CLIP, nombre, juez, medidas, "No es el mismo" / "Es el mismo"). Un `empty` fresco dice "la oficina buscó y ML no tiene nada" y
+  tampoco dispara la búsqueda del servidor. Un `blocked` / `error` no es un resultado. El color real sigue saliendo solo de
+  idénticos. Si no hay resultado fresco, todo sigue como antes (el servidor busca solo si tiene proxy). El snapshot guarda
+  `match_origin = oficina` y `web_via = oficina`; la corrida, `oficina_fresh` (productos con resultado fresco al empezar) y
+  `n_oficina_ok`. En el dashboard: "Web (oficina)", el filtro de origen y una línea en Salud (productos frescos, última carga,
+  últimas 24 h con cuántas bloqueadas).
+
+**Lado Mac** (`backend/tools/oficina_ml_search.py`, se corre con el venv del repo; el Dockerfile no lo copia):
+
+- Lee `OFICINA_SEARCH_KEY` y `HUGO_URL` de `~/.config/b2box-bench/.env` (se niega si el archivo no es 600; la key **nunca** se
+  imprime ni se loguea; `HUGO_URL` tiene que ser `https://`).
+- `ListingBrowser` **sin proxy** (`BROWSER_PROXY` forzado a vacío antes de importar nada), scripts bloqueados, de a una página,
+  **pausa al azar de 8 a 15 s** entre búsquedas (no se puede bajar), tope `--max` (default 250; el piloto, `--max 50`).
+  Parsea con `market_ml_web.parse_search` y `page_problem`. Prueba las consultas de cada producto en orden y se queda con la
+  primera que trae publicaciones.
+- **Al primer captcha o bloqueo (`page_problem` = `blocked`: captcha, verificación de cuenta, 403/429, redirect a otro sitio) frena la
+  noche entera**, lo reporta a Hugo (`status: blocked`) y termina con código 3. No reintenta, no espera para probar de nuevo, no
+  cambia nada para esquivarlo. Cinco errores de lectura seguidos (página ilegible, navegador caído) también la frenan (código 5).
+- Manda lotes de 10 productos; un lote que no se puede entregar se reintenta 3 veces (5 / 15 / 45 s) y, si no, se cuenta como perdido
+  y sigue (código 4). Key mala o endpoint apagado (401 / 404): frena sin reintentar (código 2).
+- `--dry-run` busca de verdad pero **no manda nada** a Hugo. `--check` solo prueba la configuración y que Hugo acepte la key.
+  `caffeinate -i` atado al proceso mientras corre. Log en `~/Library/Logs/b2box-oficina-ml-search.log` (sin la key, sin headers, sin
+  los textos de las consultas).
+
+**Instalación en la Mac de la oficina** (una sola vez; pasos para Nico):
+
+1. En la Terminal: `cd ~/Documents/GitHub/b2box_Hugo && git pull && cd backend`.
+2. `uv sync --locked --extra dev --extra browser` y después `.venv/bin/python -m camoufox fetch` (baja el Firefox, ~150 MB).
+3. `.venv/bin/python tools/oficina_ml_search.py --init`: genera la key y la guarda en `~/.config/b2box-bench/.env`. **No la
+   muestra**: te dice que abras el archivo (`open -e ~/.config/b2box-bench/.env`) y copies el valor de `OFICINA_SEARCH_KEY`.
+4. En Coolify → aplicación Hugo → Environment Variables → agregar `OFICINA_SEARCH_KEY` con ese valor → Redeploy.
+5. En el mismo archivo, `HUGO_URL=https://<dominio de Hugo>`.
+6. `.venv/bin/python tools/oficina_ml_search.py --check` → tiene que decir `OK`.
+7. Prueba chica sin mandar nada: `… --dry-run --max 3` (3 búsquedas reales a ML, tarda ~1 minuto).
+8. **Piloto de 50:** `… tools/oficina_ml_search.py --max 50` (~15 minutos). En el dashboard, Semáforo, aparecen "Web (oficina)" a la
+   noche siguiente, cuando corre el semáforo.
+9. **Automático a la 01:00 ART:** copiar `backend/tools/com.b2box.oficina-ml-search.plist` a `~/Library/LaunchAgents/`, cambiar
+   `/Users/USUARIO/...` por la carpeta y el usuario de esa Mac, y `launchctl bootstrap gui/$(id -u)
+   ~/Library/LaunchAgents/com.b2box.oficina-ml-search.plist`. La Mac tiene que estar en la zona horaria de Buenos Aires.
+10. **La Mac tiene que estar despierta a la 01:00**: launchd no despierta una Mac dormida. El despertar programado lo configura una
+    persona con su clave de administrador: `sudo pmset repeat wakeorpoweron MTWRFSU 00:55:00` (y la Mac enchufada, con la tapa
+    abierta o en modo clamshell con monitor). Ningún script del repo lo ejecuta.
+
+**Cobertura.** Con 250 productos por noche y 1.800 "sin dato", una vuelta completa son ~8 noches; con el TTL de 7 días el
+régimen no alcanza a refrescar todo antes de que venza (necesitaría ~265 por noche). Subir `--max` en el plist (hasta 500) o
+`OFICINA_RESULT_TTL_DAYS` lo resuelve. A ~12 s por búsqueda, 250 productos son ~1 hora (más si la primera consulta viene vacía).
+
+**Riesgos.** Es la misma fuente que la búsqueda web del servidor (`robots.txt` de `listado.mercadolibre.com.ar`: permite las
+búsquedas por palabra a los agentes genéricos) pero desde una IP de oficina, así que si ML la bloquea esa IP queda marcada: por eso
+el corte al primer bloqueo y el ritmo lento. **No se revisaron los Términos y Condiciones de ML**: conviene el OK de Nico y Gabriel.
+La key vive en el `.env` de la Mac y en Coolify; rotarla es borrar la línea, `--init` y actualizar Coolify.
 
 ### Tiendas (Gadnic, Casa Perfecta…)
 
@@ -961,6 +1066,8 @@ backend/
 │   │   ├── semaforo.py       # reglas puras: ganancia, color, tramo
 │   │   ├── market_ml.py      # API de ML: budget, backoff, vendedores
 │   │   ├── market_ml_web.py  # búsqueda web de ML (estado embebido) + cupo y cortes
+│   │   ├── market_query.py   # variantes de búsqueda (título, corto, palabras clave)
+│   │   ├── oficina_ml.py     # buscador de la oficina: saneo, cola, resultados frescos
 │   │   ├── market_match.py   # filtro "mismo producto" (CLIP + nombre)
 │   │   ├── market_specs.py   # cantidad, capacidad, medidas y peso (IGUAL → SIMILAR)
 │   │   ├── match_feedback.py # "No es el mismo": exclusiones y etiquetas negativas
@@ -979,10 +1086,14 @@ backend/
 │   ├── notifier/
 │   │   └── email.py         # SMTP a tech@b2box.pro
 │   ├── api/
-│   │   └── routes.py        # /verify, /audit, /products/{id}/check
+│   │   ├── routes.py        # /verify, /audit, /products/{id}/check
+│   │   └── oficina_routes.py # /api/oficina/*: cola y resultados de la Mac (x-oficina-key)
 │   └── db/
 │       ├── models.py        # SQLModel: PriceHistory, AuditLog
 │       └── session.py
+├── tools/
+│   ├── oficina_ml_search.py                 # runner de la Mac de la oficina (no va en la imagen)
+│   └── com.b2box.oficina-ml-search.plist    # launchd, 01:00 ART (ejemplo)
 ├── scripts/
 │   └── check_lock.sh        # verifica que uv.lock esté al día con pyproject.toml
 ├── uv.lock                  # versiones exactas de producción (ver "Dependencias y lock")
@@ -1156,6 +1267,8 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `GET  /app/index-status` — si el índice de imágenes ya está listo
 - `POST /app/index-rebuild` — fuerza la reconstrucción del índice
 - `/api/price-monitor/*` — semáforo de precios contra ML (ver su sección)
+- `GET /api/oficina/ml-queue`, `POST /api/oficina/ml-results` — buscador de la oficina; se autentican con `x-oficina-key`
+  (`OFICINA_SEARCH_KEY`), no con la cookie del dashboard; 404 sin la variable (ver su sección)
 
 Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
@@ -1319,6 +1432,8 @@ Ver `.env.example`. Las críticas:
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
   (default 180; siempre queda el último snapshot de cada producto; 0 = nunca).
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
+- `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 24 caracteres; `tools/oficina_ml_search.py --init` la genera). Sin ella
+  los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
