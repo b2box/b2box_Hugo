@@ -57,6 +57,9 @@ export const SECTION_META: Record<string, SectionMeta> = {
   semaforo: {
     desc: "Cada noche Hugo compara el catálogo contra Mercado Libre y calcula cuánto ganaría un revendedor. El color real sale solo de las publicaciones idénticas; sin idénticos hay un color estimado por las similares, y siempre se muestra lo que devolvió ML (idénticos, similares y diferentes). En la misma corrida se compara también contra las tiendas (Gadnic, Casa Perfecta…): una columna por fuente y «Más barato afuera»; un idéntico de tienda con stock y precio creíble cambia el color como uno de ML. Modo sombra: solo mide, no toca Vendure.",
   },
+  seo_textos: {
+    desc: "Revisa los nombres y descripciones de TODOS los productos de Vendure (habilitados y deshabilitados, canal Argentina y canal por defecto, todos los idiomas) con reglas fijas, sin IA: título largo, relleno de marketing, códigos de modelo, marcas o personajes de terceros, nombre de fábrica o código de proveedor, nombre que no coincide con la URL, nombres repetidos, descripción vacía o con HTML y traducción es_AR faltante. Solo lee: nunca escribe en Vendure. Los datos del proveedor no se muestran: solo si el texto coincide con ellos.",
+  },
   settings: {
     desc: "Ajustes runtime de Hugo (umbrales, intervalos). Se aplican sin redeploy.",
   },

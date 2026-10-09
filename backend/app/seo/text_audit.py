@@ -20,7 +20,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete, or_
@@ -231,11 +231,20 @@ async def _read_all(reader: Reader) -> tuple[dict[str, TextsRead], dict[str, str
     return ok, failed
 
 
+def _utc_iso(dt: datetime | None) -> str | None:
+    """Las fechas de Hugo se guardan en UTC sin zona: el navegador necesita la «Z»."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat() + "Z"
+
+
 def run_to_dict(run: TextAuditRun) -> dict[str, Any]:
     return {
         "id": run.id,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "started_at": _utc_iso(run.started_at),
+        "finished_at": _utc_iso(run.finished_at),
         "status": run.status,
         "trigger": run.trigger,
         "products_total": run.products_total,

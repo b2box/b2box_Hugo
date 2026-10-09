@@ -348,6 +348,17 @@ def test_los_endpoints_piden_sesion():
         assert getattr(c, method)(url, follow_redirects=False).status_code in (401, 302, 303, 307), url
 
 
+def test_las_fechas_salen_en_utc_con_z(monkeypatch, client):
+    run(monkeypatch, FakeVendure({"ar": [], None: [raw_product(1)]}))
+    data = client.get("/api/seo/text-audit/summary").json()["run"]
+    assert data["started_at"].endswith("Z") and data["finished_at"].endswith("Z")
+    from datetime import datetime, timezone
+
+    aware = datetime(2026, 10, 9, 15, 30, tzinfo=timezone.utc)
+    assert text_audit._utc_iso(aware) == "2026-10-09T15:30:00Z"
+    assert text_audit._utc_iso(None) is None
+
+
 def test_summary_sin_corridas(client):
     data = client.get("/api/seo/text-audit/summary").json()
     assert data["run"] is None and data["running"] is False
