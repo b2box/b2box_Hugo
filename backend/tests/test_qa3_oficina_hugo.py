@@ -618,9 +618,6 @@ def test_random_json_never_gives_a_500_and_whatever_is_stored_obeys_the_whitelis
             assert all(not unicodedata.category(ch).startswith("C") for ch in c["name"] + c["seller"] + c["brand"])
 
 
-@pytest.mark.xfail(strict=True, reason="GAP (bajo): la cola mira el ÚLTIMO snapshot de cada producto sin mirar su fecha. Un producto borrado de "
-                                       "Vendure conserva para siempre su último snapshot (la poda deja el último de cada uno), nadie lo vuelve "
-                                       "a medir y la Mac lo busca cada 6 días eternamente, para un resultado que el semáforo no va a usar")
 def test_products_the_semaforo_stopped_measuring_do_not_stay_in_the_queue_forever(api):
     _snap("1")
     with Session(engine) as s:

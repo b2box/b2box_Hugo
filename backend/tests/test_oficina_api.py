@@ -266,20 +266,112 @@ def test_queue_items_carry_only_the_product_id_and_the_queries(api):
     assert set(body) == {"items", "max_results", "ttl_days"}
     [item] = body["items"]
     assert set(item) == {"product_id", "queries"}
-    assert item["queries"] == market_query.query_variants("Organizador Doble Ajustable 3 Niveles 40x30 Blanco", 3)
+    assert item["queries"] == market_query.query_variants("Organizador Doble Ajustable 3 Niveles 40x30 Blanco", 3)[:1]   # UNA por noche
     text = json.dumps(body)
     assert "12345" not in text and "BX999" not in text and "secreto" not in text
     assert body["max_results"] == 8 and body["ttl_days"] == 7
 
 
-def test_the_queries_follow_pm_ml_query_variants(api):
-    _snap("7", name="Organizador Doble Ajustable 3 Niveles 40x30 Blanco")
+LONG_NAME = "Organizador Doble Ajustable 3 Niveles 40x30 Blanco"
+
+
+def _empty_search(pid: str, query: str, ago: timedelta) -> None:
+    with Session(engine) as s:
+        s.add(MlWebResult(product_id=pid, query=query, fetched_at=(utcnow() - ago).replace(microsecond=0),
+                          candidates="[]", n_candidates=0, status="empty"))
+        s.commit()
+
+
+def test_only_one_page_per_product_per_night_and_the_next_variant_waits_for_the_next_night(api):
+    """Tope de ML desde la IP de la oficina: una consulta por producto y por noche. Si vino vacía, la siguiente variante
+    recién la noche siguiente."""
+    _snap("1", name=LONG_NAME)
+    v1, v2, v3 = market_query.query_variants(LONG_NAME, 3)
+    assert [(i["product_id"], i["queries"]) for i in _queue(api)["items"]] == [("1", [v1])]
+    _empty_search("1", v1, timedelta(hours=2))                       # esta misma noche: ya se usó su página
+    assert _queue(api)["items"] == []
+    _clear_results()
+    _empty_search("1", v1, timedelta(hours=20))                      # la noche anterior vino vacía: ahora la segunda
+    assert [i["queries"] for i in _queue(api)["items"]] == [[v2]]
+    _empty_search("1", v2, timedelta(hours=14))                      # y esa también: la tercera
+    assert [i["queries"] for i in _queue(api)["items"]] == [[v3]]
+    _empty_search("1", v3, timedelta(hours=13))                      # se probaron las tres: queda "sin nada" hasta que venza
+    assert _queue(api)["items"] == []
+
+
+def _clear_results() -> None:
+    with Session(engine) as s:
+        for row in s.exec(select(MlWebResult)).all():
+            s.delete(row)
+        s.commit()
+
+
+def test_an_ok_result_stops_the_variants_and_an_expired_empty_one_starts_over_at_the_first(api):
+    _snap("1", name=LONG_NAME)
+    v1, v2, _ = market_query.query_variants(LONG_NAME, 3)
+    _result("1", timedelta(hours=20))                                # la primera variante trajo publicaciones
+    assert _queue(api)["items"] == []
+    _clear_results()
+    _empty_search("1", v2, timedelta(days=6, hours=2))               # vacía y por vencer: se vuelve a empezar por la primera
+    assert [i["queries"] for i in _queue(api)["items"]] == [[v1]]
+
+
+def test_the_variants_follow_pm_ml_query_variants_and_a_changed_setting_does_not_loop(api):
+    _snap("1", name=LONG_NAME)
     runtime.set_value("pm_ml_query_variants", 1)
-    [item] = _queue(api)["items"]
-    assert [q for q in item["queries"]] == market_query.query_variants("Organizador Doble Ajustable 3 Niveles 40x30 Blanco", 1)
-    assert len(item["queries"]) == 2                           # el título y, de respaldo, las 4 primeras palabras
+    v1, fallback = market_query.query_variants(LONG_NAME, 1)         # el título y, de respaldo, las 4 primeras palabras
+    assert [i["queries"] for i in _queue(api)["items"]] == [[v1]]
+    _empty_search("1", v1, timedelta(hours=20))
+    assert [i["queries"] for i in _queue(api)["items"]] == [[fallback]]
     runtime.set_value("pm_ml_query_variants", 2)
-    assert len(_queue(api)["items"][0]["queries"]) == 2
+    corto = market_query.query_variants(LONG_NAME, 2)[1]
+    assert [i["queries"] for i in _queue(api)["items"]] == [[corto]]
+    _clear_results()
+    _empty_search("1", "una consulta que ya no está en el plan", timedelta(hours=20))
+    assert _queue(api)["items"] == []                                # no se sabe por dónde seguir: espera al vencimiento
+
+
+def test_products_the_semaforo_no_longer_measures_are_not_searched(api):
+    """El último snapshot de un producto borrado de Vendure se queda para siempre; la cola mira cuán viejo es respecto
+    del snapshot más nuevo de todos (si el semáforo estuvo caído, todos son viejos y nadie queda afuera)."""
+    _snap("1")
+    with Session(engine) as s:
+        s.add(MarketPriceSnapshot(run_id=0, product_id="2", ml_status="no_data", product_name="Producto borrado",
+                                  product_enabled=True, captured_at=utcnow() - timedelta(days=4)))
+        s.add(MarketPriceSnapshot(run_id=0, product_id="3", ml_status="no_data", product_name="Se midió anteayer",
+                                  product_enabled=True, captured_at=utcnow() - timedelta(days=2)))
+        s.commit()
+    assert [i["product_id"] for i in _queue(api)["items"]] == ["1", "3"]
+
+
+def test_if_the_semaforo_was_down_for_a_week_nobody_drops_out_of_the_queue(api):
+    with Session(engine) as s:
+        for i in (1, 2):
+            s.add(MarketPriceSnapshot(run_id=0, product_id=str(i), ml_status="no_data", product_name=f"Producto {i}",
+                                      product_enabled=True, captured_at=utcnow() - timedelta(days=7, hours=i)))
+        s.commit()
+    assert [i["product_id"] for i in _queue(api)["items"]] == ["1", "2"]
+
+
+def test_blocked_and_error_reports_never_push_out_the_last_good_result(api):
+    _snap("1")
+    assert _post(api, [_res("1", fetched_at=_iso(-timedelta(days=2)))]).json()["stored"] == 1
+    for minutes in range(1, oficina_ml.KEEP_RESULTS_PER_PRODUCT + 4):
+        _post(api, [_res("1", [], status=("blocked", "error")[minutes % 2], fetched_at=_iso(-timedelta(minutes=minutes)))])
+    by_status = [r.status for r in _rows()]
+    assert by_status.count("ok") == 1 and len(by_status) == 1 + oficina_ml.KEEP_RESULTS_PER_PRODUCT
+    assert list(oficina_ml.load_fresh()) == ["1"]                    # y el semáforo lo sigue usando
+
+
+def test_results_older_than_the_retention_are_purged_by_time(api):
+    _snap("1")
+    _snap("2")
+    old = (utcnow() - oficina_ml.RESULT_RETENTION - timedelta(days=8)).replace(microsecond=0)
+    with Session(engine) as s:
+        s.add(MlWebResult(product_id="2", query="vieja", fetched_at=old, candidates="[]", status="empty"))
+        s.commit()
+    assert _post(api, [_res("1")]).json()["stored"] == 1             # un lote cualquiera dispara la purga
+    assert [r.product_id for r in _rows()] == ["1"]
 
 
 def test_the_limit_is_respected_and_bounded(api):

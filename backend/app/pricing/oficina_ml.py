@@ -63,6 +63,14 @@ FUTURE_SKEW = timedelta(minutes=5)
 # de esa noche (03:00 ART) lo encontraría vencido y el producto perdería el dato un día por semana.
 QUEUE_REFRESH_MARGIN = timedelta(days=1)
 MIN_REFRESH_AGE = timedelta(hours=12)
+# UNA página de ML por producto por noche: si la consulta vino vacía, la siguiente variante se prueba recién la noche
+# siguiente (pasadas al menos estas horas), para no multiplicar las búsquedas desde la IP de la oficina.
+NEXT_VARIANT_AFTER = timedelta(hours=12)
+# Un producto cuyo último snapshot es más viejo que esto (respecto del snapshot más nuevo de todos) ya no se mide: borrado de
+# Vendure, deshabilitado con `pm_include_disabled=0`. Buscarlo sería gastar una página de ML en un resultado que nadie usa.
+SNAPSHOT_MAX_AGE = timedelta(days=3)
+# Los resultados se purgan por tiempo (nunca antes de que venza el TTL, con margen).
+RESULT_RETENTION = timedelta(days=30)
 
 # Una key de `secrets.token_urlsafe(32)` tiene ~30 caracteres distintos; esto frena "aaaa…" o "abcabcabc…".
 MIN_KEY_DISTINCT_CHARS = 12
@@ -296,7 +304,7 @@ def ingest(items: list[Any], *, now: datetime | None = None) -> IngestReport:
                 taken.add(key)
                 fresh.append(r)
         _insert(s, fresh, report)
-        _prune(s, {r.product_id for r in fresh})
+        _prune(s, {r.product_id for r in fresh}, now)
     for r in cleaned:
         if r.status == ST_BLOCKED:
             log.warning("oficina: la Mac reportó que ML bloqueó la búsqueda (producto %s)", r.product_id)
@@ -323,17 +331,26 @@ def _insert(s: Session, fresh: list[CleanResult], report: IngestReport) -> None:
                 report.duplicates += 1
 
 
-def _prune(s: Session, product_ids: set[str]) -> None:
-    """Se conservan los últimos KEEP_RESULTS_PER_PRODUCT resultados de cada producto tocado."""
+def _prune(s: Session, product_ids: set[str], now: datetime) -> None:
+    """Retención. Por producto se conservan los últimos KEEP_RESULTS_PER_PRODUCT resultados (ok / empty) Y, aparte, los
+    últimos KEEP_RESULTS_PER_PRODUCT bloqueos / errores: una racha de bloqueos no puede desplazar el último resultado
+    bueno que todavía está dentro del TTL. Además se purga por tiempo todo lo más viejo que la retención."""
     for pid in product_ids:
-        ids = s.exec(
-            select(MlWebResult.id).where(MlWebResult.product_id == pid)
+        rows = s.exec(
+            select(MlWebResult.id, MlWebResult.status).where(MlWebResult.product_id == pid)
             .order_by(MlWebResult.fetched_at.desc(), MlWebResult.id.desc())  # type: ignore[union-attr]
         ).all()
-        for old in ids[KEEP_RESULTS_PER_PRODUCT:]:
-            row = s.get(MlWebResult, old)
-            if row is not None:
-                s.delete(row)
+        kept = {"result": 0, "failure": 0}
+        for row_id, status in rows:
+            bucket = "result" if status in RESULT_STATUSES else "failure"
+            kept[bucket] += 1
+            if kept[bucket] > KEEP_RESULTS_PER_PRODUCT:
+                row = s.get(MlWebResult, row_id)
+                if row is not None:
+                    s.delete(row)
+    horizon = now - max(RESULT_RETENTION, ttl() + timedelta(days=7))
+    for old in s.exec(select(MlWebResult).where(MlWebResult.fetched_at < horizon)).all():  # type: ignore[arg-type]
+        s.delete(old)
     s.commit()
 
 
@@ -344,12 +361,15 @@ def build_queue(limit: int, *, now: datetime | None = None) -> list[dict[str, An
     """Qué buscar esta noche, en este orden:
 
       1. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
-         todavía no buscó (habilitados antes que deshabilitados);
-      2. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los
-         que siguen sin idéntico y los que hoy tienen precio gracias a la oficina.
+         todavía no buscó (habilitados antes que deshabilitados; los deshabilitados se miden por pedido de Nico y
+         se buscan también);
+      2. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
+         siguiente, la noche siguiente);
+      3. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
+         idéntico y los que hoy tienen precio gracias a la oficina. Empiezan de nuevo por la primera variante.
 
-    Cada item lleva solo el id del producto y las consultas (las mismas variantes de la API de ML): ni
-    costos ni proveedor ni nada interno."""
+    **Cada item lleva UNA sola consulta**: una página de ML por producto por noche como tope. Y solo el id del producto:
+    ni costos ni proveedor ni nada interno. Los productos cuyo último snapshot es viejo (ya no se miden) no entran."""
     now = now or utcnow()
     variants = market_query.clamp_variants(runtime.get("pm_ml_query_variants"))
     refresh_after = max(ttl() - QUEUE_REFRESH_MARGIN, MIN_REFRESH_AGE)
@@ -358,40 +378,50 @@ def build_queue(limit: int, *, now: datetime | None = None) -> list[dict[str, An
         newest = select(func.max(MarketPriceSnapshot.id)).group_by(MarketPriceSnapshot.product_id)
         snaps = s.exec(
             select(MarketPriceSnapshot.product_id, MarketPriceSnapshot.ml_status, MarketPriceSnapshot.match_origin,
-                   MarketPriceSnapshot.product_name, MarketPriceSnapshot.product_enabled)
+                   MarketPriceSnapshot.product_name, MarketPriceSnapshot.product_enabled, MarketPriceSnapshot.captured_at)
             .where(MarketPriceSnapshot.id.in_(newest))  # type: ignore[union-attr]
         ).all()
-        last_search = dict(s.exec(
-            select(MlWebResult.product_id, func.max(MlWebResult.fetched_at))
+        results = s.exec(
+            select(MlWebResult.product_id, MlWebResult.fetched_at, MlWebResult.status, MlWebResult.query)
             .where(MlWebResult.status.in_(RESULT_STATUSES))  # type: ignore[attr-defined]
-            .group_by(MlWebResult.product_id)
-        ).all())
+        ).all()
+    last_result: dict[str, tuple[datetime, str, str]] = {}
+    for pid, fetched, status, query in results:
+        if pid not in last_result or fetched > last_result[pid][0]:
+            last_result[pid] = (fetched, status, query)
+    still_measured = max((row[5] for row in snaps), default=now) - SNAPSHOT_MAX_AGE
 
     never: list[tuple[Any, ...]] = []
+    next_variant: list[tuple[Any, ...]] = []
     expiring: list[tuple[Any, ...]] = []
-    for pid, ml_status, origin, name, enabled in snaps:
-        if not name:
+    for pid, ml_status, origin, name, enabled, captured in snaps:
+        if not name or captured < still_measured:
             continue
         by_oficina = ml_status == "ok" and origin == ORIGIN_OFICINA
-        if ml_status not in _NEEDS_SEARCH and not by_oficina:
+        needs_search = ml_status in _NEEDS_SEARCH
+        if not needs_search and not by_oficina:
             continue
-        fetched = last_search.get(pid)
-        if fetched is None:
-            if not by_oficina:
-                never.append((enabled is False, _sort_id(pid), pid, name))
-        elif fetched <= stale_before:
-            expiring.append((fetched, _sort_id(pid), pid, name))
-    never.sort(key=lambda t: t[:2])
-    expiring.sort(key=lambda t: t[:2])
+        plan = market_query.query_variants(name, variants)
+        if not plan:
+            continue
+        last = last_result.get(pid)
+        if last is None:
+            if needs_search:
+                never.append((enabled is False, _sort_id(pid), pid, plan[0]))
+            continue
+        fetched, status, used = last
+        if fetched <= stale_before:
+            expiring.append((fetched, _sort_id(pid), pid, plan[0]))
+        elif needs_search and status == ST_EMPTY and fetched <= now - NEXT_VARIANT_AFTER:
+            keys = [market_query._key(q) for q in plan]
+            at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
+            if at + 1 < len(plan):
+                next_variant.append((fetched, _sort_id(pid), pid, plan[at + 1]))
+    for group in (never, next_variant, expiring):
+        group.sort(key=lambda t: t[:2])
 
-    out: list[dict[str, Any]] = []
-    for *_, pid, name in [*never, *expiring]:
-        queries = market_query.query_variants(name, variants)
-        if queries:
-            out.append({"product_id": pid, "queries": queries})
-        if len(out) >= limit:
-            break
-    return out
+    return [{"product_id": pid, "queries": [query]}
+            for *_, pid, query in [*never, *next_variant, *expiring]][:limit]
 
 
 def _sort_id(pid: str) -> tuple[int, str]:
