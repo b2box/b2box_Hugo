@@ -385,9 +385,6 @@ async def test_a_run_a_label_and_an_undo_on_postgres_after_migrating_from_origin
     assert {x["name"] for x in client.get("/api/price-monitor/summary").json()["stores"]} == {"Casa Perfecta", "Gadnic"}
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (Postgres): la API de tiendas no saca los bytes NUL de los textos que carga una persona: "
-                                       "`name`, `house_brand` o `notes` con \\x00 dan psycopg.DataError y un 500 en vez de un 422 (SQLite "
-                                       "los acepta, por eso no se ve en la suite normal). Bajo sesión del dashboard, impacto bajo.")
 @pytest.mark.parametrize("field", ["name", "house_brand", "notes"])
 def test_a_nul_byte_in_a_text_field_of_the_store_form_is_refused_or_cleaned_not_a_500(pg, client, field):
     body = {"name": "Con NUL", "base_url": "https://www.connul.com.ar", "platform": "tiendanube"}

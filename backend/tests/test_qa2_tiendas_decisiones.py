@@ -138,11 +138,6 @@ async def test_the_house_brand_matches_without_distinguishing_case_and_the_judge
     assert judge_on == [] or all(brand not in [b for _i, b in call] for call in judge_on)
 
 
-@pytest.mark.xfail(strict=True, reason="GAP de la decisión «marca Gadnic = idéntico»: solo vale para los productos de la tienda Gadnic "
-                                       "(market_store.house_brand). Una publicación de ML o un producto de otra tienda con marca "
-                                       "«Gadnic» (el mismo importador revendido) se trata como marca conocida: va al juez y, si dice "
-                                       "«similar», queda fuera del color. Si Nico quiso la regla general, 'gadnic' va en "
-                                       "price_monitor._GENERIC_BRANDS o el house_brand se aplica a todas las fuentes.")
 @pytest.mark.parametrize("source", ["ml_web", "casa_perfecta"])
 async def test_a_listing_branded_gadnic_outside_the_gadnic_store_is_not_a_known_brand(webw, store_db, monkeypatch, judge_on, source):
     from app.pricing import market_match, store_catalog

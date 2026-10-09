@@ -440,6 +440,9 @@ Listings = tuple[list[MlListing], dict]
 _GENERIC_BRANDS = frozenset({
     "generica", "generico", "sin marca", "no aplica", "n/a", "na", "otra", "otras", "otros",
     "no especificada", "no especificado", "importado", "oem", "marca generica",
+    # Decisión de Nico (08-oct-2026): «Gadnic» es marca de importador, como la nuestra; no es una marca conocida
+    # con valor propio. Vale en TODAS las fuentes (una publicación de ML o de otra tienda que la declare incluida).
+    "gadnic",
 })
 
 

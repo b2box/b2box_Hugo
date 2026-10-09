@@ -152,8 +152,12 @@ async def index_now(request: Request, store_id: int = Path(..., ge=1, le=DB_INT_
     if lock is not None and lock.locked():
         raise HTTPException(409, "ya hay un indexado de esa tienda en curso")
     row = session.get(MarketStore, store_id)
-    if row is not None and row.last_indexed_at is not None:
-        wait_s = int(store_catalog.MANUAL_COOLDOWN_MIN * 60 - (utcnow() - row.last_indexed_at).total_seconds())
+    # El descanso es por SITIO: borrar y volver a crear la tienda no lo saltea.
+    last_pass = max((t for t in (row.last_indexed_at if row is not None else None,
+                                 await asyncio.to_thread(store_catalog.last_pass_at, info.apex)) if t is not None),
+                    default=None)
+    if last_pass is not None:
+        wait_s = int(store_catalog.MANUAL_COOLDOWN_MIN * 60 - (utcnow() - last_pass).total_seconds())
         if wait_s > 0:
             raise HTTPException(429, f"La última pasada de esa tienda terminó hace poco. Probá de nuevo en "
                                      f"{max(1, round(wait_s / 60))} min.", headers={"Retry-After": str(wait_s)})
@@ -200,11 +204,13 @@ async def label_match(body: LabelBody, request: Request, match_id: int = Path(..
 
 
 @router.delete("/api/price-monitor/store-matches/{match_id}/label")
-async def unlabel_match(match_id: int = Path(..., ge=1, le=DB_INT_MAX),
+async def unlabel_match(request: Request, match_id: int = Path(..., ge=1, le=DB_INT_MAX),
                         session: Session = Depends(get_session)) -> dict[str, Any]:
-    m = store_match.clear_label(session, match_id)
+    actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
+    m = store_match.clear_label(session, match_id, actor)
     if m is None:
         raise HTTPException(404, "coincidencia no encontrada")
+    log.info("tiendas: %s deshizo la marca de la coincidencia %s", actor or "?", match_id)
     price_monitor.recount_run(session, m.run_id)
     session.commit()
     session.refresh(m)

@@ -376,6 +376,12 @@ def save_matches(run_id: int, product_id: str, rows: list[StoreMatch]) -> None:
         s.commit()
 
 
+# Topes de tiempo: una foto que gotea o un juez que no contesta no pueden trabar el slot de la corrida (con
+# `pm_ml_concurrency` slots, un par de productos colgados la dejaban sin terminar).
+STORE_MATCH_TIMEOUT_S = 120.0
+PRODUCT_MATCH_TIMEOUT_S = 300.0
+
+
 async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *,
                  judge: JudgeTool, brand_of: BrandTool) -> MarketPriceSnapshot:
     """Compara el producto contra todas las tiendas activas, guarda los candidatos y, con
@@ -390,8 +396,22 @@ async def attach(ctx: Any, product: VendureProduct, snap: MarketPriceSnapshot, *
     try:
         specs = _specs_of(snap)
         rows: list[StoreMatch] = []
-        for store in run.stores:
-            rows += await _match_store(run, store, ctx, product, query, specs, snap.our_price_cents, judge, brand_of)
+
+        async def all_stores() -> None:
+            for store in run.stores:
+                try:
+                    rows.extend(await asyncio.wait_for(
+                        _match_store(run, store, ctx, product, query, specs, snap.our_price_cents, judge, brand_of),
+                        timeout=STORE_MATCH_TIMEOUT_S))
+                except (asyncio.TimeoutError, TimeoutError):
+                    log.warning("tiendas: %s en «%s» pasó los %.0f s: se sigue sin esa tienda",
+                                product.id, store.info.name, STORE_MATCH_TIMEOUT_S)
+
+        try:
+            await asyncio.wait_for(all_stores(), timeout=PRODUCT_MATCH_TIMEOUT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            log.warning("tiendas: %s pasó los %.0f s comparando con las tiendas: se guarda lo que haya",
+                        product.id, PRODUCT_MATCH_TIMEOUT_S)
         await asyncio.to_thread(save_matches, ctx.run_id, product.id, rows)
         if run.affect_color and not apply_color(snap, rows, green_min=ctx.green_min, yellow_min=ctx.yellow_min):
             # Sin idénticos de tienda que valgan: sus similares confirmados suman al estimado.
@@ -810,9 +830,10 @@ def set_label(session: Session, match_id: int, label: str, actor: str | None = N
     return m
 
 
-def clear_label(session: Session, match_id: int) -> StoreMatch | None:
+def clear_label(session: Session, match_id: int, actor: str | None = None) -> StoreMatch | None:
     """«Deshacer»: si la persona había cambiado de opinión vuelve a su marca anterior; si no,
-    el candidato vuelve a la categoría que dijo Hugo y se olvida la corrección."""
+    el candidato vuelve a la categoría que dijo Hugo y se olvida la corrección. `actor`: quién deshace
+    (queda como autor de la marca restaurada)."""
     m = session.get(StoreMatch, match_id)
     if m is None:
         return None
@@ -821,6 +842,7 @@ def clear_label(session: Session, match_id: int) -> StoreMatch | None:
         StoreMatchFeedback.item_id == m.item_id)).first()
     if fb is not None and fb.previous_label in LABELS:
         fb.label, fb.previous_label = fb.previous_label, None
+        fb.actor = (actor or "")[:120] or fb.actor
         session.add(fb)
         _apply_human(m, fb.label)
     else:

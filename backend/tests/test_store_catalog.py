@@ -180,7 +180,7 @@ async def test_daily_cap_and_rotation_of_a_big_catalog(store_db, _clock):
     again = await run_index(sid, site)                         # mismo día: no hay más cupo
     assert again.fetched == 0 and "tope diario" in again.message
     assert len(site.fetched_pages()) == 3
-    assert daily_budget.used_today(f"{store_catalog.PAGES_COUNTER_PREFIX}{sid}") == 3
+    assert daily_budget.used_today(store_catalog.get_store(sid).counter_key) == 3
 
     _clock["now"] += timedelta(days=1)                         # otro día: sigue por las que nunca se leyeron
     await run_index(sid, site)
@@ -541,7 +541,7 @@ async def test_topup_refreshes_only_stores_with_something_due_and_quota_left(sto
     # "Fresca" ya está al día; "Llena" tiene cosas vencidas pero ya gastó el cupo de hoy.
     site = tn_site(["a"])
     await run_index(fresh, site)
-    daily_budget.reserve(f"{store_catalog.PAGES_COUNTER_PREFIX}{full}", 1)
+    daily_budget.reserve(store_catalog.get_store(full).counter_key, 1)
     with Session(engine) as s:
         s.add(StoreCatalogItem(store_id=full, url="https://www.otra.com.ar/productos/x/"))
         s.commit()

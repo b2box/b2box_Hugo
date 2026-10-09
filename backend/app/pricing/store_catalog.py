@@ -81,6 +81,11 @@ DEAD_MIN_DAYS_5XX = 3
 # «Indexar ahora» desde el dashboard no se puede repetir en loop contra el sitio de un tercero.
 MANUAL_COOLDOWN_MIN = 10
 HEALTH_OK, HEALTH_DEGRADED, HEALTH_DOWN = "ok", "degradada", "caida"
+# `last_checked_at` se sella cuando se lee CADA ficha (horas después de arrancar la pasada) y la pasada de
+# mañana compara contra SU hora de arranque: sin un margen, con el cron diario «1 día» salía 2 y las lecturas
+# caían los días 0, 2 y 5 en vez de 0, 1 y 3. El margen cubre una pasada larga (Gadnic: ~2 h).
+DUE_MARGIN = timedelta(hours=6)
+LAST_PASS_PREFIX = "_meta:store_last_pass:"
 
 GetFn = Callable[..., Awaitable[httpx.Response]]
 SleepFn = Callable[[float], Awaitable[None]]
@@ -114,8 +119,13 @@ class StoreInfo:
         )
 
     @property
+    def apex(self) -> str:
+        return store_urls.apex(store_urls.host_of(self.base_url))
+
+    @property
     def counter_key(self) -> str:
-        return f"{PAGES_COUNTER_PREFIX}{self.id}"
+        """El cupo diario es por SITIO, no por fila: borrar y volver a crear la tienda no lo reinicia."""
+        return f"{PAGES_COUNTER_PREFIX}{self.apex}"
 
 
 @dataclass(slots=True)
@@ -150,6 +160,28 @@ class IndexReport:
         if self.message:
             text += f" · {self.message}"
         return text[:300]
+
+
+def last_pass_at(apex: str) -> datetime | None:
+    """Cuándo terminó la última pasada contra ese SITIO (sobrevive a borrar y recrear la tienda)."""
+    with Session(engine) as s:
+        row = s.get(Setting, f"{LAST_PASS_PREFIX}{apex}")
+    try:
+        return datetime.fromisoformat(row.value) if row is not None else None
+    except ValueError:
+        return None
+
+
+def _record_pass(apex: str, when: datetime) -> None:
+    key = f"{LAST_PASS_PREFIX}{apex}"
+    with Session(engine) as s:
+        row = s.get(Setting, key)
+        if row is None:
+            s.add(Setting(key=key, value=when.isoformat()))
+        else:
+            row.value, row.updated_at = when.isoformat(), when
+            s.add(row)
+        s.commit()
 
 
 def active_stores() -> list[StoreInfo]:
@@ -278,7 +310,7 @@ async def _collect_urls(fetch: _Fetcher, info: StoreInfo, robots: store_robots.R
             return None
         try:
             resp = await fetch(clean, max_bytes=store_parse.MAX_SITEMAP_BYTES, timeout_s=SITEMAP_TIMEOUT_S)
-        except _NETWORK_ERRORS as exc:
+        except Exception as exc:  # noqa: BLE001  (un error acá no tumba la pasada: queda dicho en las notas)
             report.notes.append(f"sitemap {clean[-60:]}: {type(exc).__name__}")
             state["complete"] = False
             return None
@@ -286,8 +318,19 @@ async def _collect_urls(fetch: _Fetcher, info: StoreInfo, robots: store_robots.R
             report.notes.append(f"sitemap {clean[-60:]}: HTTP {resp.status_code}")
             state["complete"] = False
             return None
-        sm = store_parse.parse_sitemap(store_parse.decode_sitemap_body(resp.content), max_urls=MAX_STORE_URLS)
-        if sm.truncated:
+        try:
+            # Hasta ~1 s de CPU con un sitemap de 25 MB: fuera del event loop.
+            sm = await asyncio.to_thread(lambda: store_parse.parse_sitemap(
+                store_parse.decode_sitemap_body(resp.content), max_urls=MAX_STORE_URLS))
+        except Exception as exc:  # noqa: BLE001
+            report.notes.append(f"sitemap {clean[-60:]}: no se pudo leer ({type(exc).__name__})")
+            state["complete"] = False
+            return None
+        if sm.truncated or not sm.locs:
+            # Truncado, o vacío (un gzip raro, una página de error con 200): no se puede afirmar que lo que
+            # falta salió del catálogo, así que no se da ninguna URL por «ya no está».
+            if not sm.locs:
+                report.notes.append(f"sitemap {clean[-60:]}: sin URLs")
             state["complete"] = False
         return sm
 
@@ -367,7 +410,7 @@ def _due_filter(refresh_days: int, dead_retry_days: int, now: datetime):
     días, nunca más que `refresh_days`): así una caída corta se recupera rápido y una muerta de
     verdad se confirma en pocos días en vez de en dos ciclos enteros."""
     def older(days: float):
-        return StoreCatalogItem.last_checked_at <= now - timedelta(days=min(days, refresh_days))  # type: ignore[operator]
+        return StoreCatalogItem.last_checked_at <= now - timedelta(days=min(days, refresh_days)) + DUE_MARGIN  # type: ignore[operator]
 
     alive = StoreCatalogItem.dead.is_(False)  # type: ignore[attr-defined]
     fails = StoreCatalogItem.fails
@@ -430,6 +473,9 @@ def _same_site(info: StoreInfo, url: str) -> bool:
 
 
 async def _read_page(fetch: _Fetcher, info: StoreInfo, due: _Due) -> _Outcome:
+    """Pide y lee UNA ficha. Nunca lanza: lo inesperado (un transporte raro, un charset que no existe, un bug
+    del parser) vuelve como resultado de ESA ficha. Si saliera como excepción terminaría la pasada en «error»
+    y la ficha, sin marcar como leída, volvería a ser la primera todas las noches."""
     conditional: dict[str, str] = {}
     if due.has_data:
         if due.etag:
@@ -448,6 +494,17 @@ async def _read_page(fetch: _Fetcher, info: StoreInfo, due: _Due) -> _Outcome:
         return _Outcome(TRANSIENT, "tardó demasiado")
     except (httpx.HTTPError, net_guard.SsrfBlocked, OSError) as exc:
         return _Outcome(TRANSIENT, f"{type(exc).__name__}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tiendas: %s: error inesperado al pedir %s (%s)", info.name, due.url[:120], type(exc).__name__)
+        return _Outcome(TRANSIENT, f"{type(exc).__name__}")
+    try:
+        return _interpret_page(info, due, resp)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tiendas: %s: no se pudo leer la ficha %s (%s)", info.name, due.url[:120], type(exc).__name__)
+        return _Outcome(STRIKE, f"no se pudo leer la ficha ({type(exc).__name__})")
+
+
+def _interpret_page(info: StoreInfo, due: _Due, resp: httpx.Response) -> _Outcome:
     code = resp.status_code
     if code == 304 and due.has_data:
         return _Outcome(NOT_MODIFIED)
@@ -463,7 +520,10 @@ async def _read_page(fetch: _Fetcher, info: StoreInfo, due: _Due) -> _Outcome:
         return _Outcome(TRANSIENT, f"HTTP {code}")
     if not _same_site(info, str(resp.url)):
         return _Outcome(STRIKE, "redirige a otro sitio")
-    parsed = store_parse.parse_product_page(info.platform, resp.text, [due.url, str(resp.url)])
+    # utf-8 a propósito: `resp.text` obedece el charset que declare la tienda (utf-16, uno que no existe…) y
+    # algunos revientan. Los parsers aguantan el texto con caracteres de reemplazo.
+    page = resp.content.decode("utf-8", "replace")
+    parsed = store_parse.parse_product_page(info.platform, page, [due.url, str(resp.url)])
     if parsed is None:
         return _Outcome(STRIKE, "la página no es un producto")
     image = next((u for u in (store_urls.safe_image(c, info.image_hosts) for c in parsed.image_urls) if u), None)
@@ -506,7 +566,7 @@ def _save_outcome(item_id: int, out: _Outcome, now: datetime) -> bool:
             if row.dead:
                 row.dead_since = now          # sigue muerta: otros 30 días
             elif row.fails >= DEAD_AFTER_FAILS and (
-                    not out.soft or now - row.first_fail_at >= timedelta(days=_dead_min_days())):
+                    not out.soft or now - row.first_fail_at >= timedelta(days=_dead_min_days()) - DUE_MARGIN):
                 row.dead, row.dead_since = True, now
                 s.add(row)
                 s.commit()
@@ -585,6 +645,7 @@ async def index_store(
 def _record_status(store_id: int, report: IndexReport) -> None:
     if report.status == "skipped":
         return
+    apex = None
     with Session(engine) as s:
         row = s.get(MarketStore, store_id)
         if row is not None:
@@ -594,6 +655,9 @@ def _record_status(store_id: int, report: IndexReport) -> None:
                 row.health = report.health
             s.add(row)
             s.commit()
+            apex = store_urls.apex(store_urls.host_of(row.base_url))
+    if apex:
+        _record_pass(apex, utcnow())
 
 
 def _store_active(store_id: int) -> bool:
@@ -628,11 +692,12 @@ async def _index(info: StoreInfo, report: IndexReport, *, max_seconds: float | N
     try:
         resp = await fetch(f"{info.base_url}/robots.txt", max_bytes=store_robots.MAX_ROBOTS_BYTES,
                            timeout_s=ROBOTS_TIMEOUT_S)
-        robots = store_robots.from_status(resp.status_code, resp.text, get_settings().store_user_agent)
+        robots = store_robots.from_status(resp.status_code, resp.content.decode("utf-8", "replace"),
+                                          get_settings().store_user_agent)
         if robots.blocked_all:
             report.status, report.message = "aborted", f"robots.txt devolvió HTTP {resp.status_code}: no se rastrea"
             return
-    except _NETWORK_ERRORS as exc:
+    except Exception as exc:  # noqa: BLE001  (cualquier error acá = no se rastrea, no una pasada en «error»)
         report.status, report.message = "aborted", f"no se pudo leer robots.txt ({type(exc).__name__}): no se rastrea"
         return
     fetch.set_robots(robots)
@@ -838,7 +903,7 @@ def clean_store_fields(data: dict, *, partial: bool = False, current: dict | Non
         return key in data and (not partial or data[key] is not None)
 
     if has("name") or not partial:
-        name = " ".join(str(data.get("name") or "").split())
+        name = store_parse.one_line(str(data.get("name") or ""), 400)
         if not 1 <= len(name) <= _NAME_MAX:
             raise ValueError(f"el nombre tiene que tener entre 1 y {_NAME_MAX} caracteres")
         out["name"] = name
@@ -882,9 +947,9 @@ def clean_store_fields(data: dict, *, partial: bool = False, current: dict | Non
                              "puede autorizarlos (STORE_TRUSTED_IMAGE_HOSTS): " + ", ".join(not_allowed))
         out["image_hosts"] = ",".join(hosts) or None
     if "house_brand" in data:
-        out["house_brand"] = " ".join(str(data["house_brand"] or "").split())[:60] or None
+        out["house_brand"] = store_parse.one_line(str(data["house_brand"] or ""), 60) or None
     if "notes" in data:
-        out["notes"] = " ".join(str(data["notes"] or "").split())[:500] or None
+        out["notes"] = store_parse.one_line(str(data["notes"] or ""), 500) or None
     return out
 
 
