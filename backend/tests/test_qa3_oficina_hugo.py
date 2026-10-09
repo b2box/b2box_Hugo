@@ -96,7 +96,8 @@ def test_a_lockout_is_per_ip_not_global(api, monkeypatch):
     """Detrás de Traefik (1 hop) la IP es la última del X-Forwarded-For: otra IP no queda afuera por culpa de la bloqueada."""
     for _ in range(oficina_routes.FAIL_MAX):
         api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "6.6.6.6"})
-    assert api.get("/api/oficina/ml-queue", headers={**H, "x-forwarded-for": "6.6.6.6"}).status_code == 429
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "6.6.6.6"}).status_code == 429
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "190.1.2.3"}).status_code == 401
     assert api.get("/api/oficina/ml-queue", headers={**H, "x-forwarded-for": "190.1.2.3"}).status_code == 200
 
 
@@ -104,12 +105,18 @@ def test_a_spoofed_first_forwarded_for_does_not_dodge_the_lockout(api):
     for _ in range(oficina_routes.FAIL_MAX):
         api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "8.8.8.8, 6.6.6.6"})
     # el atacante cambia lo que inventó (lo de la izquierda); el proxy sigue agregando su IP real a la derecha
-    r = api.get("/api/oficina/ml-queue", headers={**H, "x-forwarded-for": "1.1.1.1, 6.6.6.6"})
+    r = api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "1.1.1.1, 6.6.6.6"})
     assert r.status_code == 429
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: la limpieza de `_locked_until` en guard() reusa el nombre `key` y pisa la key "
-                                       "configurada con una IP: con >2000 bloqueos y alguno vencido, la key buena da 401")
+def test_a_shared_edge_ip_locked_by_a_third_party_does_not_leave_the_runner_without_its_queue(api):
+    """Con un CDN delante la IP puede ser la de un borde compartido: el bloqueo frena fallos, no a quien trae la key buena."""
+    for _ in range(oficina_routes.FAIL_MAX + 3):
+        api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala", "x-forwarded-for": "172.70.1.1"})
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "otra-mala", "x-forwarded-for": "172.70.1.1"}).status_code == 429
+    assert api.get("/api/oficina/ml-queue", headers={**H, "x-forwarded-for": "172.70.1.1"}).status_code == 200
+
+
 def test_the_lock_table_cleanup_does_not_overwrite_the_configured_key(api, monkeypatch):
     clock = {"t": 10_000.0}
     monkeypatch.setattr(oficina_routes, "_now", lambda: clock["t"])

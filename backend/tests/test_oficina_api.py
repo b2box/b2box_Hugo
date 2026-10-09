@@ -155,15 +155,42 @@ def test_the_key_is_compared_in_constant_time(api, monkeypatch):
     assert calls == [(32, 32)] * 3                  # siempre dos digests del mismo largo
 
 
-def test_too_many_wrong_keys_lock_the_ip_even_for_the_right_key(api, monkeypatch):
+def test_too_many_wrong_keys_lock_the_ip_but_never_the_right_key(api, monkeypatch):
     clock = {"t": 1000.0}
     monkeypatch.setattr(oficina_routes, "_now", lambda: clock["t"])
     for _ in range(oficina_routes.FAIL_MAX):
         assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala"}).status_code in (401,)
-    r = api.get("/api/oficina/ml-queue", headers=H)
+    r = api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala"})
     assert r.status_code == 429 and int(r.headers["retry-after"]) > 0
-    clock["t"] += oficina_routes.LOCK_S + 1
+    # el bloqueo frena fallos: detrás de un CDN esa IP puede ser un borde compartido, y la key buena tiene que seguir entrando
     assert api.get("/api/oficina/ml-queue", headers=H).status_code == 200
+    clock["t"] += oficina_routes.LOCK_S + 1
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "mala"}).status_code == 401
+
+
+def test_cleaning_the_lock_table_never_overwrites_the_configured_key(api, monkeypatch):
+    """Regresión (seguridad): la limpieza reusaba el nombre `key` y pisaba la key configurada con una IP vencida; con más de
+    2.000 bloqueos, presentar esa IP como key daba 200."""
+    clock = {"t": 10_000.0}
+    monkeypatch.setattr(oficina_routes, "_now", lambda: clock["t"])
+    for i in range(oficina_routes._MAX_TRACKED_IPS + 5):
+        oficina_routes._locked_until[f"9.9.{i // 250}.{i % 250}"] = clock["t"] - 1          # todos vencidos
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "9.9.8.4"}).status_code == 401
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "9.9.8.4"}).status_code == 401
+    assert api.get("/api/oficina/ml-queue", headers=H).status_code == 200
+    assert len(oficina_routes._locked_until) <= 1                                           # y la limpieza sí limpió
+    # lo mismo con la tabla de fallos y la de pedidos
+    for i in range(oficina_routes._MAX_TRACKED_IPS + 5):
+        oficina_routes._fails[f"8.8.{i // 250}.{i % 250}"].append(clock["t"] - 10_000)
+        oficina_routes._hits[f"7.7.{i // 250}.{i % 250}"].append(clock["t"] - 10_000)
+    assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": "8.8.8.4"}).status_code == 401
+    assert api.get("/api/oficina/ml-queue", headers=H).status_code == 200
+
+
+def test_every_route_of_the_router_is_behind_the_guard():
+    """La auth es del router, no de cada ruta: una ruta nueva no se puede olvidar de protegerla."""
+    assert any(d.dependency is oficina_routes.guard for d in oficina_routes.router.dependencies)
+    assert {r.path for r in oficina_routes.router.routes} == {"/api/oficina/ml-queue", "/api/oficina/ml-results"}
 
 
 def test_simple_rate_limit_per_ip(api, monkeypatch):
