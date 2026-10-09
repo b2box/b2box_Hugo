@@ -269,6 +269,8 @@ def check_marcas(name: str, description_plain: str, lists: TextLists) -> str | N
 
 # Códigos de modelo: 1 a 3 letras, 1 a 3 dígitos, una letra opcional (C64, H6S).
 _MODEL_RE = re.compile(r"(?<!\w)([A-Z]{1,3}\d{1,3}[A-Z]?)(?!\w)")
+# Con guion (ZK-7731, X-200): el código entero, no la sigla suelta.
+_HYPHEN_CODE_RE = re.compile(r"(?<!\w)([A-Z]{1,4}-\d{1,5}[A-Z]?)(?!\w)")
 _CAPS_RE = re.compile(r"(?<!\w)([A-Z]{2,4})(?!\w)")
 _QTY_RE = re.compile(r"(?<!\w)x\d{1,3}(?:u|ud|uds|un|unid)(?!\w)", re.I)
 _ASTERISK_RE = re.compile(r"\S*\*\S*")
@@ -303,11 +305,14 @@ def check_cod(name: str, lists: TextLists) -> str | None:
         if label not in found:
             found.append(label)
 
-    for m in _MODEL_RE.finditer(name):
-        if not _is_technical(m.group(1), technical):
-            add(m.group(1))
+    masked = name
+    for regex in (_HYPHEN_CODE_RE, _MODEL_RE):
+        for m in regex.finditer(name):
+            masked = masked[: m.start()] + " " * (m.end() - m.start()) + masked[m.end():]
+            if not _is_technical(m.group(1).replace("-", ""), technical):
+                add(m.group(1))
     if not _mostly_upper(name):
-        for m in _CAPS_RE.finditer(name):
+        for m in _CAPS_RE.finditer(masked):
             tok = m.group(1)
             if tok not in _CAPS_STOPWORDS and not _is_technical(tok, technical):
                 add(tok)

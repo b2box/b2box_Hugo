@@ -166,6 +166,12 @@ def test_cod_marca_codigos(title, token):
     assert token in audit(title)["COD"]
 
 
+def test_cod_toma_el_codigo_con_guion_entero_y_no_repite_la_sigla():
+    assert audit("Pinza ZK-7731 Profesional")["COD"] == "ZK-7731"
+    assert audit("Pinza X-200 y C64")["COD"] == "X-200, C64"
+    assert "COD" not in rules_of("Cable USB-C Reforzado") and "COD" not in rules_of("Cámara IP-67 Sumergible")
+
+
 def test_cod_no_confunde_un_titulo_todo_en_mayusculas_con_siglas():
     got = audit("ORGANIZADOR DE COCINA CON TAPA")
     assert "COD" not in got
