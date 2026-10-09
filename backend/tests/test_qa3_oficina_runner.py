@@ -34,6 +34,7 @@ from app.db.session import engine  # noqa: E402
 from app.pricing import market_match, market_ml_web  # noqa: E402
 from tests.ml_web_fixtures import ANTIBOT_HTML, listing_html, page, polycard  # noqa: E402,F401
 from tests.test_oficina_api import KEY, _snap, api  # noqa: E402,F401
+from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 BACKEND = Path(__file__).resolve().parents[1]
 DRIVER = Path(__file__).with_name("qa3_runner_driver.py")

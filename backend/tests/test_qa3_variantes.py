@@ -20,6 +20,7 @@ from app.pricing import daily_budget, market_match, market_ml, market_query, pri
 from tests.qa3_titles import BORDE, REALISTAS, TODOS  # noqa: E402
 from tests.test_price_monitor import (  # noqa: E402,F401
     ML_IMG, FakeVendure, _candidate, _listing, _product, _runs, _set, _snaps, world)
+from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 _CODE = market_match._CODE_TOKEN
 

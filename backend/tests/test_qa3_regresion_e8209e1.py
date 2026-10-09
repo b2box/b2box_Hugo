@@ -41,6 +41,7 @@ from tests.test_price_monitor import (  # noqa: E402,F401
     ML_IMG, FakeVendure, _candidate, _listing, _product, _runs, _set, _snaps, world)
 from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 from tests.test_semaforo_web import PHOTO, _card, _score, _web_page, webw  # noqa: E402,F401
+from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 OUT = os.environ.get("QA3_OUT")
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_origin_main_e8209e1_qa3.json.gz"

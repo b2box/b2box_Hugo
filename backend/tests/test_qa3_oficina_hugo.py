@@ -29,6 +29,7 @@ from app.db.models import MarketPriceSnapshot, MlWebResult  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.pricing import market_ml_web, oficina_ml  # noqa: E402
 from tests.test_oficina_api import H, KEY, _card, _iso, _post, _queue, _res, _rows, _snap, api  # noqa: E402,F401
+from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 
 def _stored_candidates() -> list[dict]:
