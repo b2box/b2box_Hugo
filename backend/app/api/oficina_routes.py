@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from typing import Any
 
@@ -41,9 +42,40 @@ FAIL_MAX = 10
 FAIL_WINDOW_S = 300.0
 LOCK_S = 300.0
 
-_hits: dict[str, deque[float]] = defaultdict(deque)
-_fails: dict[str, deque[float]] = defaultdict(deque)
-_locked_until: dict[str, float] = {}
+# Tablas por IP, con tope DURO: LRU (se evicta la que hace más que no se toca). Un atacante con un /64 de IPv6 o con una botnet
+# puede inventar millones de IPs; sin tope la tabla crecía sin techo y cada request recorría todo.
+_HARD_CAP = 5000
+# Pasado este tamaño se barre además lo vencido, como mucho cada _PURGE_EVERY_S segundos (barrer es O(n)).
+_MAX_TRACKED_IPS = 2000
+_PURGE_EVERY_S = 30.0
+
+
+class _IpTable(OrderedDict):
+    """OrderedDict por IP que crea el valor al pedirlo (como un defaultdict), mantiene el orden de uso y no pasa de
+    _HARD_CAP entradas."""
+
+    def __init__(self, factory: Callable[[], Any] | None = None) -> None:
+        super().__init__()
+        self._factory = factory
+        self.last_purge = 0.0
+
+    def __missing__(self, key: str) -> Any:
+        if self._factory is None:
+            raise KeyError(key)
+        value = self[key] = self._factory()
+        return value
+
+    def touch(self, ip: str) -> None:
+        """La IP se usó ahora: pasa al final, y si la tabla se pasó del tope se evicta lo más viejo."""
+        if ip in self:
+            self.move_to_end(ip)
+        while len(self) > _HARD_CAP:
+            self.popitem(last=False)
+
+
+_hits = _IpTable(deque)
+_fails = _IpTable(deque)
+_locked_until = _IpTable()
 
 
 def _now() -> float:
@@ -52,25 +84,39 @@ def _now() -> float:
 
 def reset_limits() -> None:
     """Para los tests."""
-    _hits.clear()
-    _fails.clear()
-    _locked_until.clear()
+    for table in (_hits, _fails, _locked_until):
+        table.clear()
+        table.last_purge = 0.0
 
 
-_MAX_TRACKED_IPS = 2000
+def _ip_key(ip: str) -> str:
+    """La clave de las tablas: una IPv4 tal cual; una IPv6 agrupada por /64 (quien tiene una red IPv6 tiene 2^64 direcciones:
+    por IP suelta no habría rate limit ni bloqueo que valga)."""
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return ip[:64]
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address) + "/64"
+    return str(addr)
 
 
-def _purge(store: dict[str, Any], expired: Callable[[Any], bool]) -> None:
-    """Saca de una tabla por IP lo vencido, solo cuando creció de más (nadie tiene 2.000 IPs distintas de la oficina).
-    Helper aparte, con nombres propios: la limpieza vive dentro de `guard`, donde `key` es la key configurada."""
-    if len(store) > _MAX_TRACKED_IPS:
-        for stale_ip in [ip for ip, value in store.items() if expired(value)]:
-            del store[stale_ip]
+def _purge(table: _IpTable, expired: Callable[[Any], bool], now: float) -> None:
+    """Saca de una tabla por IP lo vencido, solo si creció de más y como mucho cada _PURGE_EVERY_S. Helper aparte, con nombres
+    propios: se llama desde `guard`, donde `key` es la key configurada."""
+    if len(table) <= _MAX_TRACKED_IPS or now - table.last_purge < _PURGE_EVERY_S:
+        return
+    table.last_purge = now
+    for stale_ip in [ip for ip, value in table.items() if expired(value)]:
+        del table[stale_ip]
 
 
-def _window(store: dict[str, deque[float]], ip: str, span: float, now: float) -> deque[float]:
-    _purge(store, lambda hits: not hits or hits[-1] <= now - span)
-    hits = store[ip]
+def _window(table: _IpTable, ip: str, span: float, now: float) -> deque[float]:
+    _purge(table, lambda hits: not hits or hits[-1] <= now - span, now)
+    hits = table[ip]
+    table.touch(ip)
     while hits and hits[0] <= now - span:
         hits.popleft()
     return hits
@@ -91,10 +137,10 @@ def guard(request: Request) -> None:
     configured = oficina_ml.configured_key()
     if configured is None:
         raise HTTPException(status_code=404, detail="Not Found")
-    ip = client_ip(request)
+    ip = _ip_key(client_ip(request))
     now = _now()
     if not _key_matches(request.headers.get(HEADER), configured):
-        _purge(_locked_until, lambda until: until <= now)
+        _purge(_locked_until, lambda until: until <= now, now)
         if _locked_until.get(ip, 0.0) > now:
             raise HTTPException(status_code=429, detail="Demasiados intentos con una key inválida",
                                 headers={"Retry-After": str(int(_locked_until[ip] - now) + 1)})
@@ -102,6 +148,7 @@ def guard(request: Request) -> None:
         fails.append(now)
         if len(fails) >= FAIL_MAX:
             _locked_until[ip] = now + LOCK_S
+            _locked_until.touch(ip)
             fails.clear()
             log.warning("oficina: IP %s bloqueada %d s por %d intentos con key inválida", ip, int(LOCK_S), FAIL_MAX)
         raise HTTPException(status_code=401, detail="Key inválida o ausente")

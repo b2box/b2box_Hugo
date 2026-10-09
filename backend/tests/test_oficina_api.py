@@ -762,3 +762,99 @@ def test_a_key_needs_enough_distinct_characters_but_the_shared_check_is_unchange
     assert security.weak_key_reason("a" * 40) is None                       # las API keys de producción de siempre no cambian
     assert "distintos" in security.weak_key_reason("a" * 40, min_distinct=12)
     assert security.weak_key_reason(KEY, min_distinct=oficina_ml.MIN_KEY_DISTINCT_CHARS) is None
+
+
+# ─── tablas por IP: tope duro, IPv6 por /64, costo acotado ─────────────────
+
+
+class _FakeRequest:
+    def __init__(self, ip: str, key: str = "mala") -> None:
+        self.headers = {"x-forwarded-for": ip, "x-oficina-key": key}
+        self.client = None
+
+
+def _guard(ip: str, key: str = "mala") -> int:
+    from fastapi import HTTPException
+
+    try:
+        oficina_routes.guard(_FakeRequest(ip, key))
+        return 200
+    except HTTPException as exc:
+        return exc.status_code
+
+
+def test_ipv6_clients_are_grouped_by_their_64_network(api):
+    """Quien tiene una red IPv6 tiene 2^64 direcciones: por IP suelta no habría bloqueo que valga."""
+    for i in range(oficina_routes.FAIL_MAX):
+        assert _guard(f"2001:db8:aaaa:bbbb:{i:x}::{i + 1:x}") == 401
+    assert _guard("2001:db8:aaaa:bbbb:ffff:ffff:ffff:ffff") == 429                    # otra dirección del MISMO /64: bloqueada
+    assert _guard("2001:db8:aaaa:cccc::1") == 401                                      # otro /64: no
+    assert _guard("2001:db8:aaaa:bbbb::1", KEY) == 200                                 # y la key buena entra igual
+
+
+def test_ip_keys_are_normalized():
+    key = oficina_routes._ip_key
+    assert key("::ffff:1.2.3.4") == key("1.2.3.4") == "1.2.3.4"
+    assert key("2001:db8::1") == key("2001:0DB8:0:0:ffff:ffff:ffff:ffff") == "2001:db8::/64"
+    assert key("fe80::1%eth0") == "fe80::/64"
+    assert key("no es una ip") == "no es una ip" and len(key("x" * 500)) <= 64 and key("unknown") == "unknown"
+
+
+def test_the_tables_have_a_hard_cap_and_evict_the_least_recently_used(api):
+    for table in (oficina_routes._fails, oficina_routes._locked_until, oficina_routes._hits):
+        table.clear()
+    now = oficina_routes._now()
+    cap = oficina_routes._HARD_CAP
+    for i in range(cap * 3):                                           # vigentes: la limpieza por vencimiento no los toca
+        oficina_routes._fails[f"10.{i // 65536}.{(i // 256) % 256}.{i % 256}"] = __import__("collections").deque([now])
+    assert _guard("9.9.9.9") == 401
+    assert len(oficina_routes._fails) <= cap
+    assert "9.9.9.9" in oficina_routes._fails                           # la que acaba de llegar está
+    assert "10.0.0.0" not in oficina_routes._fails                      # la más vieja se fue
+    for i in range(cap + 10):
+        oficina_routes._locked_until[f"11.0.{i // 256}.{i % 256}"] = now + 1000
+        oficina_routes._locked_until.touch(f"11.0.{i // 256}.{i % 256}")
+    assert len(oficina_routes._locked_until) <= cap
+
+
+def test_a_hundred_thousand_ips_cost_bounded_time_and_memory(api):
+    """Un atacante con un /48 de IPv6 o una botnet inventa IPs sin fin: cada request cuesta O(1) y la tabla no pasa del tope."""
+    import time
+
+    started = time.perf_counter()
+    for i in range(100_000):
+        _guard(f"172.{16 + (i >> 16)}.{(i >> 8) & 255}.{i & 255}")
+    elapsed = time.perf_counter() - started
+    assert len(oficina_routes._fails) <= oficina_routes._HARD_CAP and elapsed < 15, elapsed
+    assert elapsed / 100_000 < 0.0001                                     # menos de 0,1 ms por request en una laptop
+    # y una tabla ya enorme (relleno directo) se acota en la primera pasada, sin recorrerla en cada request
+    from collections import deque
+
+    now = oficina_routes._now()
+    for i in range(300_000):
+        oficina_routes._fails.setdefault(f"2001:db8::{i:x}/64", deque([now]))
+    started = time.perf_counter()
+    _guard("8.8.4.4")
+    first = time.perf_counter() - started
+    started = time.perf_counter()
+    for _ in range(100):
+        _guard("8.8.4.4")
+    steady = (time.perf_counter() - started) / 100
+    assert len(oficina_routes._fails) <= oficina_routes._HARD_CAP and first < 1.0 and steady < 0.002, (first, steady)
+
+
+def test_the_expired_sweep_runs_at_most_every_30_seconds(api, monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(oficina_routes, "_now", lambda: clock["t"])
+    for i in range(oficina_routes._MAX_TRACKED_IPS + 10):
+        oficina_routes._locked_until[f"9.8.{i // 250}.{i % 250}"] = clock["t"] - 1
+    assert _guard("1.1.1.1") == 401
+    assert len(oficina_routes._locked_until) == 0                       # barrió lo vencido
+    for i in range(oficina_routes._MAX_TRACKED_IPS + 10):
+        oficina_routes._locked_until[f"9.7.{i // 250}.{i % 250}"] = clock["t"] - 1
+    clock["t"] += 5
+    assert _guard("1.1.1.2") == 401
+    assert len(oficina_routes._locked_until) > oficina_routes._MAX_TRACKED_IPS      # no volvió a barrer (5 s < 30 s)
+    clock["t"] += 31
+    assert _guard("1.1.1.3") == 401
+    assert len(oficina_routes._locked_until) == 0
