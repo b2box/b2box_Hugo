@@ -1101,6 +1101,80 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
   su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
 
+## Auditoría de textos del catálogo (SEO, solo lectura)
+
+HG1 del diseño `seo-palabras-diseno.md`. Hugo recorre **todos** los productos de Vendure
+(habilitados y deshabilitados), en el canal Argentina (`VENDURE_CHANNEL_TOKEN`) y en el canal
+por defecto, con **todas** sus traducciones (`es_AR`, `es`, las que haya), y por cada producto e
+idioma marca problemas de texto con reglas fijas, **sin IA**. El resultado queda en la base de
+Hugo (`text_audit_run` y `text_audit_item`) y se ve en el dashboard → **Textos (SEO)**.
+
+**Nunca escribe en Vendure.** Lee con una `query` por página de 100 productos y por canal, sin
+variantes (no dispara el N+1 de `variantList`): unas 22 lecturas para 1.100 productos, unos segundos.
+Cada canal se lee aparte: si uno falla, la corrida queda **incompleta** con el motivo a la vista
+y el otro se audita igual. Tiene un tope de 270 s por canal.
+
+### Reglas
+
+| Regla | Qué marca |
+|---|---|
+| `LARGO` | Nombre de más de 60 caracteres |
+| `RELLENO` | Frases de marketing que no aportan búsqueda («Iluminá tus espacios con magia», «súper práctico») |
+| `COD` | Código de modelo (`C64`, `H6S`, `ZK-7731`), sigla suelta (`SG`), cantidad pegada (`x4u`), medida con asterisco (`98*56cm`), escala mal copiada (`Escala 176`) |
+| `MAR` | Marca o personaje de terceros de la lista (`iPhone`, `Kuromi`, `Guide`, `Let's Slim`, `Nespresso`…), en título o descripción; avisa si está solo como «para iPhone» |
+| `FAB` | El texto coincide con el nombre de fábrica, el modelo o el link del proveedor **de ese producto**, o nombra un sitio de proveedor (1688, Alibaba, AliExpress…) |
+| `SLUG_NO_COINCIDE` | Nombre y URL comparten la mitad o menos de sus palabras (se reescribió uno y quedó el otro) |
+| `NOMBRE_ES_CODIGO` | El nombre es `BX…`/`PA…` o el código del producto |
+| `ESPACIOS` | Espacio al inicio o al final, espacios dobles, saltos de línea |
+| `DUP_EXACTO` | Mismo nombre que otro producto **habilitado** (en el mismo idioma) |
+| `DUP_CASI` | Nombre casi igual (Jaccard ≥ 0,6 sobre palabras con contenido) a otro producto habilitado |
+| `SIN_DESCRIPCION` | Descripción vacía o de menos de 20 caracteres |
+| `DESC_CON_HTML_EN_META` | La descripción trae etiquetas HTML, entidades o emojis: la ficha la copia tal cual a la meta description |
+| `META_LARGA` | Esa descripción, ya en texto plano, pasa de 160 caracteres |
+| `SIN_ES_AR` | El producto no tiene traducción `es_AR` (el canal Argentina no cae a `es`) |
+
+Los duplicados se buscan solo entre productos habilitados: un duplicado que Hugo ya apagó no
+cuenta contra el original. `META_LARGA` describe la ficha **de hoy**; cuando el storefront
+recorte la meta (SF1) deja de ser un problema real, pero el conteo sirve de línea base.
+
+**Datos del proveedor.** `FAB` compara los textos contra `supplierBusiness`, `supplierSizeModel`
+y `supplierLink` del propio producto (el modelo se compara sin medidas ni datos técnicos como
+`200W` o `XL`). Esos valores **no se guardan, no se loguean y no salen por la API ni por el CSV**:
+la regla solo dice «coincide con nombre de fábrica: sí» (o código / link) y en qué parte del
+texto. Los objetos que los cargan ocultan los valores en `repr`.
+
+### Cómo usarlo
+
+- Dashboard → **Textos (SEO)** → «Auditar ahora» (o `POST /api/seo/text-audit/run`, con la sesión
+  del dashboard). Corre en background; 409 si ya hay una, 429 si la última arrancó hace menos de un minuto.
+- Corre sola los **lunes 07:30 UTC (04:30 ART)** con reloj persistente (si el proceso estaba caído a esa hora, se
+  recupera al arrancar). `SEO_TEXT_AUDIT_CRON_UTC` la cambia; **vacía = sin corrida programada**. En APScheduler el
+  `1` del día de la semana es martes: escribir el día con su nombre (`mon`, `tue`…).
+- La vista tiene un chip por regla con la cantidad de **productos distintos** (respeta los demás filtros), filtros
+  de habilitados / canal / idioma / «solo con problemas», búsqueda por nombre, URL o código, y exporta **CSV** (UTF-8
+  con BOM, abre bien en Excel; las celdas que empiezan con `=`, `+`, `-` o `@` salen escapadas) con los mismos filtros.
+- Las listas de **marcas**, **relleno** y **datos técnicos permitidos** se editan en el panel «Listas editables» (sin
+  redeploy). Lo guardado reemplaza a la lista de fábrica entera y vale desde la próxima corrida; «Restablecer» vuelve
+  a la de fábrica.
+- Endpoints (sesión del dashboard): `GET /api/seo/text-audit/summary`, `GET /api/seo/text-audit/items?rule=&enabled=&lang=&channel=&q=&only_issues=&run_id=&page=&page_size=`
+  (`enabled`: `all` | `enabled` | `disabled`; `channel`: `all` | `ar` | `solo_default`; `lang`: `-` = sin traducciones),
+  `GET /api/seo/text-audit/export.csv` (mismos filtros), `GET|PUT|DELETE /api/seo/text-audit/lists[/{marcas|relleno|tecnicos}]`.
+- Se conservan las últimas 8 corridas.
+
+**Qué sigue (no está hecho):** HG2 en adelante (diccionario, reescritura, aplicar a Vendure). Los typos
+(«Biométricacon») y las traducciones literales («fregadero», «flexómetro») quedan para HG4: necesitan
+diccionario o corrector.
+
+**Migración y rollback.** Es automática en el arranque (`init_db`): crea las tablas `text_audit_run` y
+`text_audit_item` (con su índice único `ix_text_audit_item_run_prod_lang`) y no toca ninguna otra (hay un test
+sobre Postgres 16). Las listas editables viven en `settings` (`seo:lista:*`). Para volver el esquema atrás:
+
+```sql
+DROP TABLE IF EXISTS text_audit_item;
+DROP TABLE IF EXISTS text_audit_run;
+DELETE FROM settings WHERE key LIKE 'seo:lista:%' OR key = '_meta:last_run:seo_text_audit';
+```
+
 ## Estructura
 
 ```
@@ -1142,13 +1216,18 @@ backend/
 │   │   ├── calibrate_market_match.py  # precisión/recall del filtro
 │   │   ├── competitor_check.py  # SIN USO: no tiene llamador
 │   │   └── diff.py
+│   ├── seo/
+│   │   ├── text_rules.py     # reglas de texto sin IA (puras)
+│   │   ├── lists.py          # marcas, relleno y datos técnicos (editables)
+│   │   └── text_audit.py     # corrida: lee Vendure, evalúa, guarda y consulta
 │   ├── scheduler/
 │   │   └── jobs.py          # APScheduler
 │   ├── notifier/
 │   │   └── email.py         # SMTP a tech@b2box.pro
 │   ├── api/
 │   │   ├── routes.py        # /verify, /audit, /products/{id}/check
-│   │   └── oficina_routes.py # /api/oficina/*: cola y resultados de la Mac (x-oficina-key)
+│   │   ├── oficina_routes.py # /api/oficina/*: cola y resultados de la Mac (x-oficina-key)
+│   │   └── seo_routes.py     # /api/seo/text-audit/*: auditoría de textos (solo lectura)
 │   └── db/
 │       ├── models.py        # SQLModel: PriceHistory, AuditLog
 │       └── session.py
@@ -1328,6 +1407,7 @@ postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.co
 - `GET  /app/index-status` — si el índice de imágenes ya está listo
 - `POST /app/index-rebuild` — fuerza la reconstrucción del índice
 - `/api/price-monitor/*` — semáforo de precios contra ML (ver su sección)
+- `/api/seo/text-audit/*` — auditoría de textos del catálogo, solo lectura (ver su sección)
 - `GET /api/oficina/ml-queue`, `POST /api/oficina/ml-results` — buscador de la oficina; se autentican con `x-oficina-key`
   (`OFICINA_SEARCH_KEY`), no con la cookie del dashboard; 404 sin la variable (ver su sección)
 
@@ -1490,6 +1570,8 @@ Ver `.env.example`. Las críticas:
   `host`, `*.dominio` o `acdn*.dominio`) — indexado de las tiendas.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
+- `SEO_TEXT_AUDIT_CRON_UTC` — horario de la auditoría de textos (default `30 7 * * mon`, lunes 04:30 ART;
+  vacía = sin corrida programada). El día de la semana con su nombre: en APScheduler `1` es martes.
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan
   (default 180; siempre queda el último snapshot de cada producto; 0 = nunca).
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
