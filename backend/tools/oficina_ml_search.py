@@ -75,7 +75,7 @@ EXIT_OK, EXIT_CONFIG, EXIT_BLOCKED, EXIT_SEND, EXIT_BROWSER, EXIT_BUSY = 0, 2, 3
 log = logging.getLogger("oficina_ml_search")
 
 _PRODUCT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$", re.ASCII)
-_MIN_KEY_LEN = 24
+_MIN_KEY_LEN = 32          # (lo mismo que exige Hugo: oficina_ml.MIN_KEY_LEN)
 
 
 class ConfigError(Exception):
@@ -143,7 +143,7 @@ def load_config(env_path: Path) -> Config:
     if not key:
         raise ConfigError(f"Falta {KEY_VAR} en {env_path}. Corré --init para generarla.")
     if len(key) < _MIN_KEY_LEN:
-        raise ConfigError(f"{KEY_VAR} es muy corta (mínimo {_MIN_KEY_LEN} caracteres)")
+        raise ConfigError(f"{KEY_VAR} es muy corta (mínimo {_MIN_KEY_LEN} caracteres): usá la que genera --init")
     if not (values.get(URL_VAR) or "").strip():
         raise ConfigError(f"Falta {URL_VAR} en {env_path} (por ejemplo {URL_VAR}=https://hugo.b2box.pro)")
     return Config(key=key, hugo_url=normalize_hugo_url(values[URL_VAR] or ""))

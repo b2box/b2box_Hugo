@@ -189,6 +189,7 @@ def test_load_config_reads_key_and_url(tmp_path):
     ("HUGO_URL=https://h.example\n", 0o600, "Falta OFICINA_SEARCH_KEY"),
     (f"OFICINA_SEARCH_KEY={SECRET}\n", 0o600, "Falta HUGO_URL"),
     ("OFICINA_SEARCH_KEY=corta\nHUGO_URL=https://h.example\n", 0o600, "muy corta"),
+    (f"OFICINA_SEARCH_KEY={'k' * 31}\nHUGO_URL=https://h.example\n", 0o600, "muy corta"),
     (f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://h.example\n", 0o644, "chmod 600"),
     (f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://h.example\n", 0o640, "chmod 600"),
     (f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=http://hugo.b2box.pro\n", 0o600, "https"),

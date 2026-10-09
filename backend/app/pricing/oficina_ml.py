@@ -87,14 +87,26 @@ _NEEDS_SEARCH = ("no_data", "failed")
 # ─── La key ────────────────────────────────────────────────────────
 
 
+# Una key de `secrets.token_urlsafe(32)` mide 43 caracteres. Se exigen 32 (~190 bits si es aleatoria): es lo que hace inútil la
+# fuerza bruta, porque el bloqueo por IP frena fallos pero no a quien trae la key buena (ver api/oficina_routes.guard). Usar la que
+# genera `oficina_ml_search.py --init`.
+MIN_KEY_LEN = 32
+_weak_logged: set[str] = set()
+
+
 def configured_key() -> str | None:
-    """OFICINA_SEARCH_KEY si está y es una key de verdad (>= 24 caracteres, no un placeholder)."""
+    """OFICINA_SEARCH_KEY si está y es una key de verdad (>= 32 caracteres, >= 12 distintos, no un placeholder). Una key floja
+    deja el buscador apagado y se avisa UNA vez (no en cada request)."""
     key = (get_settings().oficina_search_key or "").strip()
     if not key:
         return None
     reason = weak_key_reason(key, min_distinct=MIN_KEY_DISTINCT_CHARS)
+    if reason is None and len(key) < MIN_KEY_LEN:
+        reason = f"tiene menos de {MIN_KEY_LEN} caracteres (usá la que genera `oficina_ml_search.py --init`)"
     if reason:
-        log.error("OFICINA_SEARCH_KEY %s: el buscador de la oficina queda apagado", reason)
+        if reason not in _weak_logged:
+            _weak_logged.add(reason)
+            log.error("OFICINA_SEARCH_KEY %s: el buscador de la oficina queda apagado", reason)
         return None
     return key
 

@@ -858,3 +858,32 @@ def test_the_expired_sweep_runs_at_most_every_30_seconds(api, monkeypatch):
     clock["t"] += 31
     assert _guard("1.1.1.3") == 401
     assert len(oficina_routes._locked_until) == 0
+
+
+def test_the_key_needs_at_least_32_characters_because_a_good_key_is_never_blocked(api, monkeypatch):
+    """Con la key correcta nunca bloqueada, la única defensa contra la fuerza bruta es que la key sea larga."""
+    from app import security
+
+    assert oficina_ml.MIN_KEY_LEN == 32 and len(KEY) >= 32
+    for n, status in ((31, 404), (32, 200)):
+        key = ("0123456789abcdefghijklmnopqrstuv")[:n]
+        monkeypatch.setattr(oficina_ml, "get_settings",
+                            lambda key=key: Settings(vendure_api_url="https://example.invalid/x", oficina_search_key=key))
+        assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": key}).status_code == status
+    import secrets
+
+    assert len(secrets.token_urlsafe(32)) >= 32 and security.weak_key_reason(secrets.token_urlsafe(32), min_distinct=12) is None
+
+
+def test_a_weak_key_is_logged_once_not_on_every_request(api, monkeypatch, caplog):
+    import logging
+
+    oficina_ml._weak_logged.clear()
+    caplog.set_level(logging.ERROR, logger="app.pricing.oficina_ml")
+    weak = "a" * 40
+    monkeypatch.setattr(oficina_ml, "get_settings",
+                        lambda: Settings(vendure_api_url="https://example.invalid/x", oficina_search_key=weak))
+    for _ in range(25):
+        assert api.get("/api/oficina/ml-queue", headers={"x-oficina-key": weak}).status_code == 404
+    errors = [r for r in caplog.records if "OFICINA_SEARCH_KEY" in r.getMessage()]
+    assert len(errors) == 1 and weak not in caplog.text and "distintos" in errors[0].getMessage()
