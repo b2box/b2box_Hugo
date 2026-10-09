@@ -18,7 +18,6 @@ import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.db.session import engine  # noqa: E402
-from app.seo import text_audit  # noqa: E402
 from tests.seo_fixtures import FakeVendure, raw_product  # noqa: E402
 from tests.test_seo_text_audit import client, env, items, run  # noqa: E402,F401
 
