@@ -443,3 +443,111 @@ def healthy(pid: str = "0", costs=None, box=OK_BOX, product=OK_PRODUCT, cert: st
     tiers = ladder_tiers(costs or OK_COSTS, cbm, kg, cert_usd=cert)
     return Scenario(pid, f"v{pid}", tiers, tiers[0].min_q, kw.pop("median", 0), box=box, product=product,
                     name=kw.pop("name", f"Producto {pid}"), **kw)
+
+
+# ─── Mundo de la base: corridas y snapshots armados aparte de los helpers del developer ─────────────────
+
+from datetime import datetime, timedelta  # noqa: E402
+
+NOW = datetime(2026, 10, 14, 9, 0, 0)       # «ahora» de la pasada de la noche (UTC, sin tz como todo Hugo)
+OK_LISTINGS = ((900_000, "clip", "s1"), (905_000, "clip", "s2"), (895_000, "clip", "s3"))
+
+
+def reset_db() -> None:
+    from sqlalchemy import delete
+    from sqlmodel import Session
+
+    from app import runtime
+    from app.db import models as m
+    from app.db.session import engine, init_db
+
+    init_db()
+    with Session(engine) as s:
+        for model in (m.PriceReviewEvent, m.PriceReviewItem, m.MarketPriceSnapshot, m.PriceMonitorRun, m.Setting,
+                      m.StoreMatch, m.StoreMatchFeedback, m.MarketStore, m.MarketMatchFeedback, m.AuditLog):
+            s.execute(delete(model))
+        s.commit()
+    runtime.invalidate()
+
+
+def setting(key: str, value: Any) -> None:
+    from app import runtime
+
+    runtime.set_value(key, value)
+
+
+def new_run(started: datetime = NOW, status: str = "ok") -> int:
+    from sqlmodel import Session
+
+    from app.db.models import PriceMonitorRun
+    from app.db.session import engine
+
+    with Session(engine) as s:
+        run = PriceMonitorRun(status=status, mode=1, started_at=started, finished_at=started, total_products=0)
+        s.add(run)
+        s.commit()
+        s.refresh(run)
+        return int(run.id)
+
+
+def entry(i: int, price: int, source: str, seller: str | None, origin: str = "api", prices: list[int] | None = None,
+          sellers: list[str] | None = None) -> dict[str, Any]:
+    return {"ml_id": f"MLA{i}", "title": f"Idéntico {i}", "permalink": f"https://articulo.mercadolibre.com.ar/MLA-{i}-x",
+            "origin": origin, "category": "igual", "source": source, "image_score": 0.9, "name_score": 0.8,
+            "confidence": None, "reason": "", "differences": [], "notes": [], "brand": None, "image_url": None,
+            "specs": {}, "listings": len(prices or [price]), "min_cents": min(prices or [price]),
+            "median_cents": price, "prices_cents": prices if prices is not None else [price],
+            "sellers": sellers if sellers is not None else ([seller] if seller else []), "seller": seller}
+
+
+def mk_snap(run_id: int | None, pid: str, *, our: int = 1_000_000, listings=OK_LISTINGS, color: str | None = None,
+            ml_status: str = "ok", enabled: bool = True, data_at: datetime | None = NOW - timedelta(hours=1),
+            origin: str = "api", basis: str = "ml", commission: float = 13.0, shipping: int = 0, flag: str | None = None,
+            entries: list[dict[str, Any]] | None = None, captured_at: datetime | None = None, variant: str = "101",
+            tier: str = "tier:min_qty=10", specs: dict | None = None, web_via: str | None = None, **extra: Any):
+    """Un snapshot (en memoria; `save()` lo guarda). El color sale de las reglas del semáforo escritas en `qa5_bandeja.color_of`
+    salvo que se pase `color`. `listings` = (precio, fuente, vendedor)."""
+    from app.db.models import MarketPriceSnapshot
+
+    es = entries if entries is not None else [entry(i, p, src, sel, origin) for i, (p, src, sel) in enumerate(listings, 1)]
+    prices = sorted(p for e in es for p in e["prices_cents"])
+    n = len(prices)
+    median = None if not n else (prices[n // 2] if n % 2 else round((prices[n // 2 - 1] + prices[n // 2]) / 2))
+    if color is None:
+        color = "sin_dato" if (median is None or ml_status != "ok") else color_of(median, our)
+    margin = None if median is None else round(margin_pct(median, our, commission, shipping), 2)
+    return MarketPriceSnapshot(
+        run_id=run_id or 0, product_id=pid, variant_id=variant, captured_at=captured_at or NOW, ml_status=ml_status,
+        ml_median_cents=median if ml_status == "ok" else None, ml_min_cents=min(prices) if prices else None,
+        ml_listing_count=n if ml_status == "ok" else 0,
+        ml_seller_count=len({s for e in es for s in e["sellers"]}) if ml_status == "ok" else 0,
+        matched_listings=json.dumps(es) if es and ml_status == "ok" else None, match_source="clip",
+        match_origin=origin if ml_status == "ok" else None, our_price_cents=our, tier_used=tier,
+        commission_pct=commission, shipping_cents=shipping, est_margin_pct=margin, color=color,
+        product_name=f"Producto {pid}", product_code=f"BX{pid}", product_image_url=f"https://cdn.b2box/{pid}.jpg",
+        product_slug=f"producto-{pid}", product_enabled=enabled, data_at=data_at, price_basis=basis, review_flag=flag,
+        our_specs=json.dumps(specs) if specs else None, web_via=web_via, **extra)
+
+
+def save(snap: Any) -> int:
+    from sqlmodel import Session
+
+    from app.db.session import engine
+
+    with Session(engine) as s:
+        s.add(snap)
+        s.commit()
+        s.refresh(snap)
+        return int(snap.id)
+
+
+def rows(model: Any, *where: Any) -> list[Any]:
+    from sqlmodel import Session, select
+
+    from app.db.session import engine
+
+    with Session(engine) as s:
+        stmt = select(model)
+        for w in where:
+            stmt = stmt.where(w)
+        return list(s.exec(stmt))
