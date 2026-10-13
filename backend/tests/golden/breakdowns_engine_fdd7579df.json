@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "fuente": "Generado con el engine REAL de Vendure (describeImportPricing, B2BOX-Cloud/b2box main fdd7579df, packages/backend-core/src/plugins/advanced-pricing/engine) y el mapeo de services/map-exact-breakdown.ts. Los INPUTS (costos en yuanes, cajas, tarifas) son inventados con forma de Argentina (semilla de logística + depósito fiscal); NO es una captura de producción.",
+    "fuente": "Generado con el engine REAL de Vendure (describeImportPricing, B2BOX-Cloud/b2box main fdd7579df, packages/backend-core/src/plugins/advanced-pricing/engine) y el mapeo de services/map-exact-breakdown.ts. Los INPUTS (costos en yuanes, cajas, tarifas) son inventados con forma de Argentina (semilla de logística + depósito fiscal); NO es una captura de producción. pctApplied.salesVat = 21 (el IVA de la venta con el que el motor armó la factura).",
     "inputs_comunes": {
       "antidumpingPct": "0",
       "b2boxFeeBrackets": [],
@@ -326,7 +326,8 @@
             "minor": 15377616
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -576,7 +577,8 @@
             "minor": 15133559
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -826,7 +828,8 @@
             "minor": 14930336
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         }
       ]
@@ -1116,7 +1119,8 @@
             "minor": 1080717
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -1366,7 +1370,8 @@
             "minor": 1027743
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -1616,7 +1621,8 @@
             "minor": 995213
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         }
       ]
@@ -1906,7 +1912,8 @@
             "minor": 1531818
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -2156,7 +2163,8 @@
             "minor": 1127199
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         },
         {
@@ -2406,7 +2414,8 @@
             "minor": 860000
           },
           "pctApplied": {
-            "b2boxFee": "20"
+            "b2boxFee": "20",
+            "salesVat": "21"
           }
         }
       ]

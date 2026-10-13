@@ -139,3 +139,90 @@ def test_to_dict_is_json_ready_and_small():
     text = json.dumps(d)
     assert len(text) < 4_000 and d["components"][7]["key"] == "certificado"
     assert d["components"][7]["usd"] == 180.0
+
+
+# ─── el parser no se deja engañar ────────────────────────────────
+
+
+def _good():
+    return copy.deepcopy(FIXTURE["variants"][0]["breakdowns"][0])
+
+
+def test_the_fixture_invoices_are_exactly_net_plus_sales_vat_rounded_up_and_the_peso_price_matches_the_dollars():
+    """El motor real arma la factura como neto + IVA de la venta (redondeada al centavo) y el precio por unidad en pesos
+    sale de los dólares al cambio efectivo: el parser lo exige y las 9 filas del motor lo cumplen."""
+    n = 0
+    for v in FIXTURE["variants"]:
+        for raw in v["breakdowns"]:
+            bd = parse_tier_breakdown(raw)
+            assert bd.sales_vat == Decimal(21)
+            assert 0 <= bd.factura_usd - bd.neto_usd * Decimal("1.21") < Decimal("0.0101")
+            expected = bd.factura_usd * bd.usd_to_channel * 100 / bd.quantity
+            assert abs(Decimal(bd.factura_per_unit_minor) - expected) <= max(Decimal(2), expected * Decimal("0.005"))
+            n += 1
+    assert n == 9
+
+
+def test_an_invoice_that_is_not_the_net_plus_the_sales_vat_is_an_error_even_when_the_ten_parts_add_up():
+    raw = _good()
+    for key in ("facturaUsd",):                            # sube la factura: la parte «IVA de la venta» (factura - neto) sube igual
+        raw[key]["exact"] = str(Decimal(raw[key]["exact"]) + Decimal("5"))
+    with pytest.raises(BreakdownError) as exc:
+        parse_tier_breakdown(raw)
+    assert "IVA de la venta" in str(exc.value) or "neto" in str(exc.value)
+
+
+def test_a_one_cent_invoice_rounding_is_tolerated():
+    raw = _good()
+    raw["facturaUsd"]["exact"] = str(Decimal(raw["facturaUsd"]["exact"]) + Decimal("0.01"))
+    raw["netoUsd"]["exact"] = str(Decimal(raw["netoUsd"]["exact"]) + Decimal("0.01"))
+    raw["paymentGatewayFeeUsd"]["exact"] = str(Decimal(raw["paymentGatewayFeeUsd"]["exact"]) + Decimal("0.01"))
+    parse_tier_breakdown(raw)
+
+
+@pytest.mark.parametrize("key,factor", [("facturaChannelPerUnit", 1.5), ("facturaChannelPerUnit", 0.5),
+                                        ("netoChannelPerUnit", 1.2), ("netoChannelPerUnit", 0.01)])
+def test_a_peso_price_per_unit_that_contradicts_the_dollars_is_an_error(key, factor):
+    raw = _good()
+    raw[key]["minor"] = int(raw[key]["minor"] * factor)
+    with pytest.raises(BreakdownError) as exc:
+        parse_tier_breakdown(raw)
+    assert "por unidad" in str(exc.value)
+
+
+def test_a_peso_price_within_rounding_is_fine():
+    raw = _good()
+    raw["facturaChannelPerUnit"]["minor"] += 2
+    raw["netoChannelPerUnit"]["minor"] -= 1
+    parse_tier_breakdown(raw)
+
+
+def _all_zero():
+    raw = _good()
+    for key, node in list(raw.items()):
+        if isinstance(node, dict) and "exact" in node and key not in ("netoChannelPerUnit", "facturaChannelPerUnit"):
+            node["exact"] = "0.0000"
+    raw["servicios"] = []
+    raw["netoChannelPerUnit"] = {"exact": "0.00", "minor": 0, "currencyCode": "ARS"}
+    raw["facturaChannelPerUnit"] = {"exact": "0.00", "minor": 0, "currencyCode": "ARS"}
+    return raw
+
+
+@pytest.mark.parametrize("stray", ["fleteUsd", "seguroUsd", "arancelesUsd", "serviciosUsd", "b2boxFeeUsd", "paymentGatewayFeeUsd",
+                                   "subtopUsd", "finCostUsd", "cifUsd", "chinaLogisticsUsd"])
+def test_a_tier_with_factory_invoice_and_net_at_zero_but_one_other_amount_is_a_broken_breakdown_not_no_dollars(stray):
+    raw = _all_zero()
+    parse_tier_breakdown(copy.deepcopy(raw))                      # todo en cero: «sin dólares», sin error
+    raw[stray]["exact"] = "37.5000"
+    with pytest.raises(BreakdownError) as exc:
+        parse_tier_breakdown(raw)
+    assert "montos distintos de cero" in str(exc.value)
+
+
+def test_a_truly_empty_tier_and_a_local_stock_tier_with_only_a_certificate_are_still_no_dollars():
+    raw = _all_zero()
+    assert parse_tier_breakdown(raw).usd_available is False
+    raw["certificationUsd"]["exact"] = "12.50"                  # abastecimiento local: trae el certificado y nada más
+    raw["facturaChannelPerUnit"] = {"exact": "100.00", "minor": 10000, "currencyCode": "ARS"}
+    raw["netoChannelPerUnit"] = {"exact": "82.64", "minor": 8264, "currencyCode": "ARS"}
+    assert parse_tier_breakdown(raw).usd_available is False
