@@ -85,6 +85,8 @@ const PART_COLORS = [
   "#2563eb", "#0ea5e9", "#14b8a6", "#22c55e", "#84cc16", "#eab308", "#f97316", "#ef4444", "#a855f7", "#64748b",
 ];
 
+// "1 unidad" / "25 unidades".
+const units = (n: number): string => `${nfmt(n)} ${n === 1 ? "unidad" : "unidades"}`;
 const usd = (v: number | null | undefined): string =>
   v == null ? "—" : v.toLocaleString("es-AR", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const ars = (v: number | null | undefined): string =>
@@ -414,6 +416,12 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
         </span>
       </div>
 
+      {!d.costs_visible && (
+        <p className="p-2 rounded-md text-xs border bg-muted/40 border-border text-muted-foreground">
+          El costo de fábrica y el fee de B2BOX son solo para responsables: acá no se muestran.
+        </p>
+      )}
+
       {closed && (
         <p className="p-2 rounded-md text-xs border bg-success/10 border-success/40 text-success">
           Esta ficha ya está cerrada{d.closed_at ? ` (${fmtTime(d.closed_at)})` : ""}: {d.events.find((e) => e.kind === "cerrado_auto")?.motive_text ?? "dejó de ser rojo"}
@@ -587,32 +595,42 @@ function EventLine({ e }: { e: ReviewEvent }) {
 
 function BreakdownBlock({ b }: { b: ReviewBreakdown }) {
   const comps = b.components;
+  const restricted = b.restricted === true;
   const total = comps.reduce((acc, c) => acc + Math.max(c.usd, 0), 0) || 1;
   return (
     <div className="space-y-2">
-      <p className="text-xs text-muted-foreground">
-        Tramo de {nfmt(b.quantity)} unidades: factura de <span className="num-tabular text-foreground">{usd(b.factura_usd)}</span>{" "}
-        (<span className="num-tabular">{ars(b.factura_unit_cents / 100)}</span> por unidad con IVA). Fábrica a ¥
-        {b.cny_unit.toLocaleString("es-AR", { maximumFractionDigits: 2 })} por unidad. Lo arma Vendure; Hugo no recalcula.
-      </p>
-      <div className="flex h-3 w-full overflow-hidden rounded-full border border-border" role="img" aria-label="Partes del precio">
-        {comps.map((c, i) =>
-          c.usd > 0 ? (
-            <div
-              key={c.key}
-              title={`${c.label}: ${usd(c.usd)} (${fmtPct(c.pct)})`}
-              style={{ width: `${(c.usd / total) * 100}%`, background: PART_COLORS[i % PART_COLORS.length] }}
-            />
-          ) : null,
-        )}
-      </div>
+      {restricted ? (
+        <p className="text-xs text-muted-foreground">
+          Tramo de {units(b.quantity)}: precio de {ars(b.factura_unit_cents / 100)} por unidad con IVA. Se muestran las partes
+          que no son la fábrica; la fábrica y el fee son solo para responsables. Lo arma Vendure; Hugo no recalcula.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Tramo de {units(b.quantity)}: factura de <span className="num-tabular text-foreground">{usd(b.factura_usd)}</span>{" "}
+          (<span className="num-tabular">{ars(b.factura_unit_cents / 100)}</span> por unidad con IVA). Fábrica a ¥
+          {(b.cny_unit ?? 0).toLocaleString("es-AR", { maximumFractionDigits: 2 })} por unidad. Lo arma Vendure; Hugo no recalcula.
+        </p>
+      )}
+      {!restricted && (
+        <div className="flex h-3 w-full overflow-hidden rounded-full border border-border" role="img" aria-label="Partes del precio">
+          {comps.map((c, i) =>
+            c.usd > 0 ? (
+              <div
+                key={c.key}
+                title={`${c.label}: ${usd(c.usd)} (${fmtPct(c.pct)})`}
+                style={{ width: `${(c.usd / total) * 100}%`, background: PART_COLORS[i % PART_COLORS.length] }}
+              />
+            ) : null,
+          )}
+        </div>
+      )}
       <table className="w-full text-xs">
         <thead className="text-muted-foreground uppercase tracking-wide">
           <tr>
             <th className="text-left font-medium py-1">Parte</th>
             <th className="text-right font-medium py-1">USD</th>
-            <th className="text-right font-medium py-1">$ por unidad</th>
-            <th className="text-right font-medium py-1">% del precio</th>
+            {!restricted && <th className="text-right font-medium py-1">$ por unidad</th>}
+            {!restricted && <th className="text-right font-medium py-1">% del precio</th>}
           </tr>
         </thead>
         <tbody>
@@ -628,10 +646,16 @@ function BreakdownBlock({ b }: { b: ReviewBreakdown }) {
                 )}
               </td>
               <td className="py-1 text-right num-tabular">{usd(c.usd)}</td>
-              <td className="py-1 text-right num-tabular">{ars(c.ars_unit)}</td>
-              <td className="py-1 text-right num-tabular">{fmtPct(c.pct)}</td>
+              {!restricted && <td className="py-1 text-right num-tabular">{ars(c.ars_unit)}</td>}
+              {!restricted && <td className="py-1 text-right num-tabular">{fmtPct(c.pct)}</td>}
             </tr>
           ))}
+          {restricted && (
+            <tr className="border-t border-border text-muted-foreground">
+              <td className="py-1">Fábrica y fee</td>
+              <td className="py-1 text-right" colSpan={1}>solo para responsables</td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -657,9 +681,15 @@ function TiersTable({ d }: { d: PriceReviewDetail }) {
             <tr key={i} className="border-t border-border">
               <td className="py-1">
                 {t.min_quantity ?? "?"}
-                {t.max_quantity != null ? ` a ${t.max_quantity}` : " o más"}
+                {t.max_quantity != null && t.max_quantity !== t.min_quantity ? ` a ${t.max_quantity}` : t.max_quantity != null ? "" : " o más"}
               </td>
-              <td className="py-1 text-right num-tabular">{t.cny_unit.toLocaleString("es-AR", { maximumFractionDigits: 2 })}</td>
+              <td className="py-1 text-right num-tabular">
+                {t.cny_unit === undefined ? (
+                  <span className="text-muted-foreground" title="El costo de fábrica es solo para responsables">solo responsables</span>
+                ) : (
+                  t.cny_unit.toLocaleString("es-AR", { maximumFractionDigits: 2 })
+                )}
+              </td>
               <td className="py-1 text-right num-tabular">{ars(t.neto_cents / 100)}</td>
               <td className="py-1 text-right num-tabular">{ars(t.price_cents / 100)}</td>
               <td

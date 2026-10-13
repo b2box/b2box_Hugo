@@ -1457,6 +1457,12 @@ la noche siguiente (hasta 5 intentos).
   (`ALERT_SMTP_*`) a `PM_REVIEW_EMAILS` (separados por coma; **vacío = no se manda**). Lleva lo nuevo y, una vez por
   ficha, lo que lleva más de 7 días esperando; sin novedades no sale. Los eventos se marcan (`notified_at`) recién
   después de que el SMTP aceptó el mail, así que un reintento no duplica.
+- **Quién ve los costos.** `PRICE_REVIEW_VIEWERS` (emails de la sesión del dashboard, separados por coma). **Fail-closed:**
+  vacío = nadie. Quien no esté en la lista recibe el detalle **sin** costo de fábrica en yuanes, FOB (el componente
+  «fábrica»), fee en %, evidencias del diagnóstico ni objetivo en yuanes; ni la factura/neto en dólares ni los % y pesos
+  por unidad de cada parte (con ellos se despejaría la fábrica). La pantalla dice «solo para responsables». Las frases de
+  (d) y (e) se muestran sin cifras. Ojo: las demás partes en dólares y el precio de lista permiten *estimar* la fábrica con
+  un tipo de cambio de mercado; si hace falta secreto real, la lista de `SUPABASE_ALLOWED_EMAILS` no debe incluir a quien no deba ver costos.
 - Links del detalle (opcionales, solo https): `VENDURE_ADMIN_PRODUCT_URL` (con `{id}`), `STOREFRONT_PRODUCT_URL` (con
   `{slug}` o `{id}`) y `HUGO_PUBLIC_URL` (para el mail).
 

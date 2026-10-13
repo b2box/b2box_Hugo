@@ -660,6 +660,9 @@ class Settings(EnvSettings):
     price_review_digest_cron_utc: str = Field(
         default="30 11 * * *", description="Cron (UTC) del resumen diario de la bandeja de revisión",
     )
+    # Quiénes ven el COSTO DE FÁBRICA y el fee en la bandeja (emails de la sesión del dashboard, separados por coma).
+    # Fail-closed: vacío = nadie los ve; el resto de las sesiones ve el detalle sin cny_*, FOB, fee ni evidencias.
+    price_review_viewers: str = ""
     # Para los links del detalle y del mail (plantillas con {id} / {slug}). Vacío = sin link.
     hugo_public_url: str = ""
     vendure_admin_product_url: str = ""

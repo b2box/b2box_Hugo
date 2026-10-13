@@ -275,17 +275,23 @@ class RuleResult:
     estimated: bool = False                    # el P_si es una estimación (no una cuenta de Vendure)
     action: str = ""
     evidence: dict[str, Any] = field(default_factory=dict)
+    # La misma frase SIN cifras del costo de fábrica, para quien no es responsable de costos (PRICE_REVIEW_VIEWERS).
+    # None = la frase normal no trae ninguna.
+    public_summary: str | None = None
 
     @property
     def fires(self) -> bool:
         return self.status == ST_FIRES
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "code": self.code, "title": self.title, "status": self.status, "summary": self.summary,
             "subcodes": self.subcodes, "fixes": self.fixes, "p_si_cents": self.p_si_cents,
             "estimated": self.estimated, "action": self.action, "evidence": self.evidence,
         }
+        if self.public_summary is not None:
+            out["summary_public"] = self.public_summary
+        return out
 
 
 @dataclass(slots=True)
@@ -731,11 +737,13 @@ def rule_d(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
     if ratio < th.logistics_ratio:
         return RuleResult(**base, status=ST_NO, evidence=evidence, summary=(
             f"La logística (USD {_num(float(row.logistics_usd), 0)}) cuesta {_num(ratio, 2)} veces la fábrica "
-            f"(USD {_num(float(row.fob_usd), 0)}): compite por volumen."))
+            f"(USD {_num(float(row.fob_usd), 0)}): compite por volumen."),
+            public_summary="La logística cuesta menos que la fábrica: compite por volumen.")
     return RuleResult(**base, status=ST_FIRES, fixes=FIX_NO, evidence=evidence, subcodes=["d1"], summary=(
         f"La logística cuesta {_num(ratio, 2)} veces la fábrica (USD {_num(float(row.logistics_usd), 0)} contra "
         f"USD {_num(float(row.fob_usd), 0)}): sale USD {_num(log_m3, 0)} por m³ llevarlo y lo que se compra "
-        f"vale USD {_num(fob_m3, 0)} por m³. No compite por volumen; no se arregla corrigiendo datos."))
+        f"vale USD {_num(fob_m3, 0)} por m³. No compite por volumen; no se arregla corrigiendo datos."),
+        public_summary="La logística cuesta más que la fábrica: no compite por volumen; no se arregla corrigiendo datos.")
 
 
 # ─── (e) ML por debajo del costo de fábrica ──────────────────────
@@ -756,7 +764,8 @@ def rule_e(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
     if econ.ml_median_cents > fob_ars_cents:
         return RuleResult(**base, status=ST_NO, evidence=evidence, summary=(
             f"Mercado Libre ({ars(econ.ml_median_cents)}) está por encima de lo que nos cuesta la fábrica "
-            f"({ars(fob_ars_cents)} por unidad)."))
+            f"({ars(fob_ars_cents)} por unidad)."),
+            public_summary="Mercado Libre está por encima de lo que nos cuesta la fábrica.")
     # costo de fábrica objetivo (orientativo)
     p, p_max = econ.our_price_cents, econ.p_max_cents
     fixed = p * float((row.logistics_usd + row.certification_usd) / row.nbg_usd) if row.nbg_usd > 0 else None
@@ -779,7 +788,8 @@ def rule_e(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
         tail = ""
     return RuleResult(**base, status=ST_FIRES, fixes=FIX_NO, subcodes=["e1"], evidence=evidence, summary=(
         f"Mercado Libre ({ars(econ.ml_median_cents)}) está por debajo de lo que nos cuesta la fábrica "
-        f"({ars(fob_ars_cents)} por unidad) al cambio de hoy.{tail}"))
+        f"({ars(fob_ars_cents)} por unidad) al cambio de hoy.{tail}"),
+        public_summary="Mercado Libre está por debajo de lo que nos cuesta la fábrica: hay que buscar otro proveedor o despublicar.")
 
 
 # ─── El diagnóstico completo ─────────────────────────────────────
