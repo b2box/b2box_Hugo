@@ -221,7 +221,8 @@ async def test_oficina_gives_column_by_column_what_the_server_search_would_have(
 
     assert webw.web.calls == []
     skip = {"id", "run_id", "captured_at", "match_origin", "web_state", "web_via", "web_searches", "web_bytes", "prev_color",
-            "matched_listings", "unpriced_listings", "similar_listings", "other_listings", "ml_error"}
+            "matched_listings", "unpriced_listings", "similar_listings", "other_listings", "ml_error",
+            "data_at", "review_flag"}      # la fecha del dato y la marca de la bandeja dependen del origen
     cols = [c.name for c in type(via_server).__table__.columns if c.name not in skip]
     assert {c: getattr(via_oficina, c) for c in cols} == {c: getattr(via_server, c) for c in cols}
     assert (via_server.match_origin, via_oficina.match_origin) == ("web", "oficina")

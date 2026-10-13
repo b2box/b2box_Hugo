@@ -37,6 +37,10 @@ NEW_SNAPSHOT_COLS = {"ml_variant", "web_via"}
 NEW_RUN_COLS = {"variant_stats", "oficina_fresh", "n_oficina_ok"}
 
 
+_BANDEJA_COLS = {"market_price_snapshot": {"data_at", "review_flag"},
+                 "price_monitor_run": {"review_at", "review_summary", "n_flipped"}}
+
+
 def _rollback_sql() -> str:
     for block in re.findall(r"```sql\n(.*?)```", README, flags=re.S):
         if "DROP TABLE IF EXISTS ml_web_result" in block:
@@ -49,8 +53,10 @@ def _shape(engine) -> dict:
     out = {}
     # Las tablas de la auditoría de textos (HG1) son de un PR posterior a este esquema de partida:
     # las prueba test_seo_text_audit_pg.py.
-    for table in sorted(t for t in insp.get_table_names() if not t.startswith("text_audit_")):
-        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)}
+    # Lo mismo con la bandeja de revisión: sus tablas price_review_* y sus cinco columnas las prueba test_price_review_pg.py.
+    for table in sorted(t for t in insp.get_table_names() if not t.startswith(("text_audit_", "price_review_"))):
+        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)
+                if c["name"] not in _BANDEJA_COLS.get(table, ())}
         idx = {i["name"]: (tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
         out[table] = (cols, idx)
     return out

@@ -65,8 +65,11 @@ def pg(monkeypatch):
 def _tables_as_deployed_at_9c6dc45(engine) -> None:
     old = MetaData()
     # Tampoco tienen lo que agrega feat/semaforo-tiendas (price_basis, source_stats).
-    for name, new_cols in (("price_monitor_run", PR_RUN_COLS | {"source_stats", "variant_stats", "oficina_fresh", "n_oficina_ok"}),
-                           ("market_price_snapshot", PR_SNAPSHOT_COLS | {"price_basis", "ml_variant", "web_via"}),
+    # ... ni lo de la bandeja de revisión (data_at, review_flag, review_at, review_summary, n_flipped).
+    for name, new_cols in (("price_monitor_run", PR_RUN_COLS | {"source_stats", "variant_stats", "oficina_fresh", "n_oficina_ok",
+                                                                "review_at", "review_summary", "n_flipped"}),
+                           ("market_price_snapshot", PR_SNAPSHOT_COLS | {"price_basis", "ml_variant", "web_via",
+                                                                          "data_at", "review_flag"}),
                            ("ml_seller_cache", set()), ("settings", set()),
                            ("market_match_feedback", PR_FEEDBACK_COLS)):
         src = SQLModel.metadata.tables[name]

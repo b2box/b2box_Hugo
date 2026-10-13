@@ -36,7 +36,7 @@ GOLDEN = Path(__file__).parent / "golden" / "semaforo_b052e4f_full.json"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
-                        "n_oficina_ok"}
+                        "n_oficina_ok", "data_at", "review_flag", "review_at", "review_summary", "n_flipped"}
 
 
 def _mixed_world(w) -> None:
