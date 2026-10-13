@@ -260,3 +260,23 @@ def test_the_job_runs_at_08_30_argentina_which_is_11_30_utc(monkeypatch):
 def test_a_bad_cron_falls_back_to_the_default():
     t = jobs._price_review_digest_trigger("esto no es un cron")
     assert {f.name: str(f) for f in t.fields}["hour"] == "11"
+
+
+async def test_an_old_ficha_that_comes_out_as_new_does_not_come_out_again_as_waiting(smtp):
+    add_item("old", age_days=10)                              # nueva para el mail, pero ya pasó el plazo de 7 días
+    add_item("fresh")
+    assert (await digest.send_digest(NOW))["sent"] is True
+    body = smtp.sent[0][0].get_content()
+    assert "NUEVOS (2)" in body and "ESPERANDO" not in body                    # sale una vez, como nueva
+    assert (await digest.send_digest(NOW))["sent"] is False                    # ni en un reintento del mismo día…
+    assert (await digest.send_digest(NOW + timedelta(days=3)))["sent"] is False  # …ni días después
+    assert len(smtp.sent) == 1 and len(w.events("aviso_sla")) == 1             # solo la vieja deja aviso; la fresca no
+
+
+async def test_a_ficha_that_becomes_overdue_later_still_comes_out_once_as_waiting(smtp):
+    add_item("a")                                              # sale hoy como nueva
+    await digest.send_digest(NOW)
+    assert (await digest.send_digest(NOW + timedelta(days=3)))["sent"] is False
+    await digest.send_digest(NOW + timedelta(days=8))
+    assert len(smtp.sent) == 2 and "ESPERANDO DECISIÓN HACE MÁS DE 7 DÍAS (1)" in smtp.sent[1][0].get_content()
+    assert (await digest.send_digest(NOW + timedelta(days=9)))["sent"] is False

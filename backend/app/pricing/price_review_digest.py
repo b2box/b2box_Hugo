@@ -136,12 +136,15 @@ def render(data: DigestData) -> tuple[str, str]:
 
 def mark_sent(session: Session, data: DigestData, now: datetime | None = None) -> None:
     """Después de que el SMTP aceptó el mail: los eventos incluidos pasan a `notified_at` y cada ficha que salió
-    como «esperando» deja su aviso (así no vuelve a salir). No hace commit."""
+    como «esperando» deja su aviso (así no vuelve a salir). Lo mismo para una ficha que ya pasaba el plazo cuando salió por
+    primera vez como «nueva» (p. ej. se cargó PM_REVIEW_EMAILS tarde): no tiene que volver a salir como «esperando» en el
+    próximo mail. No hace commit."""
     now = now or utcnow()
     for ev in (*data.new_events, *data.closed_events):
         ev.notified_at = now
         session.add(ev)
-    for item in data.waiting:
+    overdue_new = [i for i in data.new if i.state_since <= now - timedelta(days=data.sla_days)]
+    for item in (*data.waiting, *overdue_new):
         ev = PriceReviewEvent(item_id=int(item.id), product_id=item.product_id, at=now, actor=price_review.ACTOR_AUTO,  # type: ignore[arg-type]
                               kind=AVISO_SLA, notified_at=now,
                               payload=json.dumps({"dias": int((now - item.state_since).total_seconds() // 86400)}))
