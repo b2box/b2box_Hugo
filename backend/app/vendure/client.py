@@ -33,13 +33,24 @@ from app.pricing.semaforo import PricedVariant, PriceTier
 log = logging.getLogger(__name__)
 
 
+# Loggers de transporte que, a DEBUG, escriben headers (el token de Vendure) y respuestas (datos del proveedor, costos):
+# gql, httpx/httpcore y, desde que gql 4.4 prefiere httpx2, httpx2/httpcore2 (y sus hijos: httpcore2.connection,
+# httpcore2.http11…); h2/hpack/hyperframe si algún día se prende HTTP/2.
+_TRANSPORT_LOGGER_PREFIXES = ("gql", "httpx", "httpcore", "h2", "hpack", "hyperframe")
+_TRANSPORT_LOGGER_ROOTS = ("gql", "httpx", "httpx2", "httpcore", "httpcore2", "h2", "hpack", "hyperframe")
+
+
 def quiet_http_loggers() -> None:
-    """Sube gql, httpx y httpcore a WARNING. Con LOG_LEVEL=DEBUG el transporte de gql loguea la
-    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink de todos los
-    productos) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en
-    INFO, la URL de cada request. Se llama al importar este módulo y desde _configure_logging."""
-    for name in ("gql", "httpx", "httpcore"):
+    """Sube a WARNING todo logger de transporte HTTP: gql, httpx, httpcore, **httpx2 y httpcore2** (y cualquier hijo, el
+    que ya exista o el que se cree después, que hereda del padre). Con LOG_LEVEL=DEBUG el transporte de gql loguea la
+    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink y, desde la bandeja, los costos de
+    fábrica) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en INFO, la URL de cada
+    request. Se llama al importar este módulo y desde _configure_logging."""
+    for name in _TRANSPORT_LOGGER_ROOTS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    for name in list(logging.root.manager.loggerDict):
+        if name.startswith(_TRANSPORT_LOGGER_PREFIXES):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 quiet_http_loggers()
