@@ -34,7 +34,7 @@ import logging
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import update
@@ -333,18 +333,32 @@ def open_item_for(session: Session, product_id: str) -> PriceReviewItem | None:
 # ─── Racha (R8) ───────────────────────────────────────────────────
 
 
+MIN_HOURS_BETWEEN_NIGHTS = 12
+
+
+def _art_day(moment: datetime):
+    """El día calendario argentino (UTC-3) de un datetime naive en UTC."""
+    return moment.replace(tzinfo=timezone.utc).astimezone(daily_budget.ART).date()
+
+
+def _same_night(a: datetime, b: datetime) -> bool:
+    """¿Dos corridas son la misma noche? Mismo día ART, o menos de 12 h de diferencia (aunque crucen la medianoche)."""
+    return _art_day(a) == _art_day(b) or abs((a - b).total_seconds()) < MIN_HOURS_BETWEEN_NIGHTS * 3600
+
+
 def streaks(session: Session, run_id: int, product_ids: list[str]) -> dict[str, int]:
     """Noches seguidas con dato en rojo firme, contando la de `run_id` (que ya es firme). Mira las corridas
     anteriores de más nueva a más vieja: `failed` y `skipped` no suman ni restan; la primera noche que no fue
     rojo firme (verde, amarillo, sin dato, rojo dudoso) corta la cuenta.
 
-    Se cuentan NOCHES, no corridas: dos corridas del mismo día (la del cron y un «Correr ahora») son una sola noche,
-    y de cada día vale la última corrida con dato. Así dos disparos seguidos no alcanzan para pasar la racha."""
+    Se cuentan NOCHES, no corridas. Una noche es un día calendario de ARGENTINA (no de UTC: la medianoche UTC cae a las 21:00
+    ART) y dos corridas a menos de `MIN_HOURS_BETWEEN_NIGHTS` horas una de otra son la misma noche aunque crucen la
+    medianoche. De cada noche vale la última corrida con dato. Así dos disparos seguidos (el cron y un «Correr ahora», o dos
+    manuales) no alcanzan para pasar la racha."""
     out = {pid: 1 for pid in product_ids}
     if not product_ids:
         return out
     today = session.exec(select(PriceMonitorRun.started_at).where(PriceMonitorRun.id == run_id)).first()
-    today_day = today.date() if today else None
     low = max(1, run_id - STREAK_LOOKBACK_RUNS)
     for i in range(0, len(product_ids), 400):
         chunk = product_ids[i:i + 400]
@@ -357,17 +371,17 @@ def streaks(session: Session, run_id: int, product_ids: list[str]) -> dict[str, 
             .order_by(MarketPriceSnapshot.product_id, MarketPriceSnapshot.run_id.desc())  # type: ignore[union-attr]
         ).all()
         stopped: set[str] = set()
-        days_seen: dict[str, set] = {}
+        counted: dict[str, list[datetime]] = {}
         for pid, status, flag, started in rows:
             if pid in stopped:
                 continue
             if status in (price_monitor.FAILED, price_monitor.SKIPPED):
                 continue
-            day = started.date() if started else None
-            seen = days_seen.setdefault(pid, {today_day})
-            if day in seen:
+            nights = counted.setdefault(pid, [today] if today else [])
+            if started is not None and any(_same_night(started, other) for other in nights):
                 continue                          # otra corrida de una noche que ya se contó (o la de hoy)
-            seen.add(day)
+            if started is not None:
+                nights.append(started)
             if flag == "firme":
                 out[pid] += 1
             else:

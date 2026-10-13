@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
@@ -710,3 +710,54 @@ async def test_when_the_diagnosis_is_completed_later_the_card_is_refreshed_with_
     assert item.diag_status == "completo" and item.ml_median_cents == 950_000 and item.our_price_cents == 1_100_000
     assert json.loads(item.diag)["p_max_cents"] == round(price_max_cents(950_000, 13.0, 0, 10.0))
     assert json.loads(item.diag)["p_cents"] == item.our_price_cents
+
+
+# ─── noche = día ART, y a menos de 12 h es la misma ───────────────
+
+
+def _ART(day: int, hour: int, minute: int = 0) -> datetime:
+    """Un instante dado en HORA ARGENTINA, devuelto en UTC naive (como se guarda)."""
+    return datetime(2026, 10, day, hour, minute) + timedelta(hours=3)
+
+
+async def _run_at(pid: str, when: datetime, **snap) -> None:
+    rid = w.make_run(started=when)
+    w.add_snap(rid, pid, data_at=when, captured_at=when, **snap)
+    await pr.process_run(rid, now=when + timedelta(minutes=5))
+
+
+async def test_a_night_is_an_argentine_calendar_day_not_a_utc_one():
+    """22:30 y 23:30 ART del 13 son el 13 y el 14 en UTC (01:30 y 02:30): para Argentina es UNA noche."""
+    await _run_at("a", _ART(13, 22, 30))
+    await _run_at("a", _ART(13, 23, 50))
+    assert w.items() == []
+    await _run_at("a", _ART(14, 3, 0))                       # 3 h después: aunque sea otro día ART, es la misma noche
+    assert w.items() == []
+    await _run_at("a", _ART(14, 22, 0))                      # al otro día (hora argentina) y 19 h después: la segunda noche
+    [item] = w.items()
+    assert item.streak_nights == 2
+
+
+async def test_two_runs_less_than_twelve_hours_apart_are_one_night_even_across_art_midnight():
+    await _run_at("a", _ART(13, 21, 0))
+    await _run_at("a", _ART(14, 1, 0))                       # otro día ART, pero 4 h después
+    assert w.items() == []
+    await _run_at("a", _ART(14, 22, 0))                      # 21 h después de la última: ahora sí otra noche
+    [item] = w.items()
+    assert item.streak_nights == 2
+
+
+async def test_the_normal_nightly_cron_still_counts_one_night_per_day():
+    for day in (11, 12, 13):
+        await _run_at("a", _ART(day, 3, 0))                  # 06:00 UTC todos los días
+    [item] = w.items()
+    assert item.streak_nights == 3 and len(w.events("propuesto")) == 1
+
+
+async def test_one_manual_run_the_same_art_day_as_the_cron_does_not_make_a_night():
+    await _run_at("a", _ART(12, 3, 0))
+    await _run_at("a", _ART(13, 3, 0))                       # ya hay ficha esta noche; abajo se prueba que la manual no la altera
+    [item] = w.items()
+    n = item.streak_nights
+    await _run_at("a", _ART(13, 18, 0))                      # «Correr ahora» a la tarde: mismo día ART
+    assert w.items()[0].streak_nights == n
