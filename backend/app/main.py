@@ -21,6 +21,7 @@ from app import auth, security
 from app.api.app_routes import router as app_router
 from app.api.oficina_routes import router as oficina_router
 from app.api.price_monitor_routes import router as price_monitor_router
+from app.api.price_review_routes import router as price_review_router
 from app.api.routes import router
 from app.api.seo_routes import router as seo_router
 from app.api.store_routes import router as store_router
@@ -255,6 +256,7 @@ async def logout() -> JSONResponse:
 app.include_router(router)
 app.include_router(app_router)
 app.include_router(price_monitor_router)
+app.include_router(price_review_router)
 app.include_router(oficina_router)
 app.include_router(store_router)
 app.include_router(seo_router)

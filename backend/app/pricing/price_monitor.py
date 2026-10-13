@@ -1838,6 +1838,9 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "prev_color": snap.prev_color,
         # De qué precios sale el color: ml | ml+tiendas | tiendas.
         "price_basis": snap.price_basis or "ml",
+        # De cuándo es el dato de los idénticos, y lo que decidió la bandeja: firme | dudoso:<motivo> | None.
+        "data_at": snap.data_at.isoformat() + "Z" if snap.data_at else None,
+        "review_flag": snap.review_flag,
     }
 
 

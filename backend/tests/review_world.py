@@ -15,11 +15,15 @@ from sqlmodel import Session, select
 
 from app import runtime
 from app.db.models import (
+    MarketMatchFeedback,
     MarketPriceSnapshot,
+    MarketStore,
     PriceMonitorRun,
     PriceReviewEvent,
     PriceReviewItem,
     Setting,
+    StoreMatch,
+    StoreMatchFeedback,
 )
 from app.db.session import engine, init_db
 from app.pricing import semaforo
@@ -32,7 +36,8 @@ def reset_db() -> None:
     """Base limpia + settings por defecto. La suite usa UNA SQLite compartida: cada test empieza de cero."""
     init_db()
     with Session(engine) as s:
-        for model in (PriceReviewEvent, PriceReviewItem, MarketPriceSnapshot, PriceMonitorRun, Setting):
+        for model in (PriceReviewEvent, PriceReviewItem, MarketPriceSnapshot, PriceMonitorRun, Setting, StoreMatch,
+                      StoreMatchFeedback, MarketStore, MarketMatchFeedback):
             s.execute(delete(model))
         s.commit()
     runtime.invalidate()
@@ -53,7 +58,8 @@ def make_run(status: str = "ok", *, started: datetime | None = None, mode: int =
 
 
 def listing(i: int, price: int, *, source: str = "clip", seller: str | None = None, origin: str = "api") -> dict[str, Any]:
-    return {"ml_id": f"MLA{i}", "title": f"Producto idéntico {i}", "permalink": f"https://articulo.mercadolibre.com.ar/MLA-{i}-x",
+    return {"ml_id": f"MLA{1000 + i}", "title": f"Producto idéntico {i}",
+            "permalink": f"https://articulo.mercadolibre.com.ar/MLA-{1000 + i}-x",
             "origin": origin, "category": "igual", "source": source, "image_score": 0.9, "name_score": 0.8,
             "confidence": None, "reason": "", "differences": [], "notes": [], "brand": None, "image_url": None,
             "specs": {}, "listings": 1, "min_cents": price, "median_cents": price, "prices_cents": [price],
