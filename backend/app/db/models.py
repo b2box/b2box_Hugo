@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import BigInteger, Column, Index
+from sqlalchemy import BigInteger, Column, Index, event, inspect as sa_inspect
 from sqlmodel import Field, SQLModel
 
 from app.clock import utcnow
@@ -181,7 +181,8 @@ class PriceMonitorRun(SQLModel, table=True):
     finished_at: datetime | None = Field(default=None)
     # running | ok | degraded (>20 % failed) | failed (reventó antes de terminar)
     status: str = Field(default="running", index=True)
-    # pm_mode al arrancar: 0 sombra, 1 activo (todavía no implementado).
+    # pm_mode al arrancar: 0 sombra, 1 propuesta (llena la bandeja, no toca Vendure), 2 automático (todavía
+    # no implementado: se comporta como 1).
     mode: int = Field(default=0)
     # cron | manual | resume
     trigger: str = Field(default="cron")
@@ -235,6 +236,14 @@ class PriceMonitorRun(SQLModel, table=True):
     # resultado fresco al empezar la corrida y productos que quedaron con precio por eso.
     oficina_fresh: int = Field(default=0)
     n_oficina_ok: int = Field(default=0)
+    # Pasada de la bandeja de revisión (pricing/price_review.py) sobre esta corrida. `review_at` se
+    # escribe UNA sola vez, al terminar la pasada: es lo que la hace idempotente (también si el proceso
+    # se reinicia y retoma la corrida). `review_summary`: JSON con los conteos por motivo.
+    review_at: datetime | None = Field(default=None)
+    review_summary: str | None = Field(default=None)
+    # Productos de la corrida cuyo color cambió respecto de la corrida anterior (cualquier cambio,
+    # también hacia o desde "sin dato").
+    n_flipped: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -339,6 +348,12 @@ class MarketPriceSnapshot(SQLModel, table=True):
     ml_variant: str | None = Field(default=None, max_length=12)
     # "oficina" si `web_state` lo dejó la búsqueda de la Mac de la oficina (no el servidor).
     web_via: str | None = Field(default=None, max_length=8)
+    # De cuándo es el dato de los idénticos: la hora de la corrida (API y web del servidor) o el `fetched_at` de
+    # la búsqueda de la oficina (puede tener días). Lo usa la bandeja para exigir un dato fresco.
+    data_at: datetime | None = Field(default=None)
+    # Resultado de la pasada de la bandeja para los rojos: `firme` o `dudoso:<motivo>`. None = no es rojo
+    # (o la pasada no corrió).
+    review_flag: str | None = Field(default=None, max_length=40)
 
 
 class MarketMatchFeedback(SQLModel, table=True):
@@ -614,3 +629,127 @@ class TextAuditItem(SQLModel, table=True):
     issues: str = Field(default="")
     # JSON {regla: detalle}. Sin valores del proveedor.
     details: str | None = Field(default=None)
+
+
+# ─── Bandeja de revisión de precios (Pao) ──────────────────────────
+# Ver app/pricing/price_review.py. Una ficha por revisión de un producto (una sola abierta por producto) y
+# un registro de eventos que solo se agrega. En esta etapa Hugo NO escribe en Vendure: las fichas son
+# propuestas; las columnas de decisión, inactivación y Paco PRO (hugo_disabled, decision_*, kept_*, paco_*)
+# existen para las etapas siguientes y quedan en NULL.
+
+REVIEW_STATES = (
+    "propuesto", "en_revision", "corrigiendo", "buscando_proveedor",     # abiertos
+    "mantenido",                                                          # se vigila
+    "despublicado", "corregido", "cerrado_auto",                          # cerrados
+)
+
+
+class PriceReviewItem(SQLModel, table=True):
+    __tablename__ = "price_review_item"
+    __table_args__ = (
+        # `open_key` = product_id mientras la ficha está abierta y NULL al cerrarla: así hay UNA sola abierta
+        # por producto, igual en SQLite y Postgres, sin índices parciales (los NULL no chocan entre sí).
+        Index("ix_pri_open_key", "open_key", unique=True),
+        Index("ix_pri_state_since", "state", "state_since"),
+        Index("ix_pri_product_opened", "product_id", "opened_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    # Denormalizados, como en el snapshot.
+    product_name: str | None = Field(default=None, max_length=200)
+    product_code: str | None = Field(default=None, max_length=64)
+    product_slug: str | None = Field(default=None, max_length=200)
+    image_url: str | None = Field(default=None, max_length=500)
+    open_key: str | None = Field(default=None, max_length=64)
+    state: str = Field(default="propuesto", max_length=16)
+    state_since: datetime = Field(default_factory=utcnow)
+    opened_at: datetime = Field(default_factory=utcnow)
+    closed_at: datetime | None = Field(default=None)
+    mode_at_open: int = Field(default=1)
+    opened_run_id: int | None = Field(default=None)
+    opened_snapshot_id: int | None = Field(default=None)
+    last_run_id: int | None = Field(default=None)
+    last_snapshot_id: int | None = Field(default=None)
+    last_color: str | None = Field(default=None, max_length=16)
+    last_margin_pct: float | None = Field(default=None)
+    streak_nights: int = Field(default=0)
+    # Las cifras firmes con las que se abrió.
+    our_price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    ml_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    firm_listing_count: int | None = Field(default=None)
+    firm_seller_count: int | None = Field(default=None)
+    price_ratio: float | None = Field(default=None)        # nuestro precio / mediana de ML
+    reff_ratio: float | None = Field(default=None)         # nuestro precio / lo que le queda neto al revendedor
+    flags: str | None = Field(default=None)                # JSON: lista de códigos (oficina, en_cola…)
+    probable_cause: str | None = Field(default=None, max_length=8)    # a..e | ninguna
+    fixable: str | None = Field(default=None, max_length=8)           # si | no | aprox
+    # completo | pendiente (no se pudo leer el desglose: se reintenta) | parcial (se dejó de reintentar)
+    diag_status: str | None = Field(default=None, max_length=12)
+    diag: str | None = Field(default=None)                 # JSON, hasta 8 KB: números y códigos
+    breakdown: str | None = Field(default=None)            # JSON, hasta 8 KB
+    # ── Etapas siguientes (sin uso todavía) ──
+    hugo_disabled: bool | None = Field(default=None)
+    enabled_before: bool | None = Field(default=None)
+    disabled_at: datetime | None = Field(default=None)
+    reactivated_at: datetime | None = Field(default=None)
+    vendure_error: str | None = Field(default=None, max_length=300)
+    decision: str | None = Field(default=None, max_length=16)
+    decision_by: str | None = Field(default=None, max_length=120)
+    decision_at: datetime | None = Field(default=None)
+    decision_motive_code: str | None = Field(default=None, max_length=24)
+    decision_motive_text: str | None = Field(default=None, max_length=500)
+    kept_ratio: float | None = Field(default=None)
+    kept_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    kept_our_price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    paco_sid: str | None = Field(default=None, max_length=64)
+    paco_sent_at: datetime | None = Field(default=None)
+    paco_status: str | None = Field(default=None, max_length=16)
+    paco_checked_at: datetime | None = Field(default=None)
+    reopen_count: int = Field(default=0)
+    # Para cambiar de estado de forma atómica (UPDATE … WHERE state = :esperado AND version = :v).
+    version: int = Field(default=1)
+
+
+class PriceReviewEvent(SQLModel, table=True):
+    """Registro de lo que pasó con una ficha. SOLO SE AGREGA: nunca se edita ni se borra (la única columna
+    que cambia es `notified_at`, cuando el evento ya salió en un mail). `actor` es el email de quien lo hizo
+    o `hugo:auto` si lo hizo el sistema."""
+    __tablename__ = "price_review_event"
+    __table_args__ = (
+        Index("ix_pre_item_at", "item_id", "at"),
+        Index("ix_pre_notified", "notified_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    item_id: int
+    product_id: str = Field(max_length=64)
+    at: datetime = Field(default_factory=utcnow)
+    actor: str = Field(max_length=120)
+    kind: str = Field(max_length=24)
+    from_state: str | None = Field(default=None, max_length=16)
+    to_state: str | None = Field(default=None, max_length=16)
+    motive_code: str | None = Field(default=None, max_length=24)
+    motive_text: str | None = Field(default=None, max_length=500)
+    enabled_before: bool | None = Field(default=None)
+    enabled_after: bool | None = Field(default=None)
+    run_id: int | None = Field(default=None)
+    snapshot_id: int | None = Field(default=None)
+    payload: str | None = Field(default=None)               # JSON, hasta 2 KB
+    notified_at: datetime | None = Field(default=None)
+
+
+class EventLogIsAppendOnly(RuntimeError):
+    """Se intentó editar o borrar un evento de la bandeja."""
+
+
+@event.listens_for(PriceReviewEvent, "before_update")
+def _events_are_not_edited(_mapper, _connection, target) -> None:  # noqa: ANN001
+    changed = {a.key for a in sa_inspect(target).attrs if a.history.has_changes()}
+    if changed - {"notified_at"}:
+        raise EventLogIsAppendOnly(f"price_review_event es de solo agregar: no se edita ({sorted(changed)})")
+
+
+@event.listens_for(PriceReviewEvent, "before_delete")
+def _events_are_not_deleted(_mapper, _connection, target) -> None:  # noqa: ANN001
+    raise EventLogIsAppendOnly("price_review_event es de solo agregar: no se borra")

@@ -1,0 +1,2424 @@
+{
+  "_meta": {
+    "fuente": "Generado con el engine REAL de Vendure (describeImportPricing, B2BOX-Cloud/b2box main fdd7579df, packages/backend-core/src/plugins/advanced-pricing/engine) y el mapeo de services/map-exact-breakdown.ts. Los INPUTS (costos en yuanes, cajas, tarifas) son inventados con forma de Argentina (semilla de logística + depósito fiscal); NO es una captura de producción. pctApplied.salesVat = 21 (el IVA de la venta con el que el motor armó la factura).",
+    "inputs_comunes": {
+      "antidumpingPct": "0",
+      "b2boxFeeBrackets": [],
+      "b2boxFeePct": "20",
+      "channelMinorScale": 2,
+      "chinaLogisticsCnyMajor": "3000",
+      "cnyMinorScale": 2,
+      "cnyToUsdRate": "0.1427",
+      "containerCbm": "30",
+      "finCostG1Pct": "1.2",
+      "finCostGrossIncomeTaxPct": "1.2",
+      "finCostIncomeTaxPct": "1.2",
+      "freightCosts": "3095 USD/contenedor",
+      "grossIncomeTaxPct": "6",
+      "imoCargo": false,
+      "imoSurchargePct": "50",
+      "importDutyPct": "20",
+      "incomeTaxPct": "6",
+      "insurancePct": "0.5",
+      "packagingCnyMinor": 0,
+      "paymentGatewayFeePct": "3.5",
+      "salesVatPct": "21",
+      "serviceCosts": [
+        "forwarder",
+        "bill_of_lading",
+        "terminal",
+        "customs_clearance",
+        "operating_expenses",
+        "deposito_fiscal"
+      ],
+      "statisticalCaps": [],
+      "statisticalRatePct": "3",
+      "usdMinorScale": 2,
+      "usdToChannelRate": "1522.50",
+      "vatAdditionalPct": "20",
+      "vatImportPct": "21",
+      "compra_minima_cny": 500
+    }
+  },
+  "variants": [
+    {
+      "variant": "101",
+      "name": "Organizador plegable de cocina 3 niveles",
+      "customFields": {
+        "boxLength": 62,
+        "boxWidth": 48,
+        "boxHeight": 40,
+        "boxWeight": 18,
+        "sourcingMode": "import"
+      },
+      "priceWithTax": 14930336,
+      "tiers": [
+        {
+          "position": 0,
+          "enabled": true,
+          "minQuantity": 25,
+          "maxQuantity": 49,
+          "price": 4200,
+          "salePrice": 12708734
+        },
+        {
+          "position": 1,
+          "enabled": true,
+          "minQuantity": 50,
+          "maxQuantity": 99,
+          "price": 3600,
+          "salePrice": 12507064
+        },
+        {
+          "position": 2,
+          "enabled": true,
+          "minQuantity": 100,
+          "maxQuantity": null,
+          "price": 3100,
+          "salePrice": 12339117
+        }
+      ],
+      "breakdowns": [
+        {
+          "tierId": "2010",
+          "productVariantId": "101",
+          "minQuantity": 25,
+          "maxQuantity": 49,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "42.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 25,
+            "cbmPerUnit": 0.11904,
+            "totalCbm": 2.976,
+            "containerCbm": 30,
+            "weightKgPerUnit": 18,
+            "chargeableUnits": 2.976,
+            "cbmRatio": 0.0992,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "42.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "1050.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "149.8400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "307.0300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "2.2900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "459.1600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "91.8400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "13.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "105.6200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "564.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "118.6100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "112.9600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "231.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "33.8900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "33.8900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "67.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "42.4700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "1110.3700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "88.7900",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "6.4500",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "119.0400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "34.7200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "29.7600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "789.1400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "1675.1500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "335.0300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "73.0400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "2.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "3.6000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "2086.8200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "2525.0600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "127087.3380",
+            "currencyCode": "ARS",
+            "minor": 12708734
+          },
+          "facturaChannelPerUnit": {
+            "exact": "153776.1540",
+            "currencyCode": "ARS",
+            "minor": 15377616
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2011",
+          "productVariantId": "101",
+          "minQuantity": 50,
+          "maxQuantity": 99,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "36.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 50,
+            "cbmPerUnit": 0.11904,
+            "totalCbm": 5.952,
+            "containerCbm": 30,
+            "weightKgPerUnit": 18,
+            "chargeableUnits": 5.952,
+            "cbmRatio": 0.1984,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "36.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "1800.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "256.8600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "614.0500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "4.3600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "875.2700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "175.0600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "26.2600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "201.3200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "1076.5900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "226.0900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "215.3200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "441.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "64.6000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "64.6000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "129.2000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "84.9400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "2220.7300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "177.5700",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "12.9000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "238.0800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "69.4400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "59.5200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "1578.2800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "3297.3200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "659.4700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "143.7600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "5.3000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "6.8600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "4107.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "4969.9700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "125070.6345",
+            "currencyCode": "ARS",
+            "minor": 12507064
+          },
+          "facturaChannelPerUnit": {
+            "exact": "151335.5865",
+            "currencyCode": "ARS",
+            "minor": 15133559
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2012",
+          "productVariantId": "101",
+          "minQuantity": 100,
+          "maxQuantity": null,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "31.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 100,
+            "cbmPerUnit": 0.11904,
+            "totalCbm": 11.904,
+            "containerCbm": 30,
+            "weightKgPerUnit": 18,
+            "chargeableUnits": 11.904,
+            "cbmRatio": 0.3968,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "31.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "3100.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "442.3700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "1228.1000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "8.3600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "1678.8300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "335.7700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "50.3700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "386.1400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "2064.9700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "433.6500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "413.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "846.6500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "123.9000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "123.9000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "247.8000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "169.8800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "4441.4500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "355.1400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "25.8000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "476.1600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "138.8800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "119.0400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "3156.5500",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "6506.4200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "1301.2900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "283.6600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "10.1600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "1.4900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "1.4900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "13.1400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "8104.5100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "9806.4600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "123391.1648",
+            "currencyCode": "ARS",
+            "minor": 12339117
+          },
+          "facturaChannelPerUnit": {
+            "exact": "149303.3535",
+            "currencyCode": "ARS",
+            "minor": 14930336
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        }
+      ]
+    },
+    {
+      "variant": "102",
+      "name": "Taza térmica 350 ml",
+      "customFields": {
+        "boxLength": 24,
+        "boxWidth": 18,
+        "boxHeight": 14,
+        "boxWeight": 0.8,
+        "sourcingMode": "import"
+      },
+      "priceWithTax": 995213,
+      "tiers": [
+        {
+          "position": 0,
+          "enabled": true,
+          "minQuantity": 100,
+          "maxQuantity": 249,
+          "price": 950,
+          "salePrice": 893145
+        },
+        {
+          "position": 1,
+          "enabled": true,
+          "minQuantity": 250,
+          "maxQuantity": 499,
+          "price": 820,
+          "salePrice": 849373
+        },
+        {
+          "position": 2,
+          "enabled": true,
+          "minQuantity": 500,
+          "maxQuantity": null,
+          "price": 740,
+          "salePrice": 822488
+        }
+      ],
+      "breakdowns": [
+        {
+          "tierId": "2020",
+          "productVariantId": "102",
+          "minQuantity": 100,
+          "maxQuantity": 249,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "9.5000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 100,
+            "cbmPerUnit": 0.006048,
+            "totalCbm": 0.6048,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.8,
+            "chargeableUnits": 0.6048,
+            "cbmRatio": 0.0202,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "9.5000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "950.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "135.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "62.4000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "0.9900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "198.9600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "39.8000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "5.9700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "45.7700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "244.7300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "51.4000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "48.9500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "100.3500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "14.6900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "14.6900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "29.3800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "8.6400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "225.7000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "18.0500",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "1.3200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "24.2000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "7.0600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "6.0500",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "160.3800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "470.4300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "94.0900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "20.5400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "1.2100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.1800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.1800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "1.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "586.6300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "709.8300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "8931.4418",
+            "currencyCode": "ARS",
+            "minor": 893145
+          },
+          "facturaChannelPerUnit": {
+            "exact": "10807.1618",
+            "currencyCode": "ARS",
+            "minor": 1080717
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2021",
+          "productVariantId": "102",
+          "minQuantity": 250,
+          "maxQuantity": 499,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "8.2000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 250,
+            "cbmPerUnit": 0.006048,
+            "totalCbm": 1.512,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.8,
+            "chargeableUnits": 1.512,
+            "cbmRatio": 0.0504,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "8.2000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "2050.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "292.5400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "155.9900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "2.2500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "450.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "90.1600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "13.5300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "103.6900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "554.4700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "116.4400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "110.9000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "227.3400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "33.2700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "33.2700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "66.5400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "21.5800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "564.1500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "45.1100",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "3.2800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "60.4800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "17.6400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "15.1200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "400.9400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "1118.6200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "223.7300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "48.8200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "2.7300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.4000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.4000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "3.5300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "1394.7000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "1687.5900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "8493.7230",
+            "currencyCode": "ARS",
+            "minor": 849373
+          },
+          "facturaChannelPerUnit": {
+            "exact": "10277.4231",
+            "currencyCode": "ARS",
+            "minor": 1027743
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2022",
+          "productVariantId": "102",
+          "minQuantity": 500,
+          "maxQuantity": null,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "7.4000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 500,
+            "cbmPerUnit": 0.006048,
+            "totalCbm": 3.024,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.8,
+            "chargeableUnits": 3.024,
+            "cbmRatio": 0.1008,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "7.4000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "3700.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "527.9900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "311.9800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "4.2000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "844.1700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "168.8400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "25.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "194.1700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "1038.3400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "218.0600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "207.6700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "425.7300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "62.3100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "62.3100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "124.6200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "43.1600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "1128.2900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "90.2200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "6.5600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "120.9600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "35.2800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "30.2400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "801.8700",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "2166.6300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "433.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "94.5400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "5.1100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.7500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.7500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "6.6100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "2701.1100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "3268.3500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "8224.8800",
+            "currencyCode": "ARS",
+            "minor": 822488
+          },
+          "facturaChannelPerUnit": {
+            "exact": "9952.1258",
+            "currencyCode": "ARS",
+            "minor": 995213
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        }
+      ]
+    },
+    {
+      "variant": "103",
+      "name": "Cargador USB 20W con certificado",
+      "customFields": {
+        "boxLength": 20,
+        "boxWidth": 15,
+        "boxHeight": 8,
+        "boxWeight": 0.35,
+        "sourcingMode": "import"
+      },
+      "priceWithTax": 860000,
+      "tiers": [
+        {
+          "position": 0,
+          "enabled": true,
+          "minQuantity": 50,
+          "maxQuantity": 99,
+          "price": 1400,
+          "salePrice": 1265959
+        },
+        {
+          "position": 1,
+          "enabled": true,
+          "minQuantity": 100,
+          "maxQuantity": 249,
+          "price": 1250,
+          "salePrice": 931557
+        },
+        {
+          "position": 2,
+          "enabled": true,
+          "minQuantity": 250,
+          "maxQuantity": null,
+          "price": 1100,
+          "salePrice": 710740
+        }
+      ],
+      "breakdowns": [
+        {
+          "tierId": "2030",
+          "productVariantId": "103",
+          "minQuantity": 50,
+          "maxQuantity": 99,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "14.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 50,
+            "cbmPerUnit": 0.0024,
+            "totalCbm": 0.12,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.35,
+            "chargeableUnits": 0.12,
+            "cbmRatio": 0.004,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "14.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "700.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "99.8900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "12.3800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "0.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "112.8400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "22.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "3.3900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "25.9600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "138.8000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "29.1500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "27.7600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "56.9100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "8.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "8.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "16.6600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "1.7200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "44.7800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "3.5800",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "0.2600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "4.8000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "1.4000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "1.2000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "31.8200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "183.5800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "36.7200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "14.5600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "180.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "0.6900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.1000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.1000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "0.8900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "415.7500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "503.0600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "12659.5875",
+            "currencyCode": "ARS",
+            "minor": 1265959
+          },
+          "facturaChannelPerUnit": {
+            "exact": "15318.1770",
+            "currencyCode": "ARS",
+            "minor": 1531818
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2031",
+          "productVariantId": "103",
+          "minQuantity": 100,
+          "maxQuantity": 249,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "12.5000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 100,
+            "cbmPerUnit": 0.0024,
+            "totalCbm": 0.24,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.35,
+            "chargeableUnits": 0.24,
+            "cbmRatio": 0.008,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "12.5000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "1250.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "178.3800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "24.7600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "1.0200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "204.1600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "40.8400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "6.1300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "46.9700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "251.1300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "52.7400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "50.2300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "102.9700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "15.0700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "15.0700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "30.1400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "3.4300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "89.5500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "7.1600",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "0.5200",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "9.6000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "2.8000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "2.4000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "63.6400",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "340.6800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "68.1400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "21.4200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "180.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "1.2400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.1900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.1900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "1.6200",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "611.8600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "740.3600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "9315.5685",
+            "currencyCode": "ARS",
+            "minor": 931557
+          },
+          "facturaChannelPerUnit": {
+            "exact": "11271.9810",
+            "currencyCode": "ARS",
+            "minor": 1127199
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        },
+        {
+          "tierId": "2032",
+          "productVariantId": "103",
+          "minQuantity": 250,
+          "maxQuantity": null,
+          "channelToken": "ar",
+          "goodsKind": "resale",
+          "b2boxFeeSource": "CHANNEL_DEFAULT",
+          "inputs": {
+            "purchasePriceCny": {
+              "exact": "11.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "packagingCny": {
+              "exact": "0.0000",
+              "currencyCode": "CNY",
+              "minor": null
+            },
+            "quantity": 250,
+            "cbmPerUnit": 0.0024,
+            "totalCbm": 0.6,
+            "containerCbm": 30,
+            "weightKgPerUnit": 0.35,
+            "chargeableUnits": 0.6,
+            "cbmRatio": 0.02,
+            "cnyToUsdRate": "0.1427",
+            "usdToChannelRate": "1522.5"
+          },
+          "basePriceCnyPerUnit": {
+            "exact": "11.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "totalCny": {
+            "exact": "2750.0000",
+            "currencyCode": "CNY",
+            "minor": null
+          },
+          "fobUsd": {
+            "exact": "392.4300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "fleteUsd": {
+            "exact": "61.9000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "seguroUsd": {
+            "exact": "2.2800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "cifUsd": {
+            "exact": "456.6100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "importDutyUsd": {
+            "exact": "91.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "antidumpingUsd": {
+            "exact": "0.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "statisticalRateUsd": {
+            "exact": "13.7000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "arancelesUsd": {
+            "exact": "105.0300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "baseImpUsd": {
+            "exact": "561.6400",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatImportUsd": {
+            "exact": "117.9500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "vatAdditionalUsd": {
+            "exact": "112.3300",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g1Usd": {
+            "exact": "230.2800",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "grossIncomeTaxUsd": {
+            "exact": "33.7000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "incomeTaxUsd": {
+            "exact": "33.7000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "g2Usd": {
+            "exact": "67.4000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "chinaLogisticsUsd": {
+            "exact": "8.5700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "serviciosUsd": {
+            "exact": "223.8700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "servicios": [
+            {
+              "id": "1",
+              "code": "forwarder",
+              "appliedUsd": {
+                "exact": "17.9000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "2",
+              "code": "bill_of_lading",
+              "appliedUsd": {
+                "exact": "1.3000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "3",
+              "code": "terminal",
+              "appliedUsd": {
+                "exact": "24.0000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "4",
+              "code": "customs_clearance",
+              "appliedUsd": {
+                "exact": "7.0000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "5",
+              "code": "operating_expenses",
+              "appliedUsd": {
+                "exact": "6.0000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            },
+            {
+              "id": "6",
+              "code": "deposito_fiscal",
+              "appliedUsd": {
+                "exact": "159.1000",
+                "currencyCode": "USD",
+                "minor": null
+              },
+              "prorataMode": "cbm"
+            }
+          ],
+          "subtopUsd": {
+            "exact": "785.5100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "b2boxFeeUsd": {
+            "exact": "157.1100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "paymentGatewayFeeUsd": {
+            "exact": "40.8500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "certificationUsd": {
+            "exact": "180.0000",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostG1Usd": {
+            "exact": "2.7700",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostGrossIncomeTaxUsd": {
+            "exact": "0.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostIncomeTaxUsd": {
+            "exact": "0.4100",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "finCostUsd": {
+            "exact": "3.5900",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoUsd": {
+            "exact": "1167.0600",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "facturaUsd": {
+            "exact": "1412.1500",
+            "currencyCode": "USD",
+            "minor": null
+          },
+          "netoChannelPerUnit": {
+            "exact": "7107.3954",
+            "currencyCode": "ARS",
+            "minor": 710740
+          },
+          "facturaChannelPerUnit": {
+            "exact": "8599.9935",
+            "currencyCode": "ARS",
+            "minor": 860000
+          },
+          "pctApplied": {
+            "b2boxFee": "20",
+            "salesVat": "21"
+          }
+        }
+      ]
+    }
+  ]
+}

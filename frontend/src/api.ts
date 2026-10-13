@@ -16,6 +16,9 @@ import type {
   PriceMonitorSnapshot,
   PriceMonitorSnapshotsResponse,
   PriceMonitorSummary,
+  PriceReviewDetail,
+  PriceReviewItemsResponse,
+  PriceReviewSummary,
   SectionsResponse,
   SemaforoColor,
   SeoItemsResponse,
@@ -238,6 +241,8 @@ export interface SnapshotQuery {
   origin?: MatchOrigin | null;
   // Color estimado por similares.
   estimated?: EstimatedFilter | null;
+  // Lo que decidió la bandeja de Pao para los rojos: firme | dudoso | dudoso:<motivo>.
+  review?: string | null;
   // Por fuente: "ml" o "store:<id>" (productos con algo de esa fuente), y las fuentes donde
   // tiene que haber un idéntico (cualquiera de ellas).
   source?: string | null;
@@ -257,6 +262,7 @@ export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<Pr
   if (query.match) params.set("match", query.match);
   if (query.origin) params.set("origin", query.origin);
   if (query.estimated) params.set("estimated", query.estimated);
+  if (query.review) params.set("review", query.review);
   if (query.source) params.set("source", query.source);
   if (query.igualIn && query.igualIn.length > 0) params.set("igual_in", query.igualIn.join(","));
   return asJson<PriceMonitorSnapshotsResponse>(await apiFetch("/api/price-monitor/snapshots?" + params));
@@ -459,4 +465,30 @@ export async function saveSeoList(name: SeoListName, items: string[], allowEmpty
 
 export async function resetSeoList(name: SeoListName): Promise<SeoList> {
   return asJson<SeoList>(await apiFetch(`/api/seo/text-audit/lists/${name}`, { method: "DELETE" }));
+}
+
+
+// ─── Bandeja de revisión de precios (solo lectura) ─────────────────
+
+export interface ReviewItemsQuery {
+  state: string;
+  cause: string | null;
+  q: string;
+  page: number;
+  pageSize: number;
+}
+
+export async function getReviewSummary(): Promise<PriceReviewSummary> {
+  return asJson<PriceReviewSummary>(await apiFetch("/api/price-review/summary"));
+}
+
+export async function getReviewItems(query: ReviewItemsQuery): Promise<PriceReviewItemsResponse> {
+  const params = new URLSearchParams({ state: query.state, page: String(query.page), page_size: String(query.pageSize) });
+  if (query.cause) params.set("cause", query.cause);
+  if (query.q.trim()) params.set("q", query.q.trim());
+  return asJson<PriceReviewItemsResponse>(await apiFetch("/api/price-review/items?" + params));
+}
+
+export async function getReviewItem(id: number): Promise<PriceReviewDetail> {
+  return asJson<PriceReviewDetail>(await apiFetch(`/api/price-review/items/${id}`));
 }

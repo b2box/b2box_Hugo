@@ -15,29 +15,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from gql import Client, gql
+from graphql import GraphQLError, OperationDefinitionNode, OperationType
+from graphql import parse as parse_graphql
 from gql.transport import httpx as _gql_httpx_transport
 from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
 
 from app.config import get_settings
 from app.pricing.market_specs import our_specs_from_custom_fields
+from app.pricing.price_breakdown import BREAKDOWN_SELECTION, TierBreakdown, parse_tier_breakdowns
 from app.pricing.semaforo import PricedVariant, PriceTier
 
 log = logging.getLogger(__name__)
 
 
+# Loggers de transporte que, a DEBUG, escriben headers (el token de Vendure) y respuestas (datos del proveedor, costos):
+# gql, httpx/httpcore y, desde que gql 4.4 prefiere httpx2, httpx2/httpcore2 (y sus hijos: httpcore2.connection,
+# httpcore2.http11…); h2/hpack/hyperframe si algún día se prende HTTP/2.
+_TRANSPORT_LOGGER_PREFIXES = ("gql", "httpx", "httpcore", "h2", "hpack", "hyperframe")
+_TRANSPORT_LOGGER_ROOTS = ("gql", "httpx", "httpx2", "httpcore", "httpcore2", "h2", "hpack", "hyperframe")
+
+
 def quiet_http_loggers() -> None:
-    """Sube gql, httpx y httpcore a WARNING. Con LOG_LEVEL=DEBUG el transporte de gql loguea la
-    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink de todos los
-    productos) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en
-    INFO, la URL de cada request. Se llama al importar este módulo y desde _configure_logging."""
-    for name in ("gql", "httpx", "httpcore"):
+    """Sube a WARNING todo logger de transporte HTTP: gql, httpx, httpcore, **httpx2 y httpcore2** (y cualquier hijo, el
+    que ya exista o el que se cree después, que hereda del padre). Con LOG_LEVEL=DEBUG el transporte de gql loguea la
+    respuesta completa (ahí viajan supplierBusiness/supplierSizeModel/supplierLink y, desde la bandeja, los costos de
+    fábrica) y httpcore los headers de cada pedido (el vendure-auth-token del login); httpx, en INFO, la URL de cada
+    request. Se llama al importar este módulo y desde _configure_logging."""
+    for name in _TRANSPORT_LOGGER_ROOTS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    for name in list(logging.root.manager.loggerDict):
+        if name.startswith(_TRANSPORT_LOGGER_PREFIXES):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 quiet_http_loggers()
@@ -56,6 +72,14 @@ _TRANSPORT_HTTP_ERRORS: tuple[type[BaseException], ...] = tuple(
 )
 
 
+# Custom fields de la variante que se piden en la consulta de precios (ver `_product_fields`).
+_VARIANT_DIM_FIELDS = "length width height weight boxLength boxWidth boxHeight boxWeight"
+_VARIANT_REVIEW_FIELDS = "sourcingMode minQuantityOverride"
+_DIM_FIELD_NAMES = frozenset(_VARIANT_DIM_FIELDS.split())
+_REVIEW_FIELD_NAMES = frozenset({*_VARIANT_REVIEW_FIELDS.split(), "price"})
+_CANNOT_QUERY = re.compile(r'Cannot query field "(\w+)"')
+
+
 # ─── DTOs ──────────────────────────────────────────────────────────
 
 
@@ -63,6 +87,13 @@ def _safe_int(v: Any) -> int | None:
     """priceWithTax/stock a int, o None si no parsea."""
     try:
         return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(v: Any) -> float | None:
+    try:
+        return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
 
@@ -134,6 +165,46 @@ class TextsRead:
     supplier_fields: bool = True
 
 
+@dataclass(slots=True)
+class CertificationInfo:
+    """Recargo de certificado de un producto en un canal (`productCertification`). Sin fila = el
+    producto no necesita certificado (la lectura devuelve None, no esto). `cost_usd_cents` es el Money
+    de Vendure: centavos de dólar."""
+
+    status: str                       # required_uncertified | required_in_progress | certified | not_viable
+    holder: str | None
+    cost_usd_cents: int | None
+    issued_at: str | None
+    expires_at: str | None
+
+
+@dataclass(slots=True)
+class ChannelPricing:
+    """Datos del canal activo que necesita el diagnóstico (no cambian por producto)."""
+
+    channel_id: str
+    minimum_purchase_cny: int | None          # None = el canal no fijó el suyo (Vendure usa 500)
+    certificate_max_share_pct: float | None   # tope del recargo de certificado sobre el neto
+    container_cbm: float | None
+
+
+def read_only_document(text: str) -> str:
+    """Valida con el parser de GraphQL (graphql-core, que ya viene con gql) que el documento sea SOLO lectura: todas sus
+    definiciones son operaciones `query`. Un `startswith("query ")` no alcanza: un documento con una query y una mutation
+    empieza con «query» y gql lo manda entero. Devuelve el mismo texto; si no es solo lectura (mutation, subscription,
+    fragmentos sueltos, sintaxis rota) levanta RuntimeError."""
+    try:
+        document = parse_graphql(text)
+    except GraphQLError as exc:
+        raise RuntimeError(f"documento GraphQL inválido para una lectura: {type(exc).__name__}") from None
+    definitions = document.definitions
+    if not definitions or any(
+        not isinstance(d, OperationDefinitionNode) or d.operation != OperationType.QUERY for d in definitions
+    ):
+        raise RuntimeError("las lecturas tienen que ser operaciones query, nada más")
+    return text
+
+
 # Valor por defecto de `channel_token`: "el canal de VENDURE_CHANNEL_TOKEN".
 # None significa otra cosa: sin header `vendure-token`, o sea el canal por defecto.
 _CHANNEL_FROM_SETTINGS: Any = object()
@@ -160,6 +231,9 @@ class VendureClient:
     # Si una query de precios revienta por un campo que no existe, se apaga y el
     # semáforo sigue sin medidas en vez de quedarse sin precios.
     _dims_supported: bool = True
+    # Lo mismo para lo que suma la bandeja de revisión a la MISMA selección de precios: el costo por
+    # tramo (`bulkPriceTiers.price`) y los custom fields `sourcingMode` / `minQuantityOverride`.
+    _review_supported: bool = True
 
     # Último bearer renovado, compartido entre TODAS las instancias del proceso.
     # Sin esto, cada VendureClient() nuevo pagaba un login completo.
@@ -185,10 +259,20 @@ class VendureClient:
         # contra el admin de prod, en cada refresh.
         self._bearer: str = s.vendure_bearer or VendureClient._shared_bearer
         self._login_lock = asyncio.Lock()  # evita re-logins concurrentes
+        # Se llama ANTES de cada request HTTP real a Vendure (cada intento de un reintento y cada login). La bandeja lo usa
+        # para contar y topear las lecturas por noche; si levanta una excepción el request no sale y no se reintenta.
+        self._request_hook: Callable[[], Awaitable[None]] | None = None
         if not self._bearer:
             log.info(
                 "VENDURE_BEARER vacío — Hugo se va a loguear con user/pass al primer call"
             )
+
+    def set_request_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
+        self._request_hook = hook
+
+    async def _before_request(self) -> None:
+        if self._request_hook is not None:
+            await self._request_hook()
 
     def _new_client(self) -> Client:
         """Crea un gql.Client NUEVO con el bearer actual.
@@ -244,6 +328,7 @@ class VendureClient:
             if self._channel_token:
                 headers["vendure-token"] = self._channel_token
 
+            await self._before_request()
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
@@ -307,11 +392,17 @@ class VendureClient:
         if pricing:
             # Medidas de la variante (cm y kg) para comparar con la publicación de
             # ML. Son columnas de la misma fila: no suman queries del lado de Vendure.
-            dims = (" customFields { length width height weight boxLength boxWidth boxHeight boxWeight }"
-                    if VendureClient._dims_supported else "")
+            # Lo mismo el costo por tramo, el modo de abastecimiento y la mínima propia
+            # que usa el diagnóstico de la bandeja de revisión.
+            custom = " ".join(
+                (_VARIANT_DIM_FIELDS if VendureClient._dims_supported else "",
+                 _VARIANT_REVIEW_FIELDS if VendureClient._review_supported else "")).strip()
+            custom_block = f" customFields {{ {custom} }}" if custom else ""
+            tier_cost = " price" if VendureClient._review_supported else ""
             variant_block = (
                 "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode"
-                f"{dims} bulkPriceTiers {{ position enabled minQuantity maxQuantity salePrice }} }} totalItems }}"
+                f"{custom_block} bulkPriceTiers {{ position enabled minQuantity maxQuantity salePrice{tier_cost} }} }} "
+                "totalItems }"
             )
         elif with_variants:
             variant_block = (
@@ -378,12 +469,15 @@ class VendureClient:
                     max_quantity=_safe_int(t.get("maxQuantity")),
                     sale_price_cents=_safe_int(t.get("salePrice")),
                     enabled=bool(t.get("enabled", True)),
+                    cost_cny_minor=_safe_int(t.get("price")),
                 )
                 for t in (v.get("bulkPriceTiers") or [])
                 if isinstance(t, dict)
             ]
             tiers.sort(key=lambda t: t.position)
             specs = our_specs_from_custom_fields(v.get("customFields"))
+            custom = v.get("customFields") if isinstance(v.get("customFields"), dict) else {}
+            mode = custom.get("sourcingMode")
             out.append(PricedVariant(
                 id=str(v.get("id")),
                 name=v.get("name") or "",
@@ -392,6 +486,8 @@ class VendureClient:
                 currency=v.get("currencyCode"),
                 tiers=tuple(tiers),
                 specs=specs.as_dict() if specs else {},
+                sourcing_mode=mode if isinstance(mode, str) and mode else None,
+                min_quantity_override=_safe_int(custom.get("minQuantityOverride")),
             ))
         return out
 
@@ -513,20 +609,48 @@ class VendureClient:
         Es la lectura FRESCA que hace el semáforo cada noche: el cache de
         app/vendure/catalog.py puede tener el precio hasta 12 h viejo. Misma
         concurrencia baja que el full refresh (2): cada página sigue siendo un
-        N+1 de variantList del lado de Vendure."""
-        try:
-            return await self.fetch_all_products(
-                with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
-            )
-        except TransportQueryError as exc:
-            if not VendureClient._dims_supported or "Cannot query field" not in str(exc):
-                raise
-            log.warning("Vendure no tiene los custom fields de medidas de la variante: "
-                        "se piden los precios sin medidas (%s)", str(exc)[:160])
+        N+1 de variantList del lado de Vendure.
+
+        Si el schema no tiene alguno de los campos opcionales (medidas, o lo que suma la
+        bandeja: costo por tramo, modo de abastecimiento, mínima propia), esa parte se apaga y la
+        consulta se repite sin ella: el semáforo no se queda sin precios por un campo."""
+        for _ in range(3):
+            try:
+                return await self.fetch_all_products(
+                    with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
+                )
+            except TransportQueryError as exc:
+                if not self._drop_unsupported_field(exc):
+                    raise
+        return await self.fetch_all_products(
+            with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
+        )
+
+    @staticmethod
+    def _drop_unsupported_field(exc: Exception) -> bool:
+        """Apaga la parte opcional de la consulta de precios que el schema de Vendure no tiene.
+        True si apagó algo (conviene repetir la consulta); False si el error es otro."""
+        text = str(exc)
+        if "Cannot query field" not in text:
+            return False
+        found = _CANNOT_QUERY.search(text)
+        name = found.group(1) if found else ""
+        if name in _REVIEW_FIELD_NAMES and VendureClient._review_supported:
+            VendureClient._review_supported = False
+            what = "el costo por tramo / sourcingMode / minQuantityOverride"
+        elif VendureClient._dims_supported and (name in _DIM_FIELD_NAMES or not name):
             VendureClient._dims_supported = False
-            return await self.fetch_all_products(
-                with_variants=False, concurrency=concurrency or self.FETCH_CONCURRENCY, pricing=True,
-            )
+            what = "las medidas de la variante"
+        elif VendureClient._review_supported:
+            VendureClient._review_supported = False
+            what = "el costo por tramo / sourcingMode / minQuantityOverride"
+        elif VendureClient._dims_supported:
+            VendureClient._dims_supported = False
+            what = "las medidas de la variante"
+        else:
+            return False
+        log.warning("Vendure no tiene %s: se piden los precios sin eso (%s)", what, text[:160])
+        return True
 
     # ── Textos para la auditoría (solo lectura) ────────────────
 
@@ -546,9 +670,7 @@ class VendureClient:
             "translations { languageCode name slug description } "
             f"customFields {{ {custom} }} }} totalItems }} }}"
         )
-        if not text.lstrip().startswith("query "):  # defensa: nunca una mutation
-            raise RuntimeError("la lectura de textos tiene que ser una query")
-        return gql(text)
+        return gql(read_only_document(text))      # defensa: nunca una mutation
 
     @staticmethod
     def _map_product_texts(raw: dict[str, Any], source_field: str) -> ProductTexts:
@@ -695,6 +817,100 @@ class VendureClient:
             "variants": variants,
         }
 
+    # ── Lecturas del diagnóstico de la bandeja (SOLO queries) ──────────
+    #
+    # Todas arman un documento `query`; `_read_query` lo parsea y rechaza cualquier otra cosa (mutation,
+    # subscription, un documento con una query y una mutation…), así que desde acá es imposible escribir en
+    # Vendure. Se piden de a poco (una por producto de la bandeja, con tope duro de requests por noche), nunca
+    # por todo el catálogo.
+
+    @staticmethod
+    def _read_query(text: str):
+        """Documento de solo lectura (ver `read_only_document`): parseado, no adivinado por el prefijo."""
+        return gql(read_only_document(text))
+
+    async def get_tier_breakdowns(self, variant_id: str) -> list[TierBreakdown]:
+        """Desglose completo del precio de cada tramo habilitado de una variante
+        (`bulkPriceTierBreakdowns`: fábrica, flete, aranceles, servicios, fee, certificado, IVA).
+        Falla con `BreakdownError` si Vendure devuelve algo que no cierra: no se inventa nada."""
+        query = self._read_query(
+            "query TierBreakdowns($id: ID!) { "
+            f"bulkPriceTierBreakdowns(productVariantId: $id) {{ {BREAKDOWN_SELECTION} }} }}"
+        )
+        data = await self._execute_with_retry(
+            query, {"id": str(variant_id)}, what=f"bulkPriceTierBreakdowns({variant_id})")
+        return parse_tier_breakdowns(data.get("bulkPriceTierBreakdowns"))
+
+    async def get_priced_variant(self, variant_id: str) -> PricedVariant | None:
+        """UNA variante con su precio, tramos (costo en yuanes incluido), medidas y modo de
+        abastecimiento: lo mismo que baja el listado nocturno, para cuando ese listado no está a
+        mano. None si la variante no existe."""
+        custom = " ".join((_VARIANT_DIM_FIELDS if VendureClient._dims_supported else "",
+                           _VARIANT_REVIEW_FIELDS if VendureClient._review_supported else "")).strip()
+        custom_block = f" customFields {{ {custom} }}" if custom else ""
+        tier_cost = " price" if VendureClient._review_supported else ""
+        query = self._read_query(
+            "query PricedVariant($id: ID!) { productVariant(id: $id) { id name sku priceWithTax currencyCode"
+            f"{custom_block} bulkPriceTiers {{ position enabled minQuantity maxQuantity salePrice{tier_cost} }} }} }}"
+        )
+        data = await self._execute_with_retry(query, {"id": str(variant_id)}, what=f"productVariant({variant_id})")
+        raw = data.get("productVariant")
+        if not isinstance(raw, dict):
+            return None
+        mapped = self._map_priced_variants([raw])
+        return mapped[0] if mapped else None
+
+    async def get_certification(self, product_id: str, channel_id: str) -> CertificationInfo | None:
+        """Recargo de certificado del producto en el canal. None = sin fila: no necesita certificado."""
+        query = self._read_query(
+            "query ProductCertification($productId: ID!, $channelId: ID!) { "
+            "productCertification(productId: $productId, channelId: $channelId) "
+            "{ status holder costUsd issuedAt expiresAt } }"
+        )
+        data = await self._execute_with_retry(
+            query, {"productId": str(product_id), "channelId": str(channel_id)},
+            what=f"productCertification({product_id})")
+        raw = data.get("productCertification")
+        if not isinstance(raw, dict):
+            return None
+        return CertificationInfo(
+            status=str(raw.get("status") or ""),
+            holder=raw.get("holder") if isinstance(raw.get("holder"), str) else None,
+            cost_usd_cents=_safe_int(raw.get("costUsd")),
+            issued_at=raw.get("issuedAt") if isinstance(raw.get("issuedAt"), str) else None,
+            expires_at=raw.get("expiresAt") if isinstance(raw.get("expiresAt"), str) else None,
+        )
+
+    async def get_channel_pricing(self) -> ChannelPricing | None:
+        """Compra mínima (¥), tope del recargo de certificado y contenedor del canal activo. Dos
+        queries baratas por pasada (no dependen del producto). None si no se pudo identificar el canal."""
+        chan_query = self._read_query(
+            "query ActiveChannelPricing { activeChannel { id customFields { minimumPurchaseCny } } }")
+        data = await self._execute_with_retry(chan_query, {}, what="activeChannel")
+        chan = data.get("activeChannel")
+        if not isinstance(chan, dict) or chan.get("id") is None:
+            return None
+        channel_id = str(chan["id"])
+        custom = chan.get("customFields") if isinstance(chan.get("customFields"), dict) else {}
+        profile: dict[str, Any] = {}
+        try:
+            prof_query = self._read_query(
+                "query FiscalProfile($channelId: ID!) { "
+                "pricingFiscalProfile(channelId: $channelId) { certificateMaxSharePct containerCbm } }")
+            pdata = await self._execute_with_retry(
+                prof_query, {"channelId": channel_id}, what=f"pricingFiscalProfile({channel_id})")
+            if isinstance(pdata.get("pricingFiscalProfile"), dict):
+                profile = pdata["pricingFiscalProfile"]
+        except (TransportError, TransportQueryError, *_TRANSPORT_HTTP_ERRORS) as exc:
+            # Sin el perfil fiscal el diagnóstico igual corre: solo falta el tope del certificado.
+            log.warning("No se pudo leer el perfil fiscal del canal %s: %s", channel_id, type(exc).__name__)
+        return ChannelPricing(
+            channel_id=channel_id,
+            minimum_purchase_cny=_safe_int(custom.get("minimumPurchaseCny")),
+            certificate_max_share_pct=_safe_float(profile.get("certificateMaxSharePct")),
+            container_cbm=_safe_float(profile.get("containerCbm")),
+        )
+
     # ── Escritura ──────────────────────────────────────────────
 
     async def get_enabled_status(self, product_id: str) -> bool | None:
@@ -751,6 +967,7 @@ class VendureClient:
         last_exc: Exception | None = None
         relogged_in = False
         for attempt in range(1, max_attempts + 1):
+            await self._before_request()          # cada intento es un request real: se cuenta (y puede frenarse) acá
             try:
                 async with self._new_client() as session:
                     return await session.execute(query, variable_values=variables)

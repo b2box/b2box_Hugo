@@ -35,7 +35,8 @@ from tests.test_semaforo_web import _card, _score, _web_page, webw  # noqa: E402
 from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 SKIP_COLS = {"id", "run_id", "captured_at", "match_origin", "web_state", "web_via", "web_searches", "web_bytes", "ml_error",
-             "matched_listings", "unpriced_listings", "similar_listings", "other_listings", "ml_variant"}
+             "matched_listings", "unpriced_listings", "similar_listings", "other_listings", "ml_variant",
+             "data_at", "review_flag"}
 LIST_COLS = ("matched_listings", "unpriced_listings", "similar_listings", "other_listings")
 KINDS = ["ident2", "ident2", "ident_pack", "ident_pocas_ventas", "solo_packs", "solo_impostores", "usd", "ambiguo", "marca",
          "mas_que_el_tope", "api_429_y_web", "api_ok", "nada", "nada"]

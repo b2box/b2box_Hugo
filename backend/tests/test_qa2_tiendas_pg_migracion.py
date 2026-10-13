@@ -54,11 +54,15 @@ OLD_TABLES = ("audit_log", "image_embed_cache", "image_hash_cache", "market_matc
               "ml_seller_cache", "price_history", "price_monitor_run", "settings")
 # ml_web_result: el buscador de la oficina (feat/semaforo-variantes-y-oficina), que se apila sobre las tiendas.
 NEW_TABLES = ("market_store", "store_catalog_item", "store_match", "store_match_feedback", "ml_web_result")
+# La bandeja de revisión (PR posterior a este esquema de partida) agrega estas columnas y las tablas price_review_*:
+# las prueba test_price_review_pg.py. Estos tests miran solo lo que agregaban los PRs anteriores.
+BANDEJA_COLS = {("market_price_snapshot", "data_at"), ("market_price_snapshot", "review_flag"),
+                ("price_monitor_run", "review_at"), ("price_monitor_run", "review_summary"), ("price_monitor_run", "n_flipped")}
 ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run", "source_stats"),
                  # variantes de búsqueda y buscador de la oficina
                  ("market_price_snapshot", "ml_variant"), ("market_price_snapshot", "web_via"),
                  ("price_monitor_run", "variant_stats"), ("price_monitor_run", "oficina_fresh"),
-                 ("price_monitor_run", "n_oficina_ok")}
+                 ("price_monitor_run", "n_oficina_ok")} | BANDEJA_COLS
 PROD_TIMESTAMPTZ = [("price_monitor_run", "started_at"), ("price_monitor_run", "finished_at"), ("market_price_snapshot", "captured_at"),
                     ("ml_seller_cache", "fetched_at"), ("market_match_feedback", "created_at")]
 
@@ -83,7 +87,9 @@ def _signature(engine) -> dict:
             "where connamespace = current_schema()::regnamespace order by 1, 2"))]
     # Las tablas de la auditoría de textos (HG1) son de un PR posterior a este esquema de partida:
     # las prueba test_seo_text_audit_pg.py.
-    keep = lambda rows: [r for r in rows if "text_audit_" not in r[0]]  # noqa: E731
+    # Lo mismo con la bandeja de revisión (price_review_*) y sus cinco columnas.
+    keep = lambda rows: [r for r in rows if "text_audit_" not in r[0] and "price_review_" not in r[0]]  # noqa: E731
+    cols = [r for r in cols if (r[0], r[1]) not in BANDEJA_COLS]
     return {"columns": keep(cols), "indexes": keep(idx), "constraints": keep(con)}
 
 

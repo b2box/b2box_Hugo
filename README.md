@@ -878,18 +878,18 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 
 ### Qué NO hace todavía
 
-- No pasa los rojos a inactivo ni escribe nada en Vendure (`pm_mode=1` existe
-  pero solo loguea "modo activo todavía no implementado"). Tampoco con los
-  productos deshabilitados que ahora se miden.
-- No hay diagnóstico automático, bandeja de revisión de Pao, histéresis,
-  alertas (26 h sin correr, >20 % del catálogo cambia de color) ni campos en
-  Vendure para la web o para pauta. Eso es la etapa siguiente.
+- No pasa los rojos a inactivo ni escribe nada en Vendure. La bandeja de revisión de Pao (ver
+  [más abajo](#bandeja-de-revisión-de-precios-pao)) propone los rojos firmes y **tampoco toca Vendure**: la
+  inactivación, las decisiones de Pao y "Buscar otro proveedor" (Paco PRO) son las etapas siguientes. Lo mismo vale
+  para los productos deshabilitados que ahora se miden.
+- No hay histéresis ("mantenido no se re-inactiva salvo que empeore 10 %"), alertas (26 h sin correr, >20 % del
+  catálogo cambia de color) ni campos en Vendure para la web o para pauta.
 
 ### Settings (dashboard → Configuración → "Semáforo de precios")
 
 | Setting | Default | Qué hace |
 |---|---|---|
-| `pm_mode` | 0 | 0 sombra; 1 activo (todavía no implementado) |
+| `pm_mode` | 0 | 0 sombra (solo marca los rojos); 1 propuesta (llena la bandeja de Pao, no toca Vendure); 2 automático (todavía no existe: se comporta como 1) |
 | `pm_green_min_pct` | 30 | ganancia mínima para verde |
 | `pm_yellow_min_pct` | 10 | ganancia mínima para amarillo |
 | `pm_ml_commission_pct` | 13 | comisión de ML, % de la mediana (a definir por Gabriel) |
@@ -919,6 +919,13 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 | `pm_stores_affect_color` | 1 | 1 = el color usa la mediana de los idénticos de ML y de las tiendas (con stock, precio creíble y confirmados por foto + nombre, medidas o una persona); 0 = solo referencia |
 | `pm_stores_vision_max_calls` | 500 | tope diario del juez IA de las tiendas (contador propio; 0 = sin juez) |
 | `pm_stores_topup_minutes` | 15 | minutos para refrescar el índice viejo de las tiendas al empezar la corrida; 0 = solo el job de la madrugada |
+| `pm_review_confirm_nights` | 2 | bandeja: noches seguidas con dato en rojo firme antes de abrir la ficha (R8) |
+| `pm_review_min_listings` / `pm_review_min_sellers` | 3 / 2 | bandeja: publicaciones idénticas firmes con precio y vendedores distintos mínimos (R6) |
+| `pm_review_max_price_ratio` | 3 | bandeja: nuestro precio / mediana de ML máximo creíble (R7) |
+| `pm_review_data_max_age_h` | 48 | bandeja: antigüedad máxima del dato de los idénticos, en horas (R5) |
+| `pm_review_sla_days` | 7 | bandeja: días esperando decisión antes de salir como «esperando» en el mail |
+| `pm_diag_cert_share_pct` / `pm_diag_logistics_ratio` | 10 / 1,0 | diagnóstico (c): peso del certificado en % del neto; (d): logística / fábrica |
+| `pm_diag_box_z` / `pm_diag_min_neighbors` | 3,0 / 5 | diagnóstico (a): desvío robusto de la caja y parecidos con caja que hacen falta |
 
 Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
 umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
@@ -1100,6 +1107,123 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   cambian.
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
   su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
+
+## Bandeja de revisión de precios (Pao)
+
+Diseño: `bandeja-pao-diseno.md` (PR 1 y PR 2). **En esta etapa Hugo solo propone: no escribe nada en Vendure
+(ni `enabled` ni nada) y no manda nada a Paco PRO.** Pao ve la bandeja en el dashboard → **Bandeja de precios** y
+recibe un resumen por mail.
+
+### Qué es un «rojo firme»
+
+El rojo del Semáforo mezcla matches buenos con malos (el drone contra el avión de juguete dio -99 %). Solo un
+**rojo firme** entra a la bandeja; el resto queda como «rojo dudoso» con el motivo (se filtra en el Semáforo →
+«Bandeja de Pao»). Tienen que cumplirse todas:
+
+| # | Regla | Motivo si falla |
+|---|---|---|
+| R1 | `ml_status = ok`, color **real** rojo (nunca el estimado), producto habilitado | `solo_tiendas`, `deshabilitado` |
+| R2 | el producto no tiene ya una ficha abierta | (no se abre otra) |
+| R3 | recalculado **solo** con los idénticos confirmados por foto + nombre o por una persona (`clip`, `clip+nombre`, `manual`) sigue siendo rojo: un idéntico que solo confirmó el juez IA, o las medidas, no cuenta | `fuentes` |
+| R4 | el rojo se sostiene solo con precios de ML, sin las tiendas | `tiendas` |
+| R5 | el dato tiene menos de 48 h (la API y la web del servidor son de la hora de la corrida; la oficina, el `fetched_at` de su búsqueda) | `dato_viejo` |
+| R6 | al menos 3 publicaciones firmes con precio y 2 vendedores distintos | `pocas_publicaciones`, `pocos_vendedores` |
+| R7 | nuestro precio / mediana de ML <= 3 | `precio_extremo` |
+| R8 | rojo firme en 2 noches **con dato** seguidas; `failed` y `skipped` no suman ni restan, una noche que no es rojo firme reinicia. Se cuentan noches, no corridas: una noche es un día calendario **argentino** y dos corridas a menos de 12 h son la misma (el cron y un «Correr ahora», o dos manuales que cruzan la medianoche) | (espera la racha) |
+
+Los números son settings (`pm_review_*`). El motivo queda en `market_price_snapshot.review_flag` (`firme` o
+`dudoso:<motivo>`), y `data_at` guarda de cuándo es el dato.
+
+### Qué hace cada noche
+
+Después de cerrar la corrida del semáforo (si falla, la corrida queda `ok` y el error se anota en
+`review_summary`), `price_review.process_run`:
+
+1. marca cada snapshot rojo como `firme` / `dudoso:<motivo>` (también con `pm_mode = 0`: así la racha ya está lista
+   cuando se prende);
+2. con `pm_mode >= 1`: abre la ficha (`propuesto`) de cada rojo firme con racha, con su **diagnóstico a-e** y el
+   **desglose del precio**; actualiza las fichas abiertas y cierra solas (`cerrado_auto`) las que dejaron de ser
+   rojo o ya estaban inactivas;
+3. guarda el resumen y escribe `review_at` **una sola vez**: correrla dos veces, o retomarla después de un reinicio,
+   no duplica fichas ni eventos.
+
+`pm_mode`: **0** sombra (solo marca), **1** propuesta, **2** automático: *todavía no existe*, se comporta como 1 y lo
+loguea. Hay **una ficha abierta por producto** (`open_key` único); las cerradas quedan de historial.
+
+### Diagnóstico a-e
+
+Se evalúan las cinco y se guardan todas; la **causa probable** es la primera que se cumple en este orden. Cada una dice
+si corregirla saca el producto del rojo (**sí / no / aprox**), contra `P_max = (M × (1 − c/100) − s) / (1 + y/100)`.
+
+| | Mide | Dispara si |
+|---|---|---|
+| (a) caja | volumen, peso y densidad de la caja contra los 10 productos más parecidos por foto (índice CLIP) | z robusto >= 3 y 2x / 0,5x; o imposibles internos (caja más chica que el producto, >10x) |
+| (b) tramos | precio y costo por tramo, cantidades, regla de compra mínima | falta precio, el costo o el precio suben con la cantidad, las cantidades no cierran, el primer tramo difiere de la regla, precio guardado viejo |
+| (c) certificado | recargo de certificado / neto antes de pasarela e IVA | pesa >= 10 % o sin él deja de ser rojo (casi exacto) |
+| (d) valor por m³ | logística (flete + servicios) / fábrica | >= 1,0 |
+| (e) ML bajo la fábrica | fábrica por unidad en pesos contra la mediana de ML | mediana <= fábrica |
+
+Todo sale del desglose que devuelve Vendure (`bulkPriceTierBreakdowns`): Hugo **no recalcula la fórmula**. Los «qué
+pasaría si» de (a) son estimados. Si un dato no se puede leer, la regla dice **sin dato** (no inventa) y, si ninguna
+dispara pero a alguna le faltó algo, la causa es «diagnóstico incompleto», no «sin causa clara». Con `local_stock`,
+(a), (d) y (e) no aplican.
+
+**Carga sobre Vendure.** La consulta nocturna de precios suma una columna por tramo (`bulkPriceTiers.price`) y dos
+custom fields de la variante (`sourcingMode`, `minQuantityOverride`): mismas páginas, sin consultas nuevas (si el schema
+no los tiene se apagan solos). Las lecturas nuevas (`bulkPriceTierBreakdowns`, `productCertification`, canal) son
+**solo `query`** (cada documento se parsea con graphql-core y tiene que ser solo `query`) y tienen un **tope duro de
+150 REQUESTS HTTP reales por día argentino**: se cuenta cada intento (los reintentos y el login incluidos), el contador
+vive en la base (`settings`, reserva atómica, fail-closed) y sobrevive a reinicios y a una segunda pasada del mismo día. La
+pasada además tiene un tiempo máximo (15 min) para leer Vendure. Lo que no entra queda «diagnóstico pendiente», **no gasta
+uno de los 5 intentos** y se completa en las noches siguientes. Los errores que se guardan y se muestran llevan el tipo y un
+código (`TransportServerError 502`), nunca el mensaje; el detalle va al log.
+
+### Cómo usarlo
+
+- Prender: dashboard → Configuración → «Modo de la bandeja» = 1. Con 0 (default) solo se marcan los rojos.
+- Dashboard → **Bandeja de precios**: pestañas (Para decidir / En proceso / Mantenidos / Cerrados), filtro por causa y
+  búsqueda; el detalle muestra el producto, el desglose del precio (10 partes que suman la factura) y los tramos, el
+  diagnóstico, las publicaciones de ML y de las tiendas con **«No es el mismo»** (si el producto deja de ser rojo la
+  ficha se cierra sola en la misma respuesta), y la historia. Los botones de decisión (Corregir, Buscar otro proveedor,
+  Mantener activo, Despublicar) están deshabilitados hasta la etapa siguiente.
+- API (sesión del dashboard, solo lectura): `GET /api/price-review/summary`, `GET /api/price-review/items?state=&cause=&q=&page=`,
+  `GET /api/price-review/items/{id}`. El Semáforo acepta `review=firme|dudoso|dudoso:<motivo>`.
+- **Mail diario** 08:30 hora de Argentina (11:30 UTC, `PRICE_REVIEW_DIGEST_CRON_UTC`): por el SMTP de siempre
+  (`ALERT_SMTP_*`) a `PM_REVIEW_EMAILS` (separados por coma; **vacío = no se manda**). Lleva lo nuevo y, una vez por
+  ficha, lo que lleva más de 7 días esperando; sin novedades no sale. Los eventos se marcan (`notified_at`) recién
+  después de que el SMTP aceptó el mail, así que un reintento no duplica.
+- **Quién ve los costos.** `PRICE_REVIEW_VIEWERS` (emails de la sesión del dashboard, separados por coma). **Fail-closed:**
+  vacío = nadie. Quien no esté en la lista recibe el detalle **sin** costo de fábrica en yuanes, FOB (el componente
+  «fábrica»), fee en %, evidencias del diagnóstico ni objetivo en yuanes; ni la factura/neto en dólares ni los % y pesos
+  por unidad de cada parte (con ellos se despejaría la fábrica). La pantalla dice «solo para responsables». Las frases de
+  (d) y (e) se muestran sin cifras. Ojo: las demás partes en dólares y el precio de lista permiten *estimar* la fábrica con
+  un tipo de cambio de mercado; si hace falta secreto real, la lista de `SUPABASE_ALLOWED_EMAILS` no debe incluir a quien no deba ver costos.
+- Links del detalle (opcionales, solo https): `VENDURE_ADMIN_PRODUCT_URL` (con `{id}`), `STOREFRONT_PRODUCT_URL` (con
+  `{slug}` o `{id}`) y `HUGO_PUBLIC_URL` (para el mail).
+
+**Registro.** `price_review_event` solo se agrega (el ORM rechaza editarlo o borrarlo; lo único que cambia es
+`notified_at`) y cada evento lleva quién lo hizo: un email o `hugo:auto`.
+
+**Qué sigue (no está hecho):** decisiones de Pao con `PRICE_REVIEW_DECIDERS` y escritura de `enabled` con guardas
+(PR 3), modo automático, topes y alertas (PR 4), «Buscar otro proveedor» en Paco PRO (PR 5), volver a medir un
+producto (PR 6).
+
+**Migración y rollback.** Automática en el arranque (`init_db`): crea `price_review_item` y `price_review_event`
+(con sus índices, entre ellos el único `ix_pri_open_key`) y agrega cinco columnas opcionales (`data_at`,
+`review_flag`, `review_at`, `review_summary`, `n_flipped`); no toca nada más (hay un test sobre Postgres 16 desde el
+esquema de `origin/main`). Para volver atrás:
+
+```sql
+DROP TABLE IF EXISTS price_review_event;
+DROP TABLE IF EXISTS price_review_item;
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS data_at;
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS review_flag;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS review_at;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS review_summary;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS n_flipped;
+DELETE FROM settings WHERE key LIKE 'pm_review_%' OR key LIKE 'pm_diag_%' OR key = '_meta:last_run:price_review_digest';
+UPDATE settings SET value = '1' WHERE key = 'pm_mode' AND value = '2';
+```
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
 
@@ -1580,6 +1704,9 @@ Ver `.env.example`. Las críticas:
   `host`, `*.dominio` o `acdn*.dominio`) — indexado de las tiendas.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
+- `PM_REVIEW_EMAILS` — destinatarios del resumen diario de la bandeja de Pao (coma; vacío = no se manda).
+  `PRICE_REVIEW_DIGEST_CRON_UTC` (default `30 11 * * *` = 08:30 ART), `HUGO_PUBLIC_URL`, `VENDURE_ADMIN_PRODUCT_URL`,
+  `STOREFRONT_PRODUCT_URL` — links opcionales (https).
 - `SEO_TEXT_AUDIT_CRON_UTC` — horario de la auditoría de textos (default `30 7 * * mon`, lunes 04:30 ART;
   vacía = sin corrida programada). El día de la semana con su nombre: en APScheduler `1` es martes.
 - `PRICE_MONITOR_RETENTION_DAYS` — días de historial del semáforo que se conservan

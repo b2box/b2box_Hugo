@@ -47,8 +47,8 @@ OUT = os.environ.get("QA3_OUT")
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_origin_main_e8209e1_qa3.json.gz"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
-ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok"}
-NEW_ITEM_KEYS = {"ml_variant", "web_via"}
+ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok", "data_at", "review_flag", "review_at", "review_summary", "n_flipped"}
+NEW_ITEM_KEYS = {"ml_variant", "web_via", "data_at", "review_flag"}
 NEW_RUN_KEYS = {"variants", "oficina"}
 NEW_SUMMARY_KEYS = {"oficina"}
 

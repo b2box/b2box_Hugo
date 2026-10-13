@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getReviewSummary } from "../api";
 import { SECTION_ICON, IconLayers } from "../icons";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -53,10 +55,15 @@ export default function Sidebar({
     }
   }
 
+  // Pendientes de decidir en la bandeja de Pao: si el endpoint falla el ítem queda sin número.
+  const reviewQ = useQuery({ queryKey: ["pr-summary"], queryFn: getReviewSummary, refetchInterval: 60_000 });
+  const pending = reviewQ.data?.pending ?? null;
+
   // La lista de secciones viene del backend; sumamos "settings" como ítem extra.
   const items: [string, { label: string; count: number | null }][] = [
     ...Object.entries(sections),
     ["semaforo", { label: "Semáforo", count: null }],
+    ["bandeja", { label: "Bandeja de precios", count: pending }],
     ["seo_textos", { label: "Textos (SEO)", count: null }],
     ["vision_lab", { label: "Comparar visión", count: null }],
     ["salud", { label: "Salud", count: null }],
