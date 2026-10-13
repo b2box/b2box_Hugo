@@ -19,15 +19,16 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
-from app import runtime
+from app import auth, runtime
 from app.clock import utcnow
 from app.config import get_settings
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
 from app.db.session import get_session
+from app.notifier.email import parse_recipients
 from app.pricing import price_monitor, price_review, store_match
 
 router = APIRouter(prefix="/api/price-review", tags=["price-review"])
@@ -98,7 +99,53 @@ def _loads(raw: str | None) -> Any:
         return None
 
 
-def _cause_sentence(item: PriceReviewItem, diag: dict[str, Any] | None) -> str | None:
+# ─── Quién ve los costos ──────────────────────────────────────────
+
+
+def costs_visible(request: Request) -> bool:
+    """¿La sesión puede ver el costo de fábrica y el fee? Solo los emails de `PRICE_REVIEW_VIEWERS` (fail-closed: vacío =
+    nadie). La sesión sin usuario identificable (cookie sin email) tampoco."""
+    user = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
+    if not user:
+        return False
+    return user.strip().lower() in {e.lower() for e in parse_recipients(get_settings().price_review_viewers)}
+
+
+def restrict_breakdown(bd: dict[str, Any] | None) -> dict[str, Any] | None:
+    """El desglose de un tramo SIN el costo de fábrica: se sacan los yuanes, el cambio, el FOB (componente «fábrica»),
+    el fee en % y todo lo que permita despejarlos (la factura y el neto en dólares, el % de cada parte y los pesos por
+    unidad de cada parte). Quedan las partes de logística, aranceles, certificado, etc. en dólares."""
+    if not bd:
+        return bd
+    out = {k: v for k, v in bd.items()
+           if k not in ("cny_unit", "cny_to_usd", "usd_to_channel", "fee_pct", "factura_usd", "neto_usd", "components")}
+    out["components"] = [
+        {"key": c.get("key"), "label": c.get("label"), "usd": c.get("usd"), "detail": c.get("detail") or []}
+        for c in bd.get("components") or [] if c.get("key") != "fabrica"
+    ]
+    out["restricted"] = True
+    return out
+
+
+def restrict_tiers(tiers: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """La tabla de tramos sin el costo de fábrica en yuanes (precio de venta, neto y margen sí)."""
+    return [{k: v for k, v in t.items() if k != "cny_unit"} for t in tiers or []]
+
+
+def restrict_diagnosis(diag: dict[str, Any] | None) -> dict[str, Any] | None:
+    """El diagnóstico sin evidencias (traen los costos por tramo, el FOB y el objetivo en yuanes) y con la frase pública de
+    las reglas que, escritas completas, nombran cifras de fábrica."""
+    if not diag:
+        return diag
+    out = {k: v for k, v in diag.items() if k not in ("tiers", "rules")}
+    out["rules"] = [
+        {**{k: v for k, v in r.items() if k not in ("evidence", "summary_public")}, "summary": r.get("summary_public") or r.get("summary")}
+        for r in diag.get("rules") or []
+    ]
+    return out
+
+
+def _cause_sentence(item: PriceReviewItem, diag: dict[str, Any] | None, *, costs: bool = True) -> str | None:
     """Una oración con el número que explica la causa probable (la de la regla que dispara)."""
     if not diag or item.probable_cause is None:
         return None
@@ -109,12 +156,13 @@ def _cause_sentence(item: PriceReviewItem, diag: dict[str, Any] | None) -> str |
         return f"No se pudo completar el diagnóstico (falta: {missing}): no se puede descartar ninguna causa."
     for r in diag.get("rules") or []:
         if r.get("code") == item.probable_cause:
-            return r.get("summary")
+            return r.get("summary") if costs else (r.get("summary_public") or r.get("summary"))
     return None
 
 
-def item_to_dict(item: PriceReviewItem, *, now: datetime | None = None) -> dict[str, Any]:
-    """La ficha como la ve la lista. Sin el diagnóstico completo (eso va en el detalle)."""
+def item_to_dict(item: PriceReviewItem, *, now: datetime | None = None, costs: bool = True) -> dict[str, Any]:
+    """La ficha como la ve la lista. Sin el diagnóstico completo (eso va en el detalle). `costs=False`: sin cifras de
+    costo de fábrica en la frase de la causa."""
     now = now or utcnow()
     diag = _loads(item.diag)
     cfg = get_settings()
@@ -133,7 +181,7 @@ def item_to_dict(item: PriceReviewItem, *, now: datetime | None = None) -> dict[
         "flags": _loads(item.flags) or [],
         "probable_cause": item.probable_cause,
         "cause_label": CAUSE_LABEL.get(item.probable_cause or "", None),
-        "cause_summary": _cause_sentence(item, diag),
+        "cause_summary": _cause_sentence(item, diag, costs=costs),
         "fixable": item.fixable, "diag_status": item.diag_status,
         "links": {
             "vendure_admin": _link(cfg.vendure_admin_product_url, id=item.product_id),
@@ -205,6 +253,7 @@ async def summary(session: Session = Depends(get_session)) -> dict[str, Any]:
 
 @router.get("/items")
 async def list_items(
+    request: Request,
     state: str = Query("para_decidir", max_length=24),
     cause: str | None = Query(None, max_length=12),
     q: str | None = Query(None, max_length=120),
@@ -250,8 +299,9 @@ async def list_items(
         select(PriceReviewItem.probable_cause, func.count(PriceReviewItem.id))  # type: ignore[arg-type]
         .where(*base).group_by(PriceReviewItem.probable_cause)).all())
     now = utcnow()
+    costs = costs_visible(request)
     return {
-        "items": [item_to_dict(r, now=now) for r in rows], "total": total, "page": page, "page_size": page_size,
+        "items": [item_to_dict(r, now=now, costs=costs) for r in rows], "total": total, "page": page, "page_size": page_size,
         "has_more": (page + 1) * page_size < total,
         "causes": {c: int(cause_counts.get(c, 0)) for c in CAUSES if c != "pendiente"},
     }
@@ -262,13 +312,15 @@ async def list_items(
 
 @router.get("/items/{item_id}")
 async def item_detail(
+    request: Request,
     item_id: int = Path(..., ge=1, le=DB_INT_MAX),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     item = session.get(PriceReviewItem, item_id)
     if item is None:
         raise HTTPException(404, "ficha no encontrada")
-    out = item_to_dict(item)
+    costs = costs_visible(request)
+    out = item_to_dict(item, costs=costs)
     diag = _loads(item.diag) or {}
     breakdown = _loads(item.breakdown) or {}
     snap = session.get(MarketPriceSnapshot, item.last_snapshot_id) if item.last_snapshot_id else None
@@ -281,10 +333,12 @@ async def item_detail(
                           .order_by(PriceReviewEvent.at.desc(), PriceReviewEvent.id.desc())).all()  # type: ignore[union-attr]
     params = price_review.ReviewParams.from_runtime()
     flags = out["flags"]
+    tiers = breakdown.get("tiers") or diag.get("tiers") or []
     out.update({
-        "diagnosis": diag or None,
-        "breakdown": breakdown.get("tier"),
-        "tiers": breakdown.get("tiers") or diag.get("tiers") or [],
+        "costs_visible": costs,
+        "diagnosis": (diag if costs else restrict_diagnosis(diag)) or None,
+        "breakdown": breakdown.get("tier") if costs else restrict_breakdown(breakdown.get("tier")),
+        "tiers": tiers if costs else restrict_tiers(tiers),
         "snapshot": snapshot,
         "data": None if snap is None else {
             "at": _iso(snap.data_at or snap.captured_at), "origin": snap.match_origin,

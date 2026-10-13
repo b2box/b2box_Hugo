@@ -714,8 +714,9 @@ export interface BreakdownComponent {
   key: string;
   label: string;
   usd: number;
-  pct: number | null;
-  ars_unit: number | null;
+  // Faltan para quien no es responsable de costos (con ellos se despejaría la fábrica).
+  pct?: number | null;
+  ars_unit?: number | null;
   detail: { code: string; usd: number }[];
 }
 
@@ -725,22 +726,27 @@ export interface ReviewBreakdown {
   max_quantity: number | null;
   quantity: number;
   usd_available: boolean;
-  cny_unit: number;
   chargeable: number;
   total_cbm: number;
-  factura_usd: number;
-  neto_usd: number;
   factura_unit_cents: number;
   neto_unit_cents: number;
   currency: string;
-  fee_pct: number | null;
   components: BreakdownComponent[];
+  // Solo para los responsables de costos (PRICE_REVIEW_VIEWERS): el costo de fábrica en yuanes, el cambio, el total
+  // en dólares y el fee. Para el resto el servidor no los manda y `restricted` vale true.
+  restricted?: boolean;
+  cny_unit?: number;
+  cny_to_usd?: number;
+  usd_to_channel?: number;
+  factura_usd?: number;
+  neto_usd?: number;
+  fee_pct?: number | null;
 }
 
 export interface ReviewTierLine {
   min_quantity: number | null;
   max_quantity: number | null;
-  cny_unit: number;
+  cny_unit?: number; // falta = solo para responsables de costos
   neto_cents: number;
   price_cents: number;
   margin_pct: number | null;
@@ -769,4 +775,6 @@ export interface PriceReviewDetail extends PriceReviewItemRow {
   doubtful_today: string | null;
   events: ReviewEvent[];
   decisions_enabled: boolean;
+  // false: el costo de fábrica y el fee no vienen (solo los ve quien está en PRICE_REVIEW_VIEWERS).
+  costs_visible: boolean;
 }

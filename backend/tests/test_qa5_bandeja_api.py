@@ -27,6 +27,7 @@ BASE = "/api/price-review"
 def settings(**over) -> Settings:
     base = dict(vendure_api_url="https://example.invalid/admin-api", hugo_env="development", dashboard_user="admin",
                 dashboard_password="secreto", dashboard_secret="s" * 32, supabase_url="", supabase_anon_key="",
+                price_review_viewers="pao@b2box.pro",                      # Pao es responsable de costos (ve fábrica y fee)
                 vendure_admin_product_url="https://admin.b2box.invalid/products/{id}",
                 storefront_product_url="https://b2box.app/p/{slug}")
     base.update(over)

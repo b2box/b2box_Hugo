@@ -48,6 +48,13 @@ def world(monkeypatch):
     return fake
 
 
+@pytest.fixture(autouse=True)
+def viewers(monkeypatch):
+    """Pao es responsable de costos (PRICE_REVIEW_VIEWERS); el resto de las sesiones no ve fábrica ni fee."""
+    cfg = Settings(vendure_api_url="https://example.invalid/admin-api", price_review_viewers="pao@b2box.pro")
+    monkeypatch.setattr(routes, "get_settings", lambda: cfg)
+
+
 @pytest.fixture
 def client() -> TestClient:
     c = TestClient(main_mod.app, raise_server_exceptions=False)
