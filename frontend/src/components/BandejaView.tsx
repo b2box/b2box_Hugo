@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 import { IconExternalLink, IconInbox, IconRefresh, IconSearch } from "../icons";
 import { fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format";
 import { SECTION_META } from "../sections";
-import { StoresPanel } from "./SourceCells";
+import { StoresPanel, safeHttpsUrl } from "./SourceCells";
 import { COLOR_META, FilterChip, ListingsPanel, REVIEW_REASON } from "./SemaforoView";
 import type {
   DiagRule,
@@ -98,14 +98,16 @@ function fmtDays(d: number | null | undefined): string {
 
 function MiniThumb({ url, alt, size = "w-10 h-10" }: { url: string | null; alt: string; size?: string }) {
   const [failed, setFailed] = useState(false);
-  if (!url || failed || isUnreachableImage(url)) {
+  const safe = safeHttpsUrl(url);                      // último control antes del <img>: https, sin usuario ni puerto
+  if (!safe || failed || isUnreachableImage(safe)) {
     return <div className={cn(size, "rounded-md thumb-fallback shrink-0")} />;
   }
   return (
     <img
-      src={url}
+      src={safe}
       alt={alt}
       loading="lazy"
+      referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className={cn(size, "rounded-md object-cover bg-muted shrink-0")}
     />

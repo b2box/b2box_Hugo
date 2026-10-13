@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import or_
@@ -77,8 +77,18 @@ def _link(template: str, **values: str) -> str | None:
 
 
 def _https_or_none(url: str | None) -> str | None:
-    """Una foto solo si es una URL https: lo que llega a un <img src> no es de fiar aunque venga de nuestra base."""
-    return url if isinstance(url, str) and url.lower().startswith("https://") and len(url) <= 500 else None
+    """Una foto solo si es una URL https con host, sin usuario ni contraseña (`https://user:pass@host/…`) y sin puerto raro:
+    lo que llega a un <img src> no es de fiar aunque venga de nuestra base."""
+    if not isinstance(url, str) or len(url) > 500 or any(ord(c) < 33 or ord(c) == 127 for c in url):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        return None
+    return url if port in (None, 443) else None
 
 
 def _loads(raw: str | None) -> Any:
