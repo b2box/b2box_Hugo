@@ -89,7 +89,7 @@ def _manual_run_blocker(session: Session) -> tuple[int, str, int | None] | None:
 
 @router.post("/run", status_code=202)
 async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
-    """Dispara una corrida en background (modo sombra: no toca Vendure).
+    """Dispara una corrida en background (no toca Vendure, en ningún modo).
     409 si ya hay una en curso; 429 si no hay cupo de ML o si la última
     arrancó hace menos de `pm_manual_cooldown_min`."""
     from app.scheduler import jobs  # import tardío: jobs arrastra todo el scheduler
@@ -102,7 +102,7 @@ async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
     task = asyncio.create_task(jobs.price_monitor(trigger="manual"))
     _background.add(task)
     task.add_done_callback(_background.discard)
-    return {"status": "scheduled", "mode": "sombra"}
+    return {"status": "scheduled", "mode": price_review.mode_label(int(runtime.get("pm_mode") or 0))}
 
 
 @router.get("/summary")

@@ -23,7 +23,6 @@ from app.config import Settings  # noqa: E402
 from app.db.models import MarketStore, PriceReviewItem, StoreMatch  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.pricing import price_review as pr  # noqa: E402
-from app.vendure.client import VendureClient  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests.review_fixtures import FakeReviewVendure, engine_variant, install  # noqa: E402
 from tests.test_price_monitor_routes import _use_settings  # noqa: E402
@@ -307,7 +306,6 @@ async def test_a_correction_on_an_old_snapshot_does_not_touch_the_open_ficha(cli
 
 
 async def test_the_semaforo_can_filter_firm_and_doubtful_reds(client):
-    prev = w.make_run(started=NOW - timedelta(days=1))
     today = w.make_run()
     w.add_snap(today, "firm")
     w.add_snap(today, "juez", sources=("llm",) * 3)
@@ -326,3 +324,15 @@ async def test_the_semaforo_can_filter_firm_and_doubtful_reds(client):
     assert client.get(f"/api/price-monitor/snapshots?run_id={today}&review=cualquier;cosa").status_code == 400
     item = client.get(f"/api/price-monitor/snapshots?run_id={today}&review=dudoso").json()["items"][0]
     assert item["review_flag"].startswith("dudoso:") and item["data_at"]
+
+
+async def test_the_product_photo_only_travels_if_it_is_https(client):
+    await open_items(["a", "b"])
+    with Session(engine) as s:
+        a, b = w.items()
+        a.image_url, b.image_url = "javascript:alert(1)", "https://cdn.b2box/p.jpg"
+        s.add(s.merge(a))
+        s.add(s.merge(b))
+        s.commit()
+    rows = {i["product"]["id"]: i["product"]["image_url"] for i in client.get(BASE + "/items").json()["items"]}
+    assert rows == {"a": None, "b": "https://cdn.b2box/p.jpg"}

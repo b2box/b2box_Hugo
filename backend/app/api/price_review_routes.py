@@ -76,6 +76,11 @@ def _link(template: str, **values: str) -> str | None:
     return None if "{" in out or "}" in out else out
 
 
+def _https_or_none(url: str | None) -> str | None:
+    """Una foto solo si es una URL https: lo que llega a un <img src> no es de fiar aunque venga de nuestra base."""
+    return url if isinstance(url, str) and url.lower().startswith("https://") and len(url) <= 500 else None
+
+
 def _loads(raw: str | None) -> Any:
     try:
         return json.loads(raw) if raw else None
@@ -106,7 +111,7 @@ def item_to_dict(item: PriceReviewItem, *, now: datetime | None = None) -> dict[
     return {
         "id": item.id,
         "product": {"id": item.product_id, "name": item.product_name, "code": item.product_code,
-                    "slug": item.product_slug, "image_url": item.image_url},
+                    "slug": item.product_slug, "image_url": _https_or_none(item.image_url)},
         "state": item.state, "state_label": STATE_LABEL.get(item.state, item.state),
         "state_since": _iso(item.state_since), "opened_at": _iso(item.opened_at), "closed_at": _iso(item.closed_at),
         "waiting_days": round(max(0.0, (now - item.state_since).total_seconds() / 86400.0), 1) if item.state_since else None,
