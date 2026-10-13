@@ -111,6 +111,17 @@ def ars(cents: float | None) -> str:
     return "$ " + f"{round(cents / 100):,}".replace(",", ".")
 
 
+def _units(n: int | float | None) -> str:
+    """«1 unidad» / «25 unidades»."""
+    value = int(n) if n is not None else 0
+    return f"{value} {'unidad' if value == 1 else 'unidades'}"
+
+
+def _capfirst(text: str) -> str:
+    """Mayúscula en la primera letra y NADA más: str.capitalize() bajaba el resto («Vendure» → «vendure»)."""
+    return text[:1].upper() + text[1:]
+
+
 def _pct(v: float, digits: int = 1) -> str:
     return f"{v:.{digits}f}".replace(".", ",") + " %"
 
@@ -593,8 +604,8 @@ def rule_b(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
                 evidence["first_tier"] = {"actual": tiers[0].min_quantity, "expected": expected[0]}
                 if abs(ladder_index(tiers[0].min_quantity) - ladder_index(expected[0])) > th.ladder_steps:
                     subcodes.append("b4")
-                    reasons.append(f"el primer tramo arranca en {tiers[0].min_quantity} unidades y la regla de compra "
-                                   f"mínima (¥{threshold}) daría {expected[0]}")
+                    reasons.append(f"el primer tramo arranca en {_units(tiers[0].min_quantity)} y la regla de compra "
+                                   f"mínima (¥{threshold}) daría {_units(expected[0])}")
 
     # b1 también se ve en el desglose: un tramo sin precio vuelve en ceros
     if rows is not None and any(not b.usd_available for b in rows) and "b1" not in subcodes and import_mode:
@@ -609,7 +620,7 @@ def rule_b(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
             evidence["stale_tiers"] = stale
             subcodes.append("b5")
             worst = max(stale, key=lambda s: abs(s["diff_pct"]))
-            reasons.append(f"el precio guardado del tramo de {worst['min']} unidades difiere {_pct(abs(worst['diff_pct']))} "
+            reasons.append(f"el precio guardado del tramo de {_units(worst['min'])} difiere {_pct(abs(worst['diff_pct']))} "
                            "del que da el cálculo de Vendure")
     if row is not None and row.factura_per_unit_minor > 0:
         diff = (f.economics.our_price_cents - row.factura_per_unit_minor) / row.factura_per_unit_minor * 100.0
@@ -642,7 +653,7 @@ def rule_b(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
     if cheap and cheap.get("only_min_purchase"):
         tail += " Con el tramo más barato no sería rojo: el rojo es por la compra mínima."
     return RuleResult(**base, status=ST_FIRES, subcodes=subcodes, fixes=fixes, p_si_cents=p_out,
-                      estimated=False, evidence=evidence, summary="; ".join(reasons).capitalize() + "." + tail)
+                      estimated=False, evidence=evidence, summary=_capfirst("; ".join(reasons)) + "." + tail)
 
 
 def _quantity_gaps(tiers: Sequence[PriceTier]) -> list[str]:

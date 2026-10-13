@@ -411,8 +411,6 @@ async def test_through_the_client_a_breakdown_that_does_not_add_up_raises_and_th
 # ─── 5. Texto ───────────────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (cosmético): la frase de (b) pasa por str.capitalize() y deja «vendure» en minúscula "
-                                       "(y cualquier sigla): «...del que da el cálculo de vendure» (price_diagnosis.py:639)")
 def test_the_text_of_b_keeps_the_names_it_mentions_capitalized(world):
     calc = healthy("0").used()["netoChannelPerUnit"]["minor"]
     d, _ = diag(world, healthy("108", median=q.median_for(P0, 5), sale_prices={10: int(calc * 1.08)}), neighbors())

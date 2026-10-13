@@ -5,7 +5,6 @@ respuesta, el costo de fábrica (yuanes, FOB, componente «fábrica»), el fee e
 
 from __future__ import annotations
 
-import json
 import os
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
@@ -18,7 +17,7 @@ from app import main as main_mod  # noqa: E402
 from app.api import price_review_routes as routes  # noqa: E402
 from app.config import Settings  # noqa: E402
 from tests import review_world as w  # noqa: E402
-from tests.review_fixtures import engine_variant  # noqa: E402
+
 from tests.test_price_review_api import SPECS, open_items, world  # noqa: E402,F401  (world: fixture autouse)
 
 BASE = "/api/price-review"

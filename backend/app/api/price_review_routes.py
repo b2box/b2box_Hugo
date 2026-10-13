@@ -69,12 +69,14 @@ def _link(template: str, **values: str) -> str | None:
     marcador; los valores se escapan: nada de lo que viene de la base arma una URL a medida."""
     if not template or not template.lower().startswith("https://"):
         return None
-    out = template
+    out, used = template, 0
     for key, value in values.items():
         marker = "{" + key + "}"
         if marker in out:
             out = out.replace(marker, quote(str(value), safe=""))
-    return None if "{" in out or "}" in out else out
+            used += 1
+    # Sin ningún marcador la plantilla da el MISMO link para todas las fichas; con un marcador sin valor, un link a medias.
+    return None if used == 0 or "{" in out or "}" in out else out
 
 
 def _https_or_none(url: str | None) -> str | None:

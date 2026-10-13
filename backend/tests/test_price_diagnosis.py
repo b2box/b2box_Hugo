@@ -557,3 +557,19 @@ def test_local_stock_with_a_zeroed_breakdown_does_not_apply_c_and_is_not_missing
     # con importación, la misma fila sin dólares SÍ es un dato que falta
     f2 = replace(f, sourcing_mode="import")
     assert diagnose(f2, TH).rule("c").status == "sin_dato"
+
+
+def test_the_sentences_keep_the_names_they_mention_and_use_the_singular():
+    from app.pricing.price_diagnosis import _capfirst, _units
+
+    assert _units(1) == "1 unidad" and _units(2) == "2 unidades" and _units(25) == "25 unidades" and _units(0) == "0 unidades"
+    assert _capfirst("el precio de Vendure") == "El precio de Vendure" and _capfirst("") == ""
+    # b5 con un primer tramo de 1 unidad
+    row = rows(0)[0]
+    one = replace(row, min_quantity=1)
+    ts = [replace(t, min_quantity=m, max_quantity=x, sale_price_cents=round(row.neto_per_unit_minor * 1.05))
+          for t, (m, x) in zip(tiers_from_variant(variant(0)), [(1, 49), (50, 99), (100, None)])]
+    f = replace(facts(0), tiers=ts, breakdowns=[one, *rows(0)[1:]], tier_used="tier:min_qty=1")
+    r = rule_b(f, TH, select_tier(f.breakdowns, f.tier_used))
+    assert "arranca en 1 unidad y" in r.summary and "1 unidades" not in r.summary and "de Vendure" in r.summary
+    assert r.summary[0].isupper()
