@@ -142,9 +142,6 @@ async def test_three_new_and_two_old_make_one_mail_with_five_lines_and_a_retry_d
     assert (await digest.send_digest(NOW + timedelta(days=1)))["sent"] is False                   # ni mañana
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): una ficha de más de 7 días que sale por PRIMERA vez como «nueva» (p. ej. se cargó "
-                                       "PM_REVIEW_EMAILS tarde) vuelve a salir en el mail siguiente como «esperando más de 7 días», aunque sea "
-                                       "un reintento del mismo día: collect() solo excluye del «esperando» a las que van en este mail")
 async def test_an_old_ficha_listed_as_new_is_not_listed_again_as_waiting_in_a_retry(smtp):
     add_item("old", age_days=10)
     assert (await digest.send_digest(NOW))["sent"] is True
