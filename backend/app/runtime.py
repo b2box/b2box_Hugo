@@ -226,15 +226,15 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",
-        label="Modo del semáforo (0 sombra / 1 activo)",
+        label="Modo de la bandeja (0 sombra / 1 propuesta / 2 automático)",
         description=(
-            "0 = sombra: calcula y guarda, no toca Vendure. 1 = activo: pasar rojos a "
-            "inactivo y bandeja de revisión — TODAVÍA NO IMPLEMENTADO (PR 2); con 1 el job "
-            "solo lo loguea y sigue en sombra."
+            "0 = sombra: mide y guarda, no llena la bandeja. 1 = propuesta: los rojos firmes entran a la "
+            "bandeja de Pao y se manda el resumen diario; Hugo NO toca Vendure. 2 = automático: TODAVÍA NO "
+            "IMPLEMENTADO; se comporta como 1."
         ),
         type="int", parser=int,
         default_attr="pm_mode",
-        min=0, max=1, step=1, group="monitor",
+        min=0, max=2, step=1, group="monitor",
     ),
     SettingMeta(
         key="pm_green_min_pct",
@@ -543,6 +543,98 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="int", parser=int,
         default_attr="pm_stores_vision_max_calls",
         min=0, max=20000, step=50, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_confirm_nights",
+        label="Bandeja: noches seguidas en rojo firme",
+        description=(
+            "Cuántas corridas CON DATO seguidas tiene que salir el producto en rojo firme antes de abrir su ficha. "
+            "Una noche en que ML falló o no se pudo evaluar no suma ni resta; una noche que no es rojo firme reinicia la cuenta."
+        ),
+        type="int", parser=int,
+        default_attr="pm_review_confirm_nights",
+        min=1, max=7, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_min_listings",
+        label="Bandeja: publicaciones idénticas mínimas",
+        description=(
+            "Publicaciones idénticas con precio, confirmadas por foto + nombre o por una persona, que hacen falta "
+            "para que un rojo sea firme. Una mediana de una sola publicación la mueve un vendedor."
+        ),
+        type="int", parser=int,
+        default_attr="pm_review_min_listings",
+        min=1, max=20, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_min_sellers",
+        label="Bandeja: vendedores distintos mínimos",
+        description="Vendedores distintos entre esas publicaciones idénticas para que un rojo sea firme.",
+        type="int", parser=int,
+        default_attr="pm_review_min_sellers",
+        min=1, max=10, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_max_price_ratio",
+        label="Bandeja: precio nuestro / precio de ML máximo",
+        description=(
+            "Si nuestro precio es más de N veces la mediana de ML, casi seguro el match está mal (un drone contra un "
+            "avión de juguete): el rojo queda «dudoso: precio extremo» y no entra a la bandeja."
+        ),
+        type="float", parser=float,
+        default_attr="pm_review_max_price_ratio",
+        min=1.5, max=10.0, step=0.5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_data_max_age_h",
+        label="Bandeja: antigüedad máxima del dato (horas)",
+        description=(
+            "El dato de los idénticos tiene que ser más nuevo que esto. Las búsquedas de la Mac de la oficina pueden "
+            "tener días; la API y la web del servidor son de la hora de la corrida."
+        ),
+        type="int", parser=int,
+        default_attr="pm_review_data_max_age_h",
+        min=6, max=168, step=6, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_sla_days",
+        label="Bandeja: días esperando decisión",
+        description="Una ficha que lleva más de estos días sin decisión sale una vez en el mail como «esperando».",
+        type="int", parser=int,
+        default_attr="pm_review_sla_days",
+        min=1, max=60, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_diag_cert_share_pct",
+        label="Diagnóstico (c): peso del certificado (% del neto)",
+        description="El recargo de certificado dispara la causa (c) cuando pesa al menos este % del precio neto (el tope del canal es 20 %).",
+        type="float", parser=float,
+        default_attr="pm_diag_cert_share_pct",
+        min=1.0, max=50.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_diag_logistics_ratio",
+        label="Diagnóstico (d): logística / fábrica",
+        description="La causa (d) «valor bajo por m³» se dispara cuando la logística cuesta al menos N veces la fábrica (1 = cuesta más que la fábrica).",
+        type="float", parser=float,
+        default_attr="pm_diag_logistics_ratio",
+        min=0.2, max=10.0, step=0.1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_diag_box_z",
+        label="Diagnóstico (a): desvío de la caja (z robusto)",
+        description="La causa (a) «caja fuera de rango» se dispara cuando el volumen, el peso o la densidad de la caja se alejan de los productos parecidos al menos este z (además de 2x / 0,5x).",
+        type="float", parser=float,
+        default_attr="pm_diag_box_z",
+        min=1.0, max=10.0, step=0.5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_diag_min_neighbors",
+        label="Diagnóstico (a): parecidos mínimos con caja",
+        description="Productos parecidos por foto con la caja cargada que hacen falta para usar su caja como referencia.",
+        type="int", parser=int,
+        default_attr="pm_diag_min_neighbors",
+        min=2, max=10, step=1, group="monitor",
     ),
     SettingMeta(
         key="pm_embed_cache_days",

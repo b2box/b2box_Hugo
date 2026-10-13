@@ -350,8 +350,9 @@ class Settings(BaseSettings):
     price_monitor_cron_utc: str = Field(
         default="0 6 * * *", description="Cron (UTC) del job price_monitor. 06:00 UTC = 03:00 ART",
     )
-    # 0 = sombra (calcula y guarda, no toca Vendure). 1 = activo: todavía NO
-    # implementado (PR 2); con 1 el job solo lo loguea y sigue en sombra.
+    # Bandeja de revisión de Pao (pricing/price_review.py). 0 = sombra (mide y guarda; solo marca los rojos en
+    # los snapshots). 1 = propuesta: llena la bandeja con los rojos firmes y manda el resumen diario a Pao; NO
+    # toca Vendure. 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
     pm_mode: int = 0
     # Cortes del semáforo, en % de ganancia estimada del revendedor.
     pm_green_min_pct: float = 30.0
@@ -472,6 +473,30 @@ class Settings(BaseSettings):
     # Tope diario PROPIO de llamadas al juez IA para las tiendas (separado de pm_vision_max_calls, el de ML).
     # Solo corre si el juez de ML está prendido; 0 = las tiendas se comparan sin juez.
     pm_stores_vision_max_calls: int = 500
+
+    # ── Bandeja de revisión: qué es un «rojo firme» (todos editables desde el dashboard) ──
+    # R8: noches seguidas con dato en rojo firme antes de abrir la ficha.
+    pm_review_confirm_nights: int = 2
+    # R6: publicaciones idénticas firmes con precio y vendedores distintos mínimos.
+    pm_review_min_listings: int = 3
+    pm_review_min_sellers: int = 2
+    # R7: nuestro precio / mediana de ML máximo creíble (más es casi siempre un match equivocado).
+    pm_review_max_price_ratio: float = 3.0
+    # R5: el dato de los idénticos tiene que tener menos de estas horas.
+    pm_review_data_max_age_h: int = 48
+    # Días que una ficha puede esperar decisión antes de salir en el mail como «esperando».
+    pm_review_sla_days: int = 7
+    # Umbrales del diagnóstico a-e.
+    pm_diag_cert_share_pct: float = 10.0
+    pm_diag_logistics_ratio: float = 1.0
+    pm_diag_box_z: float = 3.0
+    pm_diag_min_neighbors: int = 5
+    # Destinatarios del resumen diario de las 08:30 (hora de Argentina), separados por coma. Vacío = no se manda.
+    pm_review_emails: str = ""
+    # Para los links del detalle y del mail (plantillas con {id} / {slug}). Vacío = sin link.
+    hugo_public_url: str = ""
+    vendure_admin_product_url: str = ""
+    storefront_product_url: str = ""
 
     # ── Juez LLM para la banda ambigua (API OpenAI-compatible) ──
     # Sin base_url o api_key el juez está apagado aunque pm_vision_max_calls > 0.
