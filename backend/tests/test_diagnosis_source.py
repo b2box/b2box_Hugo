@@ -82,7 +82,7 @@ async def test_the_hard_cap_stops_the_reads_and_the_rules_say_no_data(vendure):
                                     channel=await client.get_channel_pricing())
     assert src.calls == 1 and vendure.count("TierBreakdowns") == 0       # el tope se cuenta ANTES de pedir
     assert res.diagnosis.rule("c").status == "sin_dato" and res.diagnosis.rule("e").status == "sin_dato"
-    assert any("tope" in e for e in res.errors)
+    assert any("ReadBudgetExhausted" in e for e in res.errors)
     assert not res.complete
 
 

@@ -30,6 +30,7 @@ from app.pricing.price_diagnosis import (
     select_tier,
     tiers_from_variant,
 )
+from app.pricing.safe_error import error_code
 from app.pricing.semaforo import PricedVariant
 from app.vendure.client import CertificationInfo, ChannelPricing
 
@@ -151,8 +152,9 @@ async def diagnose_product(
     errors: list[str] = []
 
     def note(what: str, exc: Exception) -> None:
-        errors.append(f"{what}: {type(exc).__name__}: {str(exc)[:160]}")
-        log.warning("diagnóstico de %s: %s", snap.product_id, errors[-1])
+        # A la base y a la API va solo el tipo y un código; el detalle, al log del servidor.
+        errors.append(f"{what}: {error_code(exc)}")
+        log.warning("diagnóstico de %s: %s: %s: %s", snap.product_id, what, type(exc).__name__, str(exc)[:200])
 
     if variant is None and snap.variant_id:
         try:

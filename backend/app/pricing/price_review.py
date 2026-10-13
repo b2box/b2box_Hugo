@@ -48,6 +48,7 @@ from app.db.session import engine
 from app.dedup import catalog_index
 from app.pricing import diagnosis_source as ds
 from app.pricing import price_monitor, semaforo
+from app.pricing.safe_error import error_code
 from app.pricing.price_diagnosis import DiagThresholds
 from app.vendure.client import VendureClient, VendureProduct
 
@@ -639,8 +640,8 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
         try:
             channel = await budgeted.get_channel_pricing()
         except Exception as exc:  # noqa: BLE001
-            plan.summary.setdefault("errores", []).append(f"canal: {type(exc).__name__}: {str(exc)[:120]}")
-            log.warning("price_review: no se pudieron leer los datos del canal: %s", exc)
+            plan.summary.setdefault("errores", []).append(f"canal: {error_code(exc)}")
+            log.warning("price_review: no se pudieron leer los datos del canal: %s: %s", type(exc).__name__, str(exc)[:200])
         retried = 0
         for item_id in plan.pending_diag:           # primero las que quedaron sin desglose (las más viejas)
             snap, _ = await asyncio.to_thread(_load_pending, item_id)

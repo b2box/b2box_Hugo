@@ -291,9 +291,10 @@ async def test_a_crash_of_the_review_pass_never_fails_the_nightly_run_and_the_ne
     r1 = await jobs.price_monitor(trigger="manual")
     assert r1["status"] == "ok"
     run = q.rows(PriceMonitorRun, PriceMonitorRun.id == r1["run_id"])[0]
-    assert run.status == "ok" and run.review_at is None and "bug en la bandeja" in (run.review_summary or "")
+    assert run.status == "ok" and run.review_at is None and "RuntimeError" in (run.review_summary or "")
+    assert "bug en la bandeja" not in (run.review_summary or "")             # el tipo se anota, el mensaje va al log
     c = client_with_session()
-    assert "bug en la bandeja" in (c.get("/api/price-review/summary").json()["last_pass_error"] or "")
+    assert (c.get("/api/price-review/summary").json()["last_pass_error"] or "") == "RuntimeError"
     monkeypatch.setattr(pr_mod, "process_run", real)
     out = await real(r1["run_id"], now=utcnow())
     assert out is not None and q.rows(PriceMonitorRun, PriceMonitorRun.id == r1["run_id"])[0].review_at is not None

@@ -452,7 +452,7 @@ async def test_a_failing_review_pass_never_turns_the_run_into_a_failure(world, m
     result = await price_monitor.run_price_monitor()
     [run] = _runs()
     assert result["status"] == "ok" and run.status == "ok" and run.error is None
-    assert run.review_at is None and "bug de la bandeja" in json.loads(run.review_summary)["error"]
+    assert run.review_at is None and json.loads(run.review_summary)["error"] == "RuntimeError"      # el tipo, no el mensaje
 
 
 async def test_every_snapshot_remembers_when_its_data_is_from(world):
