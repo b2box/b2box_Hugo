@@ -123,6 +123,9 @@ class PriceTier:
     max_quantity: int | None
     sale_price_cents: int | None   # neto, SIN IVA (Vendure BulkPriceTier.salePrice)
     enabled: bool = True
+    # Costo de fábrica por unidad en centavos de CNY (Vendure BulkPriceTier.price; solo la Admin
+    # API lo devuelve). Lo usa el diagnóstico de la bandeja (reglas b y e), no el semáforo.
+    cost_cny_minor: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,6 +139,10 @@ class PricedVariant:
     # Medidas de la variante (cm y kg; claves de market_specs.OurSpecs). Vacío si
     # Vendure no las tiene. No participan del precio.
     specs: dict[str, float] = field(default_factory=dict)
+    # "import" | "local_stock" | None (Vendure no lo devolvió). Con local_stock no hay flete ni cambio.
+    sourcing_mode: str | None = None
+    # Mínima propia del primer tramo (ProductVariant.customFields.minQuantityOverride), o None.
+    min_quantity_override: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
