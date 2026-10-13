@@ -25,14 +25,6 @@ CREATE TABLE audit_log (
     canonical_product_id character varying,
     verify_ctx character varying
 );
-CREATE SEQUENCE audit_log_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE audit_log_id_seq OWNED BY audit_log.id;
 CREATE TABLE image_embed_cache (
     url character varying(1024) NOT NULL,
     model character varying(64) NOT NULL,
@@ -64,14 +56,6 @@ CREATE TABLE market_match_feedback (
     label integer NOT NULL,
     previous_label integer
 );
-CREATE SEQUENCE market_match_feedback_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE market_match_feedback_id_seq OWNED BY market_match_feedback.id;
 CREATE TABLE market_price_snapshot (
     id integer NOT NULL,
     run_id integer NOT NULL,
@@ -124,14 +108,6 @@ CREATE TABLE market_price_snapshot (
     ml_variant character varying(12),
     web_via character varying(8)
 );
-CREATE SEQUENCE market_price_snapshot_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE market_price_snapshot_id_seq OWNED BY market_price_snapshot.id;
 CREATE TABLE market_store (
     id integer NOT NULL,
     name character varying(60) NOT NULL,
@@ -149,14 +125,6 @@ CREATE TABLE market_store (
     last_index_status character varying(300),
     health character varying(12)
 );
-CREATE SEQUENCE market_store_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE market_store_id_seq OWNED BY market_store.id;
 CREATE TABLE ml_seller_cache (
     seller_id character varying(32) NOT NULL,
     completed_sales integer,
@@ -174,14 +142,6 @@ CREATE TABLE ml_web_result (
     status character varying(8) NOT NULL,
     reason character varying(300)
 );
-CREATE SEQUENCE ml_web_result_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE ml_web_result_id_seq OWNED BY ml_web_result.id;
 CREATE TABLE price_history (
     id integer NOT NULL,
     product_id character varying NOT NULL,
@@ -192,14 +152,6 @@ CREATE TABLE price_history (
     captured_at timestamp without time zone NOT NULL,
     extra character varying
 );
-CREATE SEQUENCE price_history_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE price_history_id_seq OWNED BY price_history.id;
 CREATE TABLE price_monitor_run (
     id integer NOT NULL,
     started_at timestamp without time zone NOT NULL,
@@ -239,14 +191,6 @@ CREATE TABLE price_monitor_run (
     oficina_fresh integer NOT NULL,
     n_oficina_ok integer NOT NULL
 );
-CREATE SEQUENCE price_monitor_run_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE price_monitor_run_id_seq OWNED BY price_monitor_run.id;
 CREATE TABLE settings (
     key character varying NOT NULL,
     value character varying NOT NULL,
@@ -276,14 +220,6 @@ CREATE TABLE store_catalog_item (
     fail_reason character varying(100),
     in_sitemap boolean NOT NULL
 );
-CREATE SEQUENCE store_catalog_item_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE store_catalog_item_id_seq OWNED BY store_catalog_item.id;
 CREATE TABLE store_match (
     id integer NOT NULL,
     run_id integer NOT NULL,
@@ -326,22 +262,6 @@ CREATE TABLE store_match_feedback (
     title character varying(300),
     product_name character varying(200)
 );
-CREATE SEQUENCE store_match_feedback_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE store_match_feedback_id_seq OWNED BY store_match_feedback.id;
-CREATE SEQUENCE store_match_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE store_match_id_seq OWNED BY store_match.id;
 CREATE TABLE text_audit_item (
     id integer NOT NULL,
     run_id integer NOT NULL,
@@ -359,14 +279,6 @@ CREATE TABLE text_audit_item (
     issues character varying NOT NULL,
     details character varying
 );
-CREATE SEQUENCE text_audit_item_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-ALTER SEQUENCE text_audit_item_id_seq OWNED BY text_audit_item.id;
 CREATE TABLE text_audit_run (
     id integer NOT NULL,
     started_at timestamp without time zone NOT NULL,
@@ -384,6 +296,83 @@ CREATE TABLE text_audit_run (
     notes character varying,
     error character varying
 );
+CREATE SEQUENCE audit_log_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE market_match_feedback_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE market_price_snapshot_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE market_store_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE ml_web_result_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE price_history_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE price_monitor_run_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE store_catalog_item_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE store_match_feedback_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE store_match_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE SEQUENCE text_audit_item_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 CREATE SEQUENCE text_audit_run_id_seq
     AS integer
     START WITH 1
@@ -391,7 +380,62 @@ CREATE SEQUENCE text_audit_run_id_seq
     NO MINVALUE
     NO MAXVALUE
     CACHE 1;
+ALTER SEQUENCE audit_log_id_seq OWNED BY audit_log.id;
+ALTER SEQUENCE market_match_feedback_id_seq OWNED BY market_match_feedback.id;
+ALTER SEQUENCE market_price_snapshot_id_seq OWNED BY market_price_snapshot.id;
+ALTER SEQUENCE market_store_id_seq OWNED BY market_store.id;
+ALTER SEQUENCE ml_web_result_id_seq OWNED BY ml_web_result.id;
+ALTER SEQUENCE price_history_id_seq OWNED BY price_history.id;
+ALTER SEQUENCE price_monitor_run_id_seq OWNED BY price_monitor_run.id;
+ALTER SEQUENCE store_catalog_item_id_seq OWNED BY store_catalog_item.id;
+ALTER SEQUENCE store_match_feedback_id_seq OWNED BY store_match_feedback.id;
+ALTER SEQUENCE store_match_id_seq OWNED BY store_match.id;
+ALTER SEQUENCE text_audit_item_id_seq OWNED BY text_audit_item.id;
 ALTER SEQUENCE text_audit_run_id_seq OWNED BY text_audit_run.id;
+ALTER TABLE ONLY audit_log ALTER COLUMN id SET DEFAULT nextval('audit_log_id_seq'::regclass);
+ALTER TABLE ONLY market_match_feedback ALTER COLUMN id SET DEFAULT nextval('market_match_feedback_id_seq'::regclass);
+ALTER TABLE ONLY market_price_snapshot ALTER COLUMN id SET DEFAULT nextval('market_price_snapshot_id_seq'::regclass);
+ALTER TABLE ONLY market_store ALTER COLUMN id SET DEFAULT nextval('market_store_id_seq'::regclass);
+ALTER TABLE ONLY ml_web_result ALTER COLUMN id SET DEFAULT nextval('ml_web_result_id_seq'::regclass);
+ALTER TABLE ONLY price_history ALTER COLUMN id SET DEFAULT nextval('price_history_id_seq'::regclass);
+ALTER TABLE ONLY price_monitor_run ALTER COLUMN id SET DEFAULT nextval('price_monitor_run_id_seq'::regclass);
+ALTER TABLE ONLY store_catalog_item ALTER COLUMN id SET DEFAULT nextval('store_catalog_item_id_seq'::regclass);
+ALTER TABLE ONLY store_match ALTER COLUMN id SET DEFAULT nextval('store_match_id_seq'::regclass);
+ALTER TABLE ONLY store_match_feedback ALTER COLUMN id SET DEFAULT nextval('store_match_feedback_id_seq'::regclass);
+ALTER TABLE ONLY text_audit_item ALTER COLUMN id SET DEFAULT nextval('text_audit_item_id_seq'::regclass);
+ALTER TABLE ONLY text_audit_run ALTER COLUMN id SET DEFAULT nextval('text_audit_run_id_seq'::regclass);
+ALTER TABLE ONLY audit_log
+    ADD CONSTRAINT audit_log_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY image_embed_cache
+    ADD CONSTRAINT image_embed_cache_pkey PRIMARY KEY (url);
+ALTER TABLE ONLY image_hash_cache
+    ADD CONSTRAINT image_hash_cache_pkey PRIMARY KEY (url);
+ALTER TABLE ONLY market_match_feedback
+    ADD CONSTRAINT market_match_feedback_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY market_price_snapshot
+    ADD CONSTRAINT market_price_snapshot_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY market_store
+    ADD CONSTRAINT market_store_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY ml_seller_cache
+    ADD CONSTRAINT ml_seller_cache_pkey PRIMARY KEY (seller_id);
+ALTER TABLE ONLY ml_web_result
+    ADD CONSTRAINT ml_web_result_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY price_history
+    ADD CONSTRAINT price_history_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY price_monitor_run
+    ADD CONSTRAINT price_monitor_run_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY settings
+    ADD CONSTRAINT settings_pkey PRIMARY KEY (key);
+ALTER TABLE ONLY store_catalog_item
+    ADD CONSTRAINT store_catalog_item_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY store_match_feedback
+    ADD CONSTRAINT store_match_feedback_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY store_match
+    ADD CONSTRAINT store_match_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY text_audit_item
+    ADD CONSTRAINT text_audit_item_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY text_audit_run
+    ADD CONSTRAINT text_audit_run_pkey PRIMARY KEY (id);
 CREATE INDEX ix_audit_dismissed_action_time ON audit_log USING btree (dismissed, action, created_at);
 CREATE INDEX ix_audit_dismissed_source_time ON audit_log USING btree (dismissed, source, created_at);
 CREATE INDEX ix_audit_log_action ON audit_log USING btree (action);
