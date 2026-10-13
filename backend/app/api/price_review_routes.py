@@ -211,6 +211,7 @@ async def list_items(
         raise HTTPException(400, f"state inválido: {state}")
     if cause is not None and cause not in CAUSES:
         raise HTTPException(400, f"cause inválida: {cause}")
+    q = (q or "").replace("\x00", "")           # Postgres rechaza el NUL en un texto
     base: list[Any] = []                      # estado y búsqueda: también acotan los contadores por causa
     if states is not None:
         base.append(PriceReviewItem.state.in_(states))  # type: ignore[attr-defined]
