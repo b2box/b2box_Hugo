@@ -336,3 +336,26 @@ async def test_the_product_photo_only_travels_if_it_is_https(client):
         s.commit()
     rows = {i["product"]["id"]: i["product"]["image_url"] for i in client.get(BASE + "/items").json()["items"]}
     assert rows == {"a": None, "b": "https://cdn.b2box/p.jpg"}
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://cdn.b2box.app/p.jpg", True),
+    ("https://cdn.b2box.app:443/p.jpg", True),
+    ("https://user:pass@cdn.b2box.app/p.jpg", False),
+    ("https://user@cdn.b2box.app/p.jpg", False),
+    ("https://:pass@cdn.b2box.app/p.jpg", False),
+    ("https://cdn.b2box.app@evil.test/p.jpg", False),
+    ("https://cdn.b2box.app:8443/p.jpg", False),
+    ("http://cdn.b2box.app/p.jpg", False),
+    ("javascript:alert(1)", False),
+    ("data:image/svg+xml;base64,AAAA", False),
+    ("//cdn.b2box.app/p.jpg", False),
+    ("https:///p.jpg", False),
+    ("https://cdn.b2box.app/p .jpg", False),
+    ("https://cdn.b2box.app/p.jpg\r\nX: y", False),
+    ("https://cdn.b2box.app/" + "a" * 600, False),
+    ("", False),
+    (None, False),
+])
+def test_the_photo_url_is_https_without_credentials(url, ok):
+    assert (routes._https_or_none(url) is not None) is ok, url
