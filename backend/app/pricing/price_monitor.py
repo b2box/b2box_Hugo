@@ -74,6 +74,7 @@ from app.pricing import (
     store_catalog,
     store_match,
 )
+from app.pricing.safe_error import error_code
 from app.pricing.market_ml import (
     ORIGIN_API,
     ORIGIN_OFICINA,
@@ -1384,7 +1385,7 @@ async def _review_pass(run_id: int, result: dict[str, Any] | None, products: lis
         log.exception("price_monitor #%s: la pasada de la bandeja de revisión falló", run_id)
         try:
             _update_run(run_id, review_summary=json.dumps(
-                {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}, ensure_ascii=False))
+                {"error": error_code(exc)}, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             log.exception("price_monitor #%s: no se pudo anotar el error de la pasada", run_id)
 
