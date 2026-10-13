@@ -19,7 +19,6 @@ import pytest  # noqa: E402
 from app.pricing.price_breakdown import TierBreakdown, parse_tier_breakdowns  # noqa: E402
 from app.pricing.price_diagnosis import (  # noqa: E402
     Box,
-    CertFacts,
     DiagFacts,
     DiagThresholds,
     Economics,
@@ -182,7 +181,6 @@ def test_rule_a_saving_is_a_lower_bound_never_more_than_removing_all_the_logisti
     f = facts(0, median_ars=70_000)
     row = select_tier(f.breakdowns, f.tier_used)
     r = rule_a(f, TH, row)
-    ref = box_reference(f.neighbor_boxes)
     share = float(row.logistics_usd / row.nbg_usd)
     # Si TODA la logística desapareciera el precio bajaría `share`; la estimación baja menos que eso.
     assert r.p_si_cents >= f.economics.our_price_cents * (1 - share)
@@ -537,3 +535,9 @@ def test_box_reference_needs_five_valid_boxes_and_ignores_incomplete_ones():
     ref = box_reference(ref_boxes(10), 5)
     assert ref.n >= 8 and ref.source == "vecinos_clip" and "×" in ref.dims_text
     assert ref.z("volume", ref.volume_cm3) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_diagnosis_is_deterministic():
+    f = facts(0, median_ars=70_000)
+    first = json.dumps(diagnose(f, TH).to_dict(), sort_keys=True)
+    assert all(json.dumps(diagnose(f, TH).to_dict(), sort_keys=True) == first for _ in range(5))

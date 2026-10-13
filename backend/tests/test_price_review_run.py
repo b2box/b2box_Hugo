@@ -478,7 +478,6 @@ async def test_a_diagnosis_that_never_works_stops_being_retried_after_five_attem
 
 
 async def test_the_nightly_catalog_variant_saves_a_read_per_product(world):
-    from app.pricing.semaforo import PricedVariant, PriceTier
     from app.vendure.client import VendureProduct
 
     prev, today = two_nights({"p1": {}})
@@ -612,3 +611,60 @@ async def test_the_pass_over_1500_snapshots_takes_under_a_minute():
     elapsed = time.monotonic() - t0
     assert elapsed < 60, f"{elapsed:.1f} s"
     assert summary["firmes"] == 150 and summary["nuevas"] == 150 and summary["rojos"] == 300
+
+
+# ─── noches, no corridas ─────────────────────────────────────────
+
+
+async def test_two_runs_on_the_same_day_are_one_night_so_a_manual_run_cannot_skip_the_streak():
+    morning = w.make_run(started=NOW.replace(hour=6))
+    w.add_snap(morning, "a")
+    await pr.process_run(morning, now=NOW.replace(hour=6))
+    afternoon = w.make_run(started=NOW.replace(hour=15))                      # «Correr ahora» el mismo día
+    w.add_snap(afternoon, "a")
+    await pr.process_run(afternoon, now=NOW.replace(hour=15))
+    assert w.items() == [], "dos corridas el mismo día no son dos noches"
+    tomorrow = w.make_run(started=NOW + timedelta(days=1))
+    w.add_snap(tomorrow, "a", data_at=NOW + timedelta(days=1))
+    await pr.process_run(tomorrow, now=NOW + timedelta(days=1))
+    [item] = w.items()
+    assert item.streak_nights == 2                                           # ayer (dos corridas) + hoy
+
+
+async def test_of_each_day_the_latest_run_with_data_decides():
+    d1a = w.make_run(started=NOW.replace(hour=6) - timedelta(days=1))
+    d1b = w.make_run(started=NOW.replace(hour=15) - timedelta(days=1))
+    d2 = w.make_run(started=NOW.replace(hour=6))
+    w.add_snap(d1a, "a")
+    w.add_snap(d1b, "a", color="verde", our=500_000)                         # la última de ayer ya no era rojo
+    w.add_snap(d2, "a")
+    for r, when in ((d1a, NOW.replace(hour=6) - timedelta(days=1)), (d1b, NOW.replace(hour=15) - timedelta(days=1)), (d2, NOW.replace(hour=6))):
+        await pr.process_run(r, now=when)
+    assert w.items() == []
+
+
+async def test_a_failed_run_of_the_same_day_does_not_hide_the_good_one():
+    ok = w.make_run(started=NOW.replace(hour=6) - timedelta(days=1))
+    failed = w.make_run(started=NOW.replace(hour=15) - timedelta(days=1))
+    today = w.make_run(started=NOW.replace(hour=6))
+    w.add_snap(ok, "a")
+    w.add_snap(failed, "a", ml_status="failed", color="sin_dato", prices=())
+    w.add_snap(today, "a")
+    await pr.process_run(ok, now=NOW.replace(hour=6) - timedelta(days=1))
+    await pr.process_run(failed, now=NOW.replace(hour=15) - timedelta(days=1))
+    await pr.process_run(today, now=NOW.replace(hour=6))
+    assert [i.product_id for i in w.items()] == ["a"]
+
+
+async def test_lowering_the_mode_during_the_pass_stops_opening_fichas(monkeypatch):
+    prev, today = two_nights({"p1": {}, "p2": {}, "p3": {}})
+    real = pr._create_item
+
+    def create_then_switch_off(plan, cand, pdiag):
+        out = real(plan, cand, pdiag)
+        w.set_setting("pm_mode", 0)                          # alguien apaga la bandeja a mitad de la pasada
+        return out
+
+    monkeypatch.setattr(pr, "_create_item", create_then_switch_off)
+    summary = await pr.process_run(today, now=NOW)
+    assert len(w.items()) == 1 and summary["nuevas"] == 1 and summary["cortada_por_modo"] is True
