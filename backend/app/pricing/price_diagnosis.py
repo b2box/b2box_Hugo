@@ -691,6 +691,10 @@ def rule_c(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
     code = "c"
     base = dict(code=code, title=TITLES[code], action=ACTIONS[code])
     if row is None or row.nbg_usd <= 0:
+        if f.is_local_stock:
+            # Vendure contesta el desglose en ceros para un abastecimiento local: no hay dólares contra los que medir el
+            # recargo. No es un dato que falte: no aplica (y no deja el diagnóstico «incompleto» para siempre).
+            return RuleResult(**base, status=ST_NA, summary="Abastecimiento local: el desglose no trae dólares, no se mide el certificado.")
         return RuleResult(**base, status=ST_NO_DATA, summary="No hay desglose de precio para medir el certificado.")
     share = float(row.certification_usd / row.nbg_usd)
     evidence: dict[str, Any] = {"cert_usd": float(row.certification_usd), "share_pct": round(share * 100, 2)}

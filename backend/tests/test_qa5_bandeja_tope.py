@@ -130,8 +130,6 @@ async def test_the_pass_over_1500_snapshots_with_400_red_firm_ones_takes_under_a
     print(f"\nTIEMPO pasada 1500 snapshots / 400 fichas: {elapsed:.1f} s")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): un producto local_stock (Vendure devuelve el desglose en ceros) queda con el diagnóstico «pendiente» y se "
-                                       "reintenta TODAS las noches hasta 5 veces, gastando consultas del tope (price_review._diag_fields: «completo» = hay desglose)")
 async def test_a_local_stock_ficha_is_not_left_pending_and_retried_forever(stack):
     from app.db.models import PriceReviewItem as Item
 
