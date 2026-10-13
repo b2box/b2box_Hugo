@@ -281,7 +281,12 @@ async def test_events_are_append_only_on_postgres(pg):
         assert s.exec(select(PriceReviewEvent)).one().notified_at == NOW
 
 
-async def test_the_api_works_on_postgres_including_search_with_special_characters(pg):
+async def test_the_api_works_on_postgres_including_search_with_special_characters(pg, monkeypatch):
+    from app.api import price_review_routes as routes
+    from app.config import Settings
+
+    cfg = Settings(vendure_api_url="https://example.invalid/admin-api", price_review_viewers="pao@b2box.pro")
+    monkeypatch.setattr(routes, "get_settings", lambda: cfg)             # Pao es responsable de costos: ve las 10 partes
     today = await _two_nights(["a", "b"])
     await pr.process_run(today, now=NOW)
     c = TestClient(main_mod.app, raise_server_exceptions=False)
