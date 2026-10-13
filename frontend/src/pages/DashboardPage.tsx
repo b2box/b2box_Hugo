@@ -8,6 +8,7 @@ import SettingsView from "../components/SettingsView";
 import HealthView from "../components/HealthView";
 import VisionCompareView from "../components/VisionCompareView";
 import SemaforoView from "../components/SemaforoView";
+import SeoTextosView from "../components/SeoTextosView";
 import HistoryModal from "../components/HistoryModal";
 import { EventActions } from "../components/EventCard";
 import {
@@ -59,7 +60,7 @@ export default function DashboardPage() {
     queryFn: getSections,
     refetchInterval: POLL_MS,
   });
-  const NON_LIST = ["settings", "salud", "vision_lab", "semaforo"];
+  const NON_LIST = ["settings", "salud", "vision_lab", "semaforo", "seo_textos"];
   const isListSection = !NON_LIST.includes(currentSection);
   const eventsQ = useQuery({
     queryKey: ["events", currentSection, page, debouncedSearch],
@@ -189,6 +190,8 @@ export default function DashboardPage() {
       ? "Comparar visión"
       : currentSection === "semaforo"
       ? "Semáforo"
+      : currentSection === "seo_textos"
+      ? "Textos (SEO)"
       : sections[currentSection]?.label ?? currentSection;
 
   return (
@@ -214,6 +217,8 @@ export default function DashboardPage() {
             <VisionCompareView />
           ) : currentSection === "semaforo" ? (
             <SemaforoView />
+          ) : currentSection === "seo_textos" ? (
+            <SeoTextosView />
           ) : (
             <EventsView
               section={currentSection}

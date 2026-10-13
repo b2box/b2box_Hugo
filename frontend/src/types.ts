@@ -511,3 +511,84 @@ export type MarketStoreInput = Partial<
     "name" | "base_url" | "platform" | "enabled" | "refresh_days" | "max_pages_per_day" | "sitemap_url" | "image_hosts" | "house_brand" | "notes"
   >
 >;
+
+// ─── Auditoría de textos del catálogo (SEO) ────────────────────────
+// Solo lectura sobre Vendure. Los datos de proveedor nunca llegan acá: la regla
+// FAB solo informa que hubo coincidencia.
+
+export interface SeoRule {
+  id: string;
+  label: string;
+  group: string;
+  help: string;
+}
+
+export interface SeoIssue {
+  rule: string;
+  detail: string;
+}
+
+export interface SeoItem {
+  product_id: string;
+  product_code: string | null;
+  language: string;
+  name: string;
+  slug: string;
+  enabled: boolean;
+  in_ar: boolean | null;
+  in_default: boolean | null;
+  name_len: number;
+  desc_chars: number;
+  n_issues: number;
+  issues: SeoIssue[];
+}
+
+export interface SeoRun {
+  id: number;
+  started_at: string | null;
+  finished_at: string | null;
+  status: "running" | "ok" | "degraded" | "failed";
+  trigger: string;
+  products_total: number;
+  products_enabled: number;
+  rows_total: number;
+  products_with_issues: number;
+  channels_ok: string[];
+  channels_failed: Record<string, string>;
+  duration_s: number | null;
+  counts: Record<string, number>;
+  notes: string | null;
+  error: string | null;
+}
+
+export interface SeoSummary {
+  run: SeoRun | null;
+  running: boolean;
+  rules: SeoRule[];
+  limits: { title_max: number; meta_max: number };
+  cron_utc: string | null;
+}
+
+export interface SeoItemsResponse {
+  run_id: number | null;
+  page: number;
+  page_size: number;
+  total: number;
+  items: SeoItem[];
+  counts: Record<string, number>;
+  facet_products: number;
+  languages: string[];
+}
+
+export type SeoListName = "marcas" | "relleno" | "tecnicos";
+
+export interface SeoList {
+  items: string[];
+  modified: boolean;
+}
+
+export interface SeoListsResponse {
+  lists: Record<SeoListName, SeoList>;
+  max_items: number;
+  max_item_len: number;
+}

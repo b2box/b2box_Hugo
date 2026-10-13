@@ -431,6 +431,19 @@ class Settings(BaseSettings):
         default="20 3 * * *",
         description="Cron (UTC) del indexador de tiendas. 03:20 UTC = 00:20 ART, antes del semáforo",
     )
+
+    # ── Auditoría de textos del catálogo (SEO, HG1) ─────────────────
+    # Ver app/seo/text_audit.py. Solo LEE Vendure (una query por página de 100
+    # productos, sin variantes) y guarda el resultado en la base de Hugo. Vacío =
+    # sin corrida programada (sigue el botón del dashboard).
+    seo_text_audit_cron_utc: str = Field(
+        default="30 7 * * mon",
+        description=(
+            "Cron (UTC) de la auditoría de textos. Lunes 07:30 UTC = 04:30 ART. Vacío = apagada. "
+            "Ojo: APScheduler cuenta los días de la semana desde el lunes (0), no desde el domingo: "
+            "escribir el día con su nombre (mon, tue…)."
+        ),
+    )
     # Identificación honesta de Hugo ante las tiendas (sin disfrazarse de navegador).
     store_user_agent: str = Field(
         default="HugoPriceBot/1.0 (+https://b2box.pro)",

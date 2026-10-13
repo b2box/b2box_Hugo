@@ -81,7 +81,10 @@ def _signature(engine) -> dict:
         con = [tuple(map(str, r)) for r in c.execute(text(
             "select conrelid::regclass::text, conname, pg_get_constraintdef(oid) from pg_constraint "
             "where connamespace = current_schema()::regnamespace order by 1, 2"))]
-    return {"columns": cols, "indexes": idx, "constraints": con}
+    # Las tablas de la auditoría de textos (HG1) son de un PR posterior a este esquema de partida:
+    # las prueba test_seo_text_audit_pg.py.
+    keep = lambda rows: [r for r in rows if "text_audit_" not in r[0]]  # noqa: E731
+    return {"columns": keep(cols), "indexes": keep(idx), "constraints": keep(con)}
 
 
 def _old_rows(engine) -> dict:

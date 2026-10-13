@@ -277,6 +277,18 @@ export function IconSearch({ className }: IconProps) {
   );
 }
 
+export function IconFileText({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z" />
+      <path d="M14 2v6h6" />
+      <path d="M8 13h8" />
+      <path d="M8 17h8" />
+      <path d="M8 9h2" />
+    </svg>
+  );
+}
+
 // Mapa de icono por clave de sección (usado por Sidebar y título de sección).
 import type { ComponentType } from "react";
 
@@ -309,4 +321,5 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   settings: IconSettings,
   salud: IconActivity,
   semaforo: IconTrafficLight,
+  seo_textos: IconFileText,
 };

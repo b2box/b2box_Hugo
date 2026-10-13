@@ -557,3 +557,60 @@ class StoreMatchFeedback(SQLModel, table=True):
     name_score: float | None = Field(default=None)
     title: str | None = Field(default=None, max_length=300)
     product_name: str | None = Field(default=None, max_length=200)
+
+
+class TextAuditRun(SQLModel, table=True):
+    """Una corrida de la auditoría de textos del catálogo (HG1). Solo lee Vendure;
+    el resultado producto por producto está en `TextAuditItem`."""
+    __tablename__ = "text_audit_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    finished_at: datetime | None = Field(default=None)
+    # running | ok | degraded (un canal no se pudo leer) | failed
+    status: str = Field(default="running", index=True, max_length=16)
+    # cron | manual
+    trigger: str = Field(default="cron", max_length=16)
+    # Productos distintos leídos (los dos canales juntos) y filas producto x idioma.
+    products_total: int = Field(default=0)
+    products_enabled: int = Field(default=0)
+    rows_total: int = Field(default=0)
+    products_with_issues: int = Field(default=0)
+    # "ar,default": canales leídos bien; los que fallaron, con el motivo.
+    channels_ok: str | None = Field(default=None)
+    channels_failed: str | None = Field(default=None)
+    duration_s: float | None = Field(default=None)
+    # JSON {regla: cantidad de productos distintos con esa regla}
+    counts: str | None = Field(default=None)
+    notes: str | None = Field(default=None)
+    error: str | None = Field(default=None)
+
+
+class TextAuditItem(SQLModel, table=True):
+    """Un producto en un idioma, con lo que la auditoría le encontró. Una fila por
+    (corrida, producto, idioma). No guarda la descripción ni los datos del proveedor."""
+    __tablename__ = "text_audit_item"
+    __table_args__ = (
+        Index("ix_text_audit_item_run_prod_lang", "run_id", "product_id", "language_code", unique=True),
+        Index("ix_text_audit_item_run_issues", "run_id", "n_issues"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: int
+    product_id: str = Field(max_length=64)
+    # "" si el producto no trae ninguna traducción.
+    language_code: str = Field(default="", max_length=16)
+    name: str = Field(default="")
+    slug: str = Field(default="")
+    enabled: bool = Field(default=True)
+    product_code: str | None = Field(default=None, max_length=64)
+    # ¿Está asignado al canal Argentina / al canal por defecto? None = ese canal no se pudo leer.
+    in_ar: bool | None = Field(default=None)
+    in_default: bool | None = Field(default=None)
+    name_len: int = Field(default=0)
+    desc_chars: int = Field(default=0)
+    n_issues: int = Field(default=0)
+    # ",LARGO,MAR," (con comas a los lados: se filtra con LIKE '%,MAR,%').
+    issues: str = Field(default="")
+    # JSON {regla: detalle}. Sin valores del proveedor.
+    details: str | None = Field(default=None)

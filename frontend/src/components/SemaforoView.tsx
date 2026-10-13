@@ -562,7 +562,7 @@ export default function SemaforoView() {
   );
 }
 
-function FilterChip({
+export function FilterChip({
   active,
   onClick,
   className,
@@ -858,7 +858,7 @@ function ProductHistory({ productId }: { productId: string }) {
   );
 }
 
-function FilterGroup<T extends string | null>({
+export function FilterGroup<T extends string | null>({
   label,
   value,
   options,
