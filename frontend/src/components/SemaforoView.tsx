@@ -362,7 +362,7 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
       } else if (!r.ok) {
         setFeedback({ ok: false, text: `No se pudo disparar (${r.status}).` });
       } else {
-        setFeedback({ ok: true, text: "Corrida disparada en modo sombra. Tarda: se recorre todo el catálogo." });
+        setFeedback({ ok: true, text: "Corrida disparada. Tarda: se recorre todo el catálogo. No toca Vendure." });
         [3, 15].forEach((s) =>
           setTimeout(() => {
             qc.invalidateQueries({ queryKey: ["pm-summary"] });
@@ -381,7 +381,7 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
         <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
           <IconTrafficLight className="w-5 h-5 text-muted-foreground" />
           Semáforo de precios
-          <Badge variant="warning">modo sombra</Badge>
+          <Badge variant="warning">{summaryQ.data?.mode ? "modo propuesta" : "modo sombra"}</Badge>
         </h2>
         <div className="flex items-center gap-2">
           <button
