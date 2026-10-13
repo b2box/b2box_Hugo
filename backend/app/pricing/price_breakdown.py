@@ -33,6 +33,11 @@ from typing import Any, Mapping
 
 # Diferencia máxima aceptada entre la suma de las 10 partes y la factura (USD).
 SUM_TOLERANCE_USD = Decimal("0.01")
+# La factura es el neto más el IVA de la venta, redondeada hacia arriba al centavo: puede pasarse hasta un centavo.
+INVOICE_TOLERANCE_USD = Decimal("0.011")
+# El precio por unidad en pesos contra los dólares y el cambio efectivo: el motor redondea hacia arriba por unidad.
+PER_UNIT_REL_TOLERANCE = Decimal("0.005")
+PER_UNIT_MIN_TOLERANCE_MINOR = 2
 
 # Qué se le pide a Vendure por tramo. Solo lo que este módulo y el diagnóstico usan.
 BREAKDOWN_SELECTION = """
@@ -47,7 +52,7 @@ BREAKDOWN_SELECTION = """
     subtopUsd { exact } b2boxFeeUsd { exact } paymentGatewayFeeUsd { exact } certificationUsd { exact }
     finCostUsd { exact } netoUsd { exact } facturaUsd { exact }
     netoChannelPerUnit { exact minor currencyCode } facturaChannelPerUnit { exact minor currencyCode }
-    pctApplied { b2boxFee }
+    pctApplied { b2boxFee salesVat }
 """
 
 
@@ -112,6 +117,7 @@ class TierBreakdown:
     neto_per_unit_minor: int
     factura_per_unit_minor: int
     channel_currency: str
+    sales_vat: Decimal | None = None       # % de IVA de la venta con el que se armó la factura (None = Vendure no lo mandó)
     # False cuando no hay desglose en dólares que mostrar (tramo sin precio o abastecimiento local):
     # todo viene en cero y no hay nada que sumar ni que explicar.
     usd_available: bool = True
@@ -283,6 +289,12 @@ def parse_tier_breakdown(raw: Mapping[str, Any]) -> TierBreakdown:
         fee_pct = Decimal(str(pct.get("b2boxFee"))) if pct.get("b2boxFee") is not None else None
     except InvalidOperation:
         fee_pct = None
+    try:
+        sales_vat = Decimal(str(pct.get("salesVat"))) if pct.get("salesVat") is not None else None
+        if sales_vat is not None and (not sales_vat.is_finite() or sales_vat < 0):
+            sales_vat = None
+    except InvalidOperation:
+        sales_vat = None
     bd = TierBreakdown(
         tier_id=tier,
         variant_id=str(raw.get("productVariantId") or ""),
@@ -315,18 +327,40 @@ def parse_tier_breakdown(raw: Mapping[str, Any]) -> TierBreakdown:
         factura_usd=_dec(raw, "facturaUsd", where),
         servicios_lines=lines,
         fee_pct=fee_pct,
+        sales_vat=sales_vat,
         neto_per_unit_minor=neto_minor,
         factura_per_unit_minor=factura_minor,
         channel_currency=currency,
     )
-    # Sin dólares que explicar: tramo sin precio de fábrica, o abastecimiento local (Vendure devuelve ceros).
+    # Sin dólares que explicar: tramo sin precio de fábrica, o abastecimiento local (Vendure devuelve todo en ceros). Solo si
+    # TODO está en cero: un tramo con fábrica, factura y neto en 0 pero con flete, aranceles, servicios o fee es un desglose
+    # roto, no un tramo «sin dólares». (El certificado no cuenta: un abastecimiento local lo trae.)
     if bd.factura_usd == 0 and bd.fob_usd == 0 and bd.neto_usd == 0:
+        stray = [name for name, v in (
+            ("flete", bd.flete_usd), ("seguro", bd.seguro_usd), ("cif", bd.cif_usd), ("aranceles", bd.aranceles_usd),
+            ("logística China", bd.china_logistics_usd), ("servicios", bd.servicios_usd), ("subtotal", bd.subtotal_usd),
+            ("fee", bd.fee_usd), ("pasarela", bd.gateway_usd), ("costo financiero", bd.fin_cost_usd)) if v != 0]
+        if stray:
+            raise BreakdownError(f"{where}: fábrica, factura y neto en 0 pero hay montos distintos de cero ({', '.join(stray)})")
         return replace(bd, usd_available=False)
     gap = abs(bd.parts_sum_usd() - bd.factura_usd)
     if gap > SUM_TOLERANCE_USD:
         raise BreakdownError(
             f"{where}: las 10 partes suman {bd.parts_sum_usd()} USD y la factura es {bd.factura_usd} USD "
             f"(diferencia {gap} USD, tolerancia {SUM_TOLERANCE_USD})")
+    # La parte 10 es factura - neto: por sí sola no ata la factura a nada. Se controla además contra el IVA de la venta.
+    if bd.sales_vat is not None:
+        expected = bd.neto_usd * (1 + bd.sales_vat / 100)
+        if abs(bd.factura_usd - expected) > INVOICE_TOLERANCE_USD:
+            raise BreakdownError(
+                f"{where}: la factura es {bd.factura_usd} USD y neto + IVA de la venta da {expected.quantize(Decimal('0.0001'))} USD")
+    # Y el precio por unidad en pesos contra los dólares al cambio efectivo.
+    for label, usd_total, minor in (("factura", bd.factura_usd, factura_minor), ("neto", bd.neto_usd, neto_minor)):
+        expected_minor = usd_total * bd.usd_to_channel * 100 / bd.quantity
+        tolerance = max(Decimal(PER_UNIT_MIN_TOLERANCE_MINOR), abs(expected_minor) * PER_UNIT_REL_TOLERANCE)
+        if abs(Decimal(minor) - expected_minor) > tolerance:
+            raise BreakdownError(
+                f"{where}: el {label} por unidad es {minor} centavos y los dólares al cambio efectivo dan {expected_minor.quantize(Decimal('1'))}")
     return bd
 
 

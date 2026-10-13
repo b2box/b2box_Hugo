@@ -344,8 +344,6 @@ def test_the_china_logistics_line_is_inside_the_services_total_so_it_cannot_unba
     assert parse_tier_breakdown(_bump(GOOD, "chinaLogisticsUsd", "0.5")).china_logistics_usd > 0
 
 
-@pytest.mark.xfail(strict=True, reason="ENDURECIMIENTO (no es un criterio): la parte 10 es factura - neto, así que una factura "
-                                       "inconsistente con el neto o con los pesos por unidad pasa el control de «las 10 partes suman»")
 def test_parser_notices_a_per_unit_peso_price_that_contradicts_the_dollar_totals():
     raw = __import__("copy").deepcopy(GOOD)
     raw["facturaChannelPerUnit"]["minor"] = int(raw["facturaChannelPerUnit"]["minor"] * 1.5)
@@ -385,8 +383,6 @@ def test_all_nine_golden_tiers_of_the_real_engine_add_up():
     assert n == 9
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA: un tramo con fábrica, factura y neto en 0 pero con otros montos distintos de cero "
-                                       "se da por «sin dólares» y NO falla aunque las partes no sumen (price_breakdown.py:323)")
 def test_parser_does_not_hide_a_broken_breakdown_behind_the_no_dollars_shortcut():
     raw = __import__("copy").deepcopy(GOOD)
     for k in ("fobUsd", "facturaUsd", "netoUsd"):
