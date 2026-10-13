@@ -1440,8 +1440,12 @@ dispara pero a alguna le faltó algo, la causa es «diagnóstico incompleto», n
 **Carga sobre Vendure.** La consulta nocturna de precios suma una columna por tramo (`bulkPriceTiers.price`) y dos
 custom fields de la variante (`sourcingMode`, `minQuantityOverride`): mismas páginas, sin consultas nuevas (si el schema
 no los tiene se apagan solos). Las lecturas nuevas (`bulkPriceTierBreakdowns`, `productCertification`, canal) son
-**solo `query`** y tienen un **tope duro de 150 por noche**; lo que no entra queda «diagnóstico pendiente» y se completa
-la noche siguiente (hasta 5 intentos).
+**solo `query`** (cada documento se parsea con graphql-core y tiene que ser solo `query`) y tienen un **tope duro de
+150 REQUESTS HTTP reales por día argentino**: se cuenta cada intento (los reintentos y el login incluidos), el contador
+vive en la base (`settings`, reserva atómica, fail-closed) y sobrevive a reinicios y a una segunda pasada del mismo día. La
+pasada además tiene un tiempo máximo (15 min) para leer Vendure. Lo que no entra queda «diagnóstico pendiente», **no gasta
+uno de los 5 intentos** y se completa en las noches siguientes. Los errores que se guardan y se muestran llevan el tipo y un
+código (`TransportServerError 502`), nunca el mensaje; el detalle va al log.
 
 ### Cómo usarlo
 

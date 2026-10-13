@@ -229,8 +229,6 @@ async def test_links_that_are_not_https_templates_with_the_marker_are_dropped(cl
     assert d["links"] == {"vendure_admin": None, "storefront": None}, template
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): `_link` documenta «solo si trae el marcador» pero una plantilla https SIN {id}/{slug} "
-                                       "se devuelve tal cual: todas las fichas linkean a la misma página (price_review_routes._link)")
 async def test_a_template_without_a_marker_does_not_produce_the_same_link_for_every_ficha(client, stack, monkeypatch):
     from app.api import price_review_routes as routes
 

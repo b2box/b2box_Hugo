@@ -366,3 +366,18 @@ async def test_the_product_photo_only_travels_if_it_is_https(client):
 ])
 def test_the_photo_url_is_https_without_credentials(url, ok):
     assert (routes._https_or_none(url) is not None) is ok, url
+
+
+@pytest.mark.parametrize("template,values,expected", [
+    ("https://x.test/p/{id}", {"id": "7"}, "https://x.test/p/7"),
+    ("https://x.test/{slug}", {"slug": "a b"}, "https://x.test/a%20b"),
+    ("https://x.test/{slug}", {"slug": "s", "id": "7"}, "https://x.test/s"),          # {slug} o {id}: alcanza con uno
+    ("https://x.test/no-marker", {"id": "7"}, None),                                  # sin marcador: el mismo link para todas
+    ("https://x.test/no-marker", {"slug": "s", "id": "7"}, None),
+    ("https://x.test/{otro}", {"id": "7"}, None),                                     # un marcador que no conocemos queda a medias
+    ("https://x.test/{id}/{otro}", {"id": "7"}, None),
+    ("http://x.test/{id}", {"id": "7"}, None),
+    ("", {"id": "7"}, None),
+])
+def test_a_link_template_needs_its_marker(template, values, expected):
+    assert routes._link(template, **values) == expected
