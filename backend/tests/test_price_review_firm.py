@@ -213,3 +213,26 @@ def test_the_reason_texts_carry_the_configured_numbers():
     assert "24" in p.reason_text("dato_viejo") and "5" in p.reason_text("pocas_publicaciones")
     assert "2" in p.reason_text("precio_extremo")
     assert all(p.reason_text(r) for r in pr.REASONS)
+
+
+@pytest.mark.parametrize("sellers,distinct", [
+    (("TiendaX", "tiendax", "TIENDAX "), 1),
+    ((" Tienda  X", "tienda x", "TIENDA\tX"), 1),
+    (("Straße", "STRASSE", "strasse"), 1),                      # casefold, no lower
+    (("TiendaX", "tiendax", "OtraTienda"), 2),
+    (("a", "b", "c"), 3),
+])
+def test_r6_sellers_are_compared_without_case_or_extra_spaces(sellers, distinct):
+    v = verdict(sellers=sellers)
+    assert v.firm_sellers == distinct
+    assert (v.firm is True) is (distinct >= 2)
+    if distinct < 2:
+        assert v.reason == "pocos_vendedores"
+
+
+def test_r6_an_empty_seller_name_is_not_a_seller():
+    entries = [w.listing(i, 900_000 + i) for i in (1, 2, 3)]
+    for e, name in zip(entries, ("", "   ", "a")):
+        e["sellers"] = [name]
+    v = verdict(matched=entries)
+    assert v.firm_sellers == 1 and v.reason == "pocos_vendedores"
