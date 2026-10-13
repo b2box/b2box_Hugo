@@ -292,9 +292,6 @@ def test_local_stock_only_applies_b_and_c(world):
     assert d.probable_cause == "ninguna"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): con local_stock y el desglose en ceros que describe el developer, (c) queda «sin_dato» y la "
-                                       "causa probable pasa a «sin_dato» (Diagnóstico incompleto) en vez de «ninguna»; además el diagnóstico "
-                                       "queda `pendiente` y se reintenta cada noche (price_diagnosis.rule_c / price_review._diag_fields)")
 def test_local_stock_with_the_zeroed_breakdown_vendure_returns_does_not_look_like_missing_data(world):
     """Vendure contesta ceros para un abastecimiento local (sin dólares que explicar). Con eso (c) no tiene fila que mirar: no
     puede convertir un producto local sano en «diagnóstico incompleto» eterno."""

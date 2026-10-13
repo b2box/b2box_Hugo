@@ -541,3 +541,19 @@ def test_the_diagnosis_is_deterministic():
     f = facts(0, median_ars=70_000)
     first = json.dumps(diagnose(f, TH).to_dict(), sort_keys=True)
     assert all(json.dumps(diagnose(f, TH).to_dict(), sort_keys=True) == first for _ in range(5))
+
+
+def test_local_stock_with_a_zeroed_breakdown_does_not_apply_c_and_is_not_missing_data():
+    """Vendure contesta ceros para un abastecimiento local: (c) no aplica (no es «sin dato»), y no queda «incompleto»."""
+    zero = replace(rows(0)[0], fob_usd=Decimal(0), flete_usd=Decimal(0), seguro_usd=Decimal(0), cif_usd=Decimal(0),
+                   aranceles_usd=Decimal(0), china_logistics_usd=Decimal(0), servicios_usd=Decimal(0), subtotal_usd=Decimal(0),
+                   fee_usd=Decimal(0), gateway_usd=Decimal(0), fin_cost_usd=Decimal(0), neto_usd=Decimal(0), factura_usd=Decimal(0),
+                   certification_usd=Decimal("12.50"), usd_available=False)
+    f = replace(facts(0, sourcing_mode="local_stock"), breakdowns=[zero], certification_read=True, tier_used="tier:min_qty=25")
+    d = diagnose(f, TH)
+    assert d.rule("c").status == "no_aplica" and "Abastecimiento local" in d.rule("c").summary
+    assert [d.rule(c).status for c in "ade"] == ["no_aplica"] * 3
+    assert d.probable_cause in ("ninguna", "b") and "tramo usado en el desglose" not in d.missing
+    # con importación, la misma fila sin dólares SÍ es un dato que falta
+    f2 = replace(f, sourcing_mode="import")
+    assert diagnose(f2, TH).rule("c").status == "sin_dato"
