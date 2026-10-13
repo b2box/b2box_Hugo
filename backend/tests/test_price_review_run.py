@@ -246,8 +246,8 @@ async def test_an_item_that_already_exists_is_never_created_twice():
     today = _three_firm_products()
     cands = pr._plan(today, NOW)
     assert len(cands.to_create) == 3
-    assert pr._create_item(cands, cands.to_create[0], None) is True
-    assert pr._create_item(cands, cands.to_create[0], None) is False       # open_key único
+    assert pr._create_item(cands, cands.to_create[0], pr._Diag(None)) is True
+    assert pr._create_item(cands, cands.to_create[0], pr._Diag(None)) is False       # open_key único
     assert len(w.items()) == 1 and len(w.events()) == 1
 
 
@@ -428,7 +428,9 @@ async def test_the_hard_cap_of_150_reads_bounds_the_night_and_the_rest_wait_for_
     waiting = [i for i in w.items() if i.diag_status == "pendiente"]
     assert done and waiting and len(done) + len(waiting) == 90 and summary["tope_alcanzado"] is True
     assert all("diag_pendiente" in json.loads(i.flags) for i in waiting)
-    assert all(json.loads(i.diag)["attempts"] == 1 for i in waiting)
+    # lo que no entró por el tope NO cuenta como intento: mañana tiene todos los suyos
+    assert all(json.loads(i.diag)["attempts"] in (0, 1) for i in waiting)
+    assert sum(1 for i in waiting if json.loads(i.diag)["attempts"] == 0) >= len(waiting) - 1
     # …y a la noche siguiente las pendientes se completan primero
     r3 = w.make_run(started=NOW + timedelta(days=1))
     for pid in pids:

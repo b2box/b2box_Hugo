@@ -22,7 +22,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +39,19 @@ _CAS_ATTEMPTS = 5
 
 def today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# Argentina no tiene horario de verano desde 2009: UTC-3 fijo (no depende de tzdata dentro del container).
+ART = timezone(timedelta(hours=-3))
+
+
+def today_art(now: datetime | None = None) -> str:
+    """El día calendario en Argentina (AAAA-MM-DD). `now` naive se toma como UTC. Lo usan los contadores que tienen que
+    cortar a la medianoche de ARGENTINA y no a las 21:00 (la corrida de la noche cae a las 03:00 ART)."""
+    moment = datetime.now(timezone.utc) if now is None else now
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ART).strftime("%Y-%m-%d")
 
 
 def parse_day_counter(raw: str | None, today: str) -> int:
@@ -58,10 +71,10 @@ def parse_day_counter(raw: str | None, today: str) -> int:
         return 0
 
 
-def used_today(key: str, floor: Callable[[], int] | None = None) -> int:
-    """Requests reservados hoy (UTC) bajo `key`. Si todavía no se contó nada,
+def used_today(key: str, floor: Callable[[], int] | None = None, day: str | None = None) -> int:
+    """Requests reservados hoy (UTC; o el `day` que se pida, p. ej. el día ART) bajo `key`. Si todavía no se contó nada,
     vale `floor()` (piso histórico opcional, ver source_check._snapshots_today)."""
-    today = today_utc()
+    today = day or today_utc()
     try:
         with Session(engine) as s:
             row = s.get(Setting, key)
@@ -79,6 +92,7 @@ def reserve(
     budget: int,
     floor: Callable[[], int] | None = None,
     also: Callable[[Session], None] | None = None,
+    day: str | None = None,
 ) -> int | None:
     """Reserva cupo para UN request contra `budget`.
 
@@ -92,8 +106,10 @@ def reserve(
     entra: el semáforo lo usa para sumar el request a su corrida. Así un corte
     del proceso en cualquier punto deja la corrida y el contador del día
     iguales (o se commitean los dos, o ninguno).
+
+    `day`: el día al que pertenece el contador (por defecto el día UTC; ver `today_art`).
     """
-    today = today_utc()
+    today = day or today_utc()
     try:
         with _lock, Session(engine) as s:
             for _ in range(_CAS_ATTEMPTS):

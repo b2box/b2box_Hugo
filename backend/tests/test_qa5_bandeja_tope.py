@@ -102,9 +102,6 @@ async def test_the_next_night_picks_up_the_pending_ones_first_and_stays_within_t
     assert len(done_after) > N - len(pending_before)             # avanzó: completó parte de los pendientes
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (medio): el tope de 150 cuenta consultas LÓGICAS; el cliente de Vendure reintenta cada "
-                                       "consulta fallida 3 veces (max_attempts=3, client.py:920), así que con Vendure fallando la "
-                                       "noche puede mandar ~3x más requests reales (hasta ~450) que el tope declarado")
 async def test_the_cap_also_holds_when_vendure_fails_and_the_client_retries(stack):
     world = stack
     today = seed(world)

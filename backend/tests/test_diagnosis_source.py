@@ -16,11 +16,13 @@ from app.db.models import MarketPriceSnapshot  # noqa: E402
 from app.pricing import diagnosis_source as ds  # noqa: E402
 from app.pricing.price_diagnosis import Box  # noqa: E402
 from app.vendure.client import VendureClient  # noqa: E402
+from tests import review_world as w  # noqa: E402
 from tests.review_fixtures import FakeReviewVendure, engine_variant, install  # noqa: E402
 
 
 @pytest.fixture
 def vendure(monkeypatch):
+    w.reset_db()                      # el contador de requests del día vive en la base: cada test arranca en cero
     fake = FakeReviewVendure()
     install(monkeypatch, fake)
     for i in range(3):
@@ -77,10 +79,13 @@ async def test_without_the_nightly_variant_it_reads_it_once(vendure):
 
 async def test_the_hard_cap_stops_the_reads_and_the_rules_say_no_data(vendure):
     client = VendureClient()
+    channel = await client.get_channel_pricing()                         # antes de ponerle tope al cliente
+    vendure.requests.clear()
     src = ds.BudgetedSource(client, max_calls=1)
-    res = await ds.diagnose_product(snap(0), src, yellow_min_pct=10.0,
-                                    channel=await client.get_channel_pricing())
-    assert src.calls == 1 and vendure.count("TierBreakdowns") == 0       # el tope se cuenta ANTES de pedir
+    res = await ds.diagnose_product(snap(0), src, yellow_min_pct=10.0, channel=channel)
+    # 1 request real alcanza (la variante); el desglose y el certificado ya no entran, y el tope se cuenta ANTES de pedir
+    assert src.calls == 1 and len(vendure.requests) == 1 and vendure.count("TierBreakdowns") == 0
+    assert res.blocked is True and src.refused is True
     assert res.diagnosis.rule("c").status == "sin_dato" and res.diagnosis.rule("e").status == "sin_dato"
     assert any("ReadBudgetExhausted" in e for e in res.errors)
     assert not res.complete
@@ -88,10 +93,11 @@ async def test_the_hard_cap_stops_the_reads_and_the_rules_say_no_data(vendure):
 
 async def test_the_cap_counts_every_call_and_never_goes_over(vendure):
     client = VendureClient()
+    variant = await client.get_priced_variant("101")                     # antes de ponerle tope al cliente
+    vendure.requests.clear()
     src = ds.BudgetedSource(client, max_calls=150)
     ch = await src.get_channel_pricing()
-    assert src.calls == 2
-    variant = await client.get_priced_variant("101")
+    assert src.calls == 2                                                 # activeChannel + pricingFiscalProfile: 2 requests reales
     for _ in range(100):
         await ds.diagnose_product(snap(), src, yellow_min_pct=10.0, channel=ch, variant=variant)
     assert src.calls == 150 and src.exhausted
@@ -149,4 +155,4 @@ def test_neighbor_boxes_come_from_the_snapshot_specs():
 async def test_the_source_wrapper_exposes_no_write_method():
     names = {n for n in dir(ds.BudgetedSource(object())) if not n.startswith("_")}
     assert names == {"get_tier_breakdowns", "get_priced_variant", "get_certification", "get_channel_pricing",
-                     "calls", "exhausted", "max_calls"}
+                     "calls", "exhausted", "max_calls", "budget", "refused"}

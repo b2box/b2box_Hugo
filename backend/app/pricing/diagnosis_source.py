@@ -11,11 +11,13 @@ Reglas de oro:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
+from app.pricing import daily_budget
 from app.pricing.price_breakdown import BreakdownError, TierBreakdown
 from app.pricing.price_diagnosis import (
     Box,
@@ -36,14 +38,14 @@ from app.vendure.client import CertificationInfo, ChannelPricing
 
 log = logging.getLogger(__name__)
 
-# Tope duro de consultas nuevas a Vendure por noche (criterio 1-6 del diseño).
+# Tope duro de REQUESTS HTTP reales a Vendure por día (ART) para las lecturas de la bandeja (criterio 1-6 del diseño).
 MAX_VENDURE_CALLS = 150
 # Cuántos productos parecidos se miran para la referencia de caja.
 NEIGHBORS_TOP_K = 10
 
 
 class ReadBudgetExhausted(RuntimeError):
-    """Se acabó el tope de consultas a Vendure de esta pasada."""
+    """Se acabó el tope de requests a Vendure del día."""
 
 
 class ReadSource(Protocol):
@@ -55,38 +57,78 @@ class ReadSource(Protocol):
     async def get_channel_pricing(self) -> ChannelPricing | None: ...
 
 
+class RequestBudget:
+    """Contador de requests HTTP reales a Vendure, PERSISTENTE (fila del día en `settings`, con reserva atómica y
+    fail-closed: ver `daily_budget`) y por día ART. Sobrevive a los reinicios y a una segunda pasada del mismo día: el tope
+    es de la noche, no de la pasada."""
+
+    KEY = "vendure_review_requests"
+
+    def __init__(self, cap: int = MAX_VENDURE_CALLS, day: str | None = None) -> None:
+        self.cap = cap
+        self.day = day or daily_budget.today_art()
+
+    def used(self) -> int:
+        return daily_budget.used_today(self.KEY, day=self.day)
+
+    def reserve(self) -> int:
+        """Reserva UN request. Levanta `ReadBudgetExhausted` si no hay cupo (o si no se pudo reservar)."""
+        total = daily_budget.reserve(self.KEY, self.cap, day=self.day)
+        if total is None:
+            raise ReadBudgetExhausted(f"tope de {self.cap} requests a Vendure por día")
+        return total
+
+
 class BudgetedSource:
-    """Envuelve un `ReadSource` y cuenta cada consulta; pasado el tope levanta `ReadBudgetExhausted`.
-    Solo reexpone las cuatro lecturas: aunque el cliente real tenga `disable_product`, desde acá no se llega."""
+    """Envuelve un `ReadSource` y topea los requests a Vendure. Solo reexpone las cuatro lecturas: aunque el cliente real
+    tenga `disable_product`, desde acá no se llega.
 
-    def __init__(self, client: ReadSource, max_calls: int = MAX_VENDURE_CALLS) -> None:
+    Con un `VendureClient` se cuelga de su `set_request_hook`: se cuenta CADA request HTTP real (los reintentos de una
+    consulta fallida y el login incluidos), no las consultas lógicas. Un origen sin hook (un doble) cuenta una por llamada."""
+
+    def __init__(self, client: ReadSource, max_calls: int = MAX_VENDURE_CALLS, *, day: str | None = None,
+                 budget: RequestBudget | None = None) -> None:
         self._client = client
-        self.max_calls = max_calls
-        self.calls = 0
+        self.budget = budget or RequestBudget(max_calls, day)
+        self.max_calls = self.budget.cap
+        self.calls = 0                  # requests reservados por ESTA pasada
+        self.refused = False            # el presupuesto dijo que no al menos una vez
+        hook = getattr(client, "set_request_hook", None)
+        self._counts_http = callable(hook)
+        if self._counts_http:
+            hook(self._on_request)
 
-    def _spend(self, n: int = 1) -> None:
-        if self.calls + n > self.max_calls:
-            raise ReadBudgetExhausted(f"tope de {self.max_calls} consultas a Vendure por pasada")
-        self.calls += n
+    async def _on_request(self) -> None:
+        try:
+            await asyncio.to_thread(self.budget.reserve)
+        except ReadBudgetExhausted:
+            self.refused = True
+            raise
+        self.calls += 1
+
+    async def _logical(self, n: int = 1) -> None:
+        if not self._counts_http:
+            for _ in range(n):
+                await self._on_request()
 
     @property
     def exhausted(self) -> bool:
-        return self.calls >= self.max_calls
+        return self.refused or self.budget.used() >= self.max_calls
 
     async def get_tier_breakdowns(self, variant_id: str) -> list[TierBreakdown]:
-        self._spend()
+        await self._logical()
         return await self._client.get_tier_breakdowns(variant_id)
 
     async def get_priced_variant(self, variant_id: str) -> PricedVariant | None:
-        self._spend()
+        await self._logical()
         return await self._client.get_priced_variant(variant_id)
 
     async def get_certification(self, product_id: str, channel_id: str) -> CertificationInfo | None:
-        self._spend()
+        await self._logical()
         return await self._client.get_certification(product_id, channel_id)
 
     async def get_channel_pricing(self) -> ChannelPricing | None:
-        self._spend(2)    # activeChannel + pricingFiscalProfile
+        await self._logical(2)    # activeChannel + pricingFiscalProfile
         return await self._client.get_channel_pricing()
 
 
@@ -96,6 +138,10 @@ class ProductDiagnosis:
     breakdown: dict[str, Any] | None            # el tramo usado, listo para guardar y mostrar
     tiers_breakdown: list[dict[str, Any]] = field(default_factory=list)   # todos los tramos (resumido)
     errors: list[str] = field(default_factory=list)
+    # ¿Se pudo LEER el desglose (aunque no traiga dólares, como un abastecimiento local)? Es lo que hace «completo» al diagnóstico.
+    breakdown_read: bool = False
+    # Algún pedido no salió porque se acabó el tope de requests del día: no cuenta como intento fallido.
+    blocked: bool = False
 
     @property
     def complete(self) -> bool:
@@ -141,15 +187,19 @@ async def diagnose_product(
     variant: PricedVariant | None = None,
     neighbor_boxes_: list[Box] | None = None,
     thresholds: DiagThresholds | None = None,
+    ml_median_cents: int | None = None,
 ) -> ProductDiagnosis | None:
     """Diagnóstico de un snapshot rojo. None si no tiene precio nuestro o mediana de ML (no hay nada que explicar).
 
     `variant`: la variante tal como la bajó el listado nocturno (sin consultas nuevas); si no se pasa se lee
-    una vez. Cada lectura fallida suma un mensaje a `errors` y deja esa parte en «sin dato»."""
-    econ: Economics | None = economics_from_snapshot(snap, yellow_min_pct)
+    una vez. Cada lectura fallida suma un mensaje a `errors` y deja esa parte en «sin dato».
+    `ml_median_cents`: la mediana con la que se calcula el precio máximo; la ficha pasa la de los idénticos FIRMES, la misma
+    que muestra, para que la pantalla no tenga dos medianas (sin pasarla vale la del snapshot)."""
+    econ: Economics | None = economics_from_snapshot(snap, yellow_min_pct, ml_median_cents)
     if econ is None:
         return None
     errors: list[str] = []
+    blocked = False
 
     def note(what: str, exc: Exception) -> None:
         # A la base y a la API va solo el tipo y un código; el detalle, al log del servidor.
@@ -159,6 +209,9 @@ async def diagnose_product(
     if variant is None and snap.variant_id:
         try:
             variant = await source.get_priced_variant(str(snap.variant_id))
+        except ReadBudgetExhausted as exc:
+            blocked = True
+            note("tramos de la variante", exc)
         except Exception as exc:  # noqa: BLE001
             note("tramos de la variante", exc)
 
@@ -168,6 +221,9 @@ async def diagnose_product(
             breakdowns = await source.get_tier_breakdowns(str(snap.variant_id))
         except BreakdownError as exc:
             note("desglose de precio (no cierra)", exc)
+        except ReadBudgetExhausted as exc:
+            blocked = True
+            note("desglose de precio", exc)
         except Exception as exc:  # noqa: BLE001
             note("desglose de precio", exc)
 
@@ -180,6 +236,9 @@ async def diagnose_product(
             if info is not None:
                 cert_facts = CertFacts(info.status, info.cost_usd_cents, info.expires_at, info.holder,
                                        channel.certificate_max_share_pct)
+        except ReadBudgetExhausted as exc:
+            blocked = True
+            note("certificado", exc)
         except Exception as exc:  # noqa: BLE001
             note("certificado", exc)
 
@@ -205,6 +264,8 @@ async def diagnose_product(
         breakdown=row.to_dict() if row is not None else None,
         tiers_breakdown=[_tier_line(b, econ) for b in (breakdowns or []) if b.usd_available],
         errors=errors,
+        breakdown_read=breakdowns is not None,
+        blocked=blocked,
     )
 
 
