@@ -1398,7 +1398,7 @@ El rojo del Semáforo mezcla matches buenos con malos (el drone contra el avión
 | R5 | el dato tiene menos de 48 h (la API y la web del servidor son de la hora de la corrida; la oficina, el `fetched_at` de su búsqueda) | `dato_viejo` |
 | R6 | al menos 3 publicaciones firmes con precio y 2 vendedores distintos | `pocas_publicaciones`, `pocos_vendedores` |
 | R7 | nuestro precio / mediana de ML <= 3 | `precio_extremo` |
-| R8 | rojo firme en 2 corridas **con dato** seguidas; `failed` y `skipped` no suman ni restan, una noche que no es rojo firme reinicia | (espera la racha) |
+| R8 | rojo firme en 2 noches **con dato** seguidas; `failed` y `skipped` no suman ni restan, una noche que no es rojo firme reinicia. Se cuentan noches, no corridas: dos corridas del mismo día (el cron y un «Correr ahora») son una sola | (espera la racha) |
 
 Los números son settings (`pm_review_*`). El motivo queda en `market_price_snapshot.review_flag` (`firme` o
 `dudoso:<motivo>`), y `data_at` guarda de cuándo es el dato.
