@@ -8,6 +8,7 @@ import SettingsView from "../components/SettingsView";
 import HealthView from "../components/HealthView";
 import VisionCompareView from "../components/VisionCompareView";
 import SemaforoView from "../components/SemaforoView";
+import BandejaView from "../components/BandejaView";
 import SeoTextosView from "../components/SeoTextosView";
 import HistoryModal from "../components/HistoryModal";
 import { EventActions } from "../components/EventCard";
@@ -39,6 +40,8 @@ export default function DashboardPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [historyProductId, setHistoryProductId] = useState<string | null>(null);
+  // Al venir de «Rojos dudosos» de la bandeja, el Semáforo abre filtrado.
+  const [semaforoReview, setSemaforoReview] = useState<"dudoso" | null>(null);
 
   // Debounce del buscador: no dispara un request por tecla.
   useEffect(() => {
@@ -60,7 +63,7 @@ export default function DashboardPage() {
     queryFn: getSections,
     refetchInterval: POLL_MS,
   });
-  const NON_LIST = ["settings", "salud", "vision_lab", "semaforo", "seo_textos"];
+  const NON_LIST = ["settings", "salud", "vision_lab", "semaforo", "bandeja", "seo_textos"];
   const isListSection = !NON_LIST.includes(currentSection);
   const eventsQ = useQuery({
     queryKey: ["events", currentSection, page, debouncedSearch],
@@ -83,6 +86,7 @@ export default function DashboardPage() {
   };
 
   function selectSection(key: string) {
+    if (key !== "semaforo") setSemaforoReview(null);
     setCurrentSection(key);
     setPage(0);
     setSearch("");
@@ -190,6 +194,8 @@ export default function DashboardPage() {
       ? "Comparar visión"
       : currentSection === "semaforo"
       ? "Semáforo"
+      : currentSection === "bandeja"
+      ? "Bandeja de precios"
       : currentSection === "seo_textos"
       ? "Textos (SEO)"
       : sections[currentSection]?.label ?? currentSection;
@@ -216,7 +222,14 @@ export default function DashboardPage() {
           ) : currentSection === "vision_lab" ? (
             <VisionCompareView />
           ) : currentSection === "semaforo" ? (
-            <SemaforoView />
+            <SemaforoView key={semaforoReview ?? "todos"} initialReview={semaforoReview} />
+          ) : currentSection === "bandeja" ? (
+            <BandejaView
+              onOpenSemaforo={() => {
+                setSemaforoReview("dudoso");
+                selectSection("semaforo");
+              }}
+            />
           ) : currentSection === "seo_textos" ? (
             <SeoTextosView />
           ) : (

@@ -321,5 +321,6 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   settings: IconSettings,
   salud: IconActivity,
   semaforo: IconTrafficLight,
+  bandeja: IconInbox,
   seo_textos: IconFileText,
 };
