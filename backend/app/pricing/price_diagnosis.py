@@ -842,12 +842,14 @@ def diagnose(f: DiagFacts, th: DiagThresholds | None = None) -> Diagnosis:
     )
 
 
-def economics_from_snapshot(snap: Any, yellow_min_pct: float) -> Economics | None:
-    """Economics a partir de un MarketPriceSnapshot (o None si no tiene precio nuestro o mediana de ML)."""
-    if not snap.our_price_cents or not snap.ml_median_cents:
+def economics_from_snapshot(snap: Any, yellow_min_pct: float, ml_median_cents: int | None = None) -> Economics | None:
+    """Economics a partir de un MarketPriceSnapshot (o None si no tiene precio nuestro o mediana de ML). `ml_median_cents`
+    pisa la mediana del snapshot: la ficha usa la de los idénticos firmes, la que muestra."""
+    median = ml_median_cents or snap.ml_median_cents
+    if not snap.our_price_cents or not median:
         return None
     return Economics(
-        our_price_cents=int(snap.our_price_cents), ml_median_cents=int(snap.ml_median_cents),
+        our_price_cents=int(snap.our_price_cents), ml_median_cents=int(median),
         commission_pct=float(snap.commission_pct or 0.0), shipping_cents=int(snap.shipping_cents or 0),
         yellow_min_pct=float(yellow_min_pct),
     )

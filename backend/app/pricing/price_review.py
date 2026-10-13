@@ -46,6 +46,7 @@ from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
 from app.db.session import engine
 from app.dedup import catalog_index
+from app.pricing import daily_budget
 from app.pricing import diagnosis_source as ds
 from app.pricing import price_monitor, semaforo
 from app.pricing.safe_error import error_code
@@ -79,6 +80,8 @@ FIRM_SOURCES = frozenset({"clip", "clip+nombre", "manual"})
 # Cuántas corridas hacia atrás se miran para la racha, y cuántas veces se reintenta un diagnóstico sin desglose.
 STREAK_LOOKBACK_RUNS = 30
 DIAG_MAX_ATTEMPTS = 5
+# Tiempo máximo que la pasada le dedica a leer Vendure (el resto de la pasada es solo base de datos).
+PASS_DEADLINE_S = 900.0
 JSON_LIMIT = 8_000
 EVENT_JSON_LIMIT = 2_000
 
@@ -523,41 +526,75 @@ def _variant_of(catalog: Mapping[str, VendureProduct] | None, snap: MarketPriceS
     return None
 
 
-async def _diagnose(snap: MarketPriceSnapshot, source: ds.BudgetedSource, channel, plan: _Plan,
-                    catalog: Mapping[str, VendureProduct] | None) -> ds.ProductDiagnosis | None:
+@dataclass(slots=True)
+class _Diag:
+    """Lo que dio diagnosticar un producto. `blocked`: no se pudo pedir (se acabó el tope de requests del día o el tiempo de la
+    pasada); eso NO cuenta como intento: la ficha se reintenta mañana con todos sus intentos."""
+    pdiag: ds.ProductDiagnosis | None
+    blocked: bool = False
+
+
+class _Gate:
+    """El tope de requests del día y el tiempo de la pasada, mirados antes de pedirle algo a Vendure."""
+
+    def __init__(self, source: ds.BudgetedSource, deadline_at: float) -> None:
+        self.source = source
+        self.deadline_at = deadline_at
+        self.deadline_hit = False
+
+    def remaining(self) -> float:
+        return max(0.0, self.deadline_at - time.monotonic())
+
+    @property
+    def closed(self) -> bool:
+        if self.remaining() <= 0:
+            self.deadline_hit = True
+        return self.deadline_hit or self.source.refused
+
+
+async def _diagnose(snap: MarketPriceSnapshot, gate: _Gate, channel, plan: _Plan,
+                    catalog: Mapping[str, VendureProduct] | None, median: int | None) -> _Diag:
+    if gate.closed:
+        return _Diag(None, blocked=True)
     neighbors = ds.neighbor_boxes(snap.product_id, plan.specs_by_product, catalog_index.neighbors_of)
     try:
-        return await ds.diagnose_product(
-            snap, source, yellow_min_pct=plan.params.yellow_min, channel=channel,
-            variant=_variant_of(catalog, snap), neighbor_boxes_=neighbors, thresholds=diag_thresholds())
+        pdiag = await asyncio.wait_for(ds.diagnose_product(
+            snap, gate.source, yellow_min_pct=plan.params.yellow_min, channel=channel,
+            variant=_variant_of(catalog, snap), neighbor_boxes_=neighbors, thresholds=diag_thresholds(),
+            ml_median_cents=median), timeout=gate.remaining())
+    except (asyncio.TimeoutError, TimeoutError):
+        gate.deadline_hit = True
+        log.warning("price_review: se acabó el tiempo de la pasada diagnosticando %s", snap.product_id)
+        return _Diag(None, blocked=True)
     except Exception:  # noqa: BLE001  (un producto no puede tirar la pasada)
         log.exception("price_review: el diagnóstico de %s reventó", snap.product_id)
-        return None
+        return _Diag(None)
+    return _Diag(pdiag, blocked=bool(pdiag and pdiag.blocked))
 
 
 def _diag_fields(pdiag: ds.ProductDiagnosis | None, attempts: int) -> dict[str, Any]:
-    """Las columnas de diagnóstico de la ficha a partir del resultado."""
+    """Las columnas de diagnóstico de la ficha a partir del resultado. «Completo» = se pudo LEER el desglose (aunque no traiga
+    dólares: un abastecimiento local, o un tramo sin precio que la regla (b) ya explica)."""
+    pending = "parcial" if attempts >= DIAG_MAX_ATTEMPTS else "pendiente"
     if pdiag is None:
-        return {"diag_status": "parcial" if attempts >= DIAG_MAX_ATTEMPTS else "pendiente", "diag": _cap_json(
+        return {"diag_status": pending, "diag": _cap_json(
             {"attempts": attempts, "errors": ["el diagnóstico no pudo armarse"]}), "breakdown": None,
             "probable_cause": None, "fixable": None}
     d = pdiag.diagnosis.to_dict()
     d["errors"], d["attempts"] = pdiag.errors, attempts
     d["tiers"] = pdiag.tiers_breakdown
-    complete = pdiag.breakdown is not None
-    status = "completo" if complete else ("parcial" if attempts >= DIAG_MAX_ATTEMPTS else "pendiente")
     return {
-        "diag_status": status, "diag": _cap_json(d),
+        "diag_status": "completo" if pdiag.breakdown_read else pending, "diag": _cap_json(d),
         "breakdown": _cap_json({"tier": pdiag.breakdown, "tiers": pdiag.tiers_breakdown}) if pdiag.breakdown else None,
         "probable_cause": pdiag.diagnosis.probable_cause, "fixable": pdiag.diagnosis.fixable,
     }
 
 
-def _create_item(plan: _Plan, cand: _Candidate, pdiag: ds.ProductDiagnosis | None) -> bool:
+def _create_item(plan: _Plan, cand: _Candidate, diag: _Diag) -> bool:
     """Abre la ficha y su evento `propuesto` en UNA transacción. False si ya había una abierta (otro
     proceso, o esta misma pasada antes de un reinicio): no se duplica nada."""
     snap, v = cand.snap, cand.verdict
-    fields = _diag_fields(pdiag, attempts=1)
+    fields = _diag_fields(diag.pdiag, attempts=0 if diag.blocked else 1)
     item = PriceReviewItem(
         product_id=snap.product_id, product_name=snap.product_name, product_code=snap.product_code,
         product_slug=snap.product_slug, image_url=snap.product_image_url, open_key=snap.product_id,
@@ -584,14 +621,26 @@ def _create_item(plan: _Plan, cand: _Candidate, pdiag: ds.ProductDiagnosis | Non
     return True
 
 
-def _retry_diag(plan: _Plan, item_id: int, pdiag: ds.ProductDiagnosis | None) -> None:
+def _retry_diag(plan: _Plan, item_id: int, diag: _Diag, verdict: FirmVerdict | None) -> None:
+    """Completa el diagnóstico de una ficha abierta. Si no se pudo pedir nada (tope del día, tiempo de la pasada) la ficha queda
+    como estaba y NO gasta un intento. Si lo de hoy sigue siendo un rojo firme, las cifras de la tarjeta se refrescan con las
+    mismas con las que se calculó el diagnóstico (una sola mediana, un solo precio)."""
+    if diag.blocked and diag.pdiag is None:
+        return
     with Session(engine, expire_on_commit=False) as s:
         item = s.get(PriceReviewItem, item_id)
         if item is None or item.state not in OPEN_STATES:
             return
-        attempts = int((_loads(item.diag) or {}).get("attempts", 1)) + 1
-        for k, val in _diag_fields(pdiag, attempts).items():
+        attempts = int((_loads(item.diag) or {}).get("attempts", 1)) + (0 if diag.blocked else 1)
+        for k, val in _diag_fields(diag.pdiag, attempts).items():
             setattr(item, k, val)
+        if verdict is not None and verdict.firm:
+            snap = s.get(MarketPriceSnapshot, item.last_snapshot_id) if item.last_snapshot_id else None
+            if snap is not None:
+                item.our_price_cents, item.ml_median_cents = snap.our_price_cents, verdict.firm_median
+                item.firm_listing_count, item.firm_seller_count = verdict.firm_listings, verdict.firm_sellers
+                item.price_ratio = None if verdict.price_ratio is None else round(verdict.price_ratio, 3)
+                item.reff_ratio = None if verdict.reff_ratio is None else round(verdict.reff_ratio, 3)
         flags = [f for f in (_loads(item.flags) or []) if not str(f).startswith("diag_")]
         if item.diag_status != "completo":
             flags.append("diag_pendiente" if item.diag_status == "pendiente" else "diag_parcial")
@@ -623,31 +672,46 @@ def _finish(plan: _Plan) -> bool:
 
 async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | None = None,
                       source: ds.ReadSource | None = None, now: datetime | None = None,
-                      max_calls: int = ds.MAX_VENDURE_CALLS) -> dict[str, Any] | None:
+                      max_calls: int = ds.MAX_VENDURE_CALLS, deadline_s: float = PASS_DEADLINE_S) -> dict[str, Any] | None:
     """La pasada de la bandeja sobre una corrida del semáforo. Devuelve el resumen, o None si la corrida no
     existe o ya fue procesada (`review_at`). NO escribe en Vendure.
 
-    `catalog`: los productos que acaba de leer la corrida (para no volver a pedir los tramos). `source`: de dónde
-    leer Vendure (por defecto el cliente real, con tope de `max_calls` consultas)."""
+    `catalog`: los productos que acaba de leer la corrida (para no volver a pedir los tramos). `source`: de dónde leer
+    Vendure (por defecto el cliente real). Las lecturas tienen DOS topes: `max_calls` REQUESTS HTTP reales por día (ART), contados
+    en la base (sobreviven a reinicios y a una segunda pasada del mismo día) y `deadline_s` segundos para leer. Lo que no entra
+    queda «diagnóstico pendiente» y no gasta un intento: se completa en las próximas noches."""
     t0 = time.monotonic()
     plan = await asyncio.to_thread(_plan, run_id, now)
     if plan is None:
         return None
-    calls = 0
     if not plan.done and (plan.to_create or plan.pending_diag):
-        budgeted = ds.BudgetedSource(source or VendureClient(), max_calls)        # type: ignore[arg-type]
+        budgeted = ds.BudgetedSource(source or VendureClient(), max_calls,           # type: ignore[arg-type]
+                                     day=daily_budget.today_art(plan.now))
+        gate = _Gate(budgeted, time.monotonic() + deadline_s)
+        if await asyncio.to_thread(budgeted.budget.used) >= budgeted.max_calls:      # el día ya gastó todo (otra pasada)
+            budgeted.refused = True
         channel = None
-        try:
-            channel = await budgeted.get_channel_pricing()
-        except Exception as exc:  # noqa: BLE001
-            plan.summary.setdefault("errores", []).append(f"canal: {error_code(exc)}")
-            log.warning("price_review: no se pudieron leer los datos del canal: %s: %s", type(exc).__name__, str(exc)[:200])
+        if not gate.closed:
+            try:
+                channel = await asyncio.wait_for(budgeted.get_channel_pricing(), timeout=gate.remaining())
+            except ds.ReadBudgetExhausted:
+                pass                                       # ya quedó anotado en `budgeted.refused`
+            except (asyncio.TimeoutError, TimeoutError):
+                gate.deadline_hit = True
+            except Exception as exc:  # noqa: BLE001
+                plan.summary.setdefault("errores", []).append(f"canal: {error_code(exc)}")
+                log.warning("price_review: no se pudieron leer los datos del canal: %s: %s", type(exc).__name__, str(exc)[:200])
         retried = 0
         for item_id in plan.pending_diag:           # primero las que quedaron sin desglose (las más viejas)
+            if gate.closed:
+                break
             snap, _ = await asyncio.to_thread(_load_pending, item_id)
             if snap is None:
                 continue
-            await asyncio.to_thread(_retry_diag, plan, item_id, await _diagnose(snap, budgeted, channel, plan, catalog))
+            verdict = evaluate_firm(snap, plan.params, plan.now)
+            median = verdict.firm_median if verdict.firm else None
+            diag = await _diagnose(snap, gate, channel, plan, catalog, median)
+            await asyncio.to_thread(_retry_diag, plan, item_id, diag, verdict)
             retried += 1
         created = 0
         for cand in plan.to_create:
@@ -655,13 +719,15 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
                 plan.summary["cortada_por_modo"] = True
                 log.warning("price_review #%s: pm_mode bajó a 0 durante la pasada; no se abren más fichas", run_id)
                 break
-            pdiag = await _diagnose(cand.snap, budgeted, channel, plan, catalog)
-            created += bool(await asyncio.to_thread(_create_item, plan, cand, pdiag))
-        calls = budgeted.calls
-        plan.summary.update({"nuevas": created, "diag_reintentados": retried, "consultas_vendure": calls,
-                             "tope_consultas": budgeted.max_calls})
-        if budgeted.exhausted:
+            diag = await _diagnose(cand.snap, gate, channel, plan, catalog, cand.verdict.firm_median)
+            created += bool(await asyncio.to_thread(_create_item, plan, cand, diag))
+        used_today = await asyncio.to_thread(budgeted.budget.used)
+        plan.summary.update({"nuevas": created, "diag_reintentados": retried, "consultas_vendure": budgeted.calls,
+                             "consultas_hoy": used_today, "tope_consultas": budgeted.max_calls})
+        if budgeted.refused or used_today >= budgeted.max_calls:
             plan.summary["tope_alcanzado"] = True
+        if gate.deadline_hit:
+            plan.summary["tiempo_agotado"] = True
     plan.summary["duracion_s"] = round(time.monotonic() - t0, 2)
     wrote = await asyncio.to_thread(_finish, plan)
     log.info("price_review #%s (modo %s): %s%s", run_id, mode_label(plan.requested_mode), plan.summary,

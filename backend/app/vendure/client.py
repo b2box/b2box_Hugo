@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -258,10 +259,20 @@ class VendureClient:
         # contra el admin de prod, en cada refresh.
         self._bearer: str = s.vendure_bearer or VendureClient._shared_bearer
         self._login_lock = asyncio.Lock()  # evita re-logins concurrentes
+        # Se llama ANTES de cada request HTTP real a Vendure (cada intento de un reintento y cada login). La bandeja lo usa
+        # para contar y topear las lecturas por noche; si levanta una excepción el request no sale y no se reintenta.
+        self._request_hook: Callable[[], Awaitable[None]] | None = None
         if not self._bearer:
             log.info(
                 "VENDURE_BEARER vacío — Hugo se va a loguear con user/pass al primer call"
             )
+
+    def set_request_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
+        self._request_hook = hook
+
+    async def _before_request(self) -> None:
+        if self._request_hook is not None:
+            await self._request_hook()
 
     def _new_client(self) -> Client:
         """Crea un gql.Client NUEVO con el bearer actual.
@@ -317,6 +328,7 @@ class VendureClient:
             if self._channel_token:
                 headers["vendure-token"] = self._channel_token
 
+            await self._before_request()
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
@@ -999,6 +1011,7 @@ class VendureClient:
         last_exc: Exception | None = None
         relogged_in = False
         for attempt in range(1, max_attempts + 1):
+            await self._before_request()          # cada intento es un request real: se cuenta (y puede frenarse) acá
             try:
                 async with self._new_client() as session:
                     return await session.execute(query, variable_values=variables)
