@@ -38,6 +38,8 @@ def pgapi(pg, monkeypatch):
     settings = Settings(vendure_api_url="https://example.invalid/admin-api", oficina_search_key=KEY)
     monkeypatch.setattr(oficina_ml, "get_settings", lambda: settings)
     oficina_routes.reset_limits()
+    with pg.begin() as c:                                    # 11 y 12 traen una fecha fija de octubre: la cola solo mira los
+        c.execute(text("UPDATE market_price_snapshot SET captured_at = now() - interval '1 day'"))   # de los últimos 3 días
     with Session(pg) as s:                                   # pg_base ya trae los productos 11 y 12
         for pid in range(20, 60):
             s.add(MarketPriceSnapshot(run_id=1, product_id=str(pid), ml_status="no_data", product_name=f"Organizador cocina {pid}",
