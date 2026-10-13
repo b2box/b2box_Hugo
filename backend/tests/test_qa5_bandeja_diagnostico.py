@@ -424,3 +424,28 @@ def test_the_text_of_b_keeps_the_names_it_mentions_capitalized(world):
     calc = healthy("0").used()["netoChannelPerUnit"]["minor"]
     d, _ = diag(world, healthy("108", median=q.median_for(P0, 5), sale_prices={10: int(calc * 1.08)}), neighbors())
     assert "de vendure" not in d.rule("b").summary, d.rule("b").summary
+
+
+# ─── Solo Argentina: todas las lecturas nuevas van al canal configurado ──────────────────────────────
+
+
+async def test_every_new_read_carries_the_channel_token_so_the_numbers_are_the_argentina_ones(world, monkeypatch):
+    """Decisión de Nico: b2box.app vende solo en Argentina. Las 4 lecturas nuevas (y la del listado) tienen que ir con el header
+    `vendure-token` del canal configurado: sin él Vendure contestaría con el canal por DEFECTO (otras tarifas, otro fee)."""
+    from app.config import Settings
+    from app.pricing import diagnosis_source as ds
+    from app.vendure import client as vendure_client
+    from app.vendure.client import VendureClient
+
+    cfg = Settings(vendure_api_url="https://example.invalid/admin-api", vendure_channel_token="ar-token")
+    monkeypatch.setattr(vendure_client, "get_settings", lambda: cfg)
+    sc = healthy("1", median=q.median_for(P0, -2))
+    world.add(sc)
+    client = VendureClient()
+    channel = await client.get_channel_pricing()
+    await ds.diagnose_product(q.snap_of(sc), client, yellow_min_pct=10.0, channel=channel, neighbor_boxes_=neighbors())
+    await client.fetch_all_products_priced()
+    reads = [r for r in world.spy.requests if r["host"] == VendureWorld.HOST]
+    ops = {__import__("re").match(r"\s*query\s+(\w+)", __import__("json").loads(r["body"])["query"]).group(1) for r in reads}
+    assert {"ActiveChannelPricing", "FiscalProfile", "TierBreakdowns", "PricedVariant", "ProductCertification", "Products"} <= ops
+    assert {r["channel"] for r in reads} == {"ar-token"}

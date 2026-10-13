@@ -290,7 +290,8 @@ class NetSpy:
 
     def _record(self, request: Any) -> dict[str, Any]:
         body = request.content[:2000].decode("utf-8", "replace") if request.content else ""
-        rec = {"method": request.method, "host": request.url.host, "path": request.url.path, "body": body}
+        rec = {"method": request.method, "host": request.url.host, "path": request.url.path, "body": body,
+               "channel": request.headers.get("vendure-token")}
         self.requests.append(rec)
         return rec
 
