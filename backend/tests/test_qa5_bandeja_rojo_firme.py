@@ -203,8 +203,6 @@ def OK3():
     return ((900_000, "clip", "a"), (905_000, "clip", "b"), (895_000, "clip", "c"))
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): los vendedores se comparan tal cual (sensible a mayúsculas): «TiendaX» y «tiendax» "
-                                       "cuentan como dos vendedores distintos y alcanzan la evidencia mínima de 2 (price_review.py:222)")
 def test_r6_the_same_seller_written_in_two_cases_is_one_seller():
     v = verdict(reds((900_000, "clip", "TiendaX"), (905_000, "clip", "tiendax"), (895_000, "clip", "TIENDAX ")))
     assert v.status == pr.DUDOSO and v.reason == "pocos_vendedores"

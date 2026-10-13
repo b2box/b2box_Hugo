@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
@@ -194,6 +195,13 @@ def _data_time(snap: MarketPriceSnapshot) -> datetime | None:
     return snap.captured_at
 
 
+def _seller_key(seller: Any) -> str:
+    """Un vendedor sin distinguir mayúsculas, espacios ni tildes de más: «TiendaX», «tiendax» y « TIENDAX » son el mismo, y
+    cuentan UNA vez para los 2 vendedores que pide R6."""
+    text = unicodedata.normalize("NFKC", str(seller or ""))
+    return " ".join(text.split()).casefold()
+
+
 def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | None = None) -> FirmVerdict:
     """R1 y R3-R7 sobre un snapshot. (R2 y R8 dependen de otras fichas y de otras noches: las mira `process_run`.)
 
@@ -223,7 +231,7 @@ def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | No
     # R3: solo con los idénticos confirmados por foto + nombre o por una persona
     firm_entries = [m for m in entries if m.get("source") in FIRM_SOURCES]
     v.firm_prices = [x for m in firm_entries for x in price_monitor._entry_prices(m)]
-    v.firm_sellers = len({str(s) for m in firm_entries for s in (m.get("sellers") or []) if s})
+    v.firm_sellers = len({name for m in firm_entries for s in (m.get("sellers") or []) if (name := _seller_key(s))})
     if not v.firm_prices or _color_with(v.firm_prices, snap, p)[0] != semaforo.ROJO:
         return doubt("fuentes")
     v.firm_median = semaforo.median_cents(v.firm_prices)
