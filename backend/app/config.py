@@ -656,6 +656,10 @@ class Settings(EnvSettings):
     pm_diag_min_neighbors: int = 5
     # Destinatarios del resumen diario de las 08:30 (hora de Argentina), separados por coma. Vacío = no se manda.
     pm_review_emails: str = ""
+    # Cron (UTC) del resumen diario. 11:30 UTC = 08:30 ART.
+    price_review_digest_cron_utc: str = Field(
+        default="30 11 * * *", description="Cron (UTC) del resumen diario de la bandeja de revisión",
+    )
     # Para los links del detalle y del mail (plantillas con {id} / {slug}). Vacío = sin link.
     hugo_public_url: str = ""
     vendure_admin_product_url: str = ""
