@@ -45,11 +45,12 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "cerrados": (price_review.DESPUBLICADO, price_review.CORREGIDO, price_review.CERRADO_AUTO),
 }
 ALL_STATES = tuple(s for states in GROUPS.values() for s in states)
-CAUSES = ("a", "b", "c", "d", "e", "ninguna", "pendiente")
+CAUSES = ("a", "b", "c", "d", "e", "ninguna", "sin_dato", "pendiente")
 
 CAUSE_LABEL = {
     "a": "Caja fuera de rango", "b": "Tramos mal armados", "c": "Certificado alto",
     "d": "Valor bajo por m³", "e": "ML bajo el costo de fábrica", "ninguna": "Sin causa clara",
+    "sin_dato": "Diagnóstico incompleto",
 }
 STATE_LABEL = {
     "propuesto": "Propuesto", "en_revision": "En revisión", "corrigiendo": "Corrigiendo",
@@ -88,6 +89,9 @@ def _cause_sentence(item: PriceReviewItem, diag: dict[str, Any] | None) -> str |
         return None
     if item.probable_cause == "ninguna":
         return "Ninguna de las cinco causas lo explica: lo más probable es que el match de Mercado Libre esté mal."
+    if item.probable_cause == "sin_dato":
+        missing = ", ".join(diag.get("missing") or []) or "algunos datos"
+        return f"No se pudo completar el diagnóstico (falta: {missing}): no se puede descartar ninguna causa."
     for r in diag.get("rules") or []:
         if r.get("code") == item.probable_cause:
             return r.get("summary")

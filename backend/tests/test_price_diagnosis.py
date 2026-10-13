@@ -130,7 +130,7 @@ A_CASES = [
     ("no: caja parecida a la de los parecidos", dict(box=Box(25, 18, 15, 0.9)), False, []),
     ("no: z enorme (MAD cero) pero apenas 1,5 veces el volumen",
      dict(neighbor_boxes=[Box(24, 18, 14, 0.8)] * 8, box=Box(24, 18, 21, 0.8)), False, []),
-    ("no: menos de 5 parecidos con caja y sin imposibles internos",
+    ("sin dato: menos de 5 parecidos con caja y sin imposibles internos",
      dict(neighbor_boxes=ref_boxes(4)), False, []),
     ("no: abastecimiento local", dict(sourcing_mode="local_stock"), False, []),
 ]
@@ -143,7 +143,9 @@ def test_rule_a(name, kw, fires, subs):
     if fires:
         assert set(subs) <= set(r.subcodes) and r.estimated
     else:
-        assert r.status in ("no", "no_aplica") and not r.subcodes
+        assert r.status in ("no", "no_aplica", "sin_dato") and not r.subcodes
+        if name.startswith("sin dato"):
+            assert r.status == "sin_dato" and "no se pudo comparar" in r.summary.lower()
 
 
 def test_rule_a_edges_on_the_ratio_and_the_z_threshold():
@@ -490,6 +492,16 @@ def test_no_cause_means_no_clear_cause_and_points_to_the_listings():
     assert "match de Mercado Libre" in d.suggestion
 
 
+def test_a_missing_reading_is_never_reported_as_no_clear_cause():
+    """Si a alguna regla le faltó un dato y ninguna dispara, la causa es «sin_dato», no «ninguna»: no se descarta nada."""
+    row = replace(rows(2)[0], certification_usd=Decimal(0))
+    f = facts(2, median_ars=8_500, box=Box(20, 15, 8, 0.35), neighbor_boxes=None)
+    f = replace(f, breakdowns=[row], tier_used="tier:min_qty=50", economics=econ_for(row, 8_500))
+    d = diagnose(f, TH)
+    assert d.rule("a").status == "sin_dato" and not any(r.fires for r in d.rules)
+    assert d.probable_cause == "sin_dato" and "Falta información" in d.suggestion
+
+
 def test_fixable_and_the_not_enough_warning():
     f = facts(0, median_ars=70_000)
     d = diagnose(f, TH)
@@ -515,7 +527,7 @@ def test_missing_data_is_reported_and_never_invented():
     assert set(d.missing) >= {"desglose de precio", "tramos de la variante", "productos parecidos", "certificado"}
     assert d.rule("b").status == "sin_dato" and d.rule("c").status == "sin_dato"
     assert d.rule("d").status == "sin_dato" and d.rule("e").status == "sin_dato"
-    assert d.probable_cause in ("a", "ninguna")        # (a3) todavía puede dispararse con la caja sola
+    assert d.probable_cause in ("a", "sin_dato")       # (a3) todavía puede dispararse con la caja sola; si no, no se descarta nada
     assert not d.complete
 
 

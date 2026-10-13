@@ -40,7 +40,8 @@ from app.pricing.semaforo import PricedVariant, PriceTier
 # ── Códigos y estados ─────────────────────────────────────────────
 
 CAUSES = ("a", "b", "c", "d", "e")
-NO_CAUSE = "ninguna"
+NO_CAUSE = "ninguna"        # se evaluaron las cinco reglas y ninguna explica el rojo
+UNKNOWN_CAUSE = "sin_dato"  # ninguna dispara, pero a alguna le faltó un dato: no se puede descartar
 
 ST_FIRES = "dispara"
 ST_NO = "no"
@@ -431,10 +432,15 @@ def rule_a(f: DiagFacts, th: DiagThresholds, row: TierBreakdown | None) -> RuleR
                 word = "mayor" if ratio > 1 else "menor"
                 reasons.append(f"su {_METRIC_LABEL[metric]} es {_num(ratio if ratio >= 1 else 1 / ratio)} veces {word} que el de los parecidos")
     if not subcodes:
-        note = f" ({ref_note})" if ref_note else ""
+        if ref is None:
+            # Sin productos parecidos con qué compararla solo se pudieron mirar los imposibles internos (a3):
+            # no se puede afirmar que la caja esté bien.
+            return RuleResult(**base, status=ST_NO_DATA, evidence=evidence, summary=(
+                f"No se pudo comparar la caja con la de productos parecidos ({ref_note}); "
+                "tampoco es imposible por sí sola (más chica que el producto o enorme)."))
         return RuleResult(**base, status=ST_NO, evidence=evidence, summary=(
-            f"La caja {box.dims_text()} cm, {_num(box.weight or 0)} kg no se aleja de lo normal{note}."
-            if box.is_complete else f"No se detecta una caja fuera de rango{note}."))
+            f"La caja {box.dims_text()} cm, {_num(box.weight or 0)} kg no se aleja de lo normal "
+            f"(parecidos: ~{ref.dims_text} cm)." if box.is_complete else "No se detecta una caja fuera de rango."))
 
     # Qué pasaría con la caja de referencia (cota inferior del ahorro: ignora aranceles sobre el flete)
     p_si: float | None = None
@@ -782,6 +788,7 @@ _SUGGESTION = {
     "a": "Corregir", "b": "Corregir", "c": "Corregir",
     "d": "Mantener (si es nicho) o Despublicar", "e": "Buscar otro proveedor",
     NO_CAUSE: "Revisar las publicaciones: probablemente el match de Mercado Libre está mal",
+    UNKNOWN_CAUSE: "Falta información para diagnosticar: revisar las publicaciones y volver a mirar mañana",
 }
 
 
@@ -790,7 +797,10 @@ def diagnose(f: DiagFacts, th: DiagThresholds | None = None) -> Diagnosis:
     th = th or DiagThresholds()
     row = select_tier(f.breakdowns, f.tier_used)
     rules = [rule_a(f, th, row), rule_b(f, th, row), rule_c(f, th, row), rule_d(f, th, row), rule_e(f, th, row)]
-    cause = next((r.code for r in rules if r.fires), NO_CAUSE)
+    cause = next((r.code for r in rules if r.fires), None)
+    if cause is None:
+        # Sin causa clara solo si TODAS se pudieron evaluar; si a alguna le faltó un dato, no se descarta nada.
+        cause = UNKNOWN_CAUSE if any(r.status == ST_NO_DATA for r in rules) else NO_CAUSE
     ours = [r for r in rules if r.code in ("a", "b", "c") and r.fires]
     if any(r.fixes == FIX_YES for r in ours):
         fixable = FIX_YES
