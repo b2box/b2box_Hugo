@@ -131,3 +131,22 @@ async def test_the_pass_over_1500_snapshots_with_400_red_firm_ones_takes_under_a
     assert summary["firmes"] == 400 and summary["nuevas"] == 400
     assert elapsed <= 60, elapsed
     print(f"\nTIEMPO pasada 1500 snapshots / 400 fichas: {elapsed:.1f} s")
+
+
+@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): un producto local_stock (Vendure devuelve el desglose en ceros) queda con el diagnóstico «pendiente» y se "
+                                       "reintenta TODAS las noches hasta 5 veces, gastando consultas del tope (price_review._diag_fields: «completo» = hay desglose)")
+async def test_a_local_stock_ficha_is_not_left_pending_and_retried_forever(stack):
+    from app.db.models import PriceReviewItem as Item
+
+    world = stack
+    prev = q.new_run(NOW - timedelta(days=1))
+    today = q.new_run(NOW)
+    tiers = [q.Tier(1, None, "0", 1, "0", "0", empty=True)]
+    sc = q.Scenario("900", "v900", tiers, 1, 2_000_000, sourcing="local_stock", sale_prices={1: 2_500_000})
+    world.add(sc)
+    for rid, at, flag in ((prev, NOW - timedelta(days=1), "firme"), (today, NOW, None)):
+        q.save(mk_snap(rid, "900", our=sc.our_price, listings=((2_000_000, "clip", "a"), (2_001_000, "clip", "b"), (1_999_000, "clip", "c")),
+                       variant="v900", tier="tier:min_qty=1", data_at=at, captured_at=at, flag=flag))
+    await pr.process_run(today, now=NOW + timedelta(hours=1))
+    [item] = q.rows(Item)
+    assert item.diag_status == "completo", (item.diag_status, item.probable_cause)
