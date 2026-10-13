@@ -430,14 +430,35 @@ async def test_a_cut_keeps_exactly_what_was_spent_and_resume_adds_up(world, monk
     assert run.ml_requests_used == daily_budget.used_today(market_ml.ML_COUNTER_KEY) > spent
 
 
-async def test_pm_mode_1_only_logs_and_stays_in_shadow(world, caplog):
+async def test_pm_mode_1_runs_the_review_pass_and_never_touches_vendure(world, caplog):
+    """Con pm_mode=1 (propuesta) la corrida es la misma: la bandeja se llena DESPUÉS de cerrarla y no escribe en Vendure."""
     _set("pm_mode", 1)
     with caplog.at_level(logging.WARNING, logger="app.pricing.price_monitor"):
         await price_monitor.run_price_monitor()
-    assert "modo activo todavía no implementado" in caplog.text
+    assert "todavía no implementado" not in caplog.text
     [run] = _runs()
     assert run.mode == 1 and run.status == "ok"
+    assert run.review_at is not None and json.loads(run.review_summary)["mode_effective"] == 1
     assert FakeVendure.forbidden == [] and world.graphql_calls == []
+
+
+async def test_a_failing_review_pass_never_turns_the_run_into_a_failure(world, monkeypatch):
+    from app.pricing import price_review
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("bug de la bandeja")
+
+    monkeypatch.setattr(price_review, "process_run", boom)
+    result = await price_monitor.run_price_monitor()
+    [run] = _runs()
+    assert result["status"] == "ok" and run.status == "ok" and run.error is None
+    assert run.review_at is None and "bug de la bandeja" in json.loads(run.review_summary)["error"]
+
+
+async def test_every_snapshot_remembers_when_its_data_is_from(world):
+    await price_monitor.run_price_monitor()
+    snaps = _snaps()
+    assert snaps["1"].data_at is not None and snaps["1"].data_at == snaps["1"].captured_at
 
 
 async def test_vendure_down_closes_the_run_as_failed(world):

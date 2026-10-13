@@ -23,8 +23,9 @@ Cada noche, para cada producto habilitado del catálogo:
 También se miden los productos deshabilitados de Vendure (`pm_include_disabled`):
 quedan marcados en el snapshot y nunca llevan a escribir nada.
 
-Lo que este job NO hace (PR 2): no toca Vendure. Ni `enabled`, ni custom
-fields, ni nada. `pm_mode=1` existe como setting pero acá solo se loguea.
+Lo que este job NO hace: no toca Vendure. Ni `enabled`, ni custom fields, ni nada. Al
+terminar la corrida, `pricing/price_review.py` marca los rojos firmes y, con `pm_mode >= 1`, abre
+las fichas de la bandeja de Pao: tampoco escribe en Vendure.
 
 Reanudación: la corrida vive en `price_monitor_run` con status `running`
 hasta que termina. Si el proceso se reinicia a mitad de la noche, la próxima
@@ -1366,7 +1367,18 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
             snap = await _match_via_web(ctx, product, snap, w)
     _store_listings(snap, _json_list(snap.matched_listings), w.igual_unpriced, w.similars, w.others,
                     keep=ctx.keep_listings, green_min=ctx.green_min, yellow_min=ctx.yellow_min)
+    snap.data_at = _data_time(ctx, snap, product.id)
     return snap
+
+
+def _data_time(ctx: RunContext, snap: MarketPriceSnapshot, product_id: str) -> datetime:
+    """De cuándo es el dato de los idénticos: la hora de la corrida (API y web del servidor), o el
+    `fetched_at` de la búsqueda de la oficina, que puede tener días (la bandeja exige un dato fresco)."""
+    if snap.match_origin == ORIGIN_OFICINA:
+        fresh = ctx.oficina.get(product_id)
+        if fresh is not None:
+            return fresh.fetched_at
+    return snap.captured_at or utcnow()
 
 
 # ─── La corrida ───────────────────────────────────────────────────
@@ -1459,10 +1471,6 @@ def _open_or_resume(mode: int, trigger: str) -> tuple[PriceMonitorRun, str]:
 
 async def _run(trigger: str) -> dict[str, Any] | None:
     mode = int(runtime.get("pm_mode") or 0)
-    if mode == 1:
-        # PR 2: rojos → inactivo + bandeja de Pao. Hasta entonces, sombra siempre.
-        log.warning("pm_mode=1 (activo): modo activo todavía no implementado; "
-                    "esta corrida es SOMBRA y no toca Vendure")
 
     run, trigger = _open_or_resume(mode, trigger)
     run_id = int(run.id)  # type: ignore[arg-type]
@@ -1482,7 +1490,7 @@ async def _run(trigger: str) -> dict[str, Any] | None:
         return {"run_id": run_id, "status": status, "error": error}
 
     try:
-        return await _evaluate_catalog(run_id, trigger, products)
+        result = await _evaluate_catalog(run_id, trigger, products)
     except Exception as exc:  # noqa: BLE001
         # Un bug no puede dejar la corrida `running` para siempre: se reintentaría
         # en cada arranque y reventaría igual. (Un reinicio del proceso NO pasa
@@ -1491,6 +1499,28 @@ async def _run(trigger: str) -> dict[str, Any] | None:
         error = f"{type(exc).__name__}: {exc}"
         status = _finalize_run(run_id, error=error, force_status=RUN_FAILED)
         return {"run_id": run_id, "status": status, "error": error}
+    await _review_pass(run_id, result, products)
+    return result
+
+
+async def _review_pass(run_id: int, result: dict[str, Any] | None, products: list[VendureProduct]) -> None:
+    """La pasada de la bandeja de revisión sobre la corrida que acaba de cerrar (pricing/price_review.py).
+
+    Corre DESPUÉS de cerrar la corrida: si falla, la corrida queda como estaba (`ok`) y la falla se loguea y
+    queda en `review_summary`. Nunca tira la corrida. No escribe en Vendure."""
+    if not result or result.get("status") not in (RUN_OK, RUN_DEGRADED):
+        return
+    try:
+        from app.pricing import price_review     # lazy: price_review importa este módulo
+
+        await price_review.process_run(run_id, catalog={p.id: p for p in products})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("price_monitor #%s: la pasada de la bandeja de revisión falló", run_id)
+        try:
+            _update_run(run_id, review_summary=json.dumps(
+                {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            log.exception("price_monitor #%s: no se pudo anotar el error de la pasada", run_id)
 
 
 def _make_web(run_id: int) -> tuple[market_ml_web.MlWebSource | None, str]:
