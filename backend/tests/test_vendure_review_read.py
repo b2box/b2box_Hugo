@@ -145,9 +145,42 @@ async def test_channel_pricing_survives_a_missing_fiscal_profile(vendure):
     assert info.minimum_purchase_cny is None and info.certificate_max_share_pct is None
 
 
-async def test_the_read_helpers_refuse_anything_that_is_not_a_query():
+@pytest.mark.parametrize("text", [
+    "mutation X { updateProduct(input: {id: 1, enabled: false}) { id } }",
+    "subscription S { productUpdated { id } }",
+    # empieza con «query » pero trae una mutation: gql lo mandaría entero
+    "query A { product(id: 1) { id } } mutation B { updateProduct(input: {id: 1, enabled: false}) { id } }",
+    "query A { product(id: 1) { id } }\nmutation B { deleteProduct(id: 1) { result } }",
+    "mutation B { updateProduct(input: {id: 1}) { id } } query A { product(id: 1) { id } }",
+    "query A { product(id: 1) { ...F } } fragment F on Product { id }",     # fragmento suelto: solo operaciones query
+    "query A { product(id: 1) { id } ",                                     # sintaxis rota
+    "",
+    "# query\nmutation M { logout { success } }",                          # un comentario con «query» no engaña
+    "{ product(id: 1) { id } } mutation M { logout { success } }",
+])
+async def test_the_read_helpers_refuse_anything_that_is_not_only_queries(text):
     with pytest.raises(RuntimeError):
-        VendureClient._read_query("mutation X { updateProduct(input: {id: 1, enabled: false}) { id } }")
+        VendureClient._read_query(text)
+
+
+@pytest.mark.parametrize("text", [
+    "query A { product(id: 1) { id } }",
+    "{ product(id: 1) { id } }",
+    "query A($id: ID!) { product(id: $id) { id } }\nquery B { activeChannel { id } }",
+    "# una mutation comentada: mutation M { logout { success } }\nquery A { activeChannel { id } }",
+])
+async def test_the_read_helpers_accept_pure_queries(text):
+    assert VendureClient._read_query(text) is not None
+
+
+async def test_the_text_audit_read_uses_the_same_check(monkeypatch):
+    from app.vendure import client as vc
+
+    seen = []
+    real = vc.read_only_document
+    monkeypatch.setattr(vc, "read_only_document", lambda t: (seen.append(t), real(t))[1])
+    VendureClient()._text_audit_query(True)
+    assert len(seen) == 1 and seen[0].lstrip().startswith("query ")
 
 
 async def test_every_diagnosis_read_is_a_query_never_a_mutation(vendure):

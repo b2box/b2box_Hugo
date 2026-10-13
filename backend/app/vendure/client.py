@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 from gql import Client, gql
+from graphql import GraphQLError, OperationDefinitionNode, OperationType
+from graphql import parse as parse_graphql
 from gql.transport import httpx as _gql_httpx_transport
 from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
@@ -183,6 +185,23 @@ class ChannelPricing:
     minimum_purchase_cny: int | None          # None = el canal no fijó el suyo (Vendure usa 500)
     certificate_max_share_pct: float | None   # tope del recargo de certificado sobre el neto
     container_cbm: float | None
+
+
+def read_only_document(text: str) -> str:
+    """Valida con el parser de GraphQL (graphql-core, que ya viene con gql) que el documento sea SOLO lectura: todas sus
+    definiciones son operaciones `query`. Un `startswith("query ")` no alcanza: un documento con una query y una mutation
+    empieza con «query» y gql lo manda entero. Devuelve el mismo texto; si no es solo lectura (mutation, subscription,
+    fragmentos sueltos, sintaxis rota) levanta RuntimeError."""
+    try:
+        document = parse_graphql(text)
+    except GraphQLError as exc:
+        raise RuntimeError(f"documento GraphQL inválido para una lectura: {type(exc).__name__}") from None
+    definitions = document.definitions
+    if not definitions or any(
+        not isinstance(d, OperationDefinitionNode) or d.operation != OperationType.QUERY for d in definitions
+    ):
+        raise RuntimeError("las lecturas tienen que ser operaciones query, nada más")
+    return text
 
 
 # Valor por defecto de `channel_token`: "el canal de VENDURE_CHANNEL_TOKEN".
@@ -639,9 +658,7 @@ class VendureClient:
             "translations { languageCode name slug description } "
             f"customFields {{ {custom} }} }} totalItems }} }}"
         )
-        if not text.lstrip().startswith("query "):  # defensa: nunca una mutation
-            raise RuntimeError("la lectura de textos tiene que ser una query")
-        return gql(text)
+        return gql(read_only_document(text))      # defensa: nunca una mutation
 
     @staticmethod
     def _map_product_texts(raw: dict[str, Any], source_field: str) -> ProductTexts:
@@ -790,15 +807,15 @@ class VendureClient:
 
     # ── Lecturas del diagnóstico de la bandeja (SOLO queries) ──────────
     #
-    # Todas arman un documento `query`; `_read_query` rechaza cualquier otra cosa, así que desde
-    # acá es imposible escribir en Vendure. Se piden de a poco (una por producto de la bandeja,
-    # tope duro en pricing/price_review.py), nunca por todo el catálogo.
+    # Todas arman un documento `query`; `_read_query` lo parsea y rechaza cualquier otra cosa (mutation,
+    # subscription, un documento con una query y una mutation…), así que desde acá es imposible escribir en
+    # Vendure. Se piden de a poco (una por producto de la bandeja, con tope duro de requests por noche), nunca
+    # por todo el catálogo.
 
     @staticmethod
     def _read_query(text: str):
-        if not text.lstrip().startswith("query "):  # defensa: nunca una mutation
-            raise RuntimeError("las lecturas del diagnóstico tienen que ser una query")
-        return gql(text)
+        """Documento de solo lectura (ver `read_only_document`): parseado, no adivinado por el prefijo."""
+        return gql(read_only_document(text))
 
     async def get_tier_breakdowns(self, variant_id: str) -> list[TierBreakdown]:
         """Desglose completo del precio de cada tramo habilitado de una variante
