@@ -113,3 +113,21 @@ async def test_the_cap_also_holds_when_vendure_fails_and_the_client_retries(stac
     summary = await pr.process_run(today, now=NOW + timedelta(hours=1))
     assert summary["consultas_vendure"] <= 150
     assert len(non_listing(world)) <= 150, f"{len(non_listing(world))} requests reales con tope 150"
+
+
+async def test_the_pass_over_1500_snapshots_with_400_red_firm_ones_takes_under_a_minute(stack, monkeypatch):
+    """Criterio 2-9, medido aparte: sin contar las consultas a Vendure (que son instantáneas en el doble) el tiempo es de la pasada misma."""
+    import time
+
+    world = stack
+    prev, today = q.new_run(NOW - timedelta(days=1)), q.new_run(NOW)
+    for i in range(1500):
+        red = i < 400
+        for rid, at, flag in ((prev, NOW - timedelta(days=1), "firme" if red else None), (today, NOW, None)):
+            q.save(mk_snap(rid, str(i), our=1_000_000 if red else 600_000, data_at=at, captured_at=at, flag=flag, variant=f"v{i}"))
+    t0 = time.monotonic()
+    summary = await pr.process_run(today, now=NOW + timedelta(hours=1))
+    elapsed = time.monotonic() - t0
+    assert summary["firmes"] == 400 and summary["nuevas"] == 400
+    assert elapsed <= 60, elapsed
+    print(f"\nTIEMPO pasada 1500 snapshots / 400 fichas: {elapsed:.1f} s")
