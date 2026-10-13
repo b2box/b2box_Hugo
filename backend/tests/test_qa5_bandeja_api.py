@@ -320,7 +320,8 @@ async def test_not_the_same_closes_the_ficha_in_the_same_response_logs_the_actor
     assert fb.actor == "pao@b2box.pro" and fb.ml_id == "MLA1000001"
     # la ficha cerrada sigue consultable y lo dice
     d = client.get(f"{BASE}/items/{item.id}").json()
-    assert d["state"] == "cerrado_auto" and d["events"][0]["actor"] == "pao@b2box.pro"
+    assert d["state"] == "cerrado_auto"
+    assert next(e for e in d["events"] if e["kind"] == "cerrado_auto")["actor"] == "pao@b2box.pro"
     assert client.get(BASE + "/items", params={"state": "cerrados"}).json()["total"] == 1
     assert client.get(BASE + "/summary").json()["pending"] == 0
 
