@@ -264,7 +264,15 @@ export function SourceFilters({
 
 // ─── El detalle de un producto: un bloque por tienda ────────────────
 
-export function StoresPanel({ s, affectColor = false }: { s: PriceMonitorSnapshot; affectColor?: boolean }) {
+export function StoresPanel({
+  s,
+  affectColor = false,
+  onChanged,
+}: {
+  s: PriceMonitorSnapshot;
+  affectColor?: boolean;
+  onChanged?: () => void;
+}) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<number | null>(null);
   const [asking, setAsking] = useState<number | null>(null);
@@ -284,6 +292,7 @@ export function StoresPanel({ s, affectColor = false }: { s: PriceMonitorSnapsho
       qc.invalidateQueries({ queryKey: ["pm-snapshots"] }),
       qc.invalidateQueries({ queryKey: ["pm-summary"] }),
     ]);
+    onChanged?.();
   }
 
   async function correct(m: StoreMatchRow, label: "es" | "no_es") {

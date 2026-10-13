@@ -256,7 +256,26 @@ function marginClass(color: SemaforoColor): string {
   return "text-muted-foreground";
 }
 
-export default function SemaforoView() {
+// Lo que decidió la bandeja de Pao para los rojos de la corrida.
+type ReviewFilter = "firme" | "dudoso";
+const REVIEW_OPTIONS: { value: ReviewFilter | null; label: string }[] = [
+  { value: null, label: "Todos" },
+  { value: "firme", label: "Rojo firme" },
+  { value: "dudoso", label: "Rojo dudoso" },
+];
+export const REVIEW_REASON: Record<string, string> = {
+  solo_tiendas: "sale solo de las tiendas",
+  deshabilitado: "producto deshabilitado",
+  tiendas: "sin tiendas ya no es rojo",
+  recalculo: "no se sostiene al recalcular",
+  fuentes: "idénticos sin confirmar por foto + nombre",
+  dato_viejo: "dato viejo",
+  pocas_publicaciones: "pocas publicaciones",
+  pocos_vendedores: "pocos vendedores",
+  precio_extremo: "precio muy distinto al de ML",
+};
+
+export default function SemaforoView({ initialReview = null }: { initialReview?: ReviewFilter | null }) {
   const qc = useQueryClient();
   const [color, setColor] = useState<ColorFilter | null>(null);
   const [page, setPage] = useState(0);
@@ -268,6 +287,7 @@ export default function SemaforoView() {
   const [match, setMatch] = useState<MatchFilter | null>(null);
   const [origin, setOrigin] = useState<MatchOrigin | null>(null);
   const [estimated, setEstimated] = useState<EstimatedFilter | null>(null);
+  const [review, setReview] = useState<ReviewFilter | null>(initialReview);
   // Por fuente (Mercado Libre, Gadnic, Casa Perfecta…): "tiene algo de" y "tiene idéntico en".
   const [source, setSource] = useState<string | null>(null);
   const [igualIn, setIgualIn] = useState<string[]>([]);
@@ -288,10 +308,10 @@ export default function SemaforoView() {
   const running = summaryQ.data?.running ?? false;
 
   const snapsQ = useQuery({
-    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin, estimated, source, igualIn],
+    queryKey: ["pm-snapshots", color, page, debounced, enabled, match, origin, estimated, review, source, igualIn],
     queryFn: () =>
       getPriceMonitorSnapshots({
-        page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin, estimated, source, igualIn,
+        page, pageSize: PAGE_SIZE, color, q: debounced, enabled, match, origin, estimated, review, source, igualIn,
       }),
     placeholderData: keepPreviousData,
     // Mientras corre, la tabla de la corrida en curso va creciendo.
@@ -469,6 +489,15 @@ export default function SemaforoView() {
           options={ORIGIN_OPTIONS}
           onPick={(v) => {
             setOrigin(v);
+            resetView();
+          }}
+        />
+        <FilterGroup
+          label="Bandeja de Pao"
+          value={review}
+          options={REVIEW_OPTIONS}
+          onPick={(v) => {
+            setReview(v);
             resetView();
           }}
         />
@@ -776,6 +805,19 @@ function SnapshotRow({
         <span className="block text-[11px] text-muted-foreground mt-0.5" title={s.ml_error ?? undefined}>
           {statusText(s)}
         </span>
+        {s.review_flag?.startsWith("dudoso:") && (
+          <span
+            className="block text-[11px] text-warning mt-0.5"
+            title="Es rojo, pero no entra a la bandeja de Pao: algo del dato no alcanza para apagar nada"
+          >
+            rojo dudoso: {REVIEW_REASON[s.review_flag.slice(7)] ?? s.review_flag.slice(7)}
+          </span>
+        )}
+        {s.review_flag === "firme" && (
+          <span className="block text-[11px] text-destructive mt-0.5" title="Rojo firme: candidato a la bandeja de Pao">
+            rojo firme
+          </span>
+        )}
         {s.price_basis && s.price_basis !== "ml" && (
           <span
             className="block text-[11px] text-muted-foreground mt-0.5"
@@ -993,7 +1035,7 @@ type Pending = {
 // diferentes (solo referencia). Cada publicación con su % de foto y de nombre, precio,
 // link, de dónde salió y el motivo. "No es el mismo" sobre un idéntico; "Es el mismo"
 // sobre un similar o un diferente: los dos piden confirmación y se pueden deshacer.
-function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
+export function ListingsPanel({ s, onChanged }: { s: PriceMonitorSnapshot; onChanged?: () => void }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [asking, setAsking] = useState<string | null>(null);
@@ -1009,6 +1051,7 @@ function ListingsPanel({ s }: { s: PriceMonitorSnapshot }) {
       qc.invalidateQueries({ queryKey: ["pm-history", s.product.id] }),
       qc.invalidateQueries({ queryKey: ["pm-summary"] }),
     ]);
+    onChanged?.();
   }
 
   async function correct(m: MatchedListing, kind: "same" | "not_same") {
