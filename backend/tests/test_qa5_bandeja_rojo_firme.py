@@ -357,9 +357,6 @@ async def test_a_first_night_run_plus_two_runs_the_next_day_make_exactly_one_fic
     assert fichas() == ["a"] and len([e for e in q.rows(PriceReviewEvent) if e.kind == "propuesto"]) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): «noche» = día calendario UTC; dos corridas manuales con 20 minutos de diferencia "
-                                       "que cruzan las 00:00 UTC (21:00 ART) cuentan como DOS noches y alcanzan la racha de 2 "
-                                       "(price_review.streaks usa started_at.date())")
 async def test_two_runs_twenty_minutes_apart_across_midnight_utc_are_not_two_nights():
     rid1 = q.new_run(NOW.replace(day=13, hour=23, minute=50))
     q.save(mk_snap(rid1, "a", data_at=NOW.replace(day=13, hour=23), captured_at=NOW.replace(day=13, hour=23, minute=50)))
