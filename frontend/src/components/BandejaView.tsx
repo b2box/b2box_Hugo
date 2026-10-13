@@ -321,7 +321,7 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
   );
 }
 
-function ItemRow({ it, onOpen }: { it: PriceReviewItemRow; onOpen: () => void }) {
+export function ItemRow({ it, onOpen }: { it: PriceReviewItemRow; onOpen: () => void }) {
   const name = it.product.name || it.product.id;
   return (
     <tr className="border-b border-border last:border-0 align-top hover:bg-muted/30">
@@ -396,7 +396,7 @@ function SectionTitle({ children }: { children: ReactNode }) {
   return <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">{children}</h3>;
 }
 
-function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: () => void }) {
+export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: () => void }) {
   const name = d.product.name || d.product.id;
   const snap = d.snapshot;
   const diag = d.diagnosis;
