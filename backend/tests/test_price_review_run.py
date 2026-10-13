@@ -670,3 +670,43 @@ async def test_lowering_the_mode_during_the_pass_stops_opening_fichas(monkeypatc
     monkeypatch.setattr(pr, "_create_item", create_then_switch_off)
     summary = await pr.process_run(today, now=NOW)
     assert len(w.items()) == 1 and summary["nuevas"] == 1 and summary["cortada_por_modo"] is True
+
+
+# ─── una sola mediana: la de los idénticos firmes ─────────────────
+
+
+def _with_judge_listing(our: int = 1_000_000):
+    """3 idénticos firmes a ~900.000 y 2 solo-juez baratos: la mediana de TODOS (880.000) no es la de los firmes (900.000)."""
+    return [w.listing(1, 900_000), w.listing(2, 905_000), w.listing(3, 895_000),
+            w.listing(4, 700_000, source="llm"), w.listing(5, 710_000, source="llm")]
+
+
+async def test_the_card_and_the_max_price_use_the_same_median_the_firm_one(world):
+    from app.pricing.price_diagnosis import price_max_cents
+
+    prev, today = two_nights({"p1": dict(matched=_with_judge_listing())})
+    await pr.process_run(today, now=NOW)
+    [item] = w.items()
+    snap = w.snap_of(today, "p1")
+    assert snap.ml_median_cents != item.ml_median_cents == 900_000                 # la del snapshot es de todos; la de la ficha, de los firmes
+    diag = json.loads(item.diag)
+    assert diag["p_max_cents"] == round(price_max_cents(item.ml_median_cents, 13.0, 0, 10.0))
+
+
+async def test_when_the_diagnosis_is_completed_later_the_card_is_refreshed_with_the_same_figures(world):
+    from app.pricing.price_diagnosis import price_max_cents
+
+    world.http_fail.add("TierBreakdowns")
+    prev, today = two_nights({"p1": dict(matched=_with_judge_listing())})
+    await pr.process_run(today, now=NOW)
+    assert w.items()[0].diag_status == "pendiente"
+    world.http_fail.clear()
+    # al día siguiente los idénticos firmes cuestan otra cosa y nuestro precio también
+    r3 = w.make_run(started=NOW + timedelta(days=1))
+    later = [w.listing(1, 950_000), w.listing(2, 955_000), w.listing(3, 945_000), w.listing(4, 700_000, source="llm")]
+    w.add_snap(r3, "p1", matched=later, our=1_100_000, data_at=NOW + timedelta(days=1), captured_at=NOW + timedelta(days=1))
+    await pr.process_run(r3, now=NOW + timedelta(days=1))
+    [item] = w.items()
+    assert item.diag_status == "completo" and item.ml_median_cents == 950_000 and item.our_price_cents == 1_100_000
+    assert json.loads(item.diag)["p_max_cents"] == round(price_max_cents(950_000, 13.0, 0, 10.0))
+    assert json.loads(item.diag)["p_cents"] == item.our_price_cents

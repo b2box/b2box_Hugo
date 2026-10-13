@@ -381,9 +381,6 @@ async def test_no_decision_route_exists_so_nothing_can_be_decided(client, stack)
         assert all(methods == {"get"} for methods in paths.values()), paths
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA (bajo): la ficha guarda la mediana de los idénticos FIRMES y el diagnóstico calcula «precio máximo para no ser rojo» "
-                                       "y «habría que bajar» con la mediana de TODOS los idénticos del snapshot: con un idéntico solo-juez la pantalla "
-                                       "muestra dos medianas distintas (price_review._diagnose usa `snap`, _create_item guarda `v.firm_median`)")
 async def test_the_detail_uses_one_median_for_the_card_and_for_the_max_price(client, stack):
     sc = healthy("1")
     entries = [q.entry(1000001 + i, p, src, f"v{i}") for i, (p, src) in enumerate(
