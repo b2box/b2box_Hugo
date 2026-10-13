@@ -273,3 +273,28 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
     routes = (root / "api/price_review_routes.py").read_text()
     assert "@router.post" not in routes and "@router.put" not in routes and "@router.delete" not in routes \
         and "@router.patch" not in routes
+
+
+async def test_a_crash_of_the_review_pass_never_fails_the_nightly_run_and_the_next_pass_recovers(stack, monkeypatch):
+    """La pasada de la bandeja corre DESPUÉS de cerrar la corrida: si revienta, la corrida queda `ok`, el error queda anotado y la
+    pasada se puede repetir sobre la misma corrida (review_at sigue vacío). Nada de eso toca Vendure."""
+    from app.pricing import price_review as pr_mod
+
+    st = stack
+    q.setting("pm_mode", 1)
+    real = pr_mod.process_run
+
+    async def boom(*a, **k):
+        raise RuntimeError("bug en la bandeja")
+
+    monkeypatch.setattr(pr_mod, "process_run", boom)
+    r1 = await jobs.price_monitor(trigger="manual")
+    assert r1["status"] == "ok"
+    run = q.rows(PriceMonitorRun, PriceMonitorRun.id == r1["run_id"])[0]
+    assert run.status == "ok" and run.review_at is None and "bug en la bandeja" in (run.review_summary or "")
+    c = client_with_session()
+    assert "bug en la bandeja" in (c.get("/api/price-review/summary").json()["last_pass_error"] or "")
+    monkeypatch.setattr(pr_mod, "process_run", real)
+    out = await real(r1["run_id"], now=utcnow())
+    assert out is not None and q.rows(PriceMonitorRun, PriceMonitorRun.id == r1["run_id"])[0].review_at is not None
+    assert st.world.writes() == [] and st.spy.violations == []
