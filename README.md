@@ -134,6 +134,46 @@ construye, `/app/lookup` devuelve `status:"indexing"`; seguilo con
 > **Memoria**: el modelo suma ~500 MB de RSS. El límite del container pasó de
 > 512M a **2G** — en Coolify hay que subirlo en el panel del servicio.
 
+#### Apify como último recurso para links de ML
+
+Hay links de Mercado Libre (sobre todo `/up/MLAU…?pdp_filters=item_id:…`) que la
+API oficial no deja leer y cuya ficha de catálogo tampoco da la foto; el fetch
+propio y Camoufox desde el datacenter chocan con el anti-bot, y el cliente se
+quedaba con `site_blocked`. En ese caso, y **antes** del fetch plano y del
+browser, Hugo le pasa el link a un actor de Apify
+(`khadinakbar/mercadolibre-all-in-one-scraper`, configurable con
+`APIFY_MELI_ACTOR`) que lo lee con **proxies residenciales de un tercero** y
+devuelve título, fotos y a veces precio. El resultado sale con `approximate=false`
+(es la ficha del link) y `source="apify"`; si el actor no trae precio, sigue
+saliendo de `/products/{MLAU}/items` como antes. También le gana a la foto
+"prestada" de la búsqueda por nombre en el catálogo.
+
+* **Costo**: ~USD 0,005 por link resuelto (techo de USD 0,05 y 1 GB de memoria por corrida).
+* **Tiempo**: 1-3 min. El techo es `APIFY_MELI_TIMEOUT_S` (90 s): el cliente de
+  `/verify` y `/app/lookup` (send-request-to-paco en Cloud) corta a ~110 s. Si
+  Apify se mandó y no pudo, no se intenta además Camoufox (no queda reloj).
+* **Prender**: cargar `APIFY_TOKEN` en Coolify y redeployar.
+* **Apagar** sin redeploy: `apify_meli_daily_budget = 0` en el dashboard
+  (Configuración, grupo app). Default 100 links por día UTC (máx. 500), reservados de a uno.
+* **Seguridad**: solo van a Apify URLs https de `mercadolibre.com.ar` /
+  `mercadolibre.com`; las fotos que vuelven se filtran a `https://*.mlstatic.com`;
+  el token va solo en el header y no se loguea. Una falla de Apify (401, 402 sin
+  saldo, timeout, actor caído) se loguea con su status y el lookup termina como
+  antes.
+* **Abuso y costo**: el mismo link (mismos ids de ML, sin importar el tracking)
+  sale de una caché en memoria por 24 h sin gastar cupo, también cuando no sirvió
+  (los errores de Apify, 1 h); como mucho 2 corridas a la vez, y si están ocupadas
+  se sigue sin Apify. `/app/vision-compare` y el comparador del dashboard nunca
+  disparan Apify. Los cambios de `apify_meli_daily_budget` (tope 500),
+  `otapi_daily_budget` y los topes del juez IA quedan en el audit log con quién y
+  de cuánto a cuánto.
+* **Cuenta**: usar una cuenta u organización de Apify **dedicada a Hugo**, con
+  límite mensual de uso y poco saldo cargado. El tope real de gasto es ese límite
+  mensual de la cuenta, no el cupo diario de Hugo. Antes de cambiar de actor,
+  verificar en el Store que corra con **"limited permissions"**.
+* **Ojo**: los términos de uso de Mercado Libre para este scraping **no fueron
+  revisados**.
+
 ### 5. Acción
 
 - **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
@@ -1665,6 +1705,8 @@ Ver `.env.example`. Las críticas:
   que un administrador autoriza, separados por comas, con la misma sintaxis que `image_hosts`:
   `host`, `*.dominio` o `acdn*.dominio`) — indexado de las tiendas.
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
+- `APIFY_TOKEN` (vacío = apagado), `APIFY_MELI_ACTOR`, `APIFY_MELI_TIMEOUT_S` (default 90) — último recurso
+  para los links de ML que la API no resuelve (ver "Apify como último recurso para links de ML").
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
 - `SEO_TEXT_AUDIT_CRON_UTC` — horario de la auditoría de textos (default `30 7 * * mon`, lunes 04:30 ART;
   vacía = sin corrida programada). El día de la semana con su nombre: en APScheduler `1` es martes.

@@ -223,6 +223,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="otapi_daily_budget",
         min=0, max=5000, step=10, group="scheduler",
     ),
+    SettingMeta(
+        key="apify_meli_daily_budget",
+        label="Apify: links de ML por día",
+        description=(
+            "Links de Mercado Libre por día (UTC) que se mandan a Apify cuando ni la API ni la "
+            "ficha de catálogo dan la foto. ~USD 0,005 cada uno y 1-3 min de espera. "
+            "0 = apagado. Sin APIFY_TOKEN no corre aunque haya cupo."
+        ),
+        type="int", parser=int,
+        default_attr="apify_meli_daily_budget",
+        min=0, max=500, step=10, group="app",
+    ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",

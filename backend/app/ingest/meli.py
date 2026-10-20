@@ -138,6 +138,15 @@ def parse_url(url: str) -> ParsedRef | None:
     return None
 
 
+def catalog_ref(url: str) -> ParsedRef | None:
+    """La ficha de catálogo de la RUTA (/p/… o /up/…), aunque el query traiga un
+    `item_id`. None si la URL no tiene una."""
+    if not url:
+        return None
+    m = _RE_CATALOG_PATH.search(urlparse(unquote(url)).path)
+    return ParsedRef(id=m.group(1).upper(), kind="product") if m else None
+
+
 # ─── Token (client_credentials) ────────────────────────────────────
 
 _token: str = ""
@@ -451,6 +460,18 @@ async def fetch_from_url(url: str) -> list[MeliItem]:
                     item = None
         if item is not None and not item.image_urls:
             item = None
+        # Un link /p/MLA… con `pdp_filters=item_id:` apunta a la publicación de
+        # otro vendedor (403), pero la ficha de catálogo de la ruta sí se lee y
+        # trae las fotos. Sin esto caía al plan B, que en un /p/ no tiene nombre
+        # en la URL para buscar, y el link quedaba sin foto.
+        catalog = catalog_ref(url)
+        if item is None and ref.kind == "item" and catalog is not None:
+            try:
+                item = await fetch(catalog)
+            except MeliError as exc:
+                log.info("API de ML no devolvió la ficha %s: %s", catalog.id, exc)
+            if item is not None and not item.image_urls:
+                item = None
 
     if item is not None:
         return [item]
@@ -472,8 +493,9 @@ async def fetch_from_url(url: str) -> list[MeliItem]:
     # candidato aproximado que devuelve la búsqueda por catálogo. Sin esto el
     # app mostraba `None`, o peor, el precio de otro producto.
     exact_price: tuple[int | None, str | None, int] = (None, None, 0)
-    if ref is not None and ref.kind == "product":
-        exact_price = await fetch_market_price(ref.id)
+    price_ref = ref if ref is not None and ref.kind == "product" else catalog_ref(url)
+    if price_ref is not None:
+        exact_price = await fetch_market_price(price_ref.id)
 
     log.info("Resolviendo %s por catálogo de ML: %r", url[:80], query[:60])
     candidates = await search_catalog(

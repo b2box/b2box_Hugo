@@ -32,6 +32,8 @@ ActionType = Literal[
     "app_lookup_request_sent",
     "app_lookup_request_failed",
     "app_lookup_no_image",
+    # Cambio de un setting runtime que gasta plata (cupo de Apify, OTAPI, juez IA)
+    "setting_changed",
 ]
 
 
