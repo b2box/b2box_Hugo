@@ -137,3 +137,14 @@ async def test_rerank_con_base_caida_no_llama(rerank, monkeypatch):
     monkeypatch.setattr(daily_budget, "reserve_async", down)
     assert await vision_rerank.pick_match(["https://a/1.jpg"], _cands(1)) is None
     assert rerank == []
+
+
+async def test_storefront_sin_visitor_o_con_ip_privada_cuenta_contra_el_socket(env, monkeypatch):
+    monkeypatch.setitem(RUNTIME, "lookup_visitor_daily_limit", 2)
+    await _lookup(AppLookupRequest(url=ML_URL), _request())                 # sin visitor
+    await _lookup(_payload("10.0.0.7"), _request())                          # privada
+    with pytest.raises(HTTPException) as exc:
+        await _lookup(AppLookupRequest(url=ML_URL), _request())
+    assert exc.value.status_code == 429
+    # Un visitante con IP real no comparte ese cupo.
+    await _lookup(_payload("190.4.4.4"), _request())
