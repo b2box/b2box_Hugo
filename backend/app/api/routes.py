@@ -923,6 +923,8 @@ _COSTLY_SETTINGS = frozenset({
     "estimate_tier_qty_3",
     "lookup_visitor_daily_limit",
     "lookup_visitor_per_minute",
+    "lookup_shared_daily_limit",
+    "lookup_shared_per_minute",
     "vision_rerank_daily_budget",
     "otapi_daily_budget",
     "pm_ml_daily_budget",

@@ -126,14 +126,15 @@ def trusted_ip_clients() -> set[str]:
 
 def visitor_ip_hash(*, api_client: str | None, declared_ip: object,
                     socket_ip: str | None) -> str | None:
-    """Hash de la IP real del visitante. `visitor.ip` solo se cree si vino con la
-    key de un cliente de confianza (el storefront); si no, o si no es una IP de
-    internet, cuenta la IP del socket (para el comparador: la del storefront,
-    compartida por todos → fail-closed). Lanza SaltMissing."""
+    """Hash de la IP real del visitante, o None si no se puede estimar.
+
+    Cliente de confianza (el storefront): solo con una `visitor.ip` de internet;
+    sin ella NO hay estimado (None → rate_limited): el bucket compartido del
+    socket es para buscar en el catálogo, no para gastar Apify. Cualquier otro
+    cliente: la IP del socket (rotar `visitor.ip` no le da cupo). Lanza
+    SaltMissing."""
     if api_client and api_client in trusted_ip_clients():
-        declared = identity.ip_hash(declared_ip)
-        if declared:
-            return declared
+        return identity.ip_hash(declared_ip)
     return identity.ip_hash(socket_ip, kind="sock")
 
 

@@ -469,7 +469,8 @@ def test_er07_ip_del_visitante_solo_con_la_key_del_storefront(env, monkeypatch):
 
 
 def test_er07_el_storefront_con_ip_privada_no_inventa_visitantes(env, monkeypatch):
-    """Una IP declarada que no es de internet no se cree: cuenta el socket."""
+    """Una IP declarada que no es de internet no se cree: sin IP de visitante
+    válida, el storefront no recibe estimado (fail-closed)."""
     monkeypatch.setattr(get_settings(), "estimate_visitor_per_minute", 0, raising=False)
     with _http_app(monkeypatch, "storefront:sf-key-0123456789abcdef") as http:
         for i in range(6):

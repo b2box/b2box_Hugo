@@ -139,12 +139,36 @@ async def test_rerank_con_base_caida_no_llama(rerank, monkeypatch):
     assert rerank == []
 
 
-async def test_storefront_sin_visitor_o_con_ip_privada_cuenta_contra_el_socket(env, monkeypatch):
-    monkeypatch.setitem(RUNTIME, "lookup_visitor_daily_limit", 2)
+async def test_storefront_sin_visitor_usa_el_bucket_compartido_con_topes_propios(env,
+                                                                              monkeypatch):
+    # El tope por visitante no aplica al bucket compartido del socket.
+    monkeypatch.setitem(RUNTIME, "lookup_visitor_daily_limit", 1)
+    monkeypatch.setitem(RUNTIME, "lookup_shared_daily_limit", 2)
     await _lookup(AppLookupRequest(url=ML_URL), _request())                 # sin visitor
     await _lookup(_payload("10.0.0.7"), _request())                          # privada
     with pytest.raises(HTTPException) as exc:
         await _lookup(AppLookupRequest(url=ML_URL), _request())
     assert exc.value.status_code == 429
-    # Un visitante con IP real no comparte ese cupo.
+    # Un visitante con IP real tiene su propio cupo (el de por visitante).
     await _lookup(_payload("190.4.4.4"), _request())
+    with pytest.raises(HTTPException):
+        await _lookup(_payload("190.4.4.4"), _request())
+
+
+async def test_bucket_compartido_rafaga_propia(env, monkeypatch):
+    monkeypatch.setitem(RUNTIME, "lookup_visitor_per_minute", 1)
+    monkeypatch.setitem(RUNTIME, "lookup_shared_per_minute", 3)
+    for _ in range(3):
+        await _lookup(AppLookupRequest(url=ML_URL), _request())
+    with pytest.raises(HTTPException) as exc:
+        await _lookup(AppLookupRequest(url=ML_URL), _request())
+    assert exc.value.headers["Retry-After"] == "60"
+
+
+async def test_storefront_sin_ip_de_visitante_valida_no_estima(env):
+    from tests.test_estimate_lookup import _ask
+
+    for ip in (None, "10.0.0.8", "no-es-ip"):
+        resp = await _ask(ip=ip)
+        assert resp.estimate_status == "rate_limited" and resp.estimate is None
+    assert env.searches == []

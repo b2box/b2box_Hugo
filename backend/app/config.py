@@ -252,6 +252,10 @@ class Settings(EnvSettings):
     # por visitante (runtime). Pasarse = 429.
     lookup_visitor_daily_limit: int = 30
     lookup_visitor_per_minute: int = 5
+    # Cliente de confianza SIN visitor.ip válida (el storefront de hoy, o sin
+    # captcha): todos comparten el bucket del socket, con estos topes propios.
+    lookup_shared_daily_limit: int = 1500
+    lookup_shared_per_minute: int = 40
     # Llamadas por día al rerank de visión del catálogo (Sonnet), runtime.
     vision_rerank_daily_budget: int = 300
 

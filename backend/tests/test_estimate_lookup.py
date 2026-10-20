@@ -50,6 +50,7 @@ RUNTIME = {
     "estimate_tier_qty_3": 1000, "apify_1688_daily_budget": 100, "otapi_daily_budget": 120,
     # Límite de todo el lookup por visitante: alto acá, se prueba aparte.
     "lookup_visitor_daily_limit": 1000, "lookup_visitor_per_minute": 1000,
+    "lookup_shared_daily_limit": 1000, "lookup_shared_per_minute": 1000,
     "vision_rerank_daily_budget": 300,
 }
 

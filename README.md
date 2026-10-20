@@ -240,12 +240,17 @@ cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en
 #### Límites del lookup público
 
 Cuando el pedido viene con la key de un cliente de confianza (`ESTIMATE_TRUSTED_IP_CLIENTS`), TODO
-`/app/lookup` se limita por visitante (hash de la IP de `visitor.ip`, IPv6 por /64; sin `visitor.ip`
-o con una inválida o privada, cuenta el hash de la IP del socket, compartido: **el storefront tiene
-que mandar `visitor.ip` antes de que esto llegue a prod**, si no el comparador entero queda en 30
-búsquedas por día): runtime
-`lookup_visitor_daily_limit` (30) y `lookup_visitor_per_minute` (5); pasarse = 429 con `Retry-After`.
-Fail-closed: si la base no contesta, 429. El app (y cualquier cliente que no sea de confianza) no cambia.
+`/app/lookup` tiene límite (pasarse = 429 con `Retry-After`; fail-closed: si la base no contesta, 429):
+
+- Con `visitor.ip` válida: por visitante (hash de la IP, IPv6 por /64), runtime
+  `lookup_visitor_daily_limit` (30) y `lookup_visitor_per_minute` (5).
+- Sin `visitor.ip` válida (no viene, inválida o privada; es lo que manda el storefront de hoy, o el
+  nuevo sin captcha válido): todos comparten el bucket de la IP del socket, con topes propios y
+  holgados, runtime `lookup_shared_daily_limit` (1500) y `lookup_shared_per_minute` (40). Así se puede
+  desplegar Hugo antes que el storefront sin dejar al comparador en 30 por día.
+- El **estimado** solo corre con `visitor.ip` válida: sin ella devuelve `rate_limited` y no gasta.
+
+Todos son settings de admin. El app (y cualquier cliente que no sea de confianza) no cambia.
 El rerank de visión del catálogo (Sonnet) tiene cupo diario runtime `vision_rerank_daily_budget`
 (300); sin cupo, o con la base caída, el lookup sigue solo con CLIP.
 
