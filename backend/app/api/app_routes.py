@@ -656,9 +656,10 @@ async def _pick_match(est, query_urls, shortlist, title):
 
 async def _check_visitor_limit(payload: AppLookupRequest, request: Request | None) -> None:
     """Límite de TODO /app/lookup por visitante para los clientes de confianza
-    (el storefront). Pasarse = 429. Fail-closed: una base caída también es 429,
-    y un pedido sin `visitor.ip` (o con una inválida o privada) cuenta contra el
-    hash de la IP del socket, compartido por todos los que llegan así. Los demás
+    (el storefront). Pasarse = 429. Fail-closed: una base caída también es 429.
+    Un pedido sin `visitor.ip` válida (o privada) cuenta contra el hash de la IP
+    del socket, compartido por todos los que llegan así, con topes propios
+    (`lookup_shared_*`, holgados: el storefront de hoy no manda la IP). Los demás
     clientes (el app) no pasan por acá: su respuesta no cambia."""
     if request is None:
         return
@@ -668,16 +669,20 @@ async def _check_visitor_limit(payload: AppLookupRequest, request: Request | Non
         return
     declared = payload.visitor.ip if payload.visitor is not None else None
     try:
-        ip_hash = estimate_identity.ip_hash(declared) or estimate_identity.ip_hash(
-            client_ip(request), kind="sock")
+        ip_hash = estimate_identity.ip_hash(declared)
+        shared = ip_hash is None
+        if shared:
+            ip_hash = estimate_identity.ip_hash(client_ip(request), kind="sock")
     except estimate_identity.SaltMissing:
         raise HTTPException(503, "Límite por visitante sin configurar en el servidor.")
     if ip_hash is None:
         return
+    # Sin IP de visitante el bucket es compartido y tiene sus propios topes.
+    prefix = "lookup_shared" if shared else "lookup_visitor"
     hit = await asyncio.to_thread(
         estimate_limits.reserve_lookup, ip_hash,
-        daily=int(runtime.get("lookup_visitor_daily_limit") or 0),
-        per_minute=int(runtime.get("lookup_visitor_per_minute") or 0),
+        daily=int(runtime.get(f"{prefix}_daily_limit") or 0),
+        per_minute=int(runtime.get(f"{prefix}_per_minute") or 0),
     )
     if hit is not None:
         retry = 60 if hit == estimate_limits.LOOKUP_PER_MINUTE else (

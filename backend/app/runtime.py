@@ -269,6 +269,26 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=120, step=1, group="app",
     ),
     SettingMeta(
+        key="lookup_shared_daily_limit",
+        label="Lookup: consultas por día del storefront sin IP de visitante",
+        description=(
+            "Tope diario COMPARTIDO de /app/lookup para los pedidos de un cliente de confianza "
+            "que no traen visitor.ip válida (todos cuentan contra la IP del socket). Pasarse = "
+            "429. 0 = ninguna."
+        ),
+        type="int", parser=int,
+        default_attr="lookup_shared_daily_limit",
+        min=0, max=100000, step=100, group="app",
+    ),
+    SettingMeta(
+        key="lookup_shared_per_minute",
+        label="Lookup: consultas por minuto del storefront sin IP de visitante",
+        description="Ráfaga compartida de los pedidos sin visitor.ip válida. Pasarse = 429.",
+        type="int", parser=int,
+        default_attr="lookup_shared_per_minute",
+        min=0, max=1000, step=5, group="app",
+    ),
+    SettingMeta(
         key="vision_rerank_daily_budget",
         label="Rerank de visión del catálogo: llamadas por día",
         description=(
