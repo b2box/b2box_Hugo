@@ -34,13 +34,15 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
 from app.config import get_settings
+from app.ingest import meli
 from app.pricing import daily_budget
 from app.pricing.market_ml import safe_image_url, safe_permalink
 from app.pricing.market_ml_web import clean_line
@@ -58,6 +60,23 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_CHARGE_USD = 0.05
 # Margen sobre el timeout del actor para el viaje de ida y vuelta a la API.
 _NETWORK_MARGIN_S = 5.0
+# Memoria del actor en MB. Sin esto Apify usa el default del actor (que puede
+# ser 4 GB) y la corrida se cobra por GB-hora además del resultado.
+_ACTOR_MEMORY_MB = 1024
+# Corridas en paralelo. Más que esto no es uso real del app: es alguien pegando
+# links en loop, y cada uno cuesta plata y 1-3 min de una corrida.
+_MAX_CONCURRENT = 2
+# Cuánto se espera un lugar libre. Corto a propósito: la espera sale del mismo
+# reloj de ~110 s del cliente, y con los dos lugares ocupados es mejor seguir
+# sin Apify que contestar tarde.
+_SLOT_WAIT_S = 2.0
+# Caché por link (ver _cache_key). Lo que Apify resolvió, o leyó y no trajo
+# fotos, vale 24 h: repetir el mismo link no vuelve a pagar. Un error de Apify
+# (402 sin saldo, timeout, red) vale 1 h: también frena el loop, pero no deja
+# un link sin resolver un día entero después de cargar saldo.
+_CACHE_TTL_S = 24 * 3600
+_CACHE_ERROR_TTL_S = 3600
+_CACHE_MAX = 2000
 _MAX_IMAGES = 10
 _MAX_TITLE = 300
 # `usuario/nombre` o `usuario~nombre`: va en el path de la URL, nada más entra.
@@ -242,36 +261,129 @@ def _new_client(total_s: float) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(total_s, connect=10.0))
 
 
+# ─── Caché y concurrencia ──────────────────────────────────────────
+
+# clave → (vence_en monotonic, resultado). OrderedDict como LRU.
+_cache: OrderedDict[str, tuple[float, ApifyMeliResult]] = OrderedDict()
+# Un semáforo por event loop: asyncio.Semaphore queda atado al loop donde
+# alguien esperó por primera vez, y los tests (o un reinicio) usan otro.
+_slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _reset_for_tests() -> None:
+    global _slots
+    _cache.clear()
+    _slots = None
+
+
+def _semaphore() -> asyncio.Semaphore:
+    global _slots
+    loop = asyncio.get_running_loop()
+    if _slots is None or _slots[0] is not loop:
+        _slots = (loop, asyncio.Semaphore(_MAX_CONCURRENT))
+    return _slots[1]
+
+
+def _cache_key(target: str) -> str:
+    """El mismo producto aunque el link traiga otro tracking: los ids de ML
+    (publicación del query y ficha de la ruta) si los hay; si no, host + ruta."""
+    ref = meli.parse_url(target)
+    catalog = meli.catalog_ref(target)
+    if ref is not None:
+        return f"{catalog.id if catalog else ''}|{ref.kind}:{ref.id}"
+    parts = urlsplit(target)
+    return f"{(parts.hostname or '').lower()}{parts.path}"
+
+
+def _cache_get(key: str) -> ApifyMeliResult | None:
+    hit = _cache.get(key)
+    if hit is None:
+        return None
+    expires_at, result = hit
+    if time.monotonic() >= expires_at:
+        _cache.pop(key, None)
+        return None
+    _cache.move_to_end(key)
+    return result
+
+
+def _cache_put(key: str, result: ApifyMeliResult, ttl_s: float) -> None:
+    _cache[key] = (time.monotonic() + ttl_s, result)
+    _cache.move_to_end(key)
+    while len(_cache) > _CACHE_MAX:
+        _cache.popitem(last=False)
+
+
+# ─── Llamada a Apify ───────────────────────────────────────────────
+
+
 async def fetch(url: str) -> ApifyMeliResult | None:
     """Lee el link de ML con el actor de Apify.
 
-    None → no se mandó nada (apagado, sin cupo, URL que no es de ML).
+    None → no se mandó nada (apagado, sin cupo, URL que no es de ML, sin lugar
+    libre, o ya se probó ese link y no sirvió): no se esperó ni se gastó.
     ApifyMeliResult sin fotos → se mandó y no sirvió (ya se esperó y se gastó).
-    Nunca lanza.
+    Nunca lanza: cualquier sorpresa (un JSON que revienta la recursión, la DB
+    del cupo caída) termina en un resultado vacío y el lookup sigue.
     """
+    try:
+        return await _fetch(url)
+    except Exception as exc:  # noqa: BLE001
+        # Solo el tipo: el mensaje puede arrastrar el request o el body.
+        log.warning("Apify: error inesperado %s, sigo sin Apify", type(exc).__name__)
+        return ApifyMeliResult()
+
+
+async def _fetch(url: str) -> ApifyMeliResult | None:
     if not enabled():
         return None
     target = allowed_url(url)
     if not target:
         log.info("Apify: %s no es un link de Mercado Libre, no se manda", (url or "")[:120])
         return None
+    key = _cache_key(target)
+    cached = _cache_get(key)
+    if cached is not None:
+        if cached.found:
+            log.info("Apify: %s sale de la caché, no se paga de nuevo", target[:120])
+            return cached
+        log.info("Apify: %s ya se probó y no sirvió, no se manda de nuevo", target[:120])
+        return None
     budget = _daily_budget()
     if budget <= 0:
         return None
-    if await daily_budget.reserve_async(COUNTER_KEY, budget) is None:
-        log.info("Apify: cupo diario agotado (%d), no se manda %s", budget, target[:120])
-        return None
 
+    slots = _semaphore()
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=_SLOT_WAIT_S)
+    except asyncio.TimeoutError:
+        log.info("Apify: %d corridas en curso, salteo %s", _MAX_CONCURRENT, target[:120])
+        return None
+    try:
+        if await daily_budget.reserve_async(COUNTER_KEY, budget) is None:
+            log.info("Apify: cupo diario agotado (%d), no se manda %s", budget, target[:120])
+            return None
+        result, ttl_s = await _run_actor(target)
+        _cache_put(key, result, ttl_s)
+        return result
+    finally:
+        slots.release()
+
+
+async def _run_actor(target: str) -> tuple[ApifyMeliResult, float]:
+    """Una corrida del actor. (resultado, cuánto vale en la caché)."""
     s = get_settings()
     actor = s.apify_meli_actor.strip()
     timeout_s = int(s.apify_meli_timeout_s)
     endpoint = (
         f"{API_BASE}/acts/{quote(actor.replace('/', '~'), safe='~')}/run-sync-get-dataset-items"
-        f"?timeout={timeout_s}&maxItems=1&maxTotalChargeUsd={_MAX_CHARGE_USD}"
+        f"?timeout={timeout_s}&memory={_ACTOR_MEMORY_MB}&maxItems=1"
+        f"&maxTotalChargeUsd={_MAX_CHARGE_USD}"
     )
     headers = {"Authorization": f"Bearer {s.apify_token.strip()}", "Accept": "application/json"}
     total = timeout_s + _NETWORK_MARGIN_S
     started = time.monotonic()
+    failed = (ApifyMeliResult(), _CACHE_ERROR_TTL_S)
     http = _new_client(total)
     try:
         status, body = await asyncio.wait_for(
@@ -279,11 +391,11 @@ async def fetch(url: str) -> ApifyMeliResult | None:
         )
     except asyncio.TimeoutError:
         log.warning("Apify %s: sin respuesta en %.0fs para %s", actor, total, target[:120])
-        return ApifyMeliResult()
+        return failed
     except httpx.HTTPError as exc:
         # Solo el tipo: el str de algunas excepciones de httpx arrastra el request.
         log.warning("Apify %s: error de red %s para %s", actor, type(exc).__name__, target[:120])
-        return ApifyMeliResult()
+        return failed
     finally:
         await http.aclose()
 
@@ -291,15 +403,16 @@ async def fetch(url: str) -> ApifyMeliResult | None:
     if status not in (200, 201):
         log.warning("Apify %s: HTTP %s (%s) en %.0fs para %s", actor, status,
                     _STATUS_REASON.get(status, "error"), elapsed, target[:120])
-        return ApifyMeliResult()
+        return failed
     if body is None:
         log.warning("Apify %s: respuesta de más de %d bytes, descartada", actor, _MAX_RESPONSE_BYTES)
-        return ApifyMeliResult()
+        return failed
     try:
         items = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError: un JSON con cien mil corchetes anidados.
         log.warning("Apify %s: respuesta no-JSON para %s", actor, target[:120])
-        return ApifyMeliResult()
+        return failed
 
     result = normalize(items, target)
     if result.found:
@@ -307,4 +420,4 @@ async def fetch(url: str) -> ApifyMeliResult | None:
                  len(result.image_urls), elapsed)
     else:
         log.info("Apify %s no trajo fotos usables de %s (%.0fs)", actor, target[:120], elapsed)
-    return result
+    return result, _CACHE_TTL_S

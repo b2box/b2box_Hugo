@@ -14,7 +14,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, func, select
 
@@ -899,23 +899,60 @@ async def list_settings() -> list[dict[str, Any]]:
     return runtime.get_all_with_meta()
 
 
+# Settings que gastan plata o cupo pago: quién los cambió y de cuánto a cuánto
+# queda en el audit log. Un tope de Apify subido a 500 sin que nadie sepa quién
+# fue se descubre recién en la factura.
+_COSTLY_SETTINGS = frozenset({
+    "apify_meli_daily_budget",
+    "otapi_daily_budget",
+    "pm_vision_max_calls",
+    "pm_stores_vision_max_calls",
+})
+
+
+def _audit_costly_setting(request: Request, key: str, before: Any, after: Any) -> None:
+    if key not in _COSTLY_SETTINGS or before == after:
+        return
+    from app.auth import COOKIE_NAME, session_username
+
+    user = session_username(request.cookies.get(COOKIE_NAME)) or "(sin sesión)"
+    try:
+        with Session(engine) as session:
+            session.add(AuditLog(
+                action="setting_changed",
+                source="manual",
+                product_id="(settings)",
+                detail=f"{user} cambió {key}: {before} → {after}"[:500],
+                before=json.dumps({key: before}),
+                after=json.dumps({key: after}),
+            ))
+            session.commit()
+    except Exception:  # noqa: BLE001
+        # El cambio ya quedó guardado: que el registro falle no lo deshace.
+        log.exception("No se pudo registrar el cambio de %s en el audit log", key)
+
+
 @router.put("/api/settings/{key}")
-async def update_setting(key: str, payload: SettingUpdate) -> dict[str, Any]:
+async def update_setting(key: str, payload: SettingUpdate, request: Request) -> dict[str, Any]:
     """Actualiza un setting runtime. Persiste en DB y aplica en la próxima lectura."""
+    before = runtime.get(key)
     try:
         new_value = runtime.set_value(key, payload.value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _audit_costly_setting(request, key, before, new_value)
     return {"key": key, "value": new_value, "ok": True}
 
 
 @router.delete("/api/settings/{key}")
-async def reset_setting(key: str) -> dict[str, Any]:
+async def reset_setting(key: str, request: Request) -> dict[str, Any]:
     """Borra el override y vuelve al default del .env."""
+    before = runtime.get(key)
     try:
         new_value = runtime.reset_to_default(key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _audit_costly_setting(request, key, before, new_value)
     return {"key": key, "value": new_value, "ok": True, "reset": True}
 
 

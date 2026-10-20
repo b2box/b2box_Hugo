@@ -410,7 +410,7 @@ async def test_compare_endpoint_devuelve_los_dos_veredictos(monkeypatch):
     from app.api.app_routes import AppLookupRequest
     from app.ingest.image_from_url import ExtractedProduct
 
-    async def fake_extract(url):  # noqa: ARG001
+    async def fake_extract(url, **kwargs):  # noqa: ARG001
         return ExtractedProduct(
             image_urls=["https://cdn.ml/1.jpg"], title="Organizador",
             marketplace="mercadolibre", canonical_url=url, kind="page",
@@ -467,7 +467,7 @@ async def test_compare_endpoint_marca_al_proveedor_que_no_contesto(monkeypatch):
     from app.api.app_routes import AppLookupRequest
     from app.ingest.image_from_url import ExtractedProduct
 
-    async def fake_extract(url):  # noqa: ARG001
+    async def fake_extract(url, **kwargs):  # noqa: ARG001
         return ExtractedProduct(
             image_urls=["https://cdn.ml/1.jpg"], title="x",
             marketplace="mercadolibre", canonical_url=url, kind="page",
@@ -513,7 +513,7 @@ async def test_compare_endpoint_expone_las_fotos_y_la_foto_prestada(monkeypatch)
 
     fotos = [f"https://cdn.ml/{i}.jpg" for i in range(6)]
 
-    async def fake_extract(url):  # noqa: ARG001
+    async def fake_extract(url, **kwargs):  # noqa: ARG001
         return ExtractedProduct(
             image_urls=fotos, title="Guante quita pelos", marketplace="mercadolibre",
             canonical_url="https://ml/canonica", kind="page", approximate=True,

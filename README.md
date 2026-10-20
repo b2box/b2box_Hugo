@@ -148,18 +148,29 @@ devuelve título, fotos y a veces precio. El resultado sale con `approximate=fal
 saliendo de `/products/{MLAU}/items` como antes. También le gana a la foto
 "prestada" de la búsqueda por nombre en el catálogo.
 
-* **Costo**: ~USD 0,005 por link resuelto (techo de USD 0,05 por corrida).
+* **Costo**: ~USD 0,005 por link resuelto (techo de USD 0,05 y 1 GB de memoria por corrida).
 * **Tiempo**: 1-3 min. El techo es `APIFY_MELI_TIMEOUT_S` (90 s): el cliente de
   `/verify` y `/app/lookup` (send-request-to-paco en Cloud) corta a ~110 s. Si
   Apify se mandó y no pudo, no se intenta además Camoufox (no queda reloj).
 * **Prender**: cargar `APIFY_TOKEN` en Coolify y redeployar.
 * **Apagar** sin redeploy: `apify_meli_daily_budget = 0` en el dashboard
-  (Configuración, grupo app). Default 100 links por día UTC, reservados de a uno.
+  (Configuración, grupo app). Default 100 links por día UTC (máx. 500), reservados de a uno.
 * **Seguridad**: solo van a Apify URLs https de `mercadolibre.com.ar` /
   `mercadolibre.com`; las fotos que vuelven se filtran a `https://*.mlstatic.com`;
   el token va solo en el header y no se loguea. Una falla de Apify (401, 402 sin
   saldo, timeout, actor caído) se loguea con su status y el lookup termina como
   antes.
+* **Abuso y costo**: el mismo link (mismos ids de ML, sin importar el tracking)
+  sale de una caché en memoria por 24 h sin gastar cupo, también cuando no sirvió
+  (los errores de Apify, 1 h); como mucho 2 corridas a la vez, y si están ocupadas
+  se sigue sin Apify. `/app/vision-compare` y el comparador del dashboard nunca
+  disparan Apify. Los cambios de `apify_meli_daily_budget` (tope 500),
+  `otapi_daily_budget` y los topes del juez IA quedan en el audit log con quién y
+  de cuánto a cuánto.
+* **Cuenta**: usar una cuenta u organización de Apify **dedicada a Hugo**, con
+  límite mensual de uso y poco saldo cargado. El tope real de gasto es ese límite
+  mensual de la cuenta, no el cupo diario de Hugo. Antes de cambiar de actor,
+  verificar en el Store que corra con **"limited permissions"**.
 * **Ojo**: los términos de uso de Mercado Libre para este scraping **no fueron
   revisados**.
 

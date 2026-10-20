@@ -35,6 +35,12 @@ BIG = f"https://http2.mlstatic.com/D_NQ_NP_2X_{PIC_ID}-F.webp"
 THUMB_2 = f"https://http2.mlstatic.com/D_NQ_NP_{PIC_ID_2}-R.webp"
 BIG_2 = f"https://http2.mlstatic.com/D_NQ_NP_2X_{PIC_ID_2}-F.webp"
 
+
+
+def _up(n: int) -> str:
+    return f"https://www.mercadolibre.com.ar/x/up/MLAU{3916488170 + n}"
+
+
 KHADINAKBAR_ITEM = {
     "itemId": "MLA1755665491",
     "title": "Masajeador Cervical Inteligente Zevya",
@@ -60,7 +66,9 @@ def apify_on(monkeypatch):
                         "khadinakbar/mercadolibre-all-in-one-scraper", raising=False)
     monkeypatch.setattr(settings, "apify_meli_timeout_s", 90, raising=False)
     monkeypatch.setattr(apify_meli, "_daily_budget", lambda: 100)
+    apify_meli._reset_for_tests()
     yield settings
+    apify_meli._reset_for_tests()
 
 
 class FakeApify:
@@ -267,10 +275,11 @@ async def test_cupo_diario_agotado(apify_on, monkeypatch, caplog):
     monkeypatch.setattr(apify_meli, "_daily_budget", lambda: 2)
     fake = FakeApify().install(monkeypatch)
 
-    assert (await apify_meli.fetch(UP_URL)).found
-    assert (await apify_meli.fetch(UP_URL)).found
+    # Tres links distintos: el mismo dos veces saldría de la caché sin gastar.
+    assert (await apify_meli.fetch(_up(1))).found
+    assert (await apify_meli.fetch(_up(2))).found
     with caplog.at_level(logging.INFO, logger="app.ingest.apify_meli"):
-        assert await apify_meli.fetch(UP_URL) is None
+        assert await apify_meli.fetch(_up(3)) is None
 
     assert len(fake.requests) == 2
     assert "cupo diario agotado" in caplog.text
@@ -505,3 +514,166 @@ def test_precio_basura_se_ignora():
     for bad in (True, -5, 0, "1000", float("inf"), 10**12):
         item = dict(KHADINAKBAR_ITEM, price=bad)
         assert apify_meli.normalize([item], UP_URL).price_cents is None
+
+
+# ─── Revisión de seguridad del PR #26 ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_json_anidado_no_revienta_el_lookup(apify_on, monkeypatch, caplog):
+    """`json.loads` de cien mil corchetes lanza RecursionError: antes era un 500."""
+    FakeApify(raw=b"[" * 100_000).install(monkeypatch)
+    _meli_api(monkeypatch, [])
+    _no_safe_get(monkeypatch)
+    _no_browser(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(BlockedByCaptcha):
+        await extract(UP_URL)
+
+    assert TOKEN not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cualquier_sorpresa_termina_en_resultado_vacio(apify_on, monkeypatch, caplog):
+    def roto():
+        raise RuntimeError(f"la DB se cayó con {TOKEN}")
+
+    monkeypatch.setattr(apify_meli, "_daily_budget", roto)
+    fake = FakeApify().install(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await apify_meli.fetch(UP_URL)
+
+    assert result is not None and not result.found
+    assert "RuntimeError" in caplog.text
+    assert TOKEN not in caplog.text
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_memoria_del_actor_acotada(apify_on, monkeypatch):
+    fake = FakeApify().install(monkeypatch)
+
+    await apify_meli.fetch(UP_URL)
+
+    assert fake.requests[0].url.params["memory"] == "1024"
+
+
+@pytest.mark.asyncio
+async def test_cache_por_link_no_gasta_cupo(apify_on, monkeypatch):
+    fake = FakeApify().install(monkeypatch)
+
+    first = await apify_meli.fetch(UP_URL)
+    # Mismo producto con tracking distinto y fragmento: la clave son los ids.
+    again = await apify_meli.fetch(UP_URL + "&matt_tool=123&utm_source=x#fotos")
+
+    assert first.found and again.image_urls == first.image_urls
+    assert len(fake.requests) == 1
+    assert apify_meli.daily_budget.used_today(apify_meli.COUNTER_KEY) == 1
+
+
+@pytest.mark.asyncio
+async def test_otra_publicacion_de_la_misma_ficha_no_es_la_misma_clave(apify_on, monkeypatch):
+    fake = FakeApify().install(monkeypatch)
+    otra = UP_URL.replace("MLA1755665491", "MLA1755665492")
+
+    await apify_meli.fetch(UP_URL)
+    await apify_meli.fetch(otra)
+
+    assert len(fake.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_link_que_no_sirvio_no_se_vuelve_a_mandar(apify_on, monkeypatch):
+    fake = FakeApify(payload=[{"title": "sin fotos"}]).install(monkeypatch)
+
+    first = await apify_meli.fetch(UP_URL)
+    second = await apify_meli.fetch(UP_URL)
+
+    assert first is not None and not first.found
+    # None: no se mandó ni se esperó, así el browser conserva su chance.
+    assert second is None
+    assert len(fake.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_error_de_apify_se_cachea_poco(apify_on, monkeypatch):
+    fake = FakeApify(status=402).install(monkeypatch)
+
+    await apify_meli.fetch(UP_URL)
+    assert await apify_meli.fetch(UP_URL) is None
+    assert len(fake.requests) == 1
+
+    # Vencido el TTL corto de error (p. ej. después de cargar saldo), se reintenta.
+    monkeypatch.setattr(apify_meli, "_CACHE_ERROR_TTL_S", 0)
+    apify_meli._reset_for_tests()
+    await apify_meli.fetch(UP_URL)
+    await apify_meli.fetch(UP_URL)
+    assert len(fake.requests) == 3
+
+
+def test_cache_acotada_lru(monkeypatch):
+    apify_meli._reset_for_tests()
+    monkeypatch.setattr(apify_meli, "_CACHE_MAX", 2)
+    hit = apify_meli.ApifyMeliResult(image_urls=[BIG])
+    apify_meli._cache_put("a", hit, 60)
+    apify_meli._cache_put("b", hit, 60)
+    assert apify_meli._cache_get("a") is hit       # "a" pasa a ser el más reciente
+    apify_meli._cache_put("c", hit, 60)
+    assert apify_meli._cache_get("b") is None      # se fue el menos usado
+    assert apify_meli._cache_get("a") is hit and apify_meli._cache_get("c") is hit
+    apify_meli._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_concurrencia_maxima_y_salteo_rapido(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_meli, "_SLOT_WAIT_S", 0.05)
+    fake = FakeApify(delay_s=0.3).install(monkeypatch)
+
+    results = await asyncio.gather(*(apify_meli.fetch(_up(n)) for n in range(4)))
+
+    assert len(fake.requests) == 2
+    assert sum(1 for r in results if r is None) == 2
+    # El que se salteó no reservó cupo.
+    assert apify_meli.daily_budget.used_today(apify_meli.COUNTER_KEY) == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_sin_fuentes_pagas_no_toca_apify(apify_on, monkeypatch):
+    fake = FakeApify().install(monkeypatch)
+    _meli_api(monkeypatch, [])
+    _no_safe_get(monkeypatch)
+    _no_browser(monkeypatch)
+
+    with pytest.raises(BlockedByCaptcha):
+        await extract(UP_URL, allow_paid=False)
+
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_vision_compare_no_dispara_apify(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import app_routes
+
+    calls: list[dict] = []
+
+    async def fake_extract(url, **kwargs):
+        calls.append(kwargs)
+        raise image_from_url.ExtractError("nada")
+
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+
+    with pytest.raises(HTTPException):
+        await app_routes.run_vision_compare(app_routes.AppLookupRequest(url=UP_URL))
+
+    assert calls == [{"allow_paid": False}]
+
+
+def test_vision_compare_tiene_rate_limit():
+    from app.api import app_routes
+    from app.security import verify_rate_limit
+
+    (route,) = [r for r in app_routes.router.routes if r.path.endswith("/vision-compare")]
+    assert any(d.call is verify_rate_limit for d in route.dependant.dependencies)

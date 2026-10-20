@@ -979,7 +979,7 @@ async def index_status() -> dict[str, Any]:
     return catalog_index.status()
 
 
-@router.post("/vision-compare", dependencies=[Depends(verify_api_key)])
+@router.post("/vision-compare", dependencies=[Depends(verify_api_key), Depends(verify_rate_limit)])
 async def vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
     """Igual que `run_vision_compare`, para scripts (autentica por X-API-Key).
 
@@ -1011,7 +1011,8 @@ async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
     image_urls: list[str] = [direct_image] if direct_image else []
     if raw_url:
         try:
-            extracted = await image_from_url.extract(raw_url)
+            # Comparar modelos es diagnóstico: no dispara Apify (se paga por link).
+            extracted = await image_from_url.extract(raw_url, allow_paid=False)
             image_urls += [u for u in extracted.image_urls if u not in image_urls]
             title = extracted.title
             approximate = extracted.approximate

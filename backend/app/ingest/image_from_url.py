@@ -420,8 +420,11 @@ async def _via_apify(url: str, marketplace: str) -> tuple[ExtractedProduct | Non
 # ─── API pública ───────────────────────────────────────────────────
 
 
-async def extract(url: str) -> ExtractedProduct:
+async def extract(url: str, *, allow_paid: bool = True) -> ExtractedProduct:
     """Devuelve las imágenes (y el título) del producto que hay en `url`.
+
+    `allow_paid=False` saltea las fuentes que se pagan por link (Apify): las
+    herramientas de diagnóstico no tienen por qué gastar cupo ni plata.
 
     Lanza ExtractError si la URL no responde o no tiene ninguna imagen usable.
     """
@@ -443,7 +446,7 @@ async def extract(url: str) -> ExtractedProduct:
     # ir al fetch plano y al browser —que desde el datacenter chocan con el
     # anti-bot—, probamos Apify si está prendido y hay cupo.
     apify_tried = False
-    if marketplace == "mercadolibre" and (
+    if allow_paid and marketplace == "mercadolibre" and (
         not candidates or candidates[0].resolved_by == "catalog"
     ):
         rescued, apify_tried = await _via_apify(url, marketplace)
