@@ -42,6 +42,8 @@ from app.db.session import engine
 from app.dedup import catalog_index, fuzzy_text, image_embed, vision_rerank
 from app.dedup.image_hash import image_similarity
 from app.dedup.url_match import url_similarity
+from app.estimate import identity as estimate_identity
+from app.estimate import limits as estimate_limits
 from app.estimate import otapi_item as estimate_otapi
 from app.estimate import pricing as estimate_pricing
 from app.estimate import service as estimate_service
@@ -640,12 +642,48 @@ async def _pick_match(est, query_urls, shortlist, title):
         return None
 
 
+async def _check_visitor_limit(payload: AppLookupRequest, request: Request | None) -> None:
+    """Límite de TODO /app/lookup por visitante, solo cuando un cliente de
+    confianza (el storefront) manda `visitor.ip`. Pasarse = 429. Fail-closed:
+    una base caída también es 429. El app y los pedidos sin `visitor` no pasan
+    por acá (su respuesta no cambia)."""
+    if request is None or payload.visitor is None or not payload.visitor.ip:
+        return
+    state = getattr(request, "state", None)
+    client = getattr(state, "api_client", None) if state is not None else None
+    if not client or client not in estimate_service.trusted_ip_clients():
+        return
+    try:
+        # IP declarada inválida o privada: cuenta la del socket (compartida).
+        ip_hash = estimate_identity.ip_hash(payload.visitor.ip) or estimate_identity.ip_hash(
+            client_ip(request), kind="sock")
+    except estimate_identity.SaltMissing:
+        raise HTTPException(503, "Límite por visitante sin configurar en el servidor.")
+    if ip_hash is None:
+        return
+    hit = await asyncio.to_thread(
+        estimate_limits.reserve_lookup, ip_hash,
+        daily=int(runtime.get("lookup_visitor_daily_limit") or 0),
+        per_minute=int(runtime.get("lookup_visitor_per_minute") or 0),
+    )
+    if hit is not None:
+        retry = 60 if hit == estimate_limits.LOOKUP_PER_MINUTE else (
+            estimate_limits.seconds_until_midnight())
+        log.info("lookup: visitante frenado por %s (%s)", hit, client)
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiadas búsquedas desde esta conexión. Probá más tarde.",
+            headers={"Retry-After": str(retry)},
+        )
+
+
 async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> AppLookupResponse:
     started = time.monotonic()
     raw_url = (payload.url or "").strip()
     direct_image = (payload.image_url or "").strip()
     if not raw_url and not direct_image:
         raise HTTPException(422, "Mandá `url` (publicación o foto) o `image_url`.")
+    await _check_visitor_limit(payload, request)
 
     # ── 0. Estimado: límites antes de gastar nada ──────────────────
     est: estimate_service.EstimateSession | None = None

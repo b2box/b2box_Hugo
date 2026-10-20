@@ -36,8 +36,13 @@ def _product(pid: str, image=_DEFAULT_IMAGE) -> VendureProduct:
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _clear_cache(monkeypatch):
     vision_rerank._CACHE.clear()
+
+    # El cupo diario se prueba aparte (test_lookup_limits.py): acá siempre hay.
+    async def always():
+        return True
+    monkeypatch.setattr(vision_rerank, "_reserve_call", always)
     yield
     vision_rerank._CACHE.clear()
 

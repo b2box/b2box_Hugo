@@ -200,11 +200,38 @@ Los links de 1688 se leen por id en OTAPI (escalera real, sin búsqueda por foto
   (default `storefront`); a los demás se les cuenta la IP del socket.
 - Runtime: `estimate_price_factor_k` (1,10, medido el 20-oct), `estimate_margin_pct` (15),
   `estimate_tier_qty_1/2/3` (**50 / 200 / 1000, provisorias: confirmarlas con el usuario**).
-- Fotos que pueden salir de Hugo (a Apify y a Qwen): mlstatic, alicdn, alibaba.com y los hosts de
-  `ESTIMATE_UPLOAD_IMAGE_HOSTS` (el bucket propio de las fotos subidas).
+- Fotos que pueden salir de Hugo (a Apify y a Qwen): mlstatic, alicdn, alibaba.com y las fotos subidas
+  al bucket propio que matcheen `ESTIMATE_UPLOAD_IMAGE_PREFIXES`. El S3 de prod es path-style, así que
+  cada entrada es `host/bucket/prefijo/` (ej. `s3.b2box.app/b2box-media/lookup-photos/`; varias, con
+  coma; vacío = ninguna foto subida). Se rechazan `..`, `%2e`, `%2f` y `//` en el path, y las URLs
+  firmadas que vivan más de `ESTIMATE_UPLOAD_MAX_EXPIRY_S` (600 s, leído de `X-Amz-Expires` o
+  `Expires`). La query de esas URLs (la firma) no se guarda ni se loguea: ni en el audit log, ni en
+  `lookup_estimate`, ni en las cachés de pHash/CLIP en base, ni en los logs de descarga.
 - Registro: tabla `lookup_estimate` (90 días, sin IP en claro) y `app_lookup_estimated` en el audit log.
-- Prueba desde el dashboard: `POST /api/estimate-test {url | image_url}` (sesión). **Gasta** y cuenta
-  para el cupo diario; devuelve además candidatos, yuanes, escenarios de Vendure, tiempos y costo.
+- Prueba desde el dashboard: `POST /api/estimate-test {url | image_url}` (sesión de un **admin**).
+  **Gasta**, cuenta para el cupo global y tiene un tope propio por usuario y día
+  (`ESTIMATE_TEST_USER_DAILY_LIMIT`, 20; aparte del de visitantes). Devuelve además candidatos,
+  yuanes, escenarios de Vendure, tiempos y costo.
+
+#### Administradores del dashboard (`DASHBOARD_ADMINS`)
+
+Los settings que gastan plata o mueven el precio que ve un cliente (cupos de Apify, OTAPI, juez IA y
+rerank de visión, prendido/cupo/k/margen/tramos del estimado, límites del lookup público) solo los
+cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en el audit log.
+
+- Setear `DASHBOARD_ADMINS` con los usuarios separados por coma: el **mail** con login por Supabase
+  (`nico@b2box.pro,gabriel@b2box.pro`), o el `DASHBOARD_USER` con login local.
+- **Fail-closed**: vacía = nadie puede cambiarlos ni correr `/api/estimate-test`, tampoco en
+  desarrollo con el login abierto. Los demás settings siguen como siempre.
+
+#### Límites del lookup público
+
+Cuando el pedido viene con la key de un cliente de confianza (`ESTIMATE_TRUSTED_IP_CLIENTS`) y trae
+`visitor.ip`, TODO `/app/lookup` se limita por visitante (hash de la IP, IPv6 por /64): runtime
+`lookup_visitor_daily_limit` (30) y `lookup_visitor_per_minute` (5); pasarse = 429 con `Retry-After`.
+Fail-closed: si la base no contesta, 429. El app y cualquier pedido sin `visitor` no cambian.
+El rerank de visión del catálogo (Sonnet) tiene cupo diario runtime `vision_rerank_daily_budget`
+(300); sin cupo, o con la base caída, el lookup sigue solo con CLIP.
 
 **Migración y rollback.** Es automática en el arranque (`init_db`): crea las tablas `estimate_usage`
 (contadores por visitante y global) y `lookup_estimate` (con su índice `ix_lookup_estimate_status_time`)

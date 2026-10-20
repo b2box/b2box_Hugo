@@ -208,3 +208,21 @@ async def reserve_estimate_async(ip_hash: str | None, **kw) -> Reservation:
 async def refund_all_async(scopes: tuple[str, ...]) -> None:
     for scope in scopes:
         await asyncio.to_thread(refund, scope)
+
+
+# ─── Todo /app/lookup por visitante del storefront ─────────────────
+
+LOOKUP_PER_MINUTE = "lookup_minute"
+LOOKUP_DAY = "lookup_day"
+
+
+def reserve_lookup(ip_hash: str, *, daily: int, per_minute: int) -> str | None:
+    """Cupo para UNA consulta de /app/lookup de un visitante. None = concedido;
+    si no, qué tope frenó. Límites en 0 = ninguna consulta (fail-closed, igual
+    que una base que no contesta)."""
+    scope = f"lk:{ip_hash}"
+    if per_minute <= 0 or not check_burst(scope, per_minute):
+        return LOOKUP_PER_MINUTE
+    if not reserve(scope, daily):
+        return LOOKUP_DAY
+    return None
