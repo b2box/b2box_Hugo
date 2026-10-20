@@ -275,6 +275,14 @@ def _price_cny(value: object) -> float | None:
     return price if price is not None and 0 < price < _MAX_PRICE_CNY else None
 
 
+def _similarity(value: object) -> float | None:
+    """El score del actor, si es un número sano. Medido viene entre 0 y ~1,1;
+    se acepta hasta 100 por si un build lo pasa a porcentaje. Fuera de eso es
+    basura, y un 1e308 rompería cualquier promedio del filtro de después."""
+    score = _number(value)
+    return score if score is not None and 0 <= score <= 100 else None
+
+
 def _count(*values: object) -> int | None:
     for value in values:
         number = _number(value)
@@ -309,7 +317,7 @@ def _candidate(item: object) -> Candidate1688 | None:
         title=clean_line(item.get("title"), _MAX_TITLE),
         price_cny=price,
         image_url=image_url,
-        similarity=_number(item.get("similarityScore")),
+        similarity=_similarity(item.get("similarityScore")),
         sold_quantity=_count(item.get("soldQuantity"), item.get("ordersCount")),
         company=clean_line(item.get("companyName"), _MAX_COMPANY),
     )

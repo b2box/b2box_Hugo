@@ -524,6 +524,16 @@ async def test_solo_candidatos_invalidos_es_no_candidates(apify_on, monkeypatch)
     assert (await apify_1688.search_by_image(PHOTO)).status == "no_candidates"
 
 
+@pytest.mark.parametrize("score, expected", [
+    (0.115, 0.115), (0, 0.0), (1.058, 1.058), (100, 100.0), ("0.5", 0.5),
+    (-0.1, None), (100.01, None), (1e308, None), (float("inf"), None), (float("nan"), None),
+    (True, None), ("alto", None), (None, None), (10**400, None),
+])
+def test_similarity_fuera_de_rango_es_none(score, expected):
+    (cand,) = apify_1688.normalize([dict(ITEM_A, similarityScore=score)])
+    assert cand.similarity == expected
+
+
 def test_como_mucho_20_candidatos():
     items = [dict(ITEM_A, offerId=str(10_000_000 + n)) for n in range(50)]
     assert len(apify_1688.normalize(items)) == 20
