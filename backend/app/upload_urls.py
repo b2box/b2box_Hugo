@@ -35,8 +35,10 @@ def _prefixes() -> list[tuple[str, str]]:
     for entry in (get_settings().estimate_upload_image_prefixes or "").split(","):
         entry = entry.strip().removeprefix("https://")
         host, sep, path = entry.partition("/")
-        if host and sep and path:
-            out.append((host.lower().rstrip("."), "/" + path.lstrip("/")))
+        if host and sep and path.strip("/"):
+            # Con barra final siempre: "lookup-photos" no puede matchear
+            # "lookup-photos-viejas/…".
+            out.append((host.lower().rstrip("."), "/" + path.strip("/") + "/"))
     return out
 
 
