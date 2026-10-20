@@ -7,6 +7,8 @@
      búsqueda con dudas (`pm_vision_api_variants`) y no puede pasar de su parte del tope (`pm_vision_web_reserve_pct`).
   c) corta-circuito: tras `pm_vision_fail_streak` fallas seguidas el juez se apaga por el resto de la corrida, con
      el motivo en la corrida; lo que no se consultó (tope, fotos, corte) queda contado.
+  d) «No medible» aparte de «Sin dato»: lo que no se puede medir por cómo está cargado (sin precio en Vendure, sin
+     foto, sin nombre, otra moneda) no infla el chip «Sin dato». Un `skipped` por cupo de ML sigue siendo sin dato.
 
 Vendure, ML (API y web), CLIP y el juez son dobles: nada sale a la red."""
 
@@ -29,6 +31,7 @@ from app.pricing import daily_budget, judge_images, market_judge, market_match, 
 from tests.test_oficina_semaforo import _store, _wire  # noqa: E402
 from tests.test_price_monitor import (  # noqa: E402,F401
     ML_IMG, FakeVendure, _candidate, _listing, _product, _runs, _set, _snaps, world)
+from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 from tests.test_semaforo_web import PHOTO  # noqa: E402
 
 
@@ -261,7 +264,7 @@ def test_b_the_new_settings_are_runtime_editable_with_sane_defaults():
     for key, default, lo, hi in (("pm_vision_web_reserve_pct", 50, 0, 100), ("pm_vision_api_variants", 1, 0, 3),
                                  ("pm_vision_fail_streak", 5, 0, 100)):
         m = metas[key]
-        assert (getattr(Settings(), m.default_attr), m.min, m.max, m.group) == (default, lo, hi, "monitor")
+        assert (Settings.model_fields[m.default_attr].default, m.min, m.max, m.group) == (default, lo, hi, "monitor")
 
 
 # ─── c) corta-circuito del juez ──────────────────────────────────────────────
@@ -429,3 +432,105 @@ async def test_c_the_breaker_is_shared_with_the_stores_and_a_raising_double_coun
     run = _runs()[0]
     assert len(calls) == 2 and run.llm_status == "juez cortado: 2 fallas seguidas (motivo: HTTP 400, code=bad_request)"
     assert run.llm_skipped_cut == 4
+
+
+# ─── d) «No medible» aparte de «Sin dato» ────────────────────────────────────
+
+
+def _unmeasurable_catalog(world) -> None:
+    no_photo = _product("4", "Accesorio sin foto")
+    no_photo.image_urls, no_photo.featured_image_url = [], None
+    FakeVendure.products = [
+        _product("1", "Producto raro"),                          # medible, ML no tiene nada: sin dato de verdad
+        _product("2", "Sin precio", price=None),
+        _product("3", "Reloj importado", currency="USD"),
+        no_photo,
+        _product("5", ""),                                       # sin nombre para buscar
+        _product("6", "Taza ceramica"),                          # medible, pero se acaba el cupo de ML
+    ]
+    world.ml.search["Producto raro"] = []
+    _set("pm_ml_daily_budget", 1)
+    _set("pm_ml_concurrency", 1)
+
+
+async def test_d_unmeasurable_products_are_marked_and_budget_skips_are_not(world):
+    _unmeasurable_catalog(world)
+
+    await price_monitor.run_price_monitor()
+
+    snaps = _snaps()
+    assert {pid: (s.ml_status, s.unmeasurable) for pid, s in snaps.items()} == {
+        "1": ("no_data", None), "2": ("skipped", "sin_precio"), "3": ("skipped", "moneda"),
+        "4": ("skipped", "sin_foto"), "5": ("skipped", "sin_nombre"), "6": ("skipped", None)}
+    assert snaps["6"].ml_error.startswith("budget ML agotado")
+    assert {s.color for s in snaps.values()} == {"sin_dato"}              # en la base, el color no cambia
+    run = _runs()[0]
+    assert (run.n_sin_dato, run.n_no_medible, run.n_skipped) == (6, 4, 5)
+    colors = price_monitor.run_to_dict(run)["colors"]
+    assert colors == {"verde": 0, "amarillo": 0, "rojo": 0, "sin_dato": 2, "no_medible": 4}
+
+
+async def test_d_the_api_has_a_no_medible_chip_and_filter_and_sin_dato_leaves_them_out(world, client):
+    _unmeasurable_catalog(world)
+    await price_monitor.run_price_monitor()
+
+    def ids(query: str) -> list[str]:
+        r = client.get(f"/api/price-monitor/snapshots?page_size=50{query}")
+        assert r.status_code == 200
+        return sorted(i["product"]["id"] for i in r.json()["items"])
+
+    body = client.get("/api/price-monitor/snapshots").json()
+    assert body["colors"] == {"verde": 0, "amarillo": 0, "rojo": 0, "sin_dato": 2, "no_medible": 4}
+    assert ids("&color=sin_dato") == ["1", "6"]
+    assert ids("&color=no_medible") == ["2", "3", "4", "5"]
+    assert ids("&status=skipped") == ["2", "3", "4", "5", "6"]          # el estado de ML no cambia
+    by_id = {i["product"]["id"]: i for i in body["items"]}
+    assert by_id["2"]["unmeasurable"] == "sin_precio" and by_id["6"]["unmeasurable"] is None
+    assert client.get("/api/price-monitor/snapshots?color=violeta").status_code == 400
+    # La card de Salud y el historial de corridas, igual.
+    summary = client.get("/api/price-monitor/summary").json()
+    assert summary["last_run"]["colors"]["no_medible"] == 4 and summary["last_run"]["colors"]["sin_dato"] == 2
+    assert client.get("/api/price-monitor/runs").json()["items"][0]["colors"]["no_medible"] == 4
+
+
+async def test_d_the_no_medible_chip_follows_the_other_filters(world, client):
+    _unmeasurable_catalog(world)
+    _set("pm_include_disabled", 1)
+    FakeVendure.products.append(_product("7", "Sin precio viejo", price=None, enabled=False))
+    await price_monitor.run_price_monitor()
+
+    only_disabled = client.get("/api/price-monitor/snapshots?enabled=disabled").json()
+    assert only_disabled["colors"]["no_medible"] == 1 and only_disabled["colors"]["sin_dato"] == 0
+    assert client.get("/api/price-monitor/snapshots?enabled=enabled").json()["colors"]["no_medible"] == 4
+
+
+# ─── migración automática (init_db) ──────────────────────────────────────────
+
+
+def test_the_new_columns_are_added_to_the_existing_tables_with_defaults(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine, inspect, text
+    from sqlmodel import SQLModel
+
+    from app.db import session
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as conn:
+        conn.execute(text("CREATE TABLE market_price_snapshot (id INTEGER PRIMARY KEY, run_id INTEGER, "
+                          "product_id VARCHAR(64), ml_status VARCHAR(16), color VARCHAR(16))"))
+        conn.execute(text("INSERT INTO market_price_snapshot (run_id, product_id, ml_status, color) "
+                          "VALUES (1, '7', 'skipped', 'sin_dato')"))
+        conn.execute(text("CREATE TABLE price_monitor_run (id INTEGER PRIMARY KEY, status VARCHAR, llm_calls INTEGER)"))
+        conn.execute(text("INSERT INTO price_monitor_run (status, llm_calls) VALUES ('ok', 2280)"))
+    monkeypatch.setattr(session, "engine", eng)
+
+    SQLModel.metadata.create_all(eng)
+    session._add_missing_columns()
+
+    assert "unmeasurable" in {c["name"] for c in inspect(eng).get_columns("market_price_snapshot")}
+    new_run_cols = ("llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut",
+                    "llm_status", "n_no_medible")
+    assert set(new_run_cols) <= {c["name"] for c in inspect(eng).get_columns("price_monitor_run")}
+    with eng.connect() as conn:
+        assert conn.execute(text("SELECT unmeasurable FROM market_price_snapshot")).one() == (None,)
+        row = conn.execute(text(f"SELECT {', '.join(new_run_cols)} FROM price_monitor_run")).one()
+        assert tuple(row) == (0, 0, 0, 0, 0, None, 0)

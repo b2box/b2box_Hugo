@@ -318,6 +318,26 @@ juez lo pide); las de la web siempre traen precio.
 
 Fallar o no poder evaluar (`failed` / `skipped`) sigue siendo aparte y no tiene estado.
 
+**Sin dato y no medible.** En la corrida #15 había 515 `skipped` (498 "sin precio en
+Vendure", casi todos deshabilitados; 11 "sin nombre para buscar"; 6 "sin foto propia")
+sumados al chip "Sin dato" junto con los que sí se buscaron. Ahora el snapshot guarda
+en `unmeasurable` por qué un producto **no se puede medir tal como está cargado**:
+`sin_precio` | `moneda` (precio que no es ARS) | `sin_foto` | `sin_nombre`. Siguen siendo
+`skipped` y `color = sin_dato` en la base (los contadores de la corrida no cambian;
+`n_no_medible` se suma aparte), pero la API los saca de "Sin dato":
+
+- `/snapshots`: `colors.sin_dato` = evaluados sin un idéntico con precio (incluye los
+  `failed` y los `skipped` por cupo de ML o por CLIP, que sí se pueden medir otra noche);
+  `colors.no_medible` = los que no; `color=sin_dato` y `color=no_medible` filtran igual;
+  cada item trae `unmeasurable`.
+- `/runs` y `/summary`: `colors` de la corrida con la misma partición.
+- Un `skipped` por **budget de ML** (o sin score de CLIP) **no** es "no medible":
+  `unmeasurable` queda en null. `status=skipped` sigue trayendo todos.
+
+Este cambio NO es aditivo para quien leía `colors.sin_dato` o `color=sin_dato`: los
+dorados de regresión lo deshacen solo a eso (`tests/no_medible_compat.py`) y comparan
+todo lo demás contra origin/main.
+
 **Color estimado.** Sin idéntico pero con similares **confirmados** con precio (en
 pesos y, en la web, con ventas suficientes), se calcula con la **mediana de esos
 similares y la misma fórmula de ganancia y los mismos cortes** que el color real. Un
@@ -384,6 +404,20 @@ Robustez:
   misma transacción que reserva el cupo: después de un corte, la corrida
   refleja exactamente lo gastado.
 - Si más del 20 % quedó `failed`, la corrida es `degraded`.
+- **Migración y rollback de "sin dato" (oct-2026).** Automática en el arranque (`init_db`),
+  todas **sin NOT NULL** (el código anterior sigue insertando): `market_price_snapshot.unmeasurable`
+  y `price_monitor_run.llm_failures`, `llm_skipped_cap`, `llm_skipped_api`,
+  `llm_skipped_photos`, `llm_skipped_cut`, `n_no_medible` (con backfill a 0) y `llm_status`.
+  Settings nuevos (sin fila hasta que alguien los cambie): `pm_vision_web_reserve_pct`,
+  `pm_vision_api_variants`, `pm_vision_fail_streak`. Para volver el esquema atrás:
+
+```sql
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS unmeasurable;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS llm_failures, DROP COLUMN IF EXISTS llm_skipped_cap,
+    DROP COLUMN IF EXISTS llm_skipped_api, DROP COLUMN IF EXISTS llm_skipped_photos,
+    DROP COLUMN IF EXISTS llm_skipped_cut, DROP COLUMN IF EXISTS llm_status, DROP COLUMN IF EXISTS n_no_medible;
+DELETE FROM settings WHERE key IN ('pm_vision_web_reserve_pct', 'pm_vision_api_variants', 'pm_vision_fail_streak');
+```
 - Solo corre en el líder, con lock. Si el proceso se reinicia a mitad, al
   levantar **retoma la misma corrida** (mismo `run_id`, solo los productos sin
   snapshot). Si el cron no disparó porque el proceso estaba caído, corre al
@@ -1145,9 +1179,13 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   cuando ML no devolvió nada. Filtros: producto (habilitados / deshabilitados /
   todos), lo que devolvió ML (tiene idéntico / solo similares / solo diferentes / sin
   resultados, con su conteo) y origen. Las chips del color real y sus conteos no
-  cambian.
+  cambian. Al lado de "Sin dato" está la chip **"No medible"** (ver "Sin dato y no
+  medible"): cada fila dice por qué ("No medible · sin precio en Vendure").
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
-  su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
+  su estado, requests a ML, % sin dato, % fallado, llamadas/costo del juez, los
+  colores con "No medible" aparte y, si pasó algo con el juez, una línea "Juez IA:
+  juez cortado: 5 fallas seguidas (motivo: …) · N sin respuesta · N sin consultar
+  por tope diario · …" (la misma línea va debajo de "Última corrida" en el semáforo).
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
 

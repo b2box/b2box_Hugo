@@ -5,7 +5,7 @@ import { IconActivity } from "../icons";
 import { fmtPct, fmtTime, nfmt } from "../lib/format";
 import { COLOR_META, JudgeLine, RUN_STATUS_LABEL } from "./SemaforoView";
 import { SourcesStats } from "./SourceCells";
-import type { PriceMonitorSummary, SemaforoColor } from "../types";
+import type { ColorFilter, PriceMonitorSummary } from "../types";
 
 // Página de salud del sistema: budget OTAPI, tasa Paco, últimas auditorías, cache.
 export default function HealthView() {
@@ -198,7 +198,7 @@ function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
             <Stat label="costo IA (USD)" value={run.llm.cost_usd.toFixed(4)} />
             <div>
               <ul className="space-y-0.5 text-xs">
-                {(Object.keys(COLOR_META) as SemaforoColor[]).map((c) => (
+                {(Object.keys(COLOR_META) as ColorFilter[]).map((c) => (
                   <li key={c} className="flex items-center gap-1.5">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${COLOR_META[c].dot}`} aria-hidden />
                     <span className="text-foreground">{COLOR_META[c].label}</span>

@@ -179,6 +179,10 @@ export interface VisionCompare {
 // Reflejan price_monitor.run_to_dict / snapshot_to_dict / summary.
 
 export type SemaforoColor = "verde" | "amarillo" | "rojo" | "sin_dato";
+// Chips y filtro `color=` de la tabla: los cuatro del semáforo y "No medible" (en la base son
+// sin_dato, pero no se pueden medir: sin precio en Vendure, sin foto, sin nombre, otra moneda).
+export type ColorFilter = SemaforoColor | "no_medible";
+export type Unmeasurable = "sin_precio" | "moneda" | "sin_foto" | "sin_nombre";
 export type MlStatus = "ok" | "no_data" | "failed" | "skipped";
 
 export interface PriceMonitorRun {
@@ -191,7 +195,8 @@ export interface PriceMonitorRun {
   total_products: number;
   processed: number;
   counts: Record<MlStatus, number>;
-  colors: Record<SemaforoColor, number>;
+  // "sin_dato" sin los no medibles, que vienen aparte (corridas viejas: sin no_medible).
+  colors: Record<SemaforoColor, number> & { no_medible?: number };
   pct_no_data: number | null;
   pct_failed: number | null;
   ml_requests_used: number;
@@ -346,6 +351,8 @@ export interface PriceMonitorSnapshot {
   est_margin_pct: number | null;
   color: SemaforoColor;
   prev_color: SemaforoColor | null;
+  // Por qué no se puede medir (null = medible; filas viejas: sin campo).
+  unmeasurable?: Unmeasurable | null;
   // Tiendas (Gadnic, Casa Perfecta…): la mejor coincidencia por fuente, el detalle por
   // tienda y el precio idéntico más bajo de afuera. Faltan en servidores viejos.
   cells?: Record<string, SourceCell>;
@@ -362,7 +369,7 @@ export interface PriceMonitorSnapshotsResponse {
   page: number;
   page_size: number;
   has_more: boolean;
-  colors: Partial<Record<SemaforoColor, number>>;
+  colors: Partial<Record<ColorFilter, number>>;
   // Aparte del color real: productos con color estimado y cuántos hay en cada estado.
   estimated_colors?: Partial<Record<"verde" | "amarillo" | "rojo", number>>;
   states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;

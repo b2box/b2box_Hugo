@@ -31,6 +31,10 @@ AMARILLO = "amarillo"
 ROJO = "rojo"
 SIN_DATO = "sin_dato"
 COLORS = (VERDE, AMARILLO, ROJO, SIN_DATO)
+# Chip del dashboard (no es un color que se guarde: la fila queda `sin_dato`): productos que no se
+# pueden medir por cómo están cargados (sin precio en Vendure, sin foto, sin nombre, otra moneda).
+# "Sin dato" queda para los que se evaluaron y no tienen un idéntico con precio.
+NO_MEDIBLE = "no_medible"
 
 # Factor IVA máximo creíble al derivar "con IVA" de un tramo: si priceWithTax /
 # salePrice se sale de este rango, el tramo no es comparable con el precio con

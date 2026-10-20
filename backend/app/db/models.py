@@ -248,6 +248,9 @@ class PriceMonitorRun(SQLModel, table=True):
     # resultado fresco al empezar la corrida y productos que quedaron con precio por eso.
     oficina_fresh: int = Field(default=0)
     n_oficina_ok: int = Field(default=0)
+    # Productos sin dato que NO SE PUEDEN MEDIR (ver MarketPriceSnapshot.unmeasurable). Están
+    # incluidos en `n_sin_dato` (el color guardado); la API los muestra aparte.
+    n_no_medible: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -352,6 +355,10 @@ class MarketPriceSnapshot(SQLModel, table=True):
     ml_variant: str | None = Field(default=None, max_length=12)
     # "oficina" si `web_state` lo dejó la búsqueda de la Mac de la oficina (no el servidor).
     web_via: str | None = Field(default=None, max_length=8)
+    # Por qué el producto NO SE PUEDE MEDIR (skipped por cómo está cargado, no por ML ni por el
+    # cupo): sin_precio | moneda | sin_foto | sin_nombre. None = medible (o fila vieja). El color
+    # sigue siendo sin_dato; el dashboard lo cuenta aparte ("No medible").
+    unmeasurable: str | None = Field(default=None, max_length=16)
 
 
 class MarketMatchFeedback(SQLModel, table=True):

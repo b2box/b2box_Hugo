@@ -41,17 +41,20 @@ from tests.test_price_monitor import (  # noqa: E402,F401
     ML_IMG, FakeVendure, _candidate, _listing, _product, _runs, _set, _snaps, world)
 from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
 from tests.test_semaforo_web import PHOTO, _card, _score, _web_page, webw  # noqa: E402,F401
+from tests.no_medible_compat import get_as_origin_main  # noqa: E402
 from tests.qa3_cleanup import qa3_clean  # noqa: E402,F401  (fixture autouse)
 
 OUT = os.environ.get("QA3_OUT")
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_origin_main_e8209e1_qa3.json.gz"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
+# unmeasurable y n_no_medible: «No medible» aparte de «Sin dato» (fix/semaforo-sin-dato, aditivas).
 # llm_failures, llm_skipped_* y llm_status (y en la API llm.failures / llm.skipped / llm.cut): lo que el juez no
 # contestó o no consultó (fix/semaforo-sin-dato). Aditivas: acá el juez está apagado y quedan en 0 / None.
 ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok", "llm_failures",
-                        "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status"}
-NEW_ITEM_KEYS = {"ml_variant", "web_via"}
+                        "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status",
+                        "unmeasurable", "n_no_medible"}
+NEW_ITEM_KEYS = {"ml_variant", "web_via", "unmeasurable"}
 NEW_RUN_KEYS = {"variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"oficina"}
 
@@ -256,6 +259,8 @@ async def test_origin_main_dump_or_compare(qworld, client, seed, config):  # noq
     for path, old in want["api"].items():
         new = got["api"][path]
         assert new["status"] == old["status"] == 200, path
+        # «No medible» aparte de «Sin dato» es buscado (ver tests/no_medible_compat.py): se deshace solo eso.
+        new = {**new, "body": _norm(get_as_origin_main(client, path))}
         _old_keys_equal(old["body"], new["body"], path)
 
 

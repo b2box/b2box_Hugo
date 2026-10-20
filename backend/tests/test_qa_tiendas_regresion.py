@@ -35,10 +35,12 @@ from tests.test_semaforo_web import _card, _score, _web_page, webw  # noqa: E402
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_b052e4f_full.json"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
+# unmeasurable y n_no_medible: «No medible» aparte de «Sin dato» (fix/semaforo-sin-dato, aditivas).
 # llm_failures, llm_skipped_* y llm_status: lo que el juez no contestó o no consultó (fix/semaforo-sin-dato, aditivas).
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
                         "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
-                        "llm_skipped_cut", "llm_status"}
+                        "llm_skipped_cut", "llm_status",
+                        "unmeasurable", "n_no_medible"}
 
 
 def _mixed_world(w) -> None:

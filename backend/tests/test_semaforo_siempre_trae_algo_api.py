@@ -114,7 +114,7 @@ def test_each_product_has_its_state_and_only_similars_have_an_estimated_color(cl
 def test_the_real_color_chips_do_not_change_and_the_estimated_ones_are_separate(client):
     _seed()
     body = _get(client).json()
-    assert body["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 5}       # solo lo real
+    assert body["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 5, "no_medible": 0}   # solo lo real
     assert body["estimated_colors"] == {"verde": 1, "amarillo": 1, "rojo": 1}
     assert body["states"] == {"igual": 1, "solo_similar": 3, "solo_diferente": 1, "ninguno": 1}
 
@@ -199,7 +199,7 @@ def test_the_run_carries_the_estimated_and_different_counts(client):
         s.commit()
     run = client.get("/api/price-monitor/runs").json()["items"][0]
     assert run["estimated"] == {"verde": 1, "amarillo": 1, "rojo": 1} and run["solo_diferentes"] == 1
-    assert run["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 5}
+    assert run["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 5, "no_medible": 0}
     assert (run["counts"]["ok"], run["counts"]["no_data"]) == (1, 5)
 
 

@@ -22,6 +22,7 @@ import { fmtArs, fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format
 import { SECTION_META } from "../sections";
 import { CheapestCell, SourceCell, SourceFilters, SourceHeads, StoresPanel } from "./SourceCells";
 import type {
+  ColorFilter,
   ListingSpecs,
   MatchCategory,
   MatchOrigin,
@@ -33,6 +34,7 @@ import type {
   PriceMonitorSnapshot,
   SemaforoColor,
   SourceMeta,
+  Unmeasurable,
   WebState,
 } from "../types";
 
@@ -40,13 +42,23 @@ import type {
 // noche y guarda; esta vista solo lee. Nada de lo que se ve acá tocó Vendure.
 
 const PAGE_SIZE = 25;
-const COLOR_ORDER: SemaforoColor[] = ["verde", "amarillo", "rojo", "sin_dato"];
+const COLOR_ORDER: ColorFilter[] = ["verde", "amarillo", "rojo", "sin_dato", "no_medible"];
 
-export const COLOR_META: Record<SemaforoColor, { label: string; dot: string; chip: string; ring: string }> = {
+export const COLOR_META: Record<ColorFilter, { label: string; dot: string; chip: string; ring: string }> = {
   verde: { label: "Verde", dot: "bg-success", chip: "border-success/40 text-success", ring: "border-success" },
   amarillo: { label: "Amarillo", dot: "bg-warning", chip: "border-warning/40 text-warning", ring: "border-warning" },
   rojo: { label: "Rojo", dot: "bg-destructive", chip: "border-destructive/40 text-destructive", ring: "border-destructive" },
   sin_dato: { label: "Sin dato", dot: "bg-muted-foreground", chip: "border-border text-muted-foreground", ring: "border-muted-foreground" },
+  // No es un color: productos que no se pueden medir tal como están cargados en Vendure.
+  no_medible: { label: "No medible", dot: "bg-muted-foreground/30", chip: "border-border text-muted-foreground/80", ring: "border-muted-foreground/30" },
+};
+
+// Por qué un producto no se puede medir (snapshot.unmeasurable).
+const UNMEASURABLE_LABEL: Record<Unmeasurable, string> = {
+  sin_precio: "sin precio en Vendure",
+  moneda: "precio en otra moneda",
+  sin_foto: "sin foto propia",
+  sin_nombre: "sin nombre para buscar",
 };
 
 const STATUS_LABEL: Record<MlStatus, string> = {
@@ -246,7 +258,7 @@ function marginClass(color: SemaforoColor): string {
 
 export default function SemaforoView() {
   const qc = useQueryClient();
-  const [color, setColor] = useState<SemaforoColor | null>(null);
+  const [color, setColor] = useState<ColorFilter | null>(null);
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -300,7 +312,7 @@ export default function SemaforoView() {
   const allCount = COLOR_ORDER.reduce((acc, c) => acc + (colorCounts[c] ?? 0), 0);
   const lastRun = summaryQ.data?.last_run ?? null;
 
-  function pickColor(c: SemaforoColor | null) {
+  function pickColor(c: ColorFilter | null) {
     setColor(c);
     setEstimated(null);          // el color real y el estimado son filtros distintos: no se combinan
     setPage(0);
@@ -708,6 +720,13 @@ function ColorCell({ s }: { s: PriceMonitorSnapshot }) {
   // Color real: de ML o, si las tiendas cuentan y no hay idéntico en ML, de las tiendas.
   if (s.ml_status === "ok" || s.price_basis === "tiendas") return <ColorDot color={s.color} />;
   if (isEstimated(s)) return <EstimatedDot color={s.estimated_color!} />;
+  if (s.unmeasurable) {
+    return (
+      <Badge variant="outline" title="No se puede medir tal como está cargado en Vendure: no cuenta como «Sin dato»">
+        No medible · {UNMEASURABLE_LABEL[s.unmeasurable] ?? s.unmeasurable}
+      </Badge>
+    );
+  }
   const st = stateOf(s);
   if (st === "diferente" || st === "similar" || st === "igual_sin_precio") {
     return (

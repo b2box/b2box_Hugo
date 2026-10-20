@@ -365,6 +365,11 @@ def _recount(s: Session, run: PriceMonitorRun) -> None:
     run.n_amarillo = int(by_color.get(semaforo.AMARILLO, 0))
     run.n_rojo = int(by_color.get(semaforo.ROJO, 0))
     run.n_sin_dato = int(by_color.get(semaforo.SIN_DATO, 0))
+    run.n_no_medible = int(s.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.color == semaforo.SIN_DATO,
+               MarketPriceSnapshot.unmeasurable.is_not(None))  # type: ignore[union-attr]
+    ).one() or 0)
     run.n_web_ok = int(s.exec(
         select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status == OK,
@@ -454,6 +459,20 @@ def _base_snapshot(ctx: RunContext, product: VendureProduct) -> MarketPriceSnaps
         shipping_cents=ctx.shipping_cents,
         ml_currency=CURRENCY,
     )
+
+
+# Por qué un producto no se puede medir (MarketPriceSnapshot.unmeasurable): es cómo está cargado en
+# Vendure, no ML ni el cupo. Un `skipped` por budget o por CLIP NO es esto: se puede medir otra noche.
+UNMEASURABLE_NO_PRICE = "sin_precio"
+UNMEASURABLE_CURRENCY = "moneda"
+UNMEASURABLE_NO_PHOTO = "sin_foto"
+UNMEASURABLE_NO_NAME = "sin_nombre"
+
+
+def _unmeasurable(snap: MarketPriceSnapshot, code: str, reason: str) -> MarketPriceSnapshot:
+    """`skipped` porque el producto no se puede medir tal como está cargado (chip "No medible")."""
+    snap.unmeasurable = code
+    return _mark(snap, SKIPPED, reason)
 
 
 def _mark(snap: MarketPriceSnapshot, status: str, reason: str) -> MarketPriceSnapshot:
@@ -1317,19 +1336,19 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
 
     our = semaforo.pick_our_price(product.priced_variants or [], ctx.tier_policy)
     if our is None:
-        return _mark(snap, SKIPPED, "sin precio en Vendure")
+        return _unmeasurable(snap, UNMEASURABLE_NO_PRICE, "sin precio en Vendure")
     snap.our_price_cents, snap.variant_id, snap.tier_used = our.price_cents, our.variant_id, our.tier_used
     if our.currency and our.currency.upper() != CURRENCY:
         # ML se compara en pesos: un precio en otra moneda daría un margen sin sentido.
-        return _mark(snap, SKIPPED, f"nuestro precio está en {our.currency}, no en {CURRENCY}")
+        return _unmeasurable(snap, UNMEASURABLE_CURRENCY, f"nuestro precio está en {our.currency}, no en {CURRENCY}")
 
     if not _our_photos(product):
-        return _mark(snap, SKIPPED, "sin foto propia para comparar")
+        return _unmeasurable(snap, UNMEASURABLE_NO_PHOTO, "sin foto propia para comparar")
     if not ctx.can_score(product):
         return _mark(snap, SKIPPED, "sin fotos en el índice CLIP (o CLIP apagado)")
     query = market_match.search_query(product.name)
     if not query:
-        return _mark(snap, SKIPPED, "sin nombre para buscar")
+        return _unmeasurable(snap, UNMEASURABLE_NO_NAME, "sin nombre para buscar")
 
     specs = _our_specs(product, our.variant_id)
     if specs is not None:
@@ -1785,8 +1804,11 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         "processed": run.processed,
         "counts": {"ok": run.n_ok, "no_data": run.n_no_data, "failed": run.n_failed,
                    "skipped": run.n_skipped},
+        # "sin_dato" son los evaluados sin un idéntico con precio; los que no se pueden medir (sin precio
+        # en Vendure, sin foto, sin nombre) van aparte en "no_medible" (en la base los dos son sin_dato).
         "colors": {"verde": run.n_verde, "amarillo": run.n_amarillo, "rojo": run.n_rojo,
-                   "sin_dato": run.n_sin_dato},
+                   "sin_dato": run.n_sin_dato - (run.n_no_medible or 0),
+                   semaforo.NO_MEDIBLE: run.n_no_medible or 0},
         "pct_no_data": pct(run.n_no_data),
         "pct_failed": pct(run.n_failed),
         "ml_requests_used": run.ml_requests_used,
@@ -1888,6 +1910,8 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         "captured_at": snap.captured_at.isoformat() + "Z" if snap.captured_at else None,
         "ml_status": snap.ml_status,
         "ml_error": snap.ml_error,
+        # Por qué no se puede medir (sin_precio | moneda | sin_foto | sin_nombre); None = medible.
+        "unmeasurable": snap.unmeasurable,
         "ml_median_cents": snap.ml_median_cents,
         "ml_min_cents": snap.ml_min_cents,
         "ml_listing_count": snap.ml_listing_count,

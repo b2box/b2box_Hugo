@@ -58,15 +58,21 @@ ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run",
                  # variantes de búsqueda y buscador de la oficina
                  ("market_price_snapshot", "ml_variant"), ("market_price_snapshot", "web_via"),
                  ("price_monitor_run", "variant_stats"), ("price_monitor_run", "oficina_fresh"),
-                 ("price_monitor_run", "n_oficina_ok")}
+                 ("price_monitor_run", "n_oficina_ok"),
+                 # «sin dato»: no medible y lo que el juez no contestó o no consultó (fix/semaforo-sin-dato)
+                 ("market_price_snapshot", "unmeasurable"),
+                 *(("price_monitor_run", c) for c in ("llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"))}
 PROD_TIMESTAMPTZ = [("price_monitor_run", "started_at"), ("price_monitor_run", "finished_at"), ("market_price_snapshot", "captured_at"),
                     ("ml_seller_cache", "fetched_at"), ("market_match_feedback", "created_at")]
 
 DOWN_SQL = """
 DROP TABLE IF EXISTS store_match_feedback, store_match, store_catalog_item, market_store, ml_web_result;
-ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS price_basis, DROP COLUMN IF EXISTS ml_variant, DROP COLUMN IF EXISTS web_via;
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS price_basis, DROP COLUMN IF EXISTS ml_variant, DROP COLUMN IF EXISTS web_via,
+    DROP COLUMN IF EXISTS unmeasurable;
 ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS source_stats, DROP COLUMN IF EXISTS variant_stats,
-    DROP COLUMN IF EXISTS oficina_fresh, DROP COLUMN IF EXISTS n_oficina_ok;
+    DROP COLUMN IF EXISTS oficina_fresh, DROP COLUMN IF EXISTS n_oficina_ok, DROP COLUMN IF EXISTS llm_failures,
+    DROP COLUMN IF EXISTS llm_skipped_cap, DROP COLUMN IF EXISTS llm_skipped_api, DROP COLUMN IF EXISTS llm_skipped_photos,
+    DROP COLUMN IF EXISTS llm_skipped_cut, DROP COLUMN IF EXISTS llm_status, DROP COLUMN IF EXISTS n_no_medible;
 DELETE FROM settings WHERE key LIKE '_meta:store%' OR key LIKE 'pm_stores%' OR key = '_meta:pm_llm_calls_stores_today';
 """
 
