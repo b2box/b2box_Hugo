@@ -95,6 +95,12 @@ _NAME_TOPK = 5
 # Con estimado pedido, el rerank de visión del catálogo tiene este techo: el
 # deadline del estimado es de 50 s y Apify corre en paralelo (diseño 1.3).
 _ESTIMATE_RERANK_BUDGET_SECONDS = 20.0
+# Techo de la extracción del link con estimado (un render de browser tarda ~50 s
+# y dejaría al estimado sin tiempo) y de la respuesta entera: el envío a Cloud,
+# que va después del estimado, recibe lo que quede hasta 55 s (mínimo 3 s).
+_ESTIMATE_EXTRACT_BUDGET_SECONDS = 20.0
+_ESTIMATE_RESPONSE_CAP_SECONDS = 55.0
+_ESTIMATE_CLOUD_MIN_SECONDS = 3.0
 
 
 # ─── Modelos ───────────────────────────────────────────────────────
@@ -689,7 +695,55 @@ async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> 
     est: estimate_service.EstimateSession | None = None
     if payload.want_estimate:
         est = await _open_estimate(payload, request, started)
+    if est is None:
+        return await _lookup_body(payload, None, started, raw_url, direct_image)
+    try:
+        return await _lookup_body(payload, est, started, raw_url, direct_image)
+    except BaseException:
+        # Una excepción (Vendure caído, cancelación del cliente…) después de
+        # abrir el estimado: igual queda su fila y el cupo vuelve si no se
+        # gastó nada. En segundo plano: con una cancelación no se puede esperar.
+        estimate_service.abandon_later(est, "el lookup terminó con una excepción")
+        raise
 
+
+async def _extract(raw_url: str, est: estimate_service.EstimateSession | None):
+    """`image_from_url.extract` con techo de tiempo si hay un estimado corriendo:
+    la respuesta entera con want_estimate no puede pasar de ~55 s."""
+    if est is None or est.blocked:
+        return await image_from_url.extract(raw_url)
+    try:
+        return await asyncio.wait_for(image_from_url.extract(raw_url),
+                                      timeout=_ESTIMATE_EXTRACT_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        raise image_from_url.ExtractError(
+            f"El link tardó más de {_ESTIMATE_EXTRACT_BUDGET_SECONDS:.0f} s en dar la foto."
+        ) from None
+
+
+async def _submit_cloud(cloud_payload: dict, est: estimate_service.EstimateSession | None,
+                        started: float):
+    """Envío a Cloud; con estimado corriendo, dentro del techo de la respuesta."""
+    if est is None or est.blocked:
+        return await cloud_integration.submit_request(cloud_payload)
+    window = max(_ESTIMATE_CLOUD_MIN_SECONDS,
+                 started + _ESTIMATE_RESPONSE_CAP_SECONDS - time.monotonic())
+    try:
+        return await asyncio.wait_for(cloud_integration.submit_request(cloud_payload),
+                                      timeout=window)
+    except asyncio.TimeoutError:
+        raise cloud_integration.CloudError(
+            f"Cloud no contestó en {window:.0f} s (puede haber quedado registrado)."
+        ) from None
+
+
+async def _lookup_body(
+    payload: AppLookupRequest,
+    est: estimate_service.EstimateSession | None,
+    started: float,
+    raw_url: str,
+    direct_image: str,
+) -> AppLookupResponse:
     # ── 1. Sacar la foto ───────────────────────────────────────────
     title = ""
     marketplace = "other"
@@ -718,7 +772,7 @@ async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> 
         canonical = offer.detail_url
     elif raw_url:
         try:
-            extracted = await image_from_url.extract(raw_url)
+            extracted = await _extract(raw_url, est)
             image_urls = image_urls + [u for u in extracted.image_urls if u not in image_urls]
             title = extracted.title
             market_price_cents = extracted.market_price_cents
@@ -1140,7 +1194,7 @@ async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> 
     )
 
     try:
-        result = await cloud_integration.submit_request(cloud_payload)
+        result = await _submit_cloud(cloud_payload, est, started)
         base.cloud_request = CloudRequestInfo(sent=True, request_id=result.request_id)
         _record(
             action="app_lookup_request_sent",

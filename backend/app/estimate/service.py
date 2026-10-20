@@ -178,6 +178,16 @@ class EstimateSession:
     def blocked(self) -> bool:
         return self.preset is not None
 
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    @property
+    def spent(self) -> bool:
+        """¿Se pagó algo? (Apify lanzado o una lectura de OTAPI). Si no, el
+        cupo del visitante se devuelve cuando no hubo estimado."""
+        return self.apify_launched or self.otapi_calls > 0
+
     # ── paso 1: link de 1688 ──────────────────────────────────────
 
     async def read_1688_link(self, url: str) -> otapi_item.Offer1688 | None:
@@ -259,7 +269,7 @@ class EstimateSession:
             await self._persist(result)
             return result
         if self._task is None or self._task.done():
-            if not self.apify_launched:
+            if not self.spent:
                 await limits.refund_all_async(self.taken)
             await self._persist(result, ended_found=self.apify_launched)
             return result
@@ -273,7 +283,7 @@ class EstimateSession:
             await asyncio.wait_for(asyncio.shield(self._task), timeout=max(self.remaining(), 0) + 5)
         except Exception:  # noqa: BLE001
             pass
-        if not self.apify_launched:
+        if not self.spent:
             await limits.refund_all_async(self.taken)
         await self._persist(result, ended_found=self.apify_launched)
 
@@ -285,7 +295,7 @@ class EstimateSession:
         self._done = True
         status = self.preset or ERROR
         result = EstimateResult(status, internal={"reason": self.reason or reason})
-        if not self.blocked and not self.apify_launched:
+        if not self.blocked and not self.spent:
             await limits.refund_all_async(self.taken)
         await self._persist(result)
         return result
@@ -565,6 +575,15 @@ class EstimateSession:
                 "source_url": self.source_url,
             }
         await asyncio.to_thread(store.save, row, audit)
+
+
+def abandon_later(session: EstimateSession, reason: str) -> None:
+    """`abandon` en segundo plano (desde un except, incluso con cancelación)."""
+    if session.done:
+        return
+    task = asyncio.create_task(session.abandon(reason))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 def _log_task_error(task: asyncio.Task) -> None:
