@@ -58,6 +58,13 @@ def today() -> str:
     return datetime.now(timezone.utc).astimezone(AR_TZ).strftime("%Y-%m-%d")
 
 
+def seconds_until_midnight(now: datetime | None = None) -> int:
+    """Segundos hasta las 00:00 de Argentina (cuando se renuevan los cupos)."""
+    now = (now or datetime.now(timezone.utc)).astimezone(AR_TZ)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, int((tomorrow - now).total_seconds()))
+
+
 def visitor_scope(ip_hash: str) -> str:
     return f"ip:{ip_hash}"
 

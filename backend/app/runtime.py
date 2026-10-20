@@ -247,6 +247,38 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="apify_1688_daily_budget",
         min=0, max=500, step=10, group="app",
     ),
+    # Límites del lookup público y del rerank de visión
+    SettingMeta(
+        key="lookup_visitor_daily_limit",
+        label="Lookup: consultas por día por visitante del storefront",
+        description=(
+            "Tope de /app/lookup por visitante (IP real que manda el storefront, con hash) y por "
+            "día. Pasarse = 429. Solo aplica a clientes de confianza que mandan visitor.ip. "
+            "0 = ninguna."
+        ),
+        type="int", parser=int,
+        default_attr="lookup_visitor_daily_limit",
+        min=0, max=1000, step=5, group="app",
+    ),
+    SettingMeta(
+        key="lookup_visitor_per_minute",
+        label="Lookup: consultas por minuto por visitante del storefront",
+        description="Ráfaga por visitante del storefront. Pasarse = 429. 0 = ninguna.",
+        type="int", parser=int,
+        default_attr="lookup_visitor_per_minute",
+        min=0, max=120, step=1, group="app",
+    ),
+    SettingMeta(
+        key="vision_rerank_daily_budget",
+        label="Rerank de visión del catálogo: llamadas por día",
+        description=(
+            "Llamadas por día (UTC) al modelo de visión (Sonnet) que elige el producto del "
+            "catálogo en /app/lookup. Sin cupo el lookup sigue solo con CLIP. 0 = apagado."
+        ),
+        type="int", parser=int,
+        default_attr="vision_rerank_daily_budget",
+        min=0, max=20000, step=50, group="app",
+    ),
     # Cotizador rápido por foto (app/estimate/)
     SettingMeta(
         key="estimate_enabled",
