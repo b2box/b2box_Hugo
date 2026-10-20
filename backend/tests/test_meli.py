@@ -430,3 +430,39 @@ async def test_sin_precio_de_la_ficha_cada_candidato_pone_el_suyo(monkeypatch):
 
     assert items[0].price_cents == 9_900_000
     assert items[0].seller_count == 1
+
+
+@pytest.mark.asyncio
+async def test_link_p_con_item_id_bloqueado_usa_la_ficha_de_la_ruta(monkeypatch):
+    """Caso real (storefront, 18-oct): /p/MLA63067895?pdp_filters=item_id:MLA2670608418.
+    La publicación da 403 y en un /p/ no hay nombre para el plan B: la ficha de la
+    ruta tiene las fotos."""
+    vistos: list[str] = []
+
+    def handler(method, url):
+        vistos.append(url)
+        if "oauth/token" in url:
+            return _resp(200, {"access_token": "t", "expires_in": 21600})
+        if "/items/MLA2670608418" in url:
+            return _resp(403, {"code": "PA_UNAUTHORIZED_RESULT_FROM_POLICIES"})
+        if url.endswith("/products/MLA63067895"):
+            return _resp(200, {"id": "MLA63067895", "name": "Ficha",
+                               "pictures": [{"id": "1", "url": "https://http2.mlstatic.com/f.jpg"}]})
+        return _resp(404, {"error": "not found"})
+
+    monkeypatch.setattr(meli, "get_settings", lambda: _fake_settings())
+    _patch_http(monkeypatch, handler)
+
+    items = await meli.fetch_from_url(
+        "https://www.mercadolibre.com.ar/p/MLA63067895?matt_tool=1&pdp_filters=item_id:MLA2670608418"
+        "&ua=x#origin=share"
+    )
+    assert len(items) == 1
+    assert items[0].image_urls == ["https://http2.mlstatic.com/f.jpg"]
+    assert any(u.endswith("/products/MLA63067895") for u in vistos)
+
+
+def test_catalog_ref_saca_la_ficha_de_la_ruta():
+    url = "https://www.mercadolibre.com.ar/p/MLA63067895?pdp_filters=item_id:MLA2670608418"
+    assert meli.catalog_ref(url) == meli.ParsedRef(id="MLA63067895", kind="product")
+    assert meli.catalog_ref("https://articulo.mercadolibre.com.ar/MLA-123456789-x") is None
