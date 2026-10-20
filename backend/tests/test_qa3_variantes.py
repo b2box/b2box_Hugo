@@ -228,6 +228,9 @@ async def test_the_llm_judge_is_asked_once_per_variant_that_brings_ambiguous_fic
     FakeVendure.products = [_product("1", title)]
     _set("pm_ml_query_variants", variants)
     _set("pm_vision_max_calls", 100)
+    # Juzgar TODAS las búsquedas de la API es configurable (pm_vision_api_variants=3); el default es solo la primera
+    # (ver test_semaforo_sin_dato.py).
+    _set("pm_vision_api_variants", 3)
     calls: list = []
     qw.install_judge(monkeypatch, calls)
     for k, q in enumerate(s.query for s in market_query.query_plan(title, variants) if not s.only_if_empty):

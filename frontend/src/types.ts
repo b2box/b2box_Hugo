@@ -195,7 +195,18 @@ export interface PriceMonitorRun {
   pct_no_data: number | null;
   pct_failed: number | null;
   ml_requests_used: number;
-  llm: { calls: number; input_tokens: number; output_tokens: number; cost_usd: number };
+  llm: {
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    // Llamadas sin veredicto (error, vacía, ilegible), consultas que no se hicieron y por qué
+    // (tope diario, parte del tope de la API, fotos, juez cortado) y el motivo del corte.
+    // Corridas viejas: sin campo.
+    failures?: number;
+    skipped?: { cap: number; api: number; photos: number; cut: number };
+    cut?: string | null;
+  };
   resumed_count: number;
   error: string | null;
   // Fuente "ML web" (búsqueda en listado.mercadolibre.com.ar). Corridas viejas: sin campo.

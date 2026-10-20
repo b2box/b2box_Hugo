@@ -390,6 +390,16 @@ class Settings(BaseSettings):
     pm_tier_policy: int = 0
     # Tope diario de llamadas al juez LLM para la banda ambigua. 0 = apagado.
     pm_vision_max_calls: int = 0
+    # Parte del tope diario del juez (en %) que las fichas de la API de ML NO pueden usar: queda
+    # para los candidatos de la web y de la oficina, que son los que traen precio. 0 = sin reserva
+    # (como antes: la API se lo podía comer todo); 100 = las fichas de la API nunca van al juez.
+    pm_vision_web_reserve_pct: int = 50
+    # Cuántas búsquedas de la API (variantes, ver pm_ml_query_variants) se juzgan por producto: solo
+    # las primeras N que traen fichas dudosas. 1 = solo la primera; 3 = todas (como antes).
+    pm_vision_api_variants: int = 1
+    # Fallas SEGUIDAS del juez (error HTTP, timeout, respuesta vacía o ilegible) que lo apagan por
+    # el resto de la corrida: no se gasta más cupo pagando llamadas que no contestan. 0 = nunca.
+    pm_vision_fail_streak: int = 5
     # Poda del cache L2 de embeddings para fotos de ML (mlstatic) más viejas que
     # esto. Las fotos del catálogo propio no se tocan.
     pm_embed_cache_days: int = 60

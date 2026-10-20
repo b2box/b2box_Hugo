@@ -138,6 +138,22 @@ MAX_SIMILAR_STORED = 6
 CURRENCY = "ARS"
 
 JudgeFn = Callable[..., Awaitable[market_judge.JudgeResult | None]]
+# A quién se le pregunta al juez: fichas de la API de ML o candidatos de la web / la oficina / las tiendas.
+JUDGE_SCOPE_API = "api"
+JUDGE_SCOPE_OTHER = "otro"
+
+
+@dataclass(slots=True)
+class JudgeBreaker:
+    """Corta-circuito del juez para UNA corrida (ML y tiendas comparten proveedor). Tras
+    `pm_vision_fail_streak` fallas seguidas se apaga hasta el final: cada falla es una llamada
+    contada contra el tope que no dio nada. Una respuesta buena vuelve la cuenta a cero. Vive en
+    memoria: si el proceso se reinicia, la corrida retomada vuelve a probar (el reinicio puede ser
+    justo el arreglo); `llm_status` queda como estaba."""
+    streak: int = 0
+    cut_reason: str | None = None
+    # Avisos que se loguean una sola vez por corrida (tope diario, fotos).
+    warned: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -152,6 +168,14 @@ class RunContext:
     tier_policy: int
     min_seller_sales: int
     judge_max_calls: int
+    # Prioridad del juez (b): % del tope que la API no puede usar y búsquedas de la API que se juzgan
+    # por producto. Los defaults del dataclass son el comportamiento anterior; los de la corrida
+    # salen de runtime (ver _context).
+    judge_web_reserve_pct: int = 0
+    judge_api_variants: int = 3
+    # Fallas seguidas que cortan el juez (0 = nunca) y el estado del corte.
+    judge_fail_streak: int = 0
+    judge_breaker: JudgeBreaker = field(default_factory=JudgeBreaker)
     # Chequeo de medidas/cantidad (pm_spec_check) y sus tolerancias.
     spec_check: bool = True
     dim_tol_pct: float = 10.0
@@ -493,6 +517,8 @@ class _Work:
     similars: list[dict[str, Any]] = field(default_factory=list)
     others: list[dict[str, Any]] = field(default_factory=list)
     igual_unpriced: list[dict[str, Any]] = field(default_factory=list)
+    # Búsquedas de la API de este producto que ya fueron al juez (tope: pm_vision_api_variants).
+    api_judged: int = 0
 
 
 async def _judge_will_answer(ctx: RunContext, counter_key: str = market_judge.LLM_COUNTER_KEY,
@@ -529,18 +555,82 @@ async def _prefetch_prices(ctx: RunContext, ambiguous: list[market_match.Decisio
     return prices
 
 
+def api_judge_cap(ctx: RunContext) -> int:
+    """Hasta dónde puede llegar el contador del día con consultas por fichas de la API: el tope menos
+    lo reservado para la web y la oficina (`pm_vision_web_reserve_pct`). Es el MISMO contador: la API
+    deja de consultar al llegar acá y la web / la oficina siguen hasta el tope entero."""
+    reserve = min(100, max(0, ctx.judge_web_reserve_pct))
+    return ctx.judge_max_calls * (100 - reserve) // 100
+
+
+async def _judge_api_targets(ctx: RunContext, product: VendureProduct, w: _Work,
+                             targets: list[market_match.Decision], prefetched: dict[str, Listings]) -> None:
+    """El juez para las fichas de UNA búsqueda de la API, si le toca: solo las primeras
+    `pm_vision_api_variants` búsquedas con fichas dudosas del producto, y dentro de la parte del tope
+    que no está reservada para la web y la oficina. Las que no van quedan «sin confirmar», como hoy."""
+    cap = api_judge_cap(ctx)
+    if w.api_judged >= ctx.judge_api_variants or cap <= 0:
+        if market_judge.enabled():          # con el juez sin configurar no hay nada que contar
+            await _judge_skipped(ctx, "llm_skipped_api")
+        return
+    w.api_judged += 1
+    await _consult_judge(ctx, product, targets, prefetched, max_calls=cap, scope=JUDGE_SCOPE_API)
+
+
+async def _judge_skipped(ctx: RunContext, column: str, warn: str | None = None) -> None:
+    """Una consulta al juez que no se hizo: suma en la corrida y, la primera vez, avisa."""
+    await asyncio.to_thread(_add_usage, ctx.run_id, **{column: 1})
+    if warn and warn not in ctx.judge_breaker.warned:
+        ctx.judge_breaker.warned.add(warn)
+        log.warning("price_monitor #%s: %s; lo que sigue queda «sin confirmar» (se cuenta en la corrida)",
+                    ctx.run_id, warn)
+
+
+async def _judge_outcome(ctx: RunContext, kind: str | None, detail: str, *, scope: str, cap: int,
+                         counter_key: str) -> None:
+    """Lo que dejó una consulta al juez: la racha de fallas (y el corte), y lo que no se consultó."""
+    b = ctx.judge_breaker
+    if kind == market_judge.OUTCOME_OK:
+        b.streak = 0
+    elif kind in market_judge.FAILURE_OUTCOMES:
+        b.streak += 1
+        await asyncio.to_thread(_add_usage, ctx.run_id, llm_failures=1)
+        if 0 < ctx.judge_fail_streak <= b.streak and b.cut_reason is None:
+            b.cut_reason = browser_fetch.redact(
+                f"juez cortado: {b.streak} fallas seguidas (motivo: {detail or kind})")[:300]
+            log.warning("price_monitor #%s: %s; sigue sin juez hasta el final de la corrida",
+                        ctx.run_id, b.cut_reason)
+            await asyncio.to_thread(_update_run, ctx.run_id, llm_status=b.cut_reason)
+    elif kind == market_judge.OUTCOME_CAP:
+        if scope == JUDGE_SCOPE_API and cap < ctx.judge_max_calls:
+            await _judge_skipped(ctx, "llm_skipped_api",
+                                 f"las fichas de la API llegaron a su parte del tope del juez ({cap} de "
+                                 f"{ctx.judge_max_calls}; el resto es para la web y la oficina)")
+        else:
+            who = "las tiendas" if counter_key == market_judge.STORES_LLM_COUNTER_KEY else "ML"
+            await _judge_skipped(ctx, "llm_skipped_cap", f"tope diario del juez alcanzado para {who} ({cap})")
+    elif kind == market_judge.OUTCOME_PHOTOS:
+        await _judge_skipped(ctx, "llm_skipped_photos",
+                             "el juez no pudo bajar ninguna foto nuestra (modo base64)")
+
+
 async def _consult_judge(ctx: RunContext, product: VendureProduct,
                          targets: list[market_match.Decision],
                          prefetched: dict[str, Listings], *,
                          counter_key: str = market_judge.LLM_COUNTER_KEY,
-                         max_calls: int | None = None) -> None:
+                         max_calls: int | None = None, scope: str = JUDGE_SCOPE_OTHER) -> None:
     """Le pregunta al juez por la banda ambigua (y, en la web, por los matches
     con marca declarada, para aplicar la regla de marca) y aplica su veredicto
     de tres valores. Nunca lanza. `counter_key` / `max_calls`: el contador y el tope
-    diarios que corresponden (las tiendas tienen los suyos, separados de los de ML)."""
+    diarios que corresponden (las tiendas tienen los suyos, separados de los de ML).
+    Con el juez cortado (fallas seguidas) no se consulta ni se gasta nada."""
+    if ctx.judge_breaker.cut_reason is not None:
+        await _judge_skipped(ctx, "llm_skipped_cut")
+        return
     cap = ctx.judge_max_calls if max_calls is None else max_calls
     # Solo se pasa `counter_key` si no es el de siempre (los dobles de los tests no lo conocen).
     extra = {} if counter_key == market_judge.LLM_COUNTER_KEY else {"counter_key": counter_key}
+    outcomes: list[tuple[str, str]] = []
     prices: dict[str, int | None] = {}
     if await _judge_will_answer(ctx, counter_key, cap):
         api_targets = [d for d in targets if d.candidate.origin == ORIGIN_API]
@@ -562,11 +652,15 @@ async def _consult_judge(ctx: RunContext, product: VendureProduct,
             product.name, _our_photos(product), cands, max_calls=cap,
             client=ctx.judge_client,
             # La llamada se cuenta al reservar el cupo, aunque después falle.
-            on_reserve=_usage_increment(ctx.run_id, llm_calls=1), **extra,
+            on_reserve=_usage_increment(ctx.run_id, llm_calls=1),
+            on_outcome=lambda kind, detail: outcomes.append((kind, detail)), **extra,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Juez LLM reventó para %s: %s", product.id, exc)
-        return
+        result = None
+        outcomes.append((market_judge.OUTCOME_ERROR, market_judge.error_summary(exc)))
+    kind, detail = outcomes[-1] if outcomes else (None, "")
+    await _judge_outcome(ctx, kind, detail, scope=scope, cap=cap, counter_key=counter_key)
     if result is None:
         return
     if result.input_tokens or result.output_tokens or result.cost_usd:
@@ -766,7 +860,10 @@ async def _decide(ctx: RunContext, product: VendureProduct, w: _Work, snap: Mark
     snap.ambiguous_count += sum(1 for d in decisions if d.verdict == market_match.AMBIGUOUS)
     targets = _judge_targets(decisions, with_brand_check=web)
     if targets and ctx.judge_max_calls > 0:
-        await _consult_judge(ctx, product, targets, prefetched)
+        if web:
+            await _consult_judge(ctx, product, targets, prefetched)
+        else:
+            await _judge_api_targets(ctx, product, w, targets, prefetched)
     if ctx.spec_check:
         for d in decisions:
             market_match.apply_specs(d, product.name, w.specs,
@@ -1288,6 +1385,9 @@ def _context(run_id: int, ml: MlMarket, web: market_ml_web.MlWebSource | None = 
         tier_policy=int(runtime.get("pm_tier_policy")),
         min_seller_sales=int(runtime.get("pm_min_seller_sales")),
         judge_max_calls=int(runtime.get("pm_vision_max_calls") or 0),
+        judge_web_reserve_pct=int(runtime.get("pm_vision_web_reserve_pct")),
+        judge_api_variants=int(runtime.get("pm_vision_api_variants")),
+        judge_fail_streak=int(runtime.get("pm_vision_fail_streak")),
         # Resueltos acá (y no como default del dataclass) para que un cambio en
         # market_match / market_judge —o un doble en los tests— se respete.
         scorer=market_match.clip_index_scorer,
@@ -1691,7 +1791,13 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         "pct_failed": pct(run.n_failed),
         "ml_requests_used": run.ml_requests_used,
         "llm": {"calls": run.llm_calls, "input_tokens": run.llm_input_tokens,
-                "output_tokens": run.llm_output_tokens, "cost_usd": run.llm_cost_usd},
+                "output_tokens": run.llm_output_tokens, "cost_usd": run.llm_cost_usd,
+                # Llamadas sin veredicto (error, vacía, ilegible), consultas que no se hicieron y por
+                # qué, y el motivo del corte por fallas seguidas (None = no se cortó).
+                "failures": run.llm_failures or 0,
+                "skipped": {"cap": run.llm_skipped_cap or 0, "api": run.llm_skipped_api or 0,
+                            "photos": run.llm_skipped_photos or 0, "cut": run.llm_skipped_cut or 0},
+                "cut": run.llm_status},
         "resumed_count": run.resumed_count,
         "error": run.error,
         "web": {

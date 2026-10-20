@@ -587,6 +587,28 @@ export function FilterChip({
   );
 }
 
+// Cómo le fue al juez IA en la corrida: si se cortó por fallas seguidas (y por qué), cuántas
+// llamadas no dieron veredicto y cuántas consultas no se hicieron. Nada si no hay nada que decir.
+export function JudgeLine({ llm }: { llm: PriceMonitorRun["llm"] }) {
+  const sk = llm.skipped ?? { cap: 0, api: 0, photos: 0, cut: 0 };
+  const parts = [
+    (llm.failures ?? 0) > 0 && `${nfmt(llm.failures ?? 0)} sin respuesta`,
+    sk.cap > 0 && `${nfmt(sk.cap)} sin consultar por tope diario`,
+    sk.api > 0 && `${nfmt(sk.api)} fichas de la API sin consultar (prioridad web/oficina)`,
+    sk.photos > 0 && `${nfmt(sk.photos)} sin foto nuestra descargable`,
+    sk.cut > 0 && `${nfmt(sk.cut)} sin consultar por el corte`,
+  ].filter(Boolean) as string[];
+  if (!llm.cut && parts.length === 0) return null;
+  return (
+    <span className="block mt-0.5">
+      Juez IA:{" "}
+      {llm.cut && <span className="text-warning font-semibold">{llm.cut}</span>}
+      {llm.cut && parts.length > 0 && " · "}
+      <span className="num-tabular">{parts.join(" · ")}</span>
+    </span>
+  );
+}
+
 function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId: number | null }) {
   if (!run) return null;
   const when = run.status === "running" ? `arrancó ${fmtTime(run.started_at)}` : `terminó ${fmtTime(run.finished_at)}`;
@@ -607,6 +629,7 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
           )}
         </span>
       )}
+      <JudgeLine llm={run.llm} />
       {run.oficina && run.oficina.fresh > 0 && (
         <span className="block mt-0.5">
           Buscador de la oficina:{" "}

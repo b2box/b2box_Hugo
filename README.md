@@ -916,6 +916,9 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 | `pm_ml_query_variants` | 3 | búsquedas por producto en la API de ML (1 = título y 4 primeras palabras, como antes; 2 = + título corto; 3 = + palabras clave) |
 | `pm_tier_policy` | 0 | 0 tramo mínimo (compra chica); 1 tramo más barato |
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
+| `pm_vision_web_reserve_pct` | 50 | % del tope del juez que las fichas de la API no pueden usar: queda para la web y la oficina (0 = sin reserva, como antes; 100 = la API nunca va al juez) |
+| `pm_vision_api_variants` | 1 | búsquedas de la API por producto que van al juez: solo las primeras N con fichas dudosas (3 = todas, como antes; 0 = ninguna) |
+| `pm_vision_fail_streak` | 5 | fallas seguidas del juez (error HTTP, timeout, respuesta vacía o ilegible) que lo cortan por el resto de la corrida; 0 = nunca |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
 | `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
 | `pm_ml_keep_listings` | 8 | publicaciones de ML que se guardan por producto (idénticas + similares + diferentes) |
@@ -963,6 +966,39 @@ similar"). Solo se consulta si `pm_vision_max_calls` > 0, con tope diario atómi
 respuesta ilegible, un timeout o la falta de cupo = sin veredicto. Tokens y
 costo estimado quedan en `price_monitor_run`. Se configura con tres variables
 (API OpenAI-compatible):
+
+**El cupo es para lo que trae precio.** En la corrida #15 (20-oct-2026) el juez gastó
+las 3.000 llamadas del día en ~66 minutos, casi todas en fichas de la API (hasta una
+por búsqueda: 3 por producto), y cuando llegaban los candidatos de la web y de la
+oficina —los que traen precio— ya no había cupo: 686 productos con dudosos sin juez y
+2.712 similares "sin confirmar". Ahora:
+
+- las fichas de la API van al juez **solo en la primera búsqueda que trae dudosas**
+  (`pm_vision_api_variants` = 1); las de las otras búsquedas quedan "sin confirmar";
+- las fichas de la API **no pueden pasar de su parte del tope**: con
+  `pm_vision_web_reserve_pct` = 50 y un tope de 3.000, la API deja de consultar cuando el
+  contador del día llega a 1.500 y la web / la oficina siguen hasta 3.000. Es el mismo
+  contador (`_meta:pm_llm_calls_today`): lo que la API no usa queda para la web. Con
+  `0` y `3` es exactamente el comportamiento anterior (los tests dorados corren así).
+
+**Corta-circuito.** Cada llamada se cuenta al reservar el cupo, aunque después falle.
+Tras `pm_vision_fail_streak` (5) fallas **seguidas** —error HTTP, timeout, respuesta
+vacía (el modelo pensó) o ilegible— el juez se apaga por el resto de la corrida (ML y
+tiendas: es el mismo proveedor) y no gasta más cupo. Una respuesta buena vuelve la
+cuenta a cero. El motivo queda en `price_monitor_run.llm_status` ("juez cortado: 5
+fallas seguidas (motivo: HTTP 401, code=invalid_api_key)": solo status y código,
+nunca el body ni la key) y se ve en Salud y en la línea de la última corrida. Los
+productos sin juez quedan "sin confirmar", como siempre. El corte vive en memoria: si
+el proceso se reinicia, la corrida retomada vuelve a probar (el reinicio puede ser el
+arreglo); `llm_status` queda como estaba.
+
+**Lo que no se consultó también se cuenta** (`price_monitor_run`, y en la API
+`llm.failures` / `llm.skipped` / `llm.cut`): `llm_failures` (llamadas sin veredicto),
+`llm_skipped_cap` (tope diario de ML o de las tiendas), `llm_skipped_api` (fichas de
+la API que cedieron el lugar: su parte del tope o búsquedas de más),
+`llm_skipped_photos` (modo base64 sin ninguna foto nuestra descargable) y
+`llm_skipped_cut` (juez cortado). "Tope diario alcanzado" y "sin fotos" se loguean a
+WARNING **una vez por corrida** (antes era un `info` por producto y no se veía).
 
 ```env
 PM_LLM_BASE_URL=...

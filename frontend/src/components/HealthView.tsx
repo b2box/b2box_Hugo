@@ -3,7 +3,7 @@ import { getHealthMetrics } from "../api";
 import { Card } from "@/components/ui/card";
 import { IconActivity } from "../icons";
 import { fmtPct, fmtTime, nfmt } from "../lib/format";
-import { COLOR_META, RUN_STATUS_LABEL } from "./SemaforoView";
+import { COLOR_META, JudgeLine, RUN_STATUS_LABEL } from "./SemaforoView";
 import { SourcesStats } from "./SourceCells";
 import type { PriceMonitorSummary, SemaforoColor } from "../types";
 
@@ -209,6 +209,9 @@ function PriceMonitorCard({ pm }: { pm: PriceMonitorSummary }) {
             </div>
           </div>
           <SourcesStats run={run} stores={pm.stores} />
+          <p className="text-xs text-muted-foreground mt-3 empty:hidden">
+            <JudgeLine llm={run.llm} />
+          </p>
           {pm.oficina?.enabled && (
             <p className="text-xs text-muted-foreground mt-3">
               Buscador de la oficina:{" "}

@@ -47,9 +47,12 @@ OUT = os.environ.get("QA3_OUT")
 GOLDEN = Path(__file__).parent / "golden" / "semaforo_origin_main_e8209e1_qa3.json.gz"
 SNAP_SKIP = {"id", "run_id", "captured_at"}
 RUN_SKIP = {"id", "started_at", "finished_at"}
-ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok"}
+# llm_failures, llm_skipped_* y llm_status (y en la API llm.failures / llm.skipped / llm.cut): lo que el juez no
+# contestó o no consultó (fix/semaforo-sin-dato). Aditivas: acá el juez está apagado y quedan en 0 / None.
+ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok", "llm_failures",
+                        "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status"}
 NEW_ITEM_KEYS = {"ml_variant", "web_via"}
-NEW_RUN_KEYS = {"variants", "oficina"}
+NEW_RUN_KEYS = {"variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"oficina"}
 
 CONFIGS: dict[str, dict] = {
