@@ -408,6 +408,17 @@ async def test_er07_base_caida_es_fail_closed_y_el_lookup_sigue(env, monkeypatch
         def __init__(self, *a, **k):
             raise OperationalError("SELECT", {}, Exception("db down"))
     monkeypatch.setattr(limits, "Session", Broken)
+    # A2: con la base caída, el límite de todo el lookup por visitante del
+    # storefront también es fail-closed: 429 sin gastar nada.
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await _ask()
+    assert exc.value.status_code == 429
+    assert env.searches == [] and FakeVendure.calls == [] and env.llm.requests == []
+    # Sin ese límite de por medio (pasa), el estimado sigue siendo fail-closed
+    # y el lookup responde como siempre.
+    monkeypatch.setattr(limits, "reserve_lookup", lambda *a, **k: None)
     resp = await _ask()
     assert resp.status == "not_found" and resp.estimate is None
     assert resp.estimate_status in ("over_budget", "rate_limited")
