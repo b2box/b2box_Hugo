@@ -170,3 +170,24 @@ def test_login_sin_clave_responde_503_y_no_tira_la_app(monkeypatch):
     http = TestClient(main_mod.app)
     r = http.post("/api/login", json={"username": "admin", "password": "pw"})
     assert r.status_code == 503 and "hugo_session" not in r.cookies
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"url": "  "}, {"url": "javascript:alert(1)"}, {"url": "ftp://x.com/a"},
+    {"image_url": "https://evil.example.com/a.jpg"},
+])
+def test_estimate_test_valida_antes_de_reservar(monkeypatch, body):
+    async def fake_run(url, image_url):
+        raise AssertionError("no debía correr")
+    monkeypatch.setattr(app_routes, "run_estimate_test", fake_run)
+    http = _client(monkeypatch, admins="nico@b2box.pro", user="nico@b2box.pro")
+    assert http.post("/api/estimate-test", json=body).status_code == 422
+    with Session(engine) as s:
+        assert s.exec(select(EstimateUsage)).all() == []
+
+
+@pytest.mark.parametrize("key", ["pm_ml_daily_budget", "pm_ml_web_daily_budget",
+                                 "catalog_full_refresh_seconds", "audit_interval_hours"])
+def test_cupos_de_ml_y_frecuencias_son_de_admin(monkeypatch, key):
+    http = _client(monkeypatch, admins="nico@b2box.pro", user="pao@b2box.pro")
+    assert http.delete(f"/api/settings/{key}").status_code == 403
