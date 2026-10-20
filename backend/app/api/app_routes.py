@@ -35,7 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_serializer
 from sqlmodel import Session
 
-from app import runtime
+from app import runtime, upload_urls
 from app.config import get_settings
 from app.db.models import AuditLog
 from app.db.session import engine
@@ -437,18 +437,21 @@ def _record(
     image_url: str | None = None,
     source_url: str | None = None,
 ) -> None:
-    """Fila de AuditLog para que el dashboard muestre qué pidió el app."""
+    """Fila de AuditLog para que el dashboard muestre qué pidió el app.
+
+    Las URLs firmadas (fotos subidas al bucket propio) se guardan sin la query:
+    la firma es una credencial temporal."""
     try:
         with Session(engine) as session:
             session.add(AuditLog(
                 action=action,
                 source=source or "b2box-app",
                 product_id=product_id,
-                detail=detail[:500],
+                detail=(upload_urls.redact_text(detail) or "")[:500],
                 confidence=confidence,
                 product_name=(product_name or "")[:200] or None,
-                product_image_url=image_url,
-                product_source_url=source_url,
+                product_image_url=upload_urls.redact(image_url),
+                product_source_url=upload_urls.redact(source_url),
             ))
             session.commit()
     except Exception:  # noqa: BLE001
@@ -705,7 +708,8 @@ async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> 
                 )
                 await _abandon_estimate(est, failed, "no se pudo sacar la foto del link")
                 return failed
-            log.info("extract falló para %s, sigo con la imagen directa: %s", raw_url, exc)
+            log.info("extract falló para %s, sigo con la imagen directa: %s",
+                     upload_urls.redact(raw_url), exc)
 
     if not image_urls:
         failed = AppLookupResponse(status="no_image", canonical_url=canonical,
@@ -788,7 +792,7 @@ async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> 
         except asyncio.TimeoutError:
             log.warning(
                 "embed de las fotos del link se pasó de %.0fs — sigo sin ellas (%s)",
-                _QUERY_EMBED_BUDGET_SECONDS, canonical[:120],
+                _QUERY_EMBED_BUDGET_SECONDS, (upload_urls.redact(canonical) or "")[:120],
             )
             query_vecs = [None] * len(query_urls)
         log.info("lookup: embed de %d fotos del link en %.1fs",

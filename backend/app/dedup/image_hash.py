@@ -24,6 +24,7 @@ from sqlmodel import Session
 
 from app.config import get_settings
 from app.net_guard import safe_get
+from app.upload_urls import redact
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ _MAX_URL_LEN = 1024  # coincide con ImageHashCache.url
 
 def _db_get(url: str) -> imagehash.ImageHash | None:
     """L2: lee el pHash de la DB (persistente entre reinicios)."""
+    if redact(url) != url:
+        # URL firmada o del bucket propio: la firma no se guarda en la base.
+        return None
     if len(url) > _MAX_URL_LEN:
         return None
     try:
@@ -54,6 +58,9 @@ def _db_get(url: str) -> imagehash.ImageHash | None:
 
 def _db_put(url: str, h: imagehash.ImageHash) -> None:
     """L2: persiste el pHash en la DB para reusarlo tras reiniciar."""
+    if redact(url) != url:
+        # URL firmada o del bucket propio: la firma no se guarda en la base.
+        return None
     if len(url) > _MAX_URL_LEN:
         return
     try:
@@ -71,7 +78,7 @@ def _db_put(url: str, h: imagehash.ImageHash) -> None:
                 session.add(row)
             session.commit()
     except Exception:  # noqa: BLE001
-        log.debug("No se pudo persistir pHash de %s", url, exc_info=True)
+        log.debug("No se pudo persistir pHash de %s", redact(url), exc_info=True)
 
 _HTTP_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 # Tope de bytes por imagen (evita descargar archivos gigantes → memoria/DoS).
@@ -151,7 +158,7 @@ async def _fetch(url: str, *, interactive: bool = False) -> bytes:
     try:
         return await asyncio.wait_for(_fetch_with_retries(url, interactive=interactive), timeout=budget)
     except asyncio.TimeoutError:
-        log.info("No se pudo descargar %s: pasó el tope de %.0f s", url[:160], budget)
+        log.info("No se pudo descargar %s: pasó el tope de %.0f s", (redact(url) or '')[:160], budget)
         raise
 
 
@@ -194,8 +201,8 @@ async def _fetch_with_retries(url: str, *, interactive: bool = False) -> bytes:
     # INFO y no debug: este fallo se tragaba entero en image_embed y era la causa
     # invisible de los 65 s del lookup. Si vuelve a pasar, tiene que verse.
     log.info("No se pudo descargar %s tras %d intentos en %.1fs: %s",
-             url[:160], attempts, time.monotonic() - started, last_error)
-    raise last_error if last_error else RuntimeError(f"fetch falló: {url}")
+             (redact(url) or '')[:160], attempts, time.monotonic() - started, last_error)
+    raise last_error if last_error else RuntimeError(f"fetch falló: {redact(url)}")
 
 
 async def hash_image(url: str) -> imagehash.ImageHash | None:

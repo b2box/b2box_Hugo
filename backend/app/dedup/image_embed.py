@@ -42,6 +42,7 @@ from PIL import Image
 from sqlmodel import Session
 
 from app.config import get_settings
+from app.upload_urls import redact
 from app.dedup.image_hash import _fetch, open_checked  # mismo fetch con guard SSRF + tope de bytes y de píxeles
 
 log = logging.getLogger(__name__)
@@ -194,6 +195,9 @@ _TOUCH_AFTER_S = 24 * 3600
 
 
 def _db_get(url: str) -> np.ndarray | None:
+    if redact(url) != url:
+        # URL firmada o del bucket propio: la firma no se guarda en la base.
+        return None
     if len(url) > _MAX_URL_LEN:
         return None
     try:
@@ -218,6 +222,9 @@ def _db_get(url: str) -> np.ndarray | None:
 
 
 def _db_put(url: str, vec: np.ndarray) -> None:
+    if redact(url) != url:
+        # URL firmada o del bucket propio: la firma no se guarda en la base.
+        return None
     if len(url) > _MAX_URL_LEN:
         return
     try:
@@ -240,7 +247,7 @@ def _db_put(url: str, vec: np.ndarray) -> None:
                 session.add(row)
             session.commit()
     except Exception:  # noqa: BLE001
-        log.debug("No se pudo persistir el embedding de %s", url, exc_info=True)
+        log.debug("No se pudo persistir el embedding de %s", redact(url), exc_info=True)
 
 
 def _cache_put(url: str, vec: np.ndarray) -> None:

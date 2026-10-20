@@ -279,7 +279,7 @@ async def test_link_de_1688_se_lee_por_id_sin_busqueda_por_foto(env):
 
 
 async def test_foto_subida_del_bucket_propio(env, monkeypatch):
-    monkeypatch.setattr(get_settings(), "estimate_upload_image_hosts", "fotos.b2box.app",
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes", "fotos.b2box.app/u/",
                         raising=False)
     photo = "https://fotos.b2box.app/u/1.jpg?X-Amz-Signature=abc"
     payload = AppLookupRequest(image_url=photo, want_estimate=True,
@@ -469,7 +469,7 @@ async def test_er07_misma_foto_dos_veces_una_sola_corrida(env, monkeypatch):
     monkeypatch.setattr(apify_1688, "search_by_image", _REAL_SEARCH)
     s = get_settings()
     monkeypatch.setattr(s, "apify_token", "apify_api_x", raising=False)
-    monkeypatch.setattr(s, "estimate_upload_image_hosts", "fotos.b2box.app", raising=False)
+    monkeypatch.setattr(s, "estimate_upload_image_prefixes", "fotos.b2box.app/u/", raising=False)
     runs = []
 
     async def one_run(*a, **k):
