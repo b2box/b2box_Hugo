@@ -877,3 +877,38 @@ async def test_misma_foto_en_paralelo_paga_una_sola_corrida(apify_on, monkeypatc
 
     assert [r.status for r in results] == ["ok"] * 3
     assert len(fake.starts) == 1 and _used() == 1
+
+
+# ─── Observaciones de QA (20-oct) ──────────────────────────────────
+
+
+async def test_puerto_443_explicito_es_la_misma_clave(apify_on, monkeypatch):
+    fake = FakeApify("ok").install(monkeypatch)
+
+    await apify_1688.search_by_image("https://Storage.example-bucket.com:443/fotos/a.jpg")
+    again = await apify_1688.search_by_image("https://storage.example-bucket.com/fotos/a.jpg")
+
+    assert again.cached is True and len(fake.starts) == 1
+    # A Apify va la forma normalizada.
+    assert json.loads(fake.requests[0].content)["imageUrls"] == [
+        "https://storage.example-bucket.com/fotos/a.jpg"]
+
+
+async def test_no_se_cubre_mientras_se_lee_el_dataset(apify_on, monkeypatch):
+    """La 1 ya terminó SUCCEEDED pero el dataset tarda: pasado el hedge no se paga otra."""
+    fake = FakeApify("ok")
+    real = fake.handler
+
+    async def dataset_lento(request):
+        if "/datasets/" in request.url.path:
+            await asyncio.sleep(0.4)
+        return await real(request)
+
+    fake.handler = dataset_lento
+    fake.install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=3.0)
+
+    assert result.status == "ok" and result.hedged is False
+    assert len(fake.starts) == 1 and _used() == 1
+    assert result.elapsed_s >= 0.35

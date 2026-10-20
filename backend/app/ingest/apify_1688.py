@@ -209,7 +209,10 @@ def allowed_image_url(url: object) -> str:
     else:
         if not _ip_is_public(host):
             return ""
-    return parts._replace(netloc=parts.netloc.lower(), fragment="").geturl()
+    # netloc = solo el host: sin el `:443` explícito ni el punto final, así
+    # `https://X.com:443/a` y `https://x.com/a` son la misma clave de caché.
+    netloc = f"[{host}]" if ":" in host else host
+    return parts._replace(netloc=netloc, fragment="").geturl()
 
 
 def _actor_input(image_url: str) -> dict[str, Any]:
@@ -726,7 +729,10 @@ async def _hedged_search(actor: str, build: str, target: str, budget: int,
             if winner is not None:
                 break
             now = time.monotonic()
-            due = now >= hedge_at or not tasks
+            # Una corrida que ya terminó SUCCEEDED y solo falta leer su dataset
+            # no se cubre: la cobertura pagaría por algo que está por llegar.
+            reading = any(r.status == "SUCCEEDED" for r in tasks.values())
+            due = (now >= hedge_at and not reading) or not tasks
             if may_hedge and len(runs) < _MAX_RUNS and due and deadline_at - now < _MIN_RUN_WINDOW_S:
                 may_hedge = False
             if may_hedge and len(runs) < _MAX_RUNS and due:
