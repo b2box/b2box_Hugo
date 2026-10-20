@@ -114,3 +114,73 @@ async def test_envio_a_cloud_con_estimado_tiene_techo(env, monkeypatch):
     assert time.monotonic() - t < 1.5
     assert resp.estimate_status == "ok" and resp.action == "show_estimate"
     assert resp.cloud_request.sent is False and "no contestó" in resp.cloud_request.error
+
+
+# ─── Carrera abandon / skip_found contra la búsqueda en segundo plano ──
+
+
+async def _open_and_start(monkeypatch, photo_gate: asyncio.Event):
+    from app.estimate import images
+
+    async def slow_fetch(url, *, interactive=False):  # noqa: ARG001
+        await photo_gate.wait()
+        return b"bytes-of:" + url.encode()
+    monkeypatch.setattr(images, "_fetch", slow_fetch)
+    est = await est_service.open_session(source="test", api_client="storefront",
+                                         declared_ip=VISITOR_IP)
+    est.start(["https://http2.mlstatic.com/D_NQ_NP_x.jpg"])
+    await asyncio.sleep(0.01)          # _prepare quedó bajando la foto
+    assert est.searching
+    return est
+
+
+@pytest.mark.parametrize("how", ["abandon", "skip_found"])
+async def test_cortar_mientras_baja_la_foto_no_lanza_apify_y_devuelve_cupo(env, monkeypatch,
+                                                                         how):
+    gate = asyncio.Event()
+    est = await _open_and_start(monkeypatch, gate)
+    if how == "abandon":
+        waiter = asyncio.create_task(est.abandon("corte"))
+    else:
+        await est.skip_found()
+    await asyncio.sleep(0.01)
+    gate.set()                          # la foto llega DESPUÉS del corte
+    if how == "abandon":
+        await waiter
+    await est_service.wait_background()
+    assert env.searches == [] and not est.apify_launched
+    assert limits.used_today(limits.visitor_scope(est.ip_hash)) == 0
+    assert _rows()[-1].estimate_status in ("error", "skipped_found")
+
+
+async def test_cortar_con_apify_ya_lanzado_no_devuelve_cupo(env, monkeypatch):
+    from app.ingest import apify_1688
+
+    launched = asyncio.Event()
+
+    async def slow_search(*a, **k):
+        launched.set()
+        await asyncio.sleep(0.2)
+        return apify_1688.Search1688Result(status="no_candidates", run_ids=["R"],
+                                           usd_imputado=0.02)
+    monkeypatch.setattr(apify_1688, "search_by_image", slow_search)
+    gate = asyncio.Event()
+    est = await _open_and_start(monkeypatch, gate)
+    gate.set()
+    await launched.wait()
+    await est.abandon("corte")
+    assert est.apify_launched
+    assert limits.used_today(limits.visitor_scope(est.ip_hash)) == 1
+
+
+async def test_lookup_que_abandona_con_busqueda_en_curso_no_espera(env, monkeypatch):
+    gate = asyncio.Event()
+    est = await _open_and_start(monkeypatch, gate)
+    base = app_routes.AppLookupResponse(status="indexing")
+    t = time.monotonic()
+    await app_routes._abandon_estimate(est, base, "índice armándose")
+    assert time.monotonic() - t < 0.1 and base.estimate_status == "error"
+    gate.set()
+    await est_service.wait_background()
+    assert env.searches == []
+    assert limits.used_today(limits.visitor_scope(est.ip_hash)) == 0
