@@ -90,6 +90,19 @@ def _seed_stores() -> None:
         logging.getLogger(__name__).warning("No se pudieron sembrar las tiendas: %s", exc)
 
 
+async def _drain_apify_aborts() -> None:
+    """Al apagar, espera los aborts de Apify que quedaron en segundo plano (cada
+    uno tiene su tope de segundos). Sin esto un redeploy los mata a mitad de
+    camino y la corrida perdedora sigue gastando hasta su timeout."""
+    from app.ingest import apify_1688
+
+    try:
+        await apify_1688.wait_pending_aborts()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Aborts de Apify sin confirmar al apagar: %s",
+                                            type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     import asyncio
@@ -173,6 +186,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     finally:
         if is_leader:
             scheduler.shutdown(wait=False)
+        await _drain_apify_aborts()
 
 
 app = FastAPI(

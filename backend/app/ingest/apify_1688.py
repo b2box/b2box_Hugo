@@ -352,10 +352,13 @@ def normalize(items: object) -> list[Candidate1688]:
 
 
 async def _request_bounded(client: httpx.AsyncClient, method: str, url: str, headers: dict,
-                           body: dict | None = None) -> tuple[int, bytes | None]:
+                           body: dict | None = None,
+                           timeout: httpx.Timeout | None = None) -> tuple[int, bytes | None]:
     """Request leyendo como mucho _MAX_RESPONSE_BYTES. (status, body | None si se pasó).
-    Con un status que no es 2xx el body no se lee (puede traer el input o la cuenta)."""
-    async with client.stream(method, url, json=body, headers=headers) as resp:
+    Con un status que no es 2xx el body no se lee (puede traer el input o la cuenta).
+    `timeout` pisa el del cliente para este request."""
+    extra = {"timeout": timeout} if timeout is not None else {}
+    async with client.stream(method, url, json=body, headers=headers, **extra) as resp:
         if resp.status_code not in (200, 201):
             return resp.status_code, b""
         chunks: list[bytes] = []
@@ -428,11 +431,11 @@ _Outcome = tuple[Literal["ok", "empty", "failed", "fatal"], list[Candidate1688]]
 
 
 async def _drive(http: httpx.AsyncClient, run: _Run, actor: str, build: str,
-                 image_url: str, headers: dict) -> _Outcome:
+                 image_url: str, headers: dict, deadline_at: float) -> _Outcome:
     """Lanza una corrida, la sigue hasta que termina y lee su dataset. No lanza
     (salvo CancelledError, que es como el orquestador la corta)."""
     try:
-        return await _drive_inner(http, run, actor, build, image_url, headers)
+        return await _drive_inner(http, run, actor, build, image_url, headers, deadline_at)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -442,9 +445,14 @@ async def _drive(http: httpx.AsyncClient, run: _Run, actor: str, build: str,
 
 
 async def _drive_inner(http: httpx.AsyncClient, run: _Run, actor: str, build: str,
-                       image_url: str, headers: dict) -> _Outcome:
-    status, body = await _request_bounded(http, "POST", _start_url(actor, build), headers,
-                                          _actor_input(image_url))
+                       image_url: str, headers: dict, deadline_at: float) -> _Outcome:
+    # El lanzamiento no puede durar más que lo que queda hasta el deadline: un
+    # POST colgado no tiene que sobrevivir a la búsqueda que lo pidió.
+    window = max(deadline_at - time.monotonic(), 0.01)
+    status, body = await asyncio.wait_for(
+        _request_bounded(http, "POST", _start_url(actor, build), headers, _actor_input(image_url),
+                         timeout=httpx.Timeout(window, connect=min(window, 10.0))),
+        timeout=window)
     if status not in (200, 201):
         log.warning("Apify 1688 corrida %d: HTTP %s (%s) al lanzar", run.n, status,
                     _STATUS_REASON.get(status, "error"))
@@ -704,7 +712,8 @@ async def _hedged_search(actor: str, build: str, target: str, budget: int,
     def launch() -> None:
         run = _Run(n=len(runs) + 1)
         runs.append(run)
-        tasks[asyncio.create_task(_drive(http, run, actor, build, target, headers))] = run
+        tasks[asyncio.create_task(
+            _drive(http, run, actor, build, target, headers, deadline_at))] = run
 
     try:
         launch()

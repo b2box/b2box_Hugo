@@ -912,3 +912,112 @@ async def test_no_se_cubre_mientras_se_lee_el_dataset(apify_on, monkeypatch):
     assert result.status == "ok" and result.hedged is False
     assert len(fake.starts) == 1 and _used() == 1
     assert result.elapsed_s >= 0.35
+
+
+# ─── Revisión de seguridad B3 ──────────────────────────────────────
+
+
+async def test_post_de_lanzamiento_con_timeout_de_la_ventana(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("ok").install(monkeypatch)
+
+    await apify_1688.search_by_image(PHOTO, deadline_s=0.5)
+
+    start = fake.requests[0]
+    assert start.url.path.endswith("/runs")
+    timeouts = start.extensions["timeout"]
+    assert all(0 < v <= 0.5 for v in timeouts.values())
+    # El poll y el dataset siguen con el timeout del cliente.
+    assert "/runs" not in fake.requests[1].url.path
+
+
+async def test_post_de_lanzamiento_colgado_corta_en_la_ventana(apify_on, monkeypatch):
+    """Aunque el transporte ignore el timeout de httpx, la ventana corta igual."""
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify()
+
+    async def never(request):
+        fake.requests.append(request)
+        await asyncio.sleep(60)
+
+    fake.handler = never
+    fake.install(monkeypatch)
+
+    run = apify_1688._Run(n=1)
+    http = apify_1688._new_client(5)
+    try:
+        t0 = time.monotonic()
+        kind, _ = await apify_1688._drive(http, run, ACTOR, "", PHOTO, {},
+                                          time.monotonic() + 0.3)
+    finally:
+        await http.aclose()
+
+    assert kind == "failed" and run.run_id == ""
+    assert time.monotonic() - t0 < 0.8
+
+
+async def test_shutdown_espera_los_aborts(apify_on, monkeypatch):
+    from app import main as main_mod
+
+    fake = FakeApify("hang")
+    real = fake.handler
+
+    async def abort_lento(request):
+        if request.url.path.endswith("/abort"):
+            await asyncio.sleep(0.2)
+        return await real(request)
+
+    fake.handler = abort_lento
+    fake.install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=0.3)
+    assert result.status == "timeout" and fake.aborted == []
+
+    await main_mod._drain_apify_aborts()
+
+    assert sorted(fake.aborted) == ["run1", "run2"]
+    assert not apify_1688._background
+
+
+async def test_shutdown_no_revienta_si_falla_la_espera(monkeypatch, caplog):
+    from app import main as main_mod
+
+    async def roto():
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(apify_1688, "wait_pending_aborts", roto)
+    with caplog.at_level(logging.WARNING):
+        await main_mod._drain_apify_aborts()
+    assert "RuntimeError" in caplog.text
+
+
+async def test_lifespan_drena_los_aborts_al_apagar(monkeypatch):
+    from fastapi import FastAPI
+
+    from app import leader
+    from app import main as main_mod
+
+    calls: list[str] = []
+
+    async def fake_drain():
+        calls.append("drain")
+
+    for name in ("_configure_logging", "_enforce_prod_secrets", "init_db", "_seed_stores"):
+        monkeypatch.setattr(main_mod, name, lambda: None)
+    monkeypatch.setattr(main_mod, "_drain_apify_aborts", fake_drain)
+    monkeypatch.setattr(leader, "try_become_leader", lambda: False)
+    # Los warm-ups corren en tareas aparte: que no hagan nada.
+    from app.dedup import image_embed
+    from app.ingest import browser_fetch
+    from app.vendure import catalog as vendure_catalog
+
+    async def no_catalog():
+        return None
+
+    monkeypatch.setattr(vendure_catalog, "get_catalog", no_catalog)
+    monkeypatch.setattr(image_embed, "available", lambda: False)
+    monkeypatch.setattr(browser_fetch, "available", lambda: False)
+
+    async with main_mod.lifespan(FastAPI()):
+        assert calls == []
+    assert calls == ["drain"]
