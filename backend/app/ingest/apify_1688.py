@@ -549,11 +549,12 @@ def _semaphore() -> asyncio.Semaphore:
     return _slots[1]
 
 
-def _cache_key(image_url: str, image_bytes_hash: str | None) -> str:
-    """La misma foto, la misma clave: el sha256 de los bytes si el llamador lo
-    tiene (la misma foto subida dos veces trae otra URL firmada); si no, el de
-    la URL ya normalizada."""
-    digest = image_bytes_hash.strip().lower() if isinstance(image_bytes_hash, str) else ""
+def _cache_key(image_url: str, trusted_bytes_sha256: str | None) -> str:
+    """La misma foto, la misma clave: el sha256 de los bytes si Hugo lo calculó
+    (la misma foto subida dos veces trae otra URL firmada); si no, el de la URL
+    ya normalizada. El hash es de confianza solo si lo calculó Hugo (ver
+    search_by_image)."""
+    digest = trusted_bytes_sha256.strip().lower() if isinstance(trusted_bytes_sha256, str) else ""
     if _SHA256_RE.fullmatch(digest):
         return f"bytes:{digest}"
     return f"url:{hashlib.sha256(image_url.encode()).hexdigest()}"
@@ -581,11 +582,15 @@ def _cache_put(key: str, result: Search1688Result, ttl_s: float) -> None:
 # ─── Búsqueda ──────────────────────────────────────────────────────
 
 
-async def search_by_image(image_url: str, *, image_bytes_hash: str | None = None,
+async def search_by_image(image_url: str, *, trusted_bytes_sha256: str | None = None,
                           deadline_s: float = DEFAULT_DEADLINE_S) -> Search1688Result:
     """Busca la foto en 1688. Nunca lanza.
 
-    `image_bytes_hash`: sha256 (hex) de los bytes de la foto, para la caché.
+    `trusted_bytes_sha256`: sha256 (hex) de los bytes de la foto, para la caché.
+    Lo calcula Hugo sobre los bytes que él mismo descargó o recibió; NUNCA un
+    valor que mande el cliente: con un hash ajeno alguien podría leer de la
+    caché los candidatos de la foto de otro, o envenenar la clave de una foto
+    con los resultados de otra.
     `deadline_s`: corte duro desde que se llama; ahí se abortan las corridas.
 
     Status: ok | no_candidates (el actor terminó y no trajo nada usable) |
@@ -600,7 +605,7 @@ async def search_by_image(image_url: str, *, image_bytes_hash: str | None = None
         log.warning("Apify 1688: deadline inválido, no se llama")
         return Search1688Result(status="error")
     try:
-        result = await _search(image_url, image_bytes_hash, deadline_s, started)
+        result = await _search(image_url, trusted_bytes_sha256, deadline_s, started)
     except Exception as exc:  # noqa: BLE001
         # Solo el tipo: el mensaje puede arrastrar el request o el body.
         log.warning("Apify 1688: error inesperado %s, sigo sin Apify", type(exc).__name__)
@@ -609,7 +614,7 @@ async def search_by_image(image_url: str, *, image_bytes_hash: str | None = None
     return result
 
 
-async def _search(image_url: str, image_bytes_hash: str | None, deadline_s: float,
+async def _search(image_url: str, trusted_bytes_sha256: str | None, deadline_s: float,
                   started: float) -> Search1688Result:
     s = get_settings()
     if not s.apify_token.strip():
@@ -622,7 +627,7 @@ async def _search(image_url: str, image_bytes_hash: str | None, deadline_s: floa
     if not target:
         log.info("Apify 1688: la foto no es una URL https pública, no se manda")
         return Search1688Result(status="error")
-    key = _cache_key(target, image_bytes_hash)
+    key = _cache_key(target, trusted_bytes_sha256)
     cached = _cache_get(key)
     if cached is not None:
         log.info("Apify 1688: foto en caché (%s), no se paga de nuevo", cached.status)

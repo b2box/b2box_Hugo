@@ -321,9 +321,9 @@ async def test_cache_por_hash_de_bytes_aunque_cambie_la_url(apify_on, monkeypatc
     """La misma foto subida dos veces trae otra URL firmada: la clave son los bytes."""
     fake = FakeApify("ok").install(monkeypatch)
 
-    await apify_1688.search_by_image(PHOTO, image_bytes_hash=PHOTO_HASH)
+    await apify_1688.search_by_image(PHOTO, trusted_bytes_sha256=PHOTO_HASH)
     again = await apify_1688.search_by_image(PHOTO.replace("abc123", "zzz999"),
-                                             image_bytes_hash=PHOTO_HASH.upper())
+                                             trusted_bytes_sha256=PHOTO_HASH.upper())
 
     assert again.cached is True
     assert len(fake.starts) == 1
@@ -332,9 +332,9 @@ async def test_cache_por_hash_de_bytes_aunque_cambie_la_url(apify_on, monkeypatc
 async def test_hash_con_forma_rara_cae_a_la_url(apify_on, monkeypatch):
     fake = FakeApify("ok").install(monkeypatch)
 
-    await apify_1688.search_by_image(PHOTO, image_bytes_hash="no-es-un-sha256")
+    await apify_1688.search_by_image(PHOTO, trusted_bytes_sha256="no-es-un-sha256")
     await apify_1688.search_by_image(PHOTO.replace("abc123", "zzz999"),
-                                     image_bytes_hash="no-es-un-sha256")
+                                     trusted_bytes_sha256="no-es-un-sha256")
 
     assert len(fake.starts) == 2
 
@@ -655,8 +655,8 @@ async def test_deadline_invalido_no_llama_ni_gasta_cupo(apify_on, monkeypatch, d
 async def test_hash_que_no_es_str_cae_a_la_url(apify_on, monkeypatch, digest):
     fake = FakeApify("ok").install(monkeypatch)
 
-    first = await apify_1688.search_by_image(PHOTO, image_bytes_hash=digest)
-    again = await apify_1688.search_by_image(PHOTO, image_bytes_hash=digest)
+    first = await apify_1688.search_by_image(PHOTO, trusted_bytes_sha256=digest)
+    again = await apify_1688.search_by_image(PHOTO, trusted_bytes_sha256=digest)
 
     assert first.status == "ok" and again.cached is True
     assert len(fake.starts) == 1
