@@ -110,3 +110,14 @@ def redact_text(text: str | None) -> str | None:
     if not text:
         return text
     return _URL_RE.sub(lambda m: redact(m.group(0)) or "", text)
+
+
+def scrub_exception(exc: BaseException) -> BaseException:
+    """Saca la firma de las URLs que traiga el mensaje de una excepción (httpx
+    pone la URL completa en el de raise_for_status). Mismo tipo y mismo objeto:
+    quien la ataja por tipo sigue funcionando."""
+    try:
+        exc.args = tuple(redact_text(a) if isinstance(a, str) else a for a in exc.args)
+    except Exception:  # noqa: BLE001
+        pass
+    return exc

@@ -24,7 +24,7 @@ from sqlmodel import Session
 
 from app.config import get_settings
 from app.net_guard import safe_get
-from app.upload_urls import redact
+from app.upload_urls import redact, scrub_exception
 
 log = logging.getLogger(__name__)
 
@@ -153,13 +153,20 @@ _INTERACTIVE_DEADLINE_S = 12.0
 
 
 async def _fetch(url: str, *, interactive: bool = False) -> bytes:
-    """Descarga una imagen con un tope de tiempo total (`_DEADLINE_S`; 12 s si hay un cliente esperando)."""
+    """Descarga una imagen con un tope de tiempo total (`_DEADLINE_S`; 12 s si hay un cliente esperando).
+
+    Las excepciones salen sin la firma de las URLs firmadas en el mensaje
+    (raise_for_status de httpx pone la URL completa)."""
     budget = _INTERACTIVE_DEADLINE_S if interactive else _DEADLINE_S
     try:
         return await asyncio.wait_for(_fetch_with_retries(url, interactive=interactive), timeout=budget)
+    except asyncio.CancelledError:
+        raise
     except asyncio.TimeoutError:
         log.info("No se pudo descargar %s: pasó el tope de %.0f s", (redact(url) or '')[:160], budget)
         raise
+    except Exception as exc:
+        raise scrub_exception(exc)
 
 
 async def _fetch_with_retries(url: str, *, interactive: bool = False) -> bytes:
@@ -200,6 +207,8 @@ async def _fetch_with_retries(url: str, *, interactive: bool = False) -> bytes:
             await asyncio.sleep(_RETRY_BACKOFF_SECONDS[attempt])
     # INFO y no debug: este fallo se tragaba entero en image_embed y era la causa
     # invisible de los 65 s del lookup. Si vuelve a pasar, tiene que verse.
+    if last_error is not None:
+        scrub_exception(last_error)
     log.info("No se pudo descargar %s tras %d intentos en %.1fs: %s",
              (redact(url) or '')[:160], attempts, time.monotonic() - started, last_error)
     raise last_error if last_error else RuntimeError(f"fetch falló: {redact(url)}")
