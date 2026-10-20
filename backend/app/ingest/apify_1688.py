@@ -10,9 +10,9 @@ Medido el 20-oct-2026 (`_notas-b2box/cotizador-rapido-foto-medicion.md`): p50
 28 s, p90 52 s y 1 de cada 6 corridas colgada hasta el timeout sin crawlear
 nada, aunque la misma foto reintentada vuelve en ~19 s. Por eso no se usa
 `run-sync` como en apify_meli: se lanza la corrida, se la sigue con polling y,
-si a los `apify_1688_hedge_after_s` (20 s) no terminó, se lanza una segunda
+si a los `apify_1688_hedge_after_s` (12 s) no terminó, se lanza una segunda
 igual ("corrida de cobertura"). Gana la primera que termina con candidatos y la
-otra se aborta; al deadline (35 s) se abortan todas y vuelve `timeout`. Según el
+otra se aborta; al deadline (38 s) se abortan todas y vuelve `timeout`. Según el
 pricing del actor, las corridas sin resultados no se cobran.
 
 Gasto y abuso, igual que apify_meli:
@@ -89,6 +89,9 @@ _POLL_INTERVAL_S = 0.25
 # Polls fallidos seguidos (5xx, red) antes de dar la corrida por perdida.
 _MAX_POLL_ERRORS = 3
 _MAX_RUNS = 2
+# Corte duro por defecto de search_by_image. Con la cobertura a los 12 s:
+# 12/38 ≈ 70 % con resultado, simulado con 15 tiempos medidos (QA, 20-oct-2026).
+DEFAULT_DEADLINE_S = 38.0
 # No se lanza una corrida que no llega a terminar antes del deadline: la más
 # rápida medida tardó 10 s.
 _MIN_RUN_WINDOW_S = 8.0
@@ -579,7 +582,7 @@ def _cache_put(key: str, result: Search1688Result, ttl_s: float) -> None:
 
 
 async def search_by_image(image_url: str, *, image_bytes_hash: str | None = None,
-                          deadline_s: float = 35.0) -> Search1688Result:
+                          deadline_s: float = DEFAULT_DEADLINE_S) -> Search1688Result:
     """Busca la foto en 1688. Nunca lanza.
 
     `image_bytes_hash`: sha256 (hex) de los bytes de la foto, para la caché.

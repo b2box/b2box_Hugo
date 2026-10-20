@@ -288,6 +288,17 @@ def test_default_del_cupo_es_apagado():
     assert Settings(vendure_api_url="https://example.invalid/x").apify_1688_daily_budget == 0
 
 
+def test_defaults_de_tiempo_simulados_por_qa():
+    """12/38: ~70 % con resultado en la simulación con los 15 tiempos medidos."""
+    import inspect
+
+    from app.config import Settings
+
+    assert Settings(vendure_api_url="https://example.invalid/x").apify_1688_hedge_after_s == 12.0
+    default = inspect.signature(apify_1688.search_by_image).parameters["deadline_s"].default
+    assert default == apify_1688.DEFAULT_DEADLINE_S == 38.0
+
+
 # ─── Caché ─────────────────────────────────────────────────────────
 
 

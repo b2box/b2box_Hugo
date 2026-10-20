@@ -160,9 +160,11 @@ class Settings(BaseSettings):
     )
     apify_1688_build: str = Field(default="", description="Build o tag fijado del actor (vacío = default)")
     # Medido el 20-oct-2026: p50 28 s, p90 52 s y 1 de cada 6 corridas colgada.
-    # A los N segundos sin resultado se lanza una segunda corrida igual.
+    # A los N segundos sin resultado se lanza una segunda corrida igual. Con el
+    # deadline de 38 s de search_by_image: 12/38 ≈ 70 % con resultado, simulado
+    # con 15 tiempos medidos (QA, 20-oct-2026).
     apify_1688_hedge_after_s: float = Field(
-        default=20.0, ge=5.0, le=60.0, description="Segundos sin resultado antes de la corrida de cobertura"
+        default=12.0, ge=5.0, le=60.0, description="Segundos sin resultado antes de la corrida de cobertura"
     )
     # 0 = apagado. Se prende de a poco desde el dashboard (runtime).
     apify_1688_daily_budget: int = 0
