@@ -235,6 +235,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="apify_meli_daily_budget",
         min=0, max=500, step=10, group="app",
     ),
+    SettingMeta(
+        key="apify_1688_daily_budget",
+        label="Apify: corridas de búsqueda en 1688 por foto por día",
+        description=(
+            "Corridas por día (UTC) del actor que busca la foto en 1688 (cotizador rápido). "
+            "~USD 0,02 cada una; una consulta lenta puede usar 2 (corrida de cobertura). "
+            "0 = apagado. Sin APIFY_TOKEN no corre aunque haya cupo."
+        ),
+        type="int", parser=int,
+        default_attr="apify_1688_daily_budget",
+        min=0, max=500, step=10, group="app",
+    ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",

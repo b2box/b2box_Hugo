@@ -174,6 +174,15 @@ saliendo de `/products/{MLAU}/items` como antes. También le gana a la foto
 * **Ojo**: los términos de uso de Mercado Libre para este scraping **no fueron
   revisados**.
 
+#### Apify: búsqueda en 1688 por foto (cotizador rápido, sin enganchar todavía)
+
+`app/ingest/apify_1688.py` busca una foto en 1688 con `piotrv1001/1688-image-search-scraper`
+(`APIFY_1688_ACTOR`, solo actores de la lista blanca del módulo; `APIFY_1688_BUILD` fija el build)
+y devuelve hasta 20 ofertas validadas, en el orden del actor. Si a los `APIFY_1688_HEDGE_AFTER_S`
+(12 s) la corrida no terminó, lanza una segunda igual y aborta la perdedora; a los 38 s aborta todo
+y vuelve `timeout`. Cupo runtime `apify_1688_daily_budget` (default **0 = apagado**, tope 500, va al
+audit log): cada corrida reserva uno (~USD 0,02). Caché de 24 h por hash de la foto (errores, 1 h; los `timeout` no se cachean).
+
 ### 5. Acción
 
 - **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
@@ -1707,6 +1716,8 @@ Ver `.env.example`. Las críticas:
 - `MELI_CLIENT_ID`, `MELI_CLIENT_SECRET` — app de Mercado Libre (el semáforo no corre sin esto).
 - `APIFY_TOKEN` (vacío = apagado), `APIFY_MELI_ACTOR`, `APIFY_MELI_TIMEOUT_S` (default 90) — último recurso
   para los links de ML que la API no resuelve (ver "Apify como último recurso para links de ML").
+- `APIFY_1688_ACTOR`, `APIFY_1688_BUILD` (vacío = default del actor), `APIFY_1688_HEDGE_AFTER_S` (default 12)
+  — búsqueda en 1688 por foto (ver "Apify: búsqueda en 1688 por foto").
 - `PRICE_MONITOR_CRON_UTC` — horario del semáforo (default `0 6 * * *`).
 - `SEO_TEXT_AUDIT_CRON_UTC` — horario de la auditoría de textos (default `30 7 * * mon`, lunes 04:30 ART;
   vacía = sin corrida programada). El día de la semana con su nombre: en APScheduler `1` es martes.
