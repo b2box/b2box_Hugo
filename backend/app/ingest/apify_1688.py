@@ -669,16 +669,25 @@ async def _search(image_url: str, trusted_bytes_sha256: str | None, deadline_s: 
         log.info("Apify 1688: la foto no es una URL https pública, no se manda")
         return Search1688Result(status="error")
     key = _cache_key(target, trusted_bytes_sha256)
-    cached = _cache_get(key)
-    if cached is not None:
-        log.info("Apify 1688: foto en caché (%s), no se paga de nuevo", cached.status)
-        return cached.copy(usd_imputado=0.0, hedged=False, cached=True)
-
     deadline_at = started + deadline_s
     loop = asyncio.get_running_loop()
-    running = _inflight.get(key)
-    if running is not None and not running.done() and running.get_loop() is loop:
-        return await _join(running, deadline_at)
+    # Como mucho 3 vueltas: sumarse, y si la compartida venció con el deadline
+    # (más corto) de otro pedido, buscar de nuevo con lo que queda del propio.
+    for _ in range(3):
+        cached = _cache_get(key)
+        if cached is not None:
+            log.info("Apify 1688: foto en caché (%s), no se paga de nuevo", cached.status)
+            return cached.copy(usd_imputado=0.0, hedged=False, cached=True)
+        running = _inflight.get(key)
+        if running is None or running.done() or running.get_loop() is not loop:
+            break
+        result = await _join(running, deadline_at)
+        if result.status != "timeout" or deadline_at - time.monotonic() < _MIN_RUN_WINDOW_S:
+            return result
+        log.info("Apify 1688: la búsqueda compartida venció antes que mi deadline, busco de nuevo")
+    else:
+        return Search1688Result(status="timeout", shared=True)
+
     task = loop.create_task(_search_paid(actor, build, target, key, deadline_at, started))
     _inflight[key] = task
     task.add_done_callback(lambda t: _inflight_done(key, t))
@@ -706,6 +715,9 @@ async def _join(running: asyncio.Task, deadline_at: float) -> Search1688Result:
                                         timeout=max(deadline_at - time.monotonic(), 0.0))
     except asyncio.TimeoutError:
         return Search1688Result(status="timeout", shared=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Apify 1688: la búsqueda compartida falló (%s)", type(exc).__name__)
+        return Search1688Result(status="error", shared=True)
     return result.copy(usd_imputado=0.0, hedged=False, shared=True)
 
 
@@ -731,8 +743,12 @@ async def _search_paid(actor: str, build: str, target: str, key: str, deadline_a
             return Search1688Result(status="over_budget")
         result = await _hedged_search(actor, build, target, budget, deadline_at,
                                       started + float(get_settings().apify_1688_hedge_after_s))
-        ttl = _CACHE_TTL_S if result.status in ("ok", "no_candidates") else _CACHE_ERROR_TTL_S
-        _cache_put(key, result, ttl)
+        # timeout NO se cachea: medido, los cuelgues son pasajeros (la misma foto
+        # reintentada volvió en ~19 s) y dependen del deadline de quien pidió.
+        if result.status in ("ok", "no_candidates"):
+            _cache_put(key, result, _CACHE_TTL_S)
+        elif result.status == "error":
+            _cache_put(key, result, _CACHE_ERROR_TTL_S)
         log.info("Apify 1688 %s: %s, %d candidatos, %d corridas%s, %.1fs (foto de %s)", actor,
                  result.status, len(result.candidates), len(result.run_ids),
                  " con cobertura" if result.hedged else "", time.monotonic() - started,

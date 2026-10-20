@@ -181,7 +181,7 @@ saliendo de `/products/{MLAU}/items` como antes. También le gana a la foto
 y devuelve hasta 20 ofertas validadas, en el orden del actor. Si a los `APIFY_1688_HEDGE_AFTER_S`
 (12 s) la corrida no terminó, lanza una segunda igual y aborta la perdedora; a los 38 s aborta todo
 y vuelve `timeout`. Cupo runtime `apify_1688_daily_budget` (default **0 = apagado**, tope 500, va al
-audit log): cada corrida reserva uno (~USD 0,02). Caché de 24 h por hash de la foto (errores, 1 h).
+audit log): cada corrida reserva uno (~USD 0,02). Caché de 24 h por hash de la foto (errores, 1 h; los `timeout` no se cachean).
 
 ### 5. Acción
 

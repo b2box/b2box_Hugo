@@ -735,20 +735,16 @@ async def test_ttl_ok_24_horas(apify_on, monkeypatch):
     assert len(fake.starts) == 2
 
 
-async def test_ttl_timeout_una_hora(apify_on, monkeypatch):
-    clock = _Clock()
-    monkeypatch.setattr(apify_1688, "time", clock)
-    fake = FakeApify("hang").install(monkeypatch)
+async def test_timeout_no_se_cachea(apify_on, monkeypatch):
+    """Los cuelgues son pasajeros (medido): el siguiente pedido vuelve a buscar."""
+    fake = FakeApify("hang", "hang", "ok").install(monkeypatch)
 
     assert (await apify_1688.search_by_image(PHOTO, deadline_s=0.4)).status == "timeout"
-    clock.offset = 3600 - 60
-    hit = await apify_1688.search_by_image(PHOTO, deadline_s=0.4)
-    assert hit.status == "timeout" and hit.cached is True and hit.usd_imputado == 0.0
-    assert len(fake.starts) == 2
-    clock.offset = 3600 + 1
-    assert (await apify_1688.search_by_image(PHOTO, deadline_s=0.4)).cached is False
+    again = await apify_1688.search_by_image(PHOTO, deadline_s=0.4)
     await apify_1688.wait_pending_aborts()
-    assert len(fake.starts) == 4
+
+    assert again.status == "ok" and again.cached is False
+    assert len(fake.starts) == 3
 
 
 async def test_over_budget_y_busy_no_se_cachean(apify_on, monkeypatch):
@@ -1103,13 +1099,11 @@ async def test_lanzamiento_que_vence_antes_que_el_loop_igual_es_timeout(apify_on
     assert result.status == "timeout"
 
 
-@pytest.mark.xfail(strict=True, reason="el timeout de un deadline corto se cachea 1 h y lo hereda "
-                                       "el que se sumó con un deadline más largo")
 async def test_deadline_corto_no_envenena_al_que_se_suma_ni_a_la_cache(apify_on, monkeypatch):
     """Un pedido con poco tiempo (p. ej. el resto del presupuesto de un request)
-    abre la búsqueda; otro con la misma foto y 5 s se suma. Hoy el segundo
-    vuelve timeout a los 0,3 s y la foto queda en timeout 1 h para todos,
-    aunque la corrida terminaba bien a los 0,6 s."""
+    abre la búsqueda; otro con la misma foto y 5 s se suma. Cuando la compartida
+    vence, el segundo busca de nuevo con lo que le queda, y el timeout no queda
+    en la caché."""
     monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
     FakeApify("late", late_s=0.6).install(monkeypatch)
 
@@ -1122,3 +1116,38 @@ async def test_deadline_corto_no_envenena_al_que_se_suma_ni_a_la_cache(apify_on,
 
     assert joiner.status == "ok"
     assert later.status == "ok"
+
+
+async def test_al_que_se_suma_sin_ventana_le_queda_el_timeout(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    monkeypatch.setattr(apify_1688, "_MIN_RUN_WINDOW_S", 8.0)
+    fake = FakeApify("hang").install(monkeypatch)
+
+    leader = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=0.3))
+    await asyncio.sleep(0.02)
+    joiner = await apify_1688.search_by_image(PHOTO, deadline_s=1.0)
+    await leader
+    await apify_1688.wait_pending_aborts()
+
+    assert joiner.status == "timeout" and joiner.shared is True
+    assert len(fake.starts) == 1 and _used() == 1
+
+
+async def test_si_la_compartida_revienta_el_que_se_suma_sale_shared(apify_on, monkeypatch):
+    gate = asyncio.Event()
+
+    async def roto(*args, **kwargs):
+        await gate.wait()
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(apify_1688, "_search_paid", roto)
+
+    leader = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=2.0))
+    await asyncio.sleep(0.02)
+    joiner = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=2.0))
+    await asyncio.sleep(0.02)
+    gate.set()
+
+    assert (await joiner).status == "error" and (await joiner).shared is True
+    lead = await leader
+    assert lead.status == "error" and lead.shared is False
