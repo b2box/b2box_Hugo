@@ -85,6 +85,10 @@ def _enforce_prod_secrets() -> None:
     # clientes por API key siguen funcionando. Pero se avisa fuerte.
     if auth.allowlist_misconfigured():
         log.error("Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL)
+    # Sin DASHBOARD_SECRET no hay sesiones (la clave derivada era pública). No se
+    # cae el arranque: /verify y /app/* (Paco, el app) siguen andando.
+    if not auth.session_secret_configured():
+        log.error("Dashboard sin login posible: %s", auth.SESSION_KEY_MISSING_DETAIL)
     # Tampoco tira el arranque: es una ruta de diagnóstico. Pero sin esto el 403
     # de /api/debug-config no tiene explicación a la vista.
     for problem in security.admin_config_warnings():
@@ -281,7 +285,12 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
         )
     auth.record_successful_login(ip)
     resp = JSONResponse({"ok": True})
-    auth.set_session_cookie(resp, request, identity or payload.username)
+    try:
+        auth.set_session_cookie(resp, request, identity or payload.username)
+    except auth.SessionKeyMissing:
+        return JSONResponse(
+            {"ok": False, "detail": auth.LOGIN_DISABLED_DETAIL}, status_code=503
+        )
     return resp
 
 

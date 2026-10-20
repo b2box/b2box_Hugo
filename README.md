@@ -213,6 +213,19 @@ Los links de 1688 se leen por id en OTAPI (escalera real, sin búsqueda por foto
   (`ESTIMATE_TEST_USER_DAILY_LIMIT`, 20; aparte del de visitantes). Devuelve además candidatos,
   yuanes, escenarios de Vendure, tiempos y costo.
 
+#### Clave de las sesiones del dashboard (`DASHBOARD_SECRET`)
+
+La cookie de sesión se firma con `DASHBOARD_SECRET` (**32+ caracteres, obligatoria en producción**).
+Sin ella no hay sesiones: el login responde 503 y el arranque deja un ERROR en el log, pero Hugo
+arranca igual (`/verify` y `/app/*` siguen andando con su API key). En desarrollo, sin secreto, la
+clave se deriva de una `DASHBOARD_PASSWORD` no vacía; con las dos vacías no hay sesiones. Antes, sin
+ninguna de las dos, la clave era pública y cualquiera podía falsificar la cookie.
+
+- Generarla: `python -c "import secrets; print(secrets.token_urlsafe(48))"` y cargarla en el entorno
+  de Hugo (Coolify) como `DASHBOARD_SECRET`.
+- Al cargarla o cambiarla **se invalidan todas las sesiones**: hay que volver a iniciar sesión.
+- Ser admin (abajo) además exige que la sesión esté firmada con `DASHBOARD_SECRET`.
+
 #### Administradores del dashboard (`DASHBOARD_ADMINS`)
 
 Los settings que gastan plata o mueven el precio que ve un cliente (cupos de Apify, OTAPI, juez IA y

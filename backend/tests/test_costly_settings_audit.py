@@ -32,7 +32,8 @@ def client(monkeypatch):
     init_db()
     _wipe()
     s = Settings(vendure_api_url="https://example.invalid/admin-api", dashboard_password="",
-                 supabase_url="", supabase_anon_key="", dashboard_admins="Nico@b2box.pro")
+                 supabase_url="", supabase_anon_key="", dashboard_admins="Nico@b2box.pro",
+                 dashboard_secret="k" * 40)
     for mod in (auth, security, main_mod):
         monkeypatch.setattr(mod, "get_settings", lambda s=s: s)
     monkeypatch.setattr(auth, "session_username", lambda token: "nico@b2box.pro")
