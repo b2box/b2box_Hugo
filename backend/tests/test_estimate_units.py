@@ -372,3 +372,29 @@ def test_audit_log_y_cache_de_fotos_sin_firma(monkeypatch):
     image_hash._db_put(signed, imagehash.ImageHash(np.zeros((8, 8), dtype=bool)))
     with Session(engine) as s:
         assert s.get(ImageHashCache, signed) is None
+
+
+async def test_excepciones_de_descarga_sin_firma(monkeypatch):
+    import httpx
+
+    from app import net_guard
+    from app.dedup import image_hash
+
+    signed = ("https://s3.b2box.app/b2box-media/lookup-photos/a.jpg"
+              "?X-Amz-Credential=AKIAXX&X-Amz-Signature=deadbeef")
+
+    async def forbidden(url, **kw):
+        request = httpx.Request("GET", url)
+        return httpx.Response(403, request=request)
+    monkeypatch.setattr(image_hash, "safe_get", forbidden)
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await image_hash._fetch(signed, interactive=True)
+    assert "AKIA" not in str(exc.value) and "Signature" not in str(exc.value)
+
+    # Cualquier excepción que traiga la URL cruda sale limpia y del mismo tipo.
+    async def raw_url_error(url, **kw):
+        raise net_guard.SsrfBlocked(f"algo raro con {url}")
+    monkeypatch.setattr(image_hash, "safe_get", raw_url_error)
+    with pytest.raises(net_guard.SsrfBlocked) as exc:
+        await image_hash._fetch(signed, interactive=True)
+    assert "AKIA" not in str(exc.value) and "lookup-photos/a.jpg" in str(exc.value)
