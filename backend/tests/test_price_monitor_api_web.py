@@ -91,8 +91,8 @@ def test_color_counters_follow_the_enabled_filter(client):
     _seed()
     all_c = client.get("/api/price-monitor/snapshots").json()["colors"]
     dis = client.get("/api/price-monitor/snapshots?enabled=disabled").json()["colors"]
-    assert all_c == {"verde": 1, "amarillo": 1, "rojo": 1, "sin_dato": 2}
-    assert dis == {"verde": 0, "amarillo": 0, "rojo": 1, "sin_dato": 1}
+    assert all_c == {"verde": 1, "amarillo": 1, "rojo": 1, "sin_dato": 2, "no_medible": 0}
+    assert dis == {"verde": 0, "amarillo": 0, "rojo": 1, "sin_dato": 1, "no_medible": 0}
 
 
 def test_every_item_says_whether_the_product_is_enabled(client):
@@ -333,7 +333,7 @@ def test_the_run_counters_follow_the_recalculated_snapshot(client):
         assert run.n_web_ok == 0 and run.n_con_similares == 2
         assert run.processed == 5 and run.status == "ok"                  # lo demás no se toca
     items = client.get("/api/price-monitor/runs").json()["items"][0]
-    assert items["colors"] == {"verde": 1, "amarillo": 0, "rojo": 1, "sin_dato": 3}
+    assert items["colors"] == {"verde": 1, "amarillo": 0, "rojo": 1, "sin_dato": 3, "no_medible": 0}
 
 
 def test_old_rows_without_a_price_list_keep_their_real_minimum(client):

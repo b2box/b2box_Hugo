@@ -563,7 +563,8 @@ async def test_judge_confirms_the_ambiguous_match_and_its_cost_is_recorded(world
 
     s = _snaps()["8"]
     assert s.ml_status == "ok" and s.match_source == "llm" and s.match_confidence == 0.8
-    assert seen == {"name": "Soporte celular auto", "ids": ["MLA8"], "max_calls": 5}
+    # Una ficha de la API usa hasta su parte del tope: el 50 % (pm_vision_web_reserve_pct) queda para la web y la oficina.
+    assert seen == {"name": "Soporte celular auto", "ids": ["MLA8"], "max_calls": 2}
     [run] = _runs()
     assert (run.llm_calls, run.llm_input_tokens, run.llm_output_tokens) == (1, 1_000, 100)
     assert run.llm_cost_usd == pytest.approx(0.00036)

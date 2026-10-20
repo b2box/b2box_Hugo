@@ -17,7 +17,7 @@ import type {
   PriceMonitorSnapshotsResponse,
   PriceMonitorSummary,
   SectionsResponse,
-  SemaforoColor,
+  ColorFilter,
   SeoItemsResponse,
   SeoList,
   SeoListName,
@@ -228,7 +228,7 @@ export async function compareVision(url: string): Promise<VisionCompare> {
 export interface SnapshotQuery {
   page: number;
   pageSize: number;
-  color?: SemaforoColor | null;
+  color?: ColorFilter | null;
   q?: string;
   runId?: number | null;
   // Productos de Vendure: habilitados / deshabilitados / todos.

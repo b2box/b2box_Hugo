@@ -388,6 +388,7 @@ async def test_the_judge_cap_is_separate_but_the_stores_must_not_leave_ml_withou
     tiendas prendidas (y SIN contar para el color) el resultado de ML tiene que ser el mismo: hoy no lo es, porque
     cada producto gasta además una llamada por tienda y a los últimos productos se les acaba el tope."""
     _set("pm_vision_max_calls", 6)
+    _set("pm_vision_web_reserve_pct", 0)        # las 6 son fichas de la API: sin reserva para la web, como antes
     with Session(engine) as s:                                           # tiendas apagadas
         s.execute(update(MarketStore).values(enabled=False))
         s.commit()

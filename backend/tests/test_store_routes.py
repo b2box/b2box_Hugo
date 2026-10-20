@@ -219,7 +219,7 @@ def test_source_filters_combine_with_color_and_narrow_the_color_chips(client):
     _seed()
     cp = _sid("Casa Perfecta")
     body = client.get(f"/api/price-monitor/snapshots?igual_in={cp}").json()
-    assert body["colors"] == {"verde": 0, "amarillo": 1, "rojo": 0, "sin_dato": 1}
+    assert body["colors"] == {"verde": 0, "amarillo": 1, "rojo": 0, "sin_dato": 1, "no_medible": 0}
     assert _ids(client.get(f"/api/price-monitor/snapshots?igual_in={cp}&color=amarillo")) == ["2"]
     assert body["total"] == 2
 

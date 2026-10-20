@@ -32,7 +32,9 @@ Costo bajo control:
   * tokens y costo estimado quedan en `price_monitor_run`.
 
 Nunca rompe el job: sin API key, sin cupo, timeout o JSON ilegible → "sin
-veredicto" (None) y el producto sigue como ambiguo.
+veredicto" (None) y el producto sigue como ambiguo. Quien llama se entera de POR
+QUÉ con `on_outcome` (ver OUTCOME_*): así el semáforo cuenta lo que no se
+consultó y corta el juez si falla muchas veces seguidas.
 """
 
 from __future__ import annotations
@@ -69,6 +71,16 @@ CATEGORIES = (CAT_IGUAL, CAT_SIMILAR, CAT_DIFERENTE)
 # Vocabulario cerrado de "qué cambia": alimenta los chips de la pantalla y evita
 # que texto de terceros (títulos de ML) llegue a la UI vía el modelo.
 DIFFERENCES = ("marca", "modelo", "medida", "capacidad", "cantidad", "funcion", "accesorio")
+# Cómo terminó una consulta (`on_outcome(kind, detalle)`). ok = hubo veredictos. Las tres de
+# falla gastaron (o intentaron gastar) una llamada sin veredicto; tope y fotos no llamaron.
+OUTCOME_OK = "ok"
+OUTCOME_ERROR = "error"            # excepción: HTTP 4xx/5xx, timeout, red
+OUTCOME_EMPTY = "vacia"            # contenido vacío o con razonamiento (el modelo pensó)
+OUTCOME_UNREADABLE = "ilegible"    # JSON que no se entiende
+OUTCOME_CAP = "tope"               # sin cupo hoy: no se llamó
+OUTCOME_PHOTOS = "fotos"           # base64 sin ninguna foto nuestra descargable: no se llamó
+FAILURE_OUTCOMES = frozenset({OUTCOME_ERROR, OUTCOME_EMPTY, OUTCOME_UNREADABLE})
+OutcomeFn = Callable[[str, str], None]
 # Fichas de ML por consulta (el llamador no debería mandar más).
 MAX_CANDIDATES = 6
 _MAX_OUR_PHOTOS = 2
@@ -264,6 +276,16 @@ def estimate_cost(input_tokens: int, output_tokens: int,
     )
 
 
+def _tell(on_outcome: OutcomeFn | None, kind: str, detail: str = "") -> None:
+    """Avisa al llamador cómo terminó la consulta. Un callback roto no rompe al juez."""
+    if on_outcome is None:
+        return
+    try:
+        on_outcome(kind, detail)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("on_outcome del juez falló: %s", exc)
+
+
 def _our_photos(our_image_urls: Sequence[str]) -> list[str]:
     return [u for u in list(our_image_urls)[:_MAX_OUR_PHOTOS] if u]
 
@@ -419,7 +441,7 @@ def _reasoning_tokens(usage: Any) -> int:
 
 async def _inline_photos(
     our_image_urls: Sequence[str], candidates: Sequence[JudgeCandidate], max_calls: int,
-    counter_key: str = LLM_COUNTER_KEY,
+    counter_key: str = LLM_COUNTER_KEY, on_outcome: OutcomeFn | None = None,
 ) -> dict[str, str] | None:
     """Modo base64: baja las fotos ANTES de reservar cupo, así una foto rota
     no gasta una llamada. None = sin veredicto: ya no hay cupo hoy (no vale
@@ -428,6 +450,7 @@ async def _inline_photos(
     used = await asyncio.to_thread(daily_budget.used_today, counter_key)
     if used >= max_calls:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
+        _tell(on_outcome, OUTCOME_CAP, f"tope {max_calls}")
         return None
     ours = _our_photos(our_image_urls)
     theirs = [c.image_url for c in list(candidates)[:MAX_CANDIDATES] if c.image_url]
@@ -437,6 +460,7 @@ async def _inline_photos(
                    "Juez LLM (base64): no se pudo bajar ninguna foto nuestra; revisá que salgan "
                    "del host de VENDURE_API_URL. Esos productos quedan sin veredicto.")
         log.info("Juez LLM: ninguna foto nuestra descargable (%d), sin veredicto", len(ours))
+        _tell(on_outcome, OUTCOME_PHOTOS, f"{len(ours)} fotos nuestras sin bajar")
         return None
     return inline
 
@@ -454,16 +478,18 @@ def make_client():
     )
 
 
-def _error_summary(exc: Exception) -> str:
+def error_summary(exc: Exception) -> str:
     """Qué loguear de un error de la llamada. Una respuesta HTTP de error
     (APIStatusError) trae en su mensaje el body del proveedor, que puede
     repetir parte del request (nombres, URLs, headers): solo el status y el
-    código de error. El resto (timeout, conexión) tiene mensajes propios."""
+    código de error. El resto (timeout, conexión, un error nuestro) solo el
+    tipo: su texto puede traer la URL del proveedor, un header o un título de
+    ML, y esto termina en `llm_status` y en el dashboard."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
         code = getattr(exc, "code", None)
         return f"HTTP {status}, code={str(code)[:40] if code is not None else '-'}"
-    return str(exc)[:200]
+    return type(exc).__name__[:60]
 
 
 async def judge(
@@ -475,21 +501,27 @@ async def judge(
     client: Any | None = None,
     on_reserve: Callable[[Any], None] | None = None,
     counter_key: str = LLM_COUNTER_KEY,
+    on_outcome: OutcomeFn | None = None,
 ) -> JudgeResult | None:
     """Pregunta al modelo. None = sin veredicto (apagado, sin cupo, falló o no
     se entendió la respuesta). El llamador trata None como "sigue ambiguo".
 
     `on_reserve` corre en la transacción que reserva el cupo del día: la
-    llamada queda contada aunque después falle (timeout, 5xx)."""
+    llamada queda contada aunque después falle (timeout, 5xx).
+
+    `on_outcome(kind, detalle)` dice cómo terminó (OUTCOME_*), salvo con el juez
+    apagado o sin candidatos (no pasó nada). El detalle de un error es
+    `error_summary`: status y código, nunca el body ni la key."""
     if max_calls <= 0 or not candidates or not enabled():
         return None
     inline: dict[str, str] | None = None
     if image_mode() == IMAGE_MODE_BASE64:
-        inline = await _inline_photos(our_image_urls, candidates, max_calls, counter_key)
+        inline = await _inline_photos(our_image_urls, candidates, max_calls, counter_key, on_outcome)
         if inline is None:
             return None
     if await daily_budget.reserve_async(counter_key, int(max_calls), None, on_reserve) is None:
         log.info("Juez LLM: tope diario alcanzado (%d), no se consulta", max_calls)
+        _tell(on_outcome, OUTCOME_CAP, f"tope {max_calls}")
         return None
 
     s = get_settings()
@@ -507,7 +539,11 @@ async def judge(
     try:
         response = await client.chat.completions.create(**request)
     except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red)
-        log.warning("Juez LLM falló (%s): %s", type(exc).__name__, _error_summary(exc))
+        summary = error_summary(exc)
+        # El log (no la DB) sigue diciendo el mensaje de un timeout o de la red.
+        detail = summary if isinstance(getattr(exc, "status_code", None), int) else str(exc)[:200]
+        log.warning("Juez LLM falló (%s): %s", type(exc).__name__, detail)
+        _tell(on_outcome, OUTCOME_ERROR, summary)
         return None
     finally:
         if own_client:
@@ -532,11 +568,15 @@ async def judge(
                    "Juez LLM: respuesta vacía o con razonamiento (reasoning_tokens=%d, %d chars): "
                    "el modelo está pensando, revisá PM_LLM_EXTRA_BODY. Cuenta como sin veredicto.",
                    reasoning, len(text))
+        _tell(on_outcome, OUTCOME_EMPTY, f"respuesta vacía o con razonamiento (reasoning_tokens={reasoning})")
         return result  # tokens gastados igual: se contabilizan, sin veredictos
     verdicts = parse_verdicts(text)
     if verdicts is None:
         log.warning("Juez LLM: respuesta ilegible (%d chars), sin veredicto", len(text))
+        _tell(on_outcome, OUTCOME_UNREADABLE, f"respuesta ilegible ({len(text)} caracteres)")
         return result  # tokens gastados igual: se contabilizan, sin veredictos
     wanted = {c.ml_id for c in candidates}
     result.verdicts = {v.ml_id: v for v in verdicts if v.ml_id in wanted}
+    # Contestó algo que se entiende: aunque no hable de nuestras publicaciones, el juez anda.
+    _tell(on_outcome, OUTCOME_OK)
     return result

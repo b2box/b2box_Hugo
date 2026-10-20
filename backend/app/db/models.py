@@ -201,6 +201,19 @@ class PriceMonitorRun(SQLModel, table=True):
     llm_input_tokens: int = Field(default=0)
     llm_output_tokens: int = Field(default=0)
     llm_cost_usd: float = Field(default=0.0)
+    # Llamadas al juez que se pagaron (o se intentaron) y no dieron veredicto: error HTTP,
+    # timeout, respuesta vacía o ilegible.
+    llm_failures: int = Field(default=0)
+    # Consultas al juez que NO se hicieron, por qué: tope diario, la parte del tope que no es de
+    # la API (pm_vision_web_reserve_pct) o búsquedas de la API de más (pm_vision_api_variants),
+    # ninguna foto nuestra descargable (modo base64) y juez cortado por fallas seguidas.
+    llm_skipped_cap: int = Field(default=0)
+    llm_skipped_api: int = Field(default=0)
+    llm_skipped_photos: int = Field(default=0)
+    llm_skipped_cut: int = Field(default=0)
+    # Por qué se cortó el juez en esta corrida ("juez cortado: 5 fallas seguidas (motivo: HTTP
+    # 401, code=…)"). None = no se cortó.
+    llm_status: str | None = Field(default=None)
     # Cuántas veces un reinicio del proceso retomó esta corrida.
     resumed_count: int = Field(default=0)
     error: str | None = Field(default=None)
@@ -235,6 +248,9 @@ class PriceMonitorRun(SQLModel, table=True):
     # resultado fresco al empezar la corrida y productos que quedaron con precio por eso.
     oficina_fresh: int = Field(default=0)
     n_oficina_ok: int = Field(default=0)
+    # Productos sin dato que NO SE PUEDEN MEDIR (ver MarketPriceSnapshot.unmeasurable). Están
+    # incluidos en `n_sin_dato` (el color guardado); la API los muestra aparte.
+    n_no_medible: int = Field(default=0)
 
 
 class MarketPriceSnapshot(SQLModel, table=True):
@@ -339,6 +355,10 @@ class MarketPriceSnapshot(SQLModel, table=True):
     ml_variant: str | None = Field(default=None, max_length=12)
     # "oficina" si `web_state` lo dejó la búsqueda de la Mac de la oficina (no el servidor).
     web_via: str | None = Field(default=None, max_length=8)
+    # Por qué el producto NO SE PUEDE MEDIR (skipped por cómo está cargado, no por ML ni por el
+    # cupo): sin_precio | moneda | sin_foto | sin_nombre. None = medible (o fila vieja). El color
+    # sigue siendo sin_dato; el dashboard lo cuenta aparte ("No medible").
+    unmeasurable: str | None = Field(default=None, max_length=16)
 
 
 class MarketMatchFeedback(SQLModel, table=True):

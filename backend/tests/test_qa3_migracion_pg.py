@@ -33,15 +33,18 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Post
 SCHEMA_SQL = (Path(__file__).parent / "golden" / "pg_schema_origin_main_e8209e1.sql").read_text()
 README = (Path(__file__).resolve().parents[2] / "README.md").read_text()
 
-NEW_SNAPSHOT_COLS = {"ml_variant", "web_via"}
-NEW_RUN_COLS = {"variant_stats", "oficina_fresh", "n_oficina_ok"}
+# unmeasurable y llm_* / n_no_medible: fix/semaforo-sin-dato, que se apila encima (también sin NOT NULL).
+NEW_SNAPSHOT_COLS = {"ml_variant", "web_via", "unmeasurable"}
+NEW_RUN_COLS = {"variant_stats", "oficina_fresh", "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"}
 
 
 def _rollback_sql() -> str:
-    for block in re.findall(r"```sql\n(.*?)```", README, flags=re.S):
-        if "DROP TABLE IF EXISTS ml_web_result" in block:
-            return block
-    raise AssertionError("el README no trae el SQL de rollback")
+    """El rollback de la oficina y, encima, el de fix/semaforo-sin-dato (los dos copiados tal cual del README)."""
+    blocks = re.findall(r"```sql\n(.*?)```", README, flags=re.S)
+    picked = [next((b for b in blocks if marker in b), None)
+              for marker in ("DROP TABLE IF EXISTS ml_web_result", "DROP COLUMN IF EXISTS llm_skipped_cap")]
+    assert all(picked), "el README no trae el SQL de rollback"
+    return "\n".join(picked)
 
 
 def _shape(engine) -> dict:

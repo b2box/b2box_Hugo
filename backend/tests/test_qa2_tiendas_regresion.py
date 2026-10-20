@@ -34,6 +34,7 @@ from app.db.models import MarketStore, StoreCatalogItem, StoreMatch  # noqa: E40
 from app.db.session import engine  # noqa: E402
 from app.pricing import daily_budget, market_judge, market_match, price_monitor, store_catalog  # noqa: E402
 from tests import qa2_world as qw  # noqa: E402
+from tests.no_medible_compat import get_as_origin_main  # noqa: E402
 from tests.store_fixtures import store_db  # noqa: E402,F401  (fixture)
 from tests.test_price_monitor import FakeVendure, world  # noqa: E402,F401
 from tests.test_price_monitor_routes import _env, client  # noqa: E402,F401
@@ -41,8 +42,13 @@ from tests.test_semaforo_web import webw  # noqa: E402,F401
 
 GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_qa2.json").read_text())
 # price_basis y source_stats: las tiendas (#21). ml_variant y variant_stats: las variantes de búsqueda (aditivas).
+# unmeasurable y n_no_medible: «No medible» aparte de «Sin dato» (fix/semaforo-sin-dato, aditivas).
+# llm_failures, llm_skipped_* y llm_status: lo que el juez no contestó o no consultó y su corte por fallas seguidas
+# (fix/semaforo-sin-dato, aditivas; en este mundo el juez nunca falla, así que quedan en 0 / None).
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
-                        "n_oficina_ok"}
+                        "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
+                        "llm_skipped_cut", "llm_status",
+                        "unmeasurable", "n_no_medible"}
 CP_IMG = "https://acdn-us.mitiendanube.com/stores/001/133/924/products/{}.webp"
 GD_IMG = "https://static.bidcom.com.ar/publicacionesML/productos/{}.jpg"
 
@@ -73,6 +79,11 @@ def run_world(webw, store_db, monkeypatch):  # noqa: F811
     store_catalog.seed_default_stores()
     runtime.set_value("pm_stores_topup_minutes", 0)
     runtime.set_value("pm_stores_affect_color", 1)
+    # La prioridad del juez para web/oficina (fix/semaforo-sin-dato) en neutro: 0 % reservado y todas las búsquedas
+    # de la API juzgadas es exactamente lo de origin/main, que es lo que este dorado compara. Con los defaults nuevos
+    # las fichas de la API ceden cupo a propósito (ver test_semaforo_sin_dato.py).
+    runtime.set_value("pm_vision_web_reserve_pct", 0)
+    runtime.set_value("pm_vision_api_variants", 3)
     box = {"score": 0.20, "calls": []}
 
     async def clip(our, urls):
@@ -263,9 +274,10 @@ async def test_with_the_ml_judge_off_the_stores_do_not_use_theirs_even_with_a_ca
 # ─── 4) lo que el dashboard recibe de ML: la API, clave por clave ────────────
 
 API_GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_api_qa2.json").read_text())
-NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant", "web_via"}
+NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant", "web_via", "unmeasurable"}
 NEW_LIST_KEYS = {"sources", "stores_affect_color"}
-NEW_RUN_KEYS = {"sources", "variants", "oficina"}
+# failures / skipped / cut: dentro de `llm`, lo que el juez no contestó o no consultó (fix/semaforo-sin-dato).
+NEW_RUN_KEYS = {"sources", "variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"stores", "stores_affect_color", "oficina"}
 
 
@@ -313,7 +325,8 @@ async def test_the_dashboard_api_serves_every_old_key_with_the_same_value_stores
     for path, old in want.items():
         r = client.get(path)
         assert r.status_code == old["status"] == 200, path
-        new = _norm(qw._strip_times(r.json()))
+        # «No medible» aparte de «Sin dato» es buscado (ver tests/no_medible_compat.py): se deshace solo eso.
+        new = _norm(qw._strip_times(get_as_origin_main(client, path)))
         old = {**old, "body": _norm(old["body"])}
         if path.endswith("/runs"):
             _assert_old_keys_equal(old["body"], new, path, NEW_RUN_KEYS, deep=True)
@@ -330,7 +343,8 @@ async def test_the_dashboard_api_serves_every_old_key_with_the_same_value_stores
                 else:
                     _assert_old_keys_equal(value, new[key], f"{path}.{key}", set())
         else:
-            _assert_old_keys_equal(old["body"], new, path, {"price_basis", "ml_variant", "web_via"}, deep=True)
+            _assert_old_keys_equal(old["body"], new, path, {"price_basis", "ml_variant", "web_via", "unmeasurable"},
+                                   deep=True)
     if stores == "prendidas_sin_identicos":
         items = client.get("/api/price-monitor/snapshots?page_size=200").json()["items"]
         assert all(i["price_basis"] == "ml" for i in items) and any(i["stores"] for i in items)

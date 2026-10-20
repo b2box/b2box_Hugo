@@ -65,8 +65,9 @@ def pg(monkeypatch):
 def _tables_as_deployed_at_9c6dc45(engine) -> None:
     old = MetaData()
     # Tampoco tienen lo que agrega feat/semaforo-tiendas (price_basis, source_stats).
-    for name, new_cols in (("price_monitor_run", PR_RUN_COLS | {"source_stats", "variant_stats", "oficina_fresh", "n_oficina_ok"}),
-                           ("market_price_snapshot", PR_SNAPSHOT_COLS | {"price_basis", "ml_variant", "web_via"}),
+    for name, new_cols in (("price_monitor_run", PR_RUN_COLS | {"source_stats", "variant_stats", "oficina_fresh", "n_oficina_ok",
+                                                "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"}),
+                           ("market_price_snapshot", PR_SNAPSHOT_COLS | {"price_basis", "ml_variant", "web_via", "unmeasurable"}),
                            ("ml_seller_cache", set()), ("settings", set()),
                            ("market_match_feedback", PR_FEEDBACK_COLS)):
         src = SQLModel.metadata.tables[name]
@@ -193,7 +194,7 @@ def test_filters_counts_and_ordering_on_postgres(api, pg):
     _seed_on(pg)
     get = lambda **p: api.get("/api/price-monitor/snapshots", params=p)
     body = get().json()
-    assert body["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 6}
+    assert body["colors"] == {"verde": 1, "amarillo": 0, "rojo": 0, "sin_dato": 6, "no_medible": 0}
     assert body["estimated_colors"] == {"verde": 1, "amarillo": 0, "rojo": 1}      # 2 verde (27.500) y 3 rojo (9.000 < 10.000)
     # igual 1+6 | solo_similar 2,3 + el failed 7 | solo_diferente 4 | ninguno 5
     assert body["states"] == {"igual": 2, "solo_similar": 3, "solo_diferente": 1, "ninguno": 1}

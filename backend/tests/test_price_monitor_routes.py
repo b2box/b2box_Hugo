@@ -97,7 +97,7 @@ def test_snapshots_default_to_the_latest_run_and_paginate(client):
     page0 = client.get("/api/price-monitor/snapshots", params={"page_size": 25}).json()
     assert page0["run_id"] == new_id and page0["total"] == 30 and page0["has_more"] is True
     assert len(page0["items"]) == 25
-    assert page0["colors"] == {"verde": 10, "amarillo": 5, "rojo": 3, "sin_dato": 12}
+    assert page0["colors"] == {"verde": 10, "amarillo": 5, "rojo": 3, "sin_dato": 12, "no_medible": 0}
     # Peor margen arriba; los sin dato al final.
     margins = [i["est_margin_pct"] for i in page0["items"] if i["est_margin_pct"] is not None]
     assert margins == sorted(margins)

@@ -258,8 +258,9 @@ hace una sola búsqueda.
   la trajo (el juez no se llama dos veces por la misma). Un IGUAL sin vendedores que
   cuenten no corta: sigue con la variante siguiente.
 - **Cada búsqueda cuenta contra `pm_ml_daily_budget`** (la reserva atómica de siempre). Sin
-  cupo a mitad de camino el producto queda `skipped`; un fallo de ML en una variante lo
-  deja `failed`, igual que con la primera.
+  cupo a mitad de camino el producto queda `skipped`; un fallo de ML en la búsqueda de una
+  variante lo deja `failed`, igual que con la primera (un 404 en los vendedores de una ficha,
+  no: ver "Robustez").
 - Para medir: el snapshot guarda en `ml_variant` qué búsqueda encontró el match
   (`titulo` | `corto` | `claves` | `inicio`) y la corrida suma en `variant_stats` cuántos
   productos resolvió cada una (el dashboard lo muestra debajo de la última corrida).
@@ -317,6 +318,26 @@ juez lo pide); las de la web siempre traen precio.
 
 Fallar o no poder evaluar (`failed` / `skipped`) sigue siendo aparte y no tiene estado.
 
+**Sin dato y no medible.** En la corrida #15 había 515 `skipped` (498 "sin precio en
+Vendure", casi todos deshabilitados; 11 "sin nombre para buscar"; 6 "sin foto propia")
+sumados al chip "Sin dato" junto con los que sí se buscaron. Ahora el snapshot guarda
+en `unmeasurable` por qué un producto **no se puede medir tal como está cargado**:
+`sin_precio` | `moneda` (precio que no es ARS) | `sin_foto` | `sin_nombre`. Siguen siendo
+`skipped` y `color = sin_dato` en la base (los contadores de la corrida no cambian;
+`n_no_medible` se suma aparte), pero la API los saca de "Sin dato":
+
+- `/snapshots`: `colors.sin_dato` = evaluados sin un idéntico con precio (incluye los
+  `failed` y los `skipped` por cupo de ML o por CLIP, que sí se pueden medir otra noche);
+  `colors.no_medible` = los que no; `color=sin_dato` y `color=no_medible` filtran igual;
+  cada item trae `unmeasurable`.
+- `/runs` y `/summary`: `colors` de la corrida con la misma partición.
+- Un `skipped` por **budget de ML** (o sin score de CLIP) **no** es "no medible":
+  `unmeasurable` queda en null. `status=skipped` sigue trayendo todos.
+
+Este cambio NO es aditivo para quien leía `colors.sin_dato` o `color=sin_dato`: los
+dorados de regresión lo deshacen solo a eso (`tests/no_medible_compat.py`) y comparan
+todo lo demás contra origin/main.
+
 **Color estimado.** Sin idéntico pero con similares **confirmados** con precio (en
 pesos y, en la web, con ventas suficientes), se calcula con la **mediana de esos
 similares y la misma fórmula de ganancia y los mismos cortes** que el color real. Un
@@ -368,10 +389,35 @@ Robustez:
   `no_data`), así con un budget corto todo el catálogo rota. 429/5xx/red →
   backoff exponencial; si persiste, ese producto queda `failed` y la corrida
   **sigue**.
+- **Un 404 de una ficha no es un fallo.** Si ML contesta 404 al pedir los vendedores
+  de UNA ficha IGUAL (`/products/{id}/items`), esa ficha queda **idéntica sin precio**
+  con el motivo ("ML no tiene vendedores para esta ficha (404)") y el producto sigue:
+  las otras fichas, las otras variantes, la web o la oficina. Sin ningún precio queda
+  `no_data` (`igual_sin_precio`), no `failed`. En la corrida #15 eran 107 productos
+  `failed` por esto. Un 429/5xx/red persistente (o cualquier otro 4xx) en los vendedores
+  **sigue siendo `failed`** si el producto terminó sin ningún precio, **aunque la web o la
+  oficina hayan corrido sin encontrar un idéntico**: ese error puede esconder el precio
+  de una ficha que ES el producto, y `failed` hace que la noche siguiente se mida
+  primero. Si la web o la oficina sí trajeron un idéntico con precio, queda `ok` (como
+  siempre).
 - El consumo (requests a ML, llamadas al juez) se suma a la corrida en la
   misma transacción que reserva el cupo: después de un corte, la corrida
   refleja exactamente lo gastado.
 - Si más del 20 % quedó `failed`, la corrida es `degraded`.
+- **Migración y rollback de "sin dato" (oct-2026).** Automática en el arranque (`init_db`),
+  todas **sin NOT NULL** (el código anterior sigue insertando): `market_price_snapshot.unmeasurable`
+  y `price_monitor_run.llm_failures`, `llm_skipped_cap`, `llm_skipped_api`,
+  `llm_skipped_photos`, `llm_skipped_cut`, `n_no_medible` (con backfill a 0) y `llm_status`.
+  Settings nuevos (sin fila hasta que alguien los cambie): `pm_vision_web_reserve_pct`,
+  `pm_vision_api_variants`, `pm_vision_fail_streak`. Para volver el esquema atrás:
+
+```sql
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS unmeasurable;
+ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS llm_failures, DROP COLUMN IF EXISTS llm_skipped_cap,
+    DROP COLUMN IF EXISTS llm_skipped_api, DROP COLUMN IF EXISTS llm_skipped_photos,
+    DROP COLUMN IF EXISTS llm_skipped_cut, DROP COLUMN IF EXISTS llm_status, DROP COLUMN IF EXISTS n_no_medible;
+DELETE FROM settings WHERE key IN ('pm_vision_web_reserve_pct', 'pm_vision_api_variants', 'pm_vision_fail_streak');
+```
 - Solo corre en el líder, con lock. Si el proceso se reinicia a mitad, al
   levantar **retoma la misma corrida** (mismo `run_id`, solo los productos sin
   snapshot). Si el cron no disparó porque el proceso estaba caído, corre al
@@ -904,6 +950,9 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 | `pm_ml_query_variants` | 3 | búsquedas por producto en la API de ML (1 = título y 4 primeras palabras, como antes; 2 = + título corto; 3 = + palabras clave) |
 | `pm_tier_policy` | 0 | 0 tramo mínimo (compra chica); 1 tramo más barato |
 | `pm_vision_max_calls` | 0 | tope diario del juez IA; 0 = apagado |
+| `pm_vision_web_reserve_pct` | 50 | % del tope del juez que las fichas de la API no pueden usar: queda para la web y la oficina (0 = sin reserva, como antes; 100 = la API nunca va al juez) |
+| `pm_vision_api_variants` | 1 | búsquedas de la API por producto que van al juez: solo las primeras N con fichas dudosas (3 = todas, como antes; 0 = ninguna) |
+| `pm_vision_fail_streak` | 5 | fallas seguidas del juez (error HTTP, timeout, respuesta vacía o ilegible) que lo cortan por el resto de la corrida; 0 = nunca |
 | `pm_embed_cache_days` | 60 | poda de embeddings de fotos de ML |
 | `pm_manual_cooldown_min` | 30 | minutos mínimos entre corridas para "Correr ahora" |
 | `pm_ml_keep_listings` | 8 | publicaciones de ML que se guardan por producto (idénticas + similares + diferentes) |
@@ -951,6 +1000,39 @@ similar"). Solo se consulta si `pm_vision_max_calls` > 0, con tope diario atómi
 respuesta ilegible, un timeout o la falta de cupo = sin veredicto. Tokens y
 costo estimado quedan en `price_monitor_run`. Se configura con tres variables
 (API OpenAI-compatible):
+
+**El cupo es para lo que trae precio.** En la corrida #15 (20-oct-2026) el juez gastó
+las 3.000 llamadas del día en ~66 minutos, casi todas en fichas de la API (hasta una
+por búsqueda: 3 por producto), y cuando llegaban los candidatos de la web y de la
+oficina —los que traen precio— ya no había cupo: 686 productos con dudosos sin juez y
+2.712 similares "sin confirmar". Ahora:
+
+- las fichas de la API van al juez **solo en la primera búsqueda que trae dudosas**
+  (`pm_vision_api_variants` = 1); las de las otras búsquedas quedan "sin confirmar";
+- las fichas de la API **no pueden pasar de su parte del tope**: con
+  `pm_vision_web_reserve_pct` = 50 y un tope de 3.000, la API deja de consultar cuando el
+  contador del día llega a 1.500 y la web / la oficina siguen hasta 3.000. Es el mismo
+  contador (`_meta:pm_llm_calls_today`): lo que la API no usa queda para la web. Con
+  `0` y `3` es exactamente el comportamiento anterior (los tests dorados corren así).
+
+**Corta-circuito.** Cada llamada se cuenta al reservar el cupo, aunque después falle.
+Tras `pm_vision_fail_streak` (5) fallas **seguidas** —error HTTP, timeout, respuesta
+vacía (el modelo pensó) o ilegible— el juez se apaga por el resto de la corrida (ML y
+tiendas: es el mismo proveedor) y no gasta más cupo. Una respuesta buena vuelve la
+cuenta a cero. El motivo queda en `price_monitor_run.llm_status` ("juez cortado: 5
+fallas seguidas (motivo: HTTP 401, code=invalid_api_key)": solo status y código,
+nunca el body ni la key) y se ve en Salud y en la línea de la última corrida. Los
+productos sin juez quedan "sin confirmar", como siempre. El corte vive en memoria: si
+el proceso se reinicia, la corrida retomada vuelve a probar (el reinicio puede ser el
+arreglo); `llm_status` queda como estaba.
+
+**Lo que no se consultó también se cuenta** (`price_monitor_run`, y en la API
+`llm.failures` / `llm.skipped` / `llm.cut`): `llm_failures` (llamadas sin veredicto),
+`llm_skipped_cap` (tope diario de ML o de las tiendas), `llm_skipped_api` (fichas de
+la API que cedieron el lugar: su parte del tope o búsquedas de más),
+`llm_skipped_photos` (modo base64 sin ninguna foto nuestra descargable) y
+`llm_skipped_cut` (juez cortado). "Tope diario alcanzado" y "sin fotos" se loguean a
+WARNING **una vez por corrida** (antes era un `info` por producto y no se veía).
 
 ```env
 PM_LLM_BASE_URL=...
@@ -1097,9 +1179,13 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   cuando ML no devolvió nada. Filtros: producto (habilitados / deshabilitados /
   todos), lo que devolvió ML (tiene idéntico / solo similares / solo diferentes / sin
   resultados, con su conteo) y origen. Las chips del color real y sus conteos no
-  cambian.
+  cambian. Al lado de "Sin dato" está la chip **"No medible"** (ver "Sin dato y no
+  medible"): cada fila dice por qué ("No medible · sin precio en Vendure").
 - La card "Semáforo de precios (ML)" en **Salud** muestra la última corrida,
-  su estado, requests a ML, % sin dato, % fallado y llamadas/costo del juez.
+  su estado, requests a ML, % sin dato, % fallado, llamadas/costo del juez, los
+  colores con "No medible" aparte y, si pasó algo con el juez, una línea "Juez IA:
+  juez cortado: 5 fallas seguidas (motivo: …) · N sin respuesta · N sin consultar
+  por tope diario · …" (la misma línea va debajo de "Última corrida" en el semáforo).
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
 

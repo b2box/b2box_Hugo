@@ -387,6 +387,42 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=3000, step=10, group="monitor",
     ),
     SettingMeta(
+        key="pm_vision_web_reserve_pct",
+        label="Juez LLM: % del tope reservado para web y oficina",
+        description=(
+            "Parte del tope diario del juez que las fichas de la API de ML no pueden usar: queda "
+            "para los candidatos de la web de ML y de la oficina, que son los que traen precio. "
+            "0 = sin reserva (la API se lo puede comer todo); 100 = la API nunca usa el juez."
+        ),
+        type="int", parser=int,
+        default_attr="pm_vision_web_reserve_pct",
+        min=0, max=100, step=5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_vision_api_variants",
+        label="Juez LLM: búsquedas de la API que se juzgan por producto",
+        description=(
+            "De las búsquedas de la API de ML de cada producto (pm_ml_query_variants), solo las "
+            "primeras N que traen fichas dudosas van al juez; las demás quedan «sin confirmar». "
+            "0 = las fichas de la API nunca van al juez; 3 = todas."
+        ),
+        type="int", parser=int,
+        default_attr="pm_vision_api_variants",
+        min=0, max=3, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_vision_fail_streak",
+        label="Juez LLM: fallas seguidas que lo cortan",
+        description=(
+            "Fallas seguidas del juez (error HTTP, timeout, respuesta vacía o ilegible) que lo "
+            "apagan por el resto de la corrida, sin gastar más cupo. El motivo se ve en Salud. "
+            "Una respuesta buena vuelve la cuenta a cero. 0 = nunca se corta."
+        ),
+        type="int", parser=int,
+        default_attr="pm_vision_fail_streak",
+        min=0, max=100, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_manual_cooldown_min",
         label="Espera entre corridas manuales (min)",
         description=(

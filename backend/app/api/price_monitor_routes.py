@@ -33,7 +33,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
 from app.pricing import match_feedback, price_monitor, store_match
 from app.pricing.market_ml import ml_budget_status
-from app.pricing.semaforo import COLORS
+from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
 
@@ -53,6 +53,9 @@ ENABLED_FILTERS = ("enabled", "disabled", "all")
 # diferente (tiene diferentes) | solo_diferente | ninguno (sin resultados).
 MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno")
 ORIGINS = ("api", "web", "oficina")
+# color=: los cuatro del semáforo y "no_medible" (sin_dato que no se puede medir: sin precio en
+# Vendure, sin foto, sin nombre). "sin_dato" deja afuera a los no medibles.
+COLOR_FILTERS = (*COLORS, NO_MEDIBLE)
 # Color estimado por similares: uno concreto o cualquiera.
 ESTIMATED_FILTERS = ("verde", "amarillo", "rojo", "any")
 
@@ -166,6 +169,17 @@ def _match_condition(match: str) -> list[Any]:
             MarketPriceSnapshot.similar_count == 0, MarketPriceSnapshot.other_count == 0]
 
 
+def _color_condition(color: str) -> list[Any]:
+    """Condiciones SQL del filtro `color` (ver COLOR_FILTERS)."""
+    if color == NO_MEDIBLE:
+        return [MarketPriceSnapshot.color == SIN_DATO,
+                MarketPriceSnapshot.unmeasurable.is_not(None)]  # type: ignore[union-attr]
+    if color == SIN_DATO:
+        return [MarketPriceSnapshot.color == SIN_DATO,
+                MarketPriceSnapshot.unmeasurable.is_(None)]  # type: ignore[union-attr]
+    return [MarketPriceSnapshot.color == color]
+
+
 def _scope_conditions(enabled: str, match: str | None, origin: str | None,
                       estimated: str | None = None) -> list[Any]:
     """Condiciones SQL de enabled / match / origin / estimated."""
@@ -203,6 +217,9 @@ async def list_snapshots(
 ) -> dict[str, Any]:
     """Tabla del semáforo. Sin `run_id` muestra la última corrida.
 
+    `color`: verde | amarillo | rojo | sin_dato (evaluados sin un idéntico con precio) |
+    no_medible (no se pueden medir: sin precio en Vendure, sin foto, sin nombre, otra moneda).
+
     `enabled`: enabled | disabled | all (productos de Vendure). `match`: igual
     (tiene idéntico) | similar (tiene similares) | solo_similar | diferente (tiene
     diferentes) | solo_diferente | ninguno (ML no devolvió nada). `origin`: api |
@@ -212,7 +229,7 @@ async def list_snapshots(
     Por fuente (Mercado Libre y las tiendas): `source` = "ml" o el id de una tienda (productos
     con algo de esa fuente); `igual_in` = lista separada por comas de esas mismas claves (productos
     con un idéntico en alguna de ellas)."""
-    if color and color not in COLORS:
+    if color and color not in COLOR_FILTERS:
         raise HTTPException(400, f"color inválido: {color}")
     if status and status not in STATUSES:
         raise HTTPException(400, f"status inválido: {status}")
@@ -248,8 +265,9 @@ async def list_snapshots(
         base = base.where(cond)
         count_stmt = count_stmt.where(cond)
     if color:
-        base = base.where(MarketPriceSnapshot.color == color)
-        count_stmt = count_stmt.where(MarketPriceSnapshot.color == color)
+        for cond in _color_condition(color):
+            base = base.where(cond)
+            count_stmt = count_stmt.where(cond)
     if status:
         base = base.where(MarketPriceSnapshot.ml_status == status)
         count_stmt = count_stmt.where(MarketPriceSnapshot.ml_status == status)
@@ -283,6 +301,13 @@ async def list_snapshots(
         .where(MarketPriceSnapshot.run_id == run_id, *scope)
         .group_by(MarketPriceSnapshot.color)
     ).all())
+    # "No medible" sale de "Sin dato": son sin_dato en la base, pero no hay nada que medir.
+    no_medible = int(session.exec(
+        select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+        .where(MarketPriceSnapshot.run_id == run_id, *scope, *_color_condition(NO_MEDIBLE))
+    ).one() or 0)
+    colors[SIN_DATO] = int(colors.get(SIN_DATO, 0)) - no_medible
+    colors[NO_MEDIBLE] = no_medible
     # Chips aparte del color real: el estimado (solo productos sin idéntico) y
     # cuántos productos hay en cada estado, con los filtros de producto y origen.
     base_scope = _scope_conditions(enabled, None, origin)
@@ -308,7 +333,7 @@ async def list_snapshots(
         "page": page,
         "page_size": page_size,
         "has_more": (page + 1) * page_size < total,
-        "colors": {c: int(colors.get(c, 0)) for c in COLORS},
+        "colors": {c: int(colors.get(c, 0)) for c in COLOR_FILTERS},
         "estimated_colors": {c: int(estimated_counts.get(c, 0)) for c in ("verde", "amarillo", "rojo")},
         "states": states,
     }
