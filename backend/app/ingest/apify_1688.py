@@ -152,6 +152,14 @@ class Search1688Result:
     elapsed_s: float = 0.0
     hedged: bool = False
     cached: bool = False
+    # Se sumó a la búsqueda en vuelo de otro pedido con la misma foto: no pagó.
+    shared: bool = False
+
+    def copy(self, **changes: Any) -> Search1688Result:
+        """Copia propia para cada llamador (la caché y los pedidos que comparten
+        búsqueda no pueden pisarse el `elapsed_s` ni las listas)."""
+        return replace(self, candidates=list(self.candidates), run_ids=list(self.run_ids),
+                       **changes)
 
 
 # ─── Configuración ─────────────────────────────────────────────────
@@ -425,9 +433,10 @@ class _Run:
 
 
 # Resultado de una corrida: ok (con candidatos), empty (terminó sin candidatos
-# válidos), failed (falla transitoria: vale cubrirla) o fatal (otra corrida
-# fallaría igual: token, saldo, respuesta gigante).
-_Outcome = tuple[Literal["ok", "empty", "failed", "fatal"], list[Candidate1688]]
+# válidos), failed (falla transitoria: vale cubrirla), fatal (otra corrida
+# fallaría igual: token, saldo, respuesta gigante) o late (el lanzamiento no
+# contestó dentro de la ventana hasta el deadline: es un timeout, no un error).
+_Outcome = tuple[Literal["ok", "empty", "failed", "fatal", "late"], list[Candidate1688]]
 
 
 async def _drive(http: httpx.AsyncClient, run: _Run, actor: str, build: str,
@@ -449,10 +458,19 @@ async def _drive_inner(http: httpx.AsyncClient, run: _Run, actor: str, build: st
     # El lanzamiento no puede durar más que lo que queda hasta el deadline: un
     # POST colgado no tiene que sobrevivir a la búsqueda que lo pidió.
     window = max(deadline_at - time.monotonic(), 0.01)
-    status, body = await asyncio.wait_for(
-        _request_bounded(http, "POST", _start_url(actor, build), headers, _actor_input(image_url),
-                         timeout=httpx.Timeout(window, connect=min(window, 10.0))),
-        timeout=window)
+    try:
+        status, body = await asyncio.wait_for(
+            _request_bounded(http, "POST", _start_url(actor, build), headers,
+                             _actor_input(image_url),
+                             timeout=httpx.Timeout(window, connect=min(window, 10.0))),
+            timeout=window)
+    except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+        # httpx corta con el mismo tope que wait_for y puede ganarle por un pelo;
+        # un timeout de httpx lejos del deadline sí es una falla de red común.
+        if isinstance(exc, httpx.TimeoutException) and time.monotonic() < deadline_at - 0.1:
+            raise
+        log.warning("Apify 1688 corrida %d: el lanzamiento no contestó antes del deadline", run.n)
+        return "late", []
     if status not in (200, 201):
         log.warning("Apify 1688 corrida %d: HTTP %s (%s) al lanzar", run.n, status,
                     _STATUS_REASON.get(status, "error"))
@@ -550,6 +568,9 @@ async def wait_pending_aborts() -> None:
 
 # clave → (vence_en monotonic, resultado). OrderedDict como LRU.
 _cache: OrderedDict[str, tuple[float, Search1688Result]] = OrderedDict()
+# Búsquedas en vuelo por clave de caché: la misma foto pedida en paralelo (un
+# cliente impaciente que reenvía) comparte la del primero. Una corrida, un cupo.
+_inflight: dict[str, asyncio.Task] = {}
 # Un semáforo por event loop (ver apify_meli._semaphore).
 _slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
@@ -557,6 +578,7 @@ _slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 def _reset_for_tests() -> None:
     global _slots
     _cache.clear()
+    _inflight.clear()
     _slots = None
 
 
@@ -650,8 +672,46 @@ async def _search(image_url: str, trusted_bytes_sha256: str | None, deadline_s: 
     cached = _cache_get(key)
     if cached is not None:
         log.info("Apify 1688: foto en caché (%s), no se paga de nuevo", cached.status)
-        return replace(cached, candidates=list(cached.candidates), run_ids=list(cached.run_ids),
-                       usd_imputado=0.0, hedged=False, cached=True)
+        return cached.copy(usd_imputado=0.0, hedged=False, cached=True)
+
+    deadline_at = started + deadline_s
+    loop = asyncio.get_running_loop()
+    running = _inflight.get(key)
+    if running is not None and not running.done() and running.get_loop() is loop:
+        return await _join(running, deadline_at)
+    task = loop.create_task(_search_paid(actor, build, target, key, deadline_at, started))
+    _inflight[key] = task
+    task.add_done_callback(lambda t: _inflight_done(key, t))
+    # shield: si al primer llamador lo cancelan (su propio deadline de afuera),
+    # la búsqueda sigue para los que se sumaron y termina en la caché.
+    return (await asyncio.shield(task)).copy()
+
+
+def _inflight_done(key: str, task: asyncio.Task) -> None:
+    if _inflight.get(key) is task:
+        _inflight.pop(key, None)
+    # Si el primer llamador se fue y nadie más esperaba, la excepción (no
+    # debería haber: todo adentro se ataja) se loguea en vez de quedar suelta.
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("Apify 1688: búsqueda compartida terminó con %s",
+                    type(task.exception()).__name__)
+
+
+async def _join(running: asyncio.Task, deadline_at: float) -> Search1688Result:
+    """Se suma a la búsqueda en vuelo de la misma foto, sin pagar. Espera hasta SU
+    deadline; si vence vuelve timeout sin cancelar la búsqueda compartida."""
+    log.info("Apify 1688: la misma foto ya se está buscando, me sumo")
+    try:
+        result = await asyncio.wait_for(asyncio.shield(running),
+                                        timeout=max(deadline_at - time.monotonic(), 0.0))
+    except asyncio.TimeoutError:
+        return Search1688Result(status="timeout", shared=True)
+    return result.copy(usd_imputado=0.0, hedged=False, shared=True)
+
+
+async def _search_paid(actor: str, build: str, target: str, key: str, deadline_at: float,
+                       started: float) -> Search1688Result:
+    """La búsqueda que gasta: cupo, semáforo, corridas y caché."""
     budget = _daily_budget()
     if budget <= 0:
         return Search1688Result(status="over_budget")
@@ -663,14 +723,14 @@ async def _search(image_url: str, trusted_bytes_sha256: str | None, deadline_s: 
         log.info("Apify 1688: %d búsquedas en curso, salteo", _MAX_CONCURRENT)
         return Search1688Result(status="busy")
     try:
-        reserved = await _reserve(budget, started + deadline_s)
+        reserved = await _reserve(budget, deadline_at)
         if reserved is None:
             return Search1688Result(status="timeout")
         if not reserved:
             log.info("Apify 1688: cupo diario agotado (%d), no se manda", budget)
             return Search1688Result(status="over_budget")
-        result = await _hedged_search(actor, build, target, budget, started + deadline_s,
-                                      started + float(s.apify_1688_hedge_after_s))
+        result = await _hedged_search(actor, build, target, budget, deadline_at,
+                                      started + float(get_settings().apify_1688_hedge_after_s))
         ttl = _CACHE_TTL_S if result.status in ("ok", "no_candidates") else _CACHE_ERROR_TTL_S
         _cache_put(key, result, ttl)
         log.info("Apify 1688 %s: %s, %d candidatos, %d corridas%s, %.1fs (foto de %s)", actor,
@@ -753,7 +813,7 @@ async def _hedged_search(actor: str, build: str, target: str, budget: int,
                              "falló" if not tasks else "sigue sin terminar")
                     launch()
     finally:
-        timed_out = bool(tasks)
+        timed_out = bool(tasks) or "late" in kinds
         for task in tasks:
             task.cancel()
         if tasks:

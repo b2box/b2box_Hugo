@@ -865,10 +865,9 @@ async def test_token_no_sale_en_logs_si_el_abort_falla(apify_on, monkeypatch, ca
     assert TOKEN not in caplog.text
 
 
-@pytest.mark.xfail(strict=True, reason="sin single-flight: la misma foto en paralelo paga N corridas")
 async def test_misma_foto_en_paralelo_paga_una_sola_corrida(apify_on, monkeypatch):
-    """Cliente impaciente que reenvía mientras espera ~30 s: hoy cada reenvío
-    reserva cupo y lanza otra corrida. Cuando haya single-flight, sacar el xfail."""
+    """Cliente impaciente que reenvía mientras espera ~30 s: los reenvíos se suman
+    a la búsqueda del primero en vez de reservar cupo y lanzar otra corrida."""
     monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
     fake = FakeApify("late", late_s=0.2).install(monkeypatch)
 
@@ -952,7 +951,8 @@ async def test_post_de_lanzamiento_colgado_corta_en_la_ventana(apify_on, monkeyp
     finally:
         await http.aclose()
 
-    assert kind == "failed" and run.run_id == ""
+    # "late", no "failed": al orquestador le dice que fue el deadline (timeout).
+    assert kind == "late" and run.run_id == ""
     assert time.monotonic() - t0 < 0.8
 
 
@@ -1021,3 +1021,81 @@ async def test_lifespan_drena_los_aborts_al_apagar(monkeypatch):
     async with main_mod.lifespan(FastAPI()):
         assert calls == []
     assert calls == ["drain"]
+
+
+# ─── Pedidos en vuelo (single-flight) ──────────────────────────────
+
+
+async def test_los_que_se_suman_no_pagan_y_tienen_copia_propia(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("late", late_s=0.2).install(monkeypatch)
+
+    first, second = await asyncio.gather(
+        apify_1688.search_by_image(PHOTO, deadline_s=3.0),
+        apify_1688.search_by_image(PHOTO, deadline_s=3.0))
+
+    assert first.shared is False and first.usd_imputado == pytest.approx(0.021)
+    assert second.shared is True and second.usd_imputado == 0.0
+    assert second.run_ids == first.run_ids == ["run1"]
+    assert second.candidates is not first.candidates
+    assert len(fake.starts) == 1
+    assert apify_1688._inflight == {}
+
+
+async def test_el_que_se_suma_vence_en_su_deadline_sin_cancelar_la_compartida(
+        apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("late", late_s=0.5).install(monkeypatch)
+
+    leader = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=3.0))
+    await asyncio.sleep(0.05)
+    joiner = await apify_1688.search_by_image(PHOTO, deadline_s=0.2)
+
+    assert joiner.status == "timeout" and joiner.shared is True
+    assert joiner.elapsed_s < 0.4
+    result = await leader
+    assert result.status == "ok"
+    assert len(fake.starts) == 1 and fake.aborted == [] and _used() == 1
+
+
+async def test_primer_llamador_cancelado_no_corta_la_compartida(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("late", late_s=0.3).install(monkeypatch)
+
+    leader = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=3.0))
+    await asyncio.sleep(0.05)
+    joiner = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=3.0))
+    await asyncio.sleep(0.05)
+    leader.cancel()
+
+    result = await joiner
+    assert result.status == "ok" and result.shared is True
+    assert len(fake.starts) == 1
+    # Lo que se pagó quedó en la caché.
+    assert (await apify_1688.search_by_image(PHOTO)).cached is True
+
+
+async def test_otra_foto_en_paralelo_no_se_suma(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("late", late_s=0.1).install(monkeypatch)
+
+    a, b = await asyncio.gather(
+        apify_1688.search_by_image(PHOTO, deadline_s=3.0),
+        apify_1688.search_by_image(PHOTO.replace("cliente", "otra"), deadline_s=3.0))
+
+    assert a.shared is False and b.shared is False
+    assert len(fake.starts) == 2
+
+
+async def test_lanzamiento_que_vence_antes_que_el_loop_igual_es_timeout(apify_on, monkeypatch):
+    """Carrera: el POST de lanzamiento vence en el deadline un pelo antes de que
+    el loop lo note. Tiene que salir timeout, no error."""
+    async def late(*args, **kwargs):
+        return "late", []
+
+    monkeypatch.setattr(apify_1688, "_drive", late)
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=1.0)
+
+    assert result.status == "timeout"
