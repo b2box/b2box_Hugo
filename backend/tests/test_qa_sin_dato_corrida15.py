@@ -185,8 +185,6 @@ def test_api_judge_cap_rounding_and_clamping(cap, reserve, want):
     assert price_monitor.api_judge_cap(ctx) == want
 
 
-@pytest.mark.xfail(strict=True, reason="BUG QA: error_summary devuelve str(exc) para errores sin status_code y "
-                   "browser_fetch.redact solo tapa el proxy: la key del juez puede quedar en llm_status")
 async def test_c_the_cut_reason_of_a_non_http_exception_does_not_leak_the_key(world, monkeypatch):
     """Una excepción SIN status_code (red, cliente) entra a llm_status vía error_summary → str(exc). Si el mensaje
     repite la API key del juez, no tiene que quedar guardada en la corrida."""
