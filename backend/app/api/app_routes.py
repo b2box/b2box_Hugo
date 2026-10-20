@@ -31,8 +31,8 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, model_serializer
 from sqlmodel import Session
 
 from app import runtime
@@ -42,9 +42,12 @@ from app.db.session import engine
 from app.dedup import catalog_index, fuzzy_text, image_embed, vision_rerank
 from app.dedup.image_hash import image_similarity
 from app.dedup.url_match import url_similarity
+from app.estimate import otapi_item as estimate_otapi
+from app.estimate import pricing as estimate_pricing
+from app.estimate import service as estimate_service
 from app.ingest import image_from_url
 from app.integrations import cloud as cloud_integration
-from app.security import verify_api_key, verify_rate_limit
+from app.security import client_ip, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient, VendureProduct
 
@@ -87,7 +90,18 @@ _EMBED_TOPK = 5
 _NAME_TOPK = 5
 
 
+# Con estimado pedido, el rerank de visión del catálogo tiene este techo: el
+# deadline del estimado es de 50 s y Apify corre en paralelo (diseño 1.3).
+_ESTIMATE_RERANK_BUDGET_SECONDS = 20.0
+
+
 # ─── Modelos ───────────────────────────────────────────────────────
+
+
+class AppLookupVisitor(BaseModel):
+    """Datos del visitante que manda el storefront. La IP solo se cree si el
+    pedido vino con la key de un cliente de confianza (ESTIMATE_TRUSTED_IP_CLIENTS)."""
+    ip: str | None = Field(default=None, max_length=64)
 
 
 class AppLookupClient(BaseModel):
@@ -120,6 +134,29 @@ class AppLookupRequest(BaseModel):
     # de sugerir y abre la consulta en Cloud. Sin esto, un "no" del cliente
     # volvería a mostrarle el mismo candidato para siempre.
     reject_suggestion: bool = False
+    # Cotizador rápido por foto: si no lo tenemos, devolver un rango de precio
+    # estimado (tabla por tramos, ARS con IVA). Solo lo manda el storefront.
+    want_estimate: bool = False
+    visitor: AppLookupVisitor | None = None
+    # Reservado para cuando el comparador pida la cantidad (hoy se ignora: el
+    # estimado va en tramos fijos).
+    quantity_hint: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
+class EstimateTierOut(BaseModel):
+    quantity: int
+    low_cents: int
+    high_cents: int
+
+
+class EstimateOut(BaseModel):
+    """Rango estimado. Solo pesos y cantidades: nada de proveedores ni yuanes."""
+    currency: str
+    vat_included: bool = True
+    tiers: list[EstimateTierOut] = Field(default_factory=list)
+    valid_until: str | None = None
+    label: str = "estimado"
+    estimate_id: str | None = None
 
 
 class LookupVariant(BaseModel):
@@ -212,6 +249,7 @@ class AppLookupResponse(BaseModel):
     # decidir la pantalla siguiente; `status` queda para diagnóstico.
     #   show_product     → mostrar el producto con el PA y el botón de comprar
     #   confirm_product  → mostrar la sugerencia y preguntar "¿es este?"
+    #   show_estimate    → no lo tenemos, pero hay rango estimado (`estimate`)
     #   ask_photo        → pedirle una foto al cliente y reintentar con image_url
     #   ask_client_data  → pedir nombre/email/teléfono y reintentar
     #   retry_later      → volver a probar en unos minutos
@@ -220,6 +258,21 @@ class AppLookupResponse(BaseModel):
     # Texto listo para mostrarle al cliente, sin jerga. El app puede usarlo tal
     # cual o escribir el suyo.
     message: str = ""
+    # Solo si se pidió `want_estimate` (sin la bandera estos dos campos no
+    # aparecen en el JSON: la respuesta queda idéntica a la de siempre).
+    #   estimated → status cuando hay rango; `estimate_status` dice por qué no:
+    #   ok | skipped_found | no_candidates | low_confidence | over_budget |
+    #   rate_limited | timeout | error | disabled
+    estimate: EstimateOut | None = None
+    estimate_status: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_estimate_when_not_asked(self, handler):
+        data = handler(self)
+        if self.estimate_status is None and isinstance(data, dict):
+            data.pop("estimate", None)
+            data.pop("estimate_status", None)
+        return data
 
 
 def _decide_action(resp: AppLookupResponse) -> AppLookupResponse:
@@ -231,6 +284,17 @@ def _decide_action(resp: AppLookupResponse) -> AppLookupResponse:
     if resp.status == "found" and resp.product is not None:
         resp.action = "show_product"
         resp.message = f"Lo tenemos: {resp.product.name}"
+        return resp
+
+    # No lo tenemos pero hay rango: va antes que pedir los datos del cliente
+    # (si además falta el mail, `cloud_request.missing_fields` lo dice y la web
+    # lo pide como algo secundario).
+    if resp.status == "estimated" and resp.estimate is not None:
+        resp.action = "show_estimate"
+        resp.message = estimate_pricing.estimate_message([
+            estimate_pricing.Tier(t.quantity, t.low_cents, t.high_cents)
+            for t in resp.estimate.tiers
+        ])
         return resp
 
     if resp.status == "site_blocked":
@@ -508,20 +572,82 @@ async def _phash_scan(
     response_model=AppLookupResponse,
     dependencies=[Depends(verify_api_key), Depends(verify_rate_limit)],
 )
-async def app_lookup(payload: AppLookupRequest) -> AppLookupResponse:
+async def app_lookup(
+    payload: AppLookupRequest, request: Request = None,  # type: ignore[assignment]
+) -> AppLookupResponse:
     """El b2box app manda una URL; Hugo responde PA + comprar ahora, o abre pedido.
 
     El `action` de la respuesta ya dice qué pantalla mostrar: el app no tiene que
     interpretar combinaciones de status + cloud_request + product.
     """
-    return _decide_action(await _lookup(payload))
+    return _decide_action(await _lookup(payload, request))
 
 
-async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
+async def _open_estimate(
+    payload: AppLookupRequest, request: Request | None, started: float
+) -> estimate_service.EstimateSession:
+    """Sesión del estimado con el cupo ya reservado (o bloqueada con el motivo).
+
+    La IP del visitante solo se cree si vino con la key de un cliente de
+    confianza; si no, cuenta la del socket (ver estimate_service.visitor_ip_hash).
+    """
+    state = getattr(request, "state", None)
+    return await estimate_service.open_session(
+        source=payload.source,
+        started_at=started,
+        input_kind="photo" if (payload.image_url or "").strip() and not (payload.url or "").strip()
+        else "link",
+        api_client=getattr(state, "api_client", None) if state is not None else None,
+        declared_ip=payload.visitor.ip if payload.visitor else None,
+        socket_ip=client_ip(request) if request is not None else None,
+    )
+
+
+def _apply_estimate(base: AppLookupResponse, result: estimate_service.EstimateResult) -> None:
+    """Pasa el estimado a la respuesta. Solo lo público (`EstimateResult.public`)."""
+    base.estimate_status = result.status
+    public = result.public()
+    if public is not None:
+        base.status = "estimated"
+        base.estimate = EstimateOut(**public)
+
+
+async def _abandon_estimate(
+    est: estimate_service.EstimateSession | None, base: AppLookupResponse | None, reason: str
+) -> None:
+    """El lookup terminó antes de poder estimar (sin foto, índice armándose)."""
+    if est is None:
+        return
+    result = await est.abandon(reason)
+    if base is not None:
+        base.estimate_status = result.status
+
+
+async def _pick_match(est, query_urls, shortlist, title):
+    """Rerank de visión. Con estimado pedido tiene techo de tiempo: Apify ya
+    corre en paralelo y el deadline del estimado es de 50 s."""
+    call = vision_rerank.pick_match(query_urls, [c[0] for c in shortlist], title=title)
+    if est is None or est.blocked:
+        return await call
+    try:
+        return await asyncio.wait_for(call, timeout=_ESTIMATE_RERANK_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        log.warning("lookup con estimado: el rerank de visión pasó %.0f s, sigo con CLIP",
+                    _ESTIMATE_RERANK_BUDGET_SECONDS)
+        return None
+
+
+async def _lookup(payload: AppLookupRequest, request: Request | None = None) -> AppLookupResponse:
+    started = time.monotonic()
     raw_url = (payload.url or "").strip()
     direct_image = (payload.image_url or "").strip()
     if not raw_url and not direct_image:
         raise HTTPException(422, "Mandá `url` (publicación o foto) o `image_url`.")
+
+    # ── 0. Estimado: límites antes de gastar nada ──────────────────
+    est: estimate_service.EstimateSession | None = None
+    if payload.want_estimate:
+        est = await _open_estimate(payload, request, started)
 
     # ── 1. Sacar la foto ───────────────────────────────────────────
     title = ""
@@ -539,7 +665,17 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
     if direct_image:
         image_urls = [direct_image]
         marketplace = "upload"
-    if raw_url:
+    # Link de 1688 con estimado: la oferta se lee por id (precio real, fotos y
+    # título) y no hace falta scrapear la ficha, que 1688 bloquea.
+    offer = None
+    if est is not None and raw_url and estimate_otapi.offer_id_from_url(raw_url):
+        offer = await est.read_1688_link(raw_url)
+    if offer is not None and offer.pictures:
+        image_urls = image_urls + [u for u in offer.pictures if u not in image_urls]
+        title = offer.title
+        marketplace = "1688" if not direct_image else marketplace
+        canonical = offer.detail_url
+    elif raw_url:
         try:
             extracted = await image_from_url.extract(raw_url)
             image_urls = image_urls + [u for u in extracted.image_urls if u not in image_urls]
@@ -561,17 +697,27 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                     product_id="(sin foto)",
                     source_url=raw_url,
                 )
-                return AppLookupResponse(
+                failed = AppLookupResponse(
                     status="site_blocked" if blocked else "no_image",
                     marketplace=image_from_url.detect_marketplace(raw_url),
                     canonical_url=raw_url,
                     detail=str(exc),
                 )
+                await _abandon_estimate(est, failed, "no se pudo sacar la foto del link")
+                return failed
             log.info("extract falló para %s, sigo con la imagen directa: %s", raw_url, exc)
 
     if not image_urls:
-        return AppLookupResponse(status="no_image", canonical_url=canonical,
-                                 detail="No hay ninguna imagen para comparar.")
+        failed = AppLookupResponse(status="no_image", canonical_url=canonical,
+                                   detail="No hay ninguna imagen para comparar.")
+        await _abandon_estimate(est, failed, "sin fotos")
+        return failed
+
+    def start_estimate() -> None:
+        # Apify arranca apenas se sabe que CLIP no ve un match claro, en
+        # paralelo con el rerank de visión (diseño 1.2). Idempotente.
+        if est is not None:
+            est.start(image_urls, title=title, marketplace=marketplace, source_url=canonical)
 
     base = AppLookupResponse(
         status="not_found",
@@ -618,6 +764,7 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                 "El índice de imágenes se está construyendo "
                 f"({status['progress_done']}/{status['progress_total']}). Reintentá en un rato."
             )
+            await _abandon_estimate(est, base, "índice de imágenes construyéndose")
             return base
 
         # Comparamos TODAS las fotos de la publicación, no solo la primera: la
@@ -695,9 +842,9 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             # la mitad. Un modelo con visión mira las fotos y elige — o dice que
             # ninguna, que es lo que evita proponer cualquier cosa.
             shortlist = sorted(best_by_pid.values(), key=lambda c: c[1], reverse=True)
-            verdict = await vision_rerank.pick_match(
-                query_urls, [c[0] for c in shortlist], title=title
-            )
+            if not (shortlist and shortlist[0][1] >= match_thr):
+                start_estimate()
+            verdict = await _pick_match(est, query_urls, shortlist, title)
 
             if verdict is not None:
                 # None sería "no pude correr el rerank" y cae al bloque de abajo;
@@ -810,6 +957,10 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
                     # Vetado por nombre (falso positivo) o imagen insuficiente: no lo
                     # mostramos. Guardamos el score para diagnóstico.
                     score = max(score, hit_score)
+        else:
+            # Ninguna foto del link se pudo embeber: no hay forma de saber si
+            # lo tenemos por imagen, así que el estimado arranca ya.
+            start_estimate()
 
     # 2c. Fallback pHash (CLIP no disponible).
     if matched is None and not image_embed.available():
@@ -821,6 +972,10 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
             score = phash_score
 
     # ── 3a. Lo tenemos → PA + comprar ahora ────────────────────────
+    if est is not None and (matched is not None or suggestion is not None):
+        # Lo tenemos (o casi): no hay estimado. Si Apify ya estaba corriendo,
+        # su resultado queda en la caché por si el cliente rechaza la sugerencia.
+        base.estimate_status = (await est.skip_found()).status
     if matched is not None:
         product_payload: LookupProduct
         try:
@@ -882,9 +1037,12 @@ async def _lookup(payload: AppLookupRequest) -> AppLookupResponse:
         )
         return base
 
-    # ── 3b. No lo tenemos → formulario a Cloud ─────────────────────
+    # ── 3b. No lo tenemos → estimado (si se pidió) y formulario a Cloud ──
     base.confidence = round(score, 4)
     base.suggestion = suggestion
+    if est is not None:
+        start_estimate()
+        _apply_estimate(base, await est.finish(title=title))
 
     if not cloud_integration.enabled():
         base.cloud_request = CloudRequestInfo(sent=False, error="SUPABASE_URL no configurado")
@@ -1097,6 +1255,56 @@ async def run_vision_compare(payload: AppLookupRequest) -> dict[str, Any]:
             for p, s in shortlist[: get_settings().vision_topk]
         ],
         "verdicts": {provider: _render(v) for provider, v in verdicts.items()},
+    }
+
+
+async def run_estimate_test(url: str, image_url: str) -> dict[str, Any]:
+    """Estimado completo para el equipo, sin pasar por la web ni por el catálogo.
+
+    Lo usa `/api/estimate-test` del dashboard. GASTA de verdad (Apify, Qwen,
+    OTAPI) y cuenta para el cupo global del día, no para el de un visitante.
+    Devuelve, además de lo que vería el cliente, el detalle interno: candidatos
+    de 1688, yuanes, escenarios de Vendure, tiempos por paso y costo.
+    """
+    raw_url, direct_image = (url or "").strip(), (image_url or "").strip()
+    if not raw_url and not direct_image:
+        raise HTTPException(422, "Mandá `url` (publicación) o `image_url` (foto).")
+    est = await estimate_service.open_session(
+        source="dashboard", input_kind="photo" if direct_image and not raw_url else "link",
+        count_visitor=False,
+    )
+    title, marketplace, canonical = "", "upload" if direct_image else "other", raw_url or direct_image
+    image_urls: list[str] = [direct_image] if direct_image else []
+    extract_error: str | None = None
+    if not est.blocked and raw_url:
+        offer = (await est.read_1688_link(raw_url)
+                 if estimate_otapi.offer_id_from_url(raw_url) else None)
+        if offer is not None:
+            image_urls += [u for u in offer.pictures if u not in image_urls]
+            title, marketplace, canonical = offer.title, "1688", offer.detail_url
+        else:
+            try:
+                extracted = await image_from_url.extract(raw_url)
+                image_urls += [u for u in extracted.image_urls if u not in image_urls]
+                title, canonical = extracted.title, extracted.canonical_url
+                marketplace = extracted.marketplace if not direct_image else marketplace
+            except image_from_url.ExtractError as exc:
+                extract_error = str(exc)[:300]
+    if est.blocked or not image_urls:
+        result = await est.abandon(extract_error or "sin fotos")
+    else:
+        est.start(image_urls, title=title, marketplace=marketplace, source_url=canonical)
+        result = await est.finish(title=title)
+    return {
+        "estimate_status": result.status,
+        "estimate": result.public(),
+        "message": result.message,
+        "title": title,
+        "marketplace": marketplace,
+        "canonical_url": canonical,
+        "image_urls": image_urls[:_MAX_QUERY_IMAGES],
+        "extract_error": extract_error,
+        "internal": result.internal,
     }
 
 

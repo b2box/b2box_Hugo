@@ -183,6 +183,29 @@ y devuelve hasta 20 ofertas validadas, en el orden del actor. Si a los `APIFY_16
 y vuelve `timeout`. Cupo runtime `apify_1688_daily_budget` (default **0 = apagado**, tope 500, va al
 audit log): cada corrida reserva uno (~USD 0,02). Caché de 24 h por hash de la foto (errores, 1 h; los `timeout` no se cachean).
 
+#### Estimado de precio por foto (cotizador rápido, `/app/lookup` con `want_estimate`)
+
+`app/estimate/` arma un rango de precio estimado para lo que NO tenemos: fotos del link (Mercado
+Libre o alibaba.com) o foto subida → búsqueda en 1688 por foto (Apify) → CLIP de las miniaturas y una
+llamada a Qwen-VL → mediana de los buenos × `k` → vecinos CLIP de nuestro catálogo → Vendure
+`estimateImportPrice` → tabla por tramos en pesos con IVA (mín/máx por cantidad, ± `m`, redondeo).
+Los links de 1688 se leen por id en OTAPI (escalera real, sin búsqueda por foto). Deadline global de
+50 s. Sin `want_estimate` la respuesta no cambia.
+
+- Prender: runtime `estimate_enabled` = 1 **y** cupos `estimate_daily_budget` (estimados por día) y
+  `apify_1688_daily_budget` (corridas). Los dos cupos y el prendido van al audit log.
+- Por visitante: 5 por día y 2 por minuto (`ESTIMATE_VISITOR_DAILY_LIMIT`, `ESTIMATE_VISITOR_PER_MINUTE`),
+  por IP con hash con sal (`ESTIMATE_HASH_SALT`, **obligatoria en producción**, 32+ caracteres: sin ella
+  el estimado no corre). `visitor.ip` solo se cree con la key de `ESTIMATE_TRUSTED_IP_CLIENTS`
+  (default `storefront`); a los demás se les cuenta la IP del socket.
+- Runtime: `estimate_price_factor_k` (1,10, medido el 20-oct), `estimate_margin_pct` (15),
+  `estimate_tier_qty_1/2/3` (**50 / 200 / 1000, provisorias: confirmarlas con el usuario**).
+- Fotos que pueden salir de Hugo (a Apify y a Qwen): mlstatic, alicdn, alibaba.com y los hosts de
+  `ESTIMATE_UPLOAD_IMAGE_HOSTS` (el bucket propio de las fotos subidas).
+- Registro: tabla `lookup_estimate` (90 días, sin IP en claro) y `app_lookup_estimated` en el audit log.
+- Prueba desde el dashboard: `POST /api/estimate-test {url | image_url}` (sesión). **Gasta** y cuenta
+  para el cupo diario; devuelve además candidatos, yuanes, escenarios de Vendure, tiempos y costo.
+
 ### 5. Acción
 
 - **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
