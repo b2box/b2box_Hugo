@@ -183,6 +183,90 @@ y devuelve hasta 20 ofertas validadas, en el orden del actor. Si a los `APIFY_16
 y vuelve `timeout`. Cupo runtime `apify_1688_daily_budget` (default **0 = apagado**, tope 500, va al
 audit log): cada corrida reserva uno (~USD 0,02). Caché de 24 h por hash de la foto (errores, 1 h; los `timeout` no se cachean).
 
+#### Estimado de precio por foto (cotizador rápido, `/app/lookup` con `want_estimate`)
+
+`app/estimate/` arma un rango de precio estimado para lo que NO tenemos: fotos del link (Mercado
+Libre o alibaba.com) o foto subida → búsqueda en 1688 por foto (Apify) → CLIP de las miniaturas y una
+llamada a Qwen-VL → mediana de los buenos × `k` → vecinos CLIP de nuestro catálogo → Vendure
+`estimateImportPrice` → tabla por tramos en pesos con IVA (mín/máx por cantidad, ± `m`, redondeo).
+Los links de 1688 se leen por id en OTAPI (escalera real, sin búsqueda por foto). Deadline global de
+50 s. Sin `want_estimate` la respuesta no cambia.
+
+- Prender: runtime `estimate_enabled` = 1 **y** cupos `estimate_daily_budget` (estimados por día) y
+  `apify_1688_daily_budget` (corridas). Los dos cupos y el prendido van al audit log.
+- Por visitante: 5 por día y 2 por minuto (`ESTIMATE_VISITOR_DAILY_LIMIT`, `ESTIMATE_VISITOR_PER_MINUTE`),
+  por IP con hash con sal (`ESTIMATE_HASH_SALT`, **obligatoria en producción**, 32+ caracteres: sin ella
+  el estimado no corre). `visitor.ip` solo se cree con la key de `ESTIMATE_TRUSTED_IP_CLIENTS`
+  (default `storefront`); a los demás se les cuenta la IP del socket.
+- Runtime: `estimate_price_factor_k` (1,10, medido el 20-oct), `estimate_margin_pct` (15),
+  `estimate_tier_qty_1/2/3` (**50 / 200 / 1000, provisorias: confirmarlas con el usuario**).
+- Fotos que pueden salir de Hugo (a Apify y a Qwen): mlstatic, alicdn, alibaba.com y las fotos subidas
+  al bucket propio que matcheen `ESTIMATE_UPLOAD_IMAGE_PREFIXES`. El S3 de prod es path-style, así que
+  cada entrada es `host/bucket/prefijo/` (ej. `s3.b2box.app/b2box-media/lookup-photos/`; varias, con
+  coma; vacío = ninguna foto subida). Se rechazan `..`, `%2e`, `%2f` y `//` en el path, y las URLs
+  firmadas que vivan más de `ESTIMATE_UPLOAD_MAX_EXPIRY_S` (600 s, leído de `X-Amz-Expires` o
+  `Expires`). La query de esas URLs (la firma) no se guarda ni se loguea: ni en el audit log, ni en
+  `lookup_estimate`, ni en las cachés de pHash/CLIP en base, ni en los logs de descarga.
+- Registro: tabla `lookup_estimate` (90 días, sin IP en claro) y `app_lookup_estimated` en el audit log.
+- Prueba desde el dashboard: `POST /api/estimate-test {url | image_url}` (sesión de un **admin**).
+  **Gasta**, cuenta para el cupo global y tiene un tope propio por usuario y día
+  (`ESTIMATE_TEST_USER_DAILY_LIMIT`, 20; aparte del de visitantes). Devuelve además candidatos,
+  yuanes, escenarios de Vendure, tiempos y costo.
+
+#### Clave de las sesiones del dashboard (`DASHBOARD_SECRET`)
+
+La cookie de sesión se firma con `DASHBOARD_SECRET` (**32+ caracteres, obligatoria en producción**).
+Sin ella no hay sesiones: el login responde 503 y el arranque deja un ERROR en el log, pero Hugo
+arranca igual (`/verify` y `/app/*` siguen andando con su API key). En desarrollo, sin secreto, la
+clave se deriva de una `DASHBOARD_PASSWORD` no vacía; con las dos vacías no hay sesiones. Antes, sin
+ninguna de las dos, la clave era pública y cualquiera podía falsificar la cookie.
+
+- Generarla: `python -c "import secrets; print(secrets.token_urlsafe(48))"` y cargarla en el entorno
+  de Hugo (Coolify) como `DASHBOARD_SECRET`.
+- Al cargarla o cambiarla **se invalidan todas las sesiones**: hay que volver a iniciar sesión.
+- Ser admin (abajo) además exige que la sesión esté firmada con `DASHBOARD_SECRET`.
+
+#### Administradores del dashboard (`DASHBOARD_ADMINS`)
+
+Los settings que gastan plata o mueven el precio que ve un cliente (cupos de Apify, OTAPI, juez IA y
+rerank de visión, prendido/cupo/k/margen/tramos del estimado, límites del lookup público) solo los
+cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en el audit log.
+
+- Setear `DASHBOARD_ADMINS` con los usuarios separados por coma: el **mail** con login por Supabase
+  (`nico@b2box.pro,gabriel@b2box.pro`), o el `DASHBOARD_USER` con login local.
+- **Fail-closed**: vacía = nadie puede cambiarlos ni correr `/api/estimate-test`, tampoco en
+  desarrollo con el login abierto. Los demás settings siguen como siempre.
+
+#### Límites del lookup público
+
+Cuando el pedido viene con la key de un cliente de confianza (`ESTIMATE_TRUSTED_IP_CLIENTS`), TODO
+`/app/lookup` tiene límite (pasarse = 429 con `Retry-After`; fail-closed: si la base no contesta, 429):
+
+- Con `visitor.ip` válida: por visitante (hash de la IP, IPv6 por /64), runtime
+  `lookup_visitor_daily_limit` (30) y `lookup_visitor_per_minute` (5).
+- Sin `visitor.ip` válida (no viene, inválida o privada; es lo que manda el storefront de hoy, o el
+  nuevo sin captcha válido): todos comparten el bucket de la IP del socket, con topes propios y
+  holgados, runtime `lookup_shared_daily_limit` (1500) y `lookup_shared_per_minute` (40). Así se puede
+  desplegar Hugo antes que el storefront sin dejar al comparador en 30 por día.
+- El **estimado** solo corre con `visitor.ip` válida: sin ella devuelve `rate_limited` y no gasta.
+
+Todos son settings de admin. El app (y cualquier cliente que no sea de confianza) no cambia.
+El rerank de visión del catálogo (Sonnet) tiene cupo diario runtime `vision_rerank_daily_budget`
+(300); sin cupo, o con la base caída, el lookup sigue solo con CLIP.
+
+**Migración y rollback.** Es automática en el arranque (`init_db`): crea las tablas `estimate_usage`
+(contadores por visitante y global) y `lookup_estimate` (con su índice `ix_lookup_estimate_status_time`)
+y no toca ninguna otra (hay un test sobre SQLite y Postgres 16). Para volver el esquema atrás, primero
+`estimate_enabled` = 0 y después:
+
+```sql
+DROP TABLE IF EXISTS lookup_estimate;
+DROP TABLE IF EXISTS estimate_usage;
+DELETE FROM settings WHERE key LIKE 'estimate_%' OR key IN ('_meta:estimate_otapi_calls_today', '_meta:estimate_llm_calls_today');
+```
+
+Las filas `app_lookup_estimated` del audit log pueden quedar (es texto).
+
 ### 5. Acción
 
 - **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien

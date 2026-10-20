@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.upload_urls import redact
+
 log = logging.getLogger(__name__)
 
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -247,7 +249,8 @@ async def safe_get(
             if resp.is_redirect and resp.has_redirect_location:
                 current = str(resp.next_request.url)  # type: ignore[union-attr]
                 if redirect_ok is not None and not redirect_ok(current):
-                    raise RedirectBlocked(f"redirect a una URL no aceptada: {current[:120]}")
+                    raise RedirectBlocked(
+                        f"redirect a una URL no aceptada: {(redact(current) or '')[:120]}")
                 continue
             return resp
-    raise SsrfBlocked(f"demasiados redirects (>{max_redirects}) para {url}")
+    raise SsrfBlocked(f"demasiados redirects (>{max_redirects}) para {redact(url)}")

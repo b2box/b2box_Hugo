@@ -714,6 +714,50 @@ class VendureClient:
             return None
         return bool(prod.get("enabled"))
 
+    async def estimate_import_price(self, estimate_input: dict[str, Any]) -> dict[str, Any] | None:
+        """Precio de importación estimado para un producto que NO está cargado.
+
+        Query `estimateImportPrice` (b2box, PR 1 del cotizador rápido): misma
+        fórmula que la tienda, con un contexto hipotético armado con los
+        escenarios (yuanes, caja) y los productos de referencia (vecinos CLIP:
+        NCM, baterías y caja típica). Solo lectura. Dos intentos (el segundo
+        es para el re-login si el bearer venció); el deadline lo pone quien
+        llama, con wait_for.
+        """
+        query = gql(
+            """
+            query EstimateImportPrice($input: EstimateImportPriceInput!) {
+              estimateImportPrice(input: $input) {
+                status
+                statusDetail
+                channelCurrencyCode
+                scenarios {
+                  label
+                  purchasePriceCny
+                  boxQuantile
+                  cbmPerUnit
+                  kgPerUnit
+                  prices { quantity netChannelPerUnit invoiceChannelPerUnit }
+                }
+                boxSource
+                boxSampleSize
+                referenceProductCount
+                taxClassificationCode
+                taxClassificationShare
+                containsBatteries
+                salesVatPct
+                profileVersion
+                computedAt
+              }
+            }
+            """
+        )
+        data = await self._execute_with_retry(
+            query, {"input": estimate_input}, what="estimate_import_price", max_attempts=2
+        )
+        result = data.get("estimateImportPrice") if isinstance(data, dict) else None
+        return result if isinstance(result, dict) else None
+
     async def disable_product(self, product_id: str) -> None:
         await self._set_enabled(product_id, False)
 

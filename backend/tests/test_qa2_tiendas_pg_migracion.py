@@ -87,9 +87,10 @@ def _signature(engine) -> dict:
         con = [tuple(map(str, r)) for r in c.execute(text(
             "select conrelid::regclass::text, conname, pg_get_constraintdef(oid) from pg_constraint "
             "where connamespace = current_schema()::regnamespace order by 1, 2"))]
-    # Las tablas de la auditoría de textos (HG1) son de un PR posterior a este esquema de partida:
-    # las prueba test_seo_text_audit_pg.py.
-    keep = lambda rows: [r for r in rows if "text_audit_" not in r[0]]  # noqa: E731
+    # Las tablas de la auditoría de textos (HG1) y del estimado por foto son de PRs posteriores a
+    # este esquema de partida: las prueban test_seo_text_audit_pg.py y test_qa_estimate_migracion.py.
+    later = ("text_audit_", "estimate_usage", "lookup_estimate")
+    keep = lambda rows: [r for r in rows if not any(x in r[0] for x in later)]  # noqa: E731
     return {"columns": keep(cols), "indexes": keep(idx), "constraints": keep(con)}
 
 

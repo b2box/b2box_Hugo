@@ -27,7 +27,9 @@ from app.scheduler import jobs  # noqa: E402
 def _use_settings(monkeypatch, **over) -> None:
     base = dict(vendure_api_url="https://example.invalid/admin-api", hugo_env="development",
                 dashboard_user="admin", dashboard_password="secreto", dashboard_secret="s" * 32,
-                supabase_url="", supabase_anon_key="")
+                supabase_url="", supabase_anon_key="",
+                # pm_vision_max_calls gasta plata: solo lo resetea un admin.
+                dashboard_admins="admin")
     base.update(over)
     s = Settings(**base)
     for mod in (auth, security, main_mod):

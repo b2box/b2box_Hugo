@@ -247,6 +247,128 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="apify_1688_daily_budget",
         min=0, max=500, step=10, group="app",
     ),
+    # Límites del lookup público y del rerank de visión
+    SettingMeta(
+        key="lookup_visitor_daily_limit",
+        label="Lookup: consultas por día por visitante del storefront",
+        description=(
+            "Tope de /app/lookup por visitante (IP real que manda el storefront, con hash) y por "
+            "día. Pasarse = 429. Solo aplica a clientes de confianza que mandan visitor.ip. "
+            "0 = ninguna."
+        ),
+        type="int", parser=int,
+        default_attr="lookup_visitor_daily_limit",
+        min=0, max=1000, step=5, group="app",
+    ),
+    SettingMeta(
+        key="lookup_visitor_per_minute",
+        label="Lookup: consultas por minuto por visitante del storefront",
+        description="Ráfaga por visitante del storefront. Pasarse = 429. 0 = ninguna.",
+        type="int", parser=int,
+        default_attr="lookup_visitor_per_minute",
+        min=0, max=120, step=1, group="app",
+    ),
+    SettingMeta(
+        key="lookup_shared_daily_limit",
+        label="Lookup: consultas por día del storefront sin IP de visitante",
+        description=(
+            "Tope diario COMPARTIDO de /app/lookup para los pedidos de un cliente de confianza "
+            "que no traen visitor.ip válida (todos cuentan contra la IP del socket). Pasarse = "
+            "429. 0 = ninguna."
+        ),
+        type="int", parser=int,
+        default_attr="lookup_shared_daily_limit",
+        min=0, max=100000, step=100, group="app",
+    ),
+    SettingMeta(
+        key="lookup_shared_per_minute",
+        label="Lookup: consultas por minuto del storefront sin IP de visitante",
+        description="Ráfaga compartida de los pedidos sin visitor.ip válida. Pasarse = 429.",
+        type="int", parser=int,
+        default_attr="lookup_shared_per_minute",
+        min=0, max=1000, step=5, group="app",
+    ),
+    SettingMeta(
+        key="vision_rerank_daily_budget",
+        label="Rerank de visión del catálogo: llamadas por día",
+        description=(
+            "Llamadas por día (UTC) al modelo de visión (Sonnet) que elige el producto del "
+            "catálogo en /app/lookup. Sin cupo el lookup sigue solo con CLIP. 0 = apagado."
+        ),
+        type="int", parser=int,
+        default_attr="vision_rerank_daily_budget",
+        min=0, max=20000, step=50, group="app",
+    ),
+    # Cotizador rápido por foto (app/estimate/)
+    SettingMeta(
+        key="estimate_enabled",
+        label="Estimado por foto prendido (1 / 0)",
+        description=(
+            "1 = /app/lookup con want_estimate busca la foto en 1688 (Apify) y devuelve un rango "
+            "de precio estimado. 0 = apagado: el lookup responde como siempre. Además necesita "
+            "cupo de Apify 1688 y del estimado."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_enabled",
+        min=0, max=1, step=1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_daily_budget",
+        label="Estimado: consultas por día (todos los visitantes)",
+        description=(
+            "Estimados por día (hora de Argentina) entre todos los visitantes. Cada uno puede "
+            "gastar una o dos corridas de Apify (~USD 0,02 c/u) y una llamada a Qwen. 0 = ninguno."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_daily_budget",
+        min=0, max=500, step=10, group="app",
+    ),
+    SettingMeta(
+        key="estimate_price_factor_k",
+        label="Estimado: factor k sobre el precio de Apify",
+        description=(
+            "Multiplica el precio en yuanes que trae el actor de 1688 (primer tramo). Medido el "
+            "20-oct: 1,10. No se aplica a los links de 1688, que se leen por id."
+        ),
+        type="float", parser=float,
+        default_attr="estimate_price_factor_k",
+        min=0.5, max=3.0, step=0.01, group="app",
+    ),
+    SettingMeta(
+        key="estimate_margin_pct",
+        label="Estimado: margen ± del rango (%)",
+        description=(
+            "Cuánto se abre el rango para cada lado sobre lo que da Vendure. Sin juez Qwen o con "
+            "la caja que no sale de los vecinos se abre un poco más."
+        ),
+        type="float", parser=float,
+        default_attr="estimate_margin_pct",
+        min=0.0, max=50.0, step=1.0, group="app",
+    ),
+    SettingMeta(
+        key="estimate_tier_qty_1",
+        label="Estimado: cantidad del tramo 1",
+        description="Primera cantidad de la tabla por tramos (provisoria: confirmar).",
+        type="int", parser=int,
+        default_attr="estimate_tier_qty_1",
+        min=1, max=100000, step=10, group="app",
+    ),
+    SettingMeta(
+        key="estimate_tier_qty_2",
+        label="Estimado: cantidad del tramo 2",
+        description="Segunda cantidad de la tabla por tramos (provisoria: confirmar).",
+        type="int", parser=int,
+        default_attr="estimate_tier_qty_2",
+        min=1, max=100000, step=10, group="app",
+    ),
+    SettingMeta(
+        key="estimate_tier_qty_3",
+        label="Estimado: cantidad del tramo 3",
+        description="Tercera cantidad de la tabla por tramos (provisoria: confirmar).",
+        type="int", parser=int,
+        default_attr="estimate_tier_qty_3",
+        min=1, max=100000, step=10, group="app",
+    ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",
@@ -627,6 +749,8 @@ _ORDERED_PAIRS: tuple[tuple[str, str], ...] = (
     ("pm_image_veto", "pm_image_threshold"),
     ("pm_image_threshold", "pm_image_strong"),
     ("pm_name_veto", "pm_name_threshold"),
+    ("estimate_tier_qty_1", "estimate_tier_qty_2"),
+    ("estimate_tier_qty_2", "estimate_tier_qty_3"),
 )
 
 
