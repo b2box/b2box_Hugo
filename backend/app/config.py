@@ -132,6 +132,24 @@ class Settings(BaseSettings):
     meli_client_id: str = Field(default="", description="Client ID de la app de ML")
     meli_client_secret: str = Field(default="", description="Client Secret de la app de ML")
 
+    # ── Apify (último recurso para links de ML) ────────────────
+    # Cuando ni la API ni la ficha de catálogo de la ruta resuelven un link de
+    # ML, un actor de Apify lo lee con proxies residenciales de ellos. Ver
+    # app/ingest/apify_meli.py. Token vacío = apagado. El cupo diario es runtime
+    # (`apify_meli_daily_budget`, 0 = apagado sin tocar el token).
+    apify_token: str = Field(default="", description="Token de la API de Apify (vacío = apagado)")
+    apify_meli_actor: str = Field(
+        default="khadinakbar/mercadolibre-all-in-one-scraper",
+        description="Actor del Store que lee la ficha de ML (usuario/nombre)",
+    )
+    # El cliente de /verify y /app/lookup (send-request-to-paco en Cloud) corta a
+    # ~110 s. Con 90 entra justo, contando la API de ML que corre antes: subirlo
+    # más hace que Apify conteste cuando ya no hay nadie esperando.
+    apify_meli_timeout_s: int = Field(
+        default=90, ge=10, le=280, description="Techo de la corrida del actor, en segundos"
+    )
+    apify_meli_daily_budget: int = 100
+
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
     storefront_product_path: str = Field(

@@ -34,7 +34,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.config import get_settings
-from app.ingest import browser_fetch, meli
+from app.ingest import apify_meli, browser_fetch, meli
 from app.net_guard import SsrfBlocked, safe_get
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,10 @@ class ExtractedProduct:
     price_by_image: dict[str, tuple[int | None, str | None, int]] = field(
         default_factory=dict
     )
+    # De dónde salieron las fotos cuando no fue el camino de siempre. Hoy solo
+    # "apify" (último recurso para ML, se paga por link): sirve para auditar
+    # cuánto se usa y para no confundirlo con la API oficial.
+    source: str = ""
 
 
 # ─── Helpers ───────────────────────────────────────────────────────
@@ -372,6 +376,47 @@ async def _via_browser(url: str, marketplace: str) -> ExtractedProduct | None:
     )
 
 
+async def _via_apify(url: str, marketplace: str) -> tuple[ExtractedProduct | None, bool]:
+    """Último recurso para ML: el actor de Apify lee la ficha con proxies
+    residenciales. Devuelve (producto | None, si se llegó a mandar).
+
+    El segundo valor importa por el reloj: si Apify ya se comió hasta
+    APIFY_MELI_TIMEOUT_S y no pudo, el llamador no tiene tiempo para encima
+    renderizar con Camoufox antes de que el cliente corte (~110 s), y desde el
+    datacenter el browser choca igual con el anti-bot.
+    """
+    result = await apify_meli.fetch(url)
+    if result is None:
+        return None, False
+    if not result.found:
+        return None, True
+
+    price_cents, currency = result.price_cents, result.currency
+    seller_count = 1 if price_cents is not None else 0
+    if price_cents is None and meli.enabled():
+        # khadinakbar a veces trae price=null. El precio de los vendedores de la
+        # ficha sigue saliendo de la API (`/products/{MLAU}/items` no lo bloquea).
+        ref = meli.catalog_ref(url)
+        if ref is None:
+            parsed = meli.parse_url(url)
+            ref = parsed if parsed is not None and parsed.kind == "product" else None
+        if ref is not None:
+            price_cents, currency, seller_count = await meli.fetch_market_price(ref.id)
+
+    return ExtractedProduct(
+        image_urls=result.image_urls[:_MAX_IMAGES],
+        title=result.title or meli.name_from_url(url),
+        marketplace=marketplace,
+        canonical_url=result.permalink or url,
+        kind="page",
+        market_price_cents=price_cents,
+        market_currency=currency,
+        market_seller_count=seller_count,
+        approximate=False,  # es la ficha del link, leída de verdad
+        source="apify",
+    ), True
+
+
 # ─── API pública ───────────────────────────────────────────────────
 
 
@@ -389,9 +434,30 @@ async def extract(url: str) -> ExtractedProduct:
     # servidor (ver meli.py). Si no hay credenciales o la API falla, seguimos
     # con el scraping — que para ML va a terminar en BlockedByCaptcha, pero el
     # camino queda igual para no tratar a ML distinto sin necesidad.
+    candidates: list[meli.MeliItem] = []
     if marketplace == "mercadolibre" and meli.enabled():
         candidates = await meli.fetch_from_url(url)
-        if candidates and candidates[0].resolved_by == "catalog":
+
+    # Ni la API ni la ficha de catálogo de la ruta dieron la ficha del link
+    # (nada, o fotos de otros productos parecidos): antes de conformarnos, o de
+    # ir al fetch plano y al browser —que desde el datacenter chocan con el
+    # anti-bot—, probamos Apify si está prendido y hay cupo.
+    apify_tried = False
+    if marketplace == "mercadolibre" and (
+        not candidates or candidates[0].resolved_by == "catalog"
+    ):
+        rescued, apify_tried = await _via_apify(url, marketplace)
+        if rescued is not None:
+            return rescued
+
+    async def browser() -> ExtractedProduct | None:
+        # Si Apify ya consumió su espera, no queda reloj para el render.
+        if apify_tried:
+            return None
+        return await _via_browser(url, marketplace)
+
+    if candidates:
+        if candidates[0].resolved_by == "catalog":
             # ML bloqueó la ficha del link y esto son fotos de OTROS productos
             # que se llaman parecido. Antes de conformarnos con una foto
             # prestada, probamos el browser: leer la ficha real es exactamente
@@ -401,48 +467,47 @@ async def extract(url: str) -> ExtractedProduct:
             # El orden importaba y estaba al revés: como la búsqueda por nombre
             # "no falla" nunca, el return de más abajo cortaba la cadena y el
             # browser no llegaba a correr justo en el único caso que lo necesita.
-            rendered = await _via_browser(url, marketplace)
+            rendered = await browser()
             if rendered is not None:
                 log.info("El browser rescató la ficha real de %s", url[:120])
                 return rendered
-        if candidates:
-            # Con un candidato es la ficha del link. Con varios, ML bloqueó el
-            # link y los sacamos del catálogo por nombre: juntamos las fotos de
-            # todos y que desempate el match de imagen contra nuestro catálogo.
-            images: list[str] = []
-            price_by_image: dict[str, tuple[int | None, str | None, int]] = {}
-            per_candidate = max(1, _MAX_IMAGES // len(candidates))
-            for candidate in candidates:
-                for image in candidate.image_urls[:per_candidate]:
-                    if image in price_by_image:
-                        continue
-                    images.append(image)
-                    price_by_image[image] = (
-                        candidate.price_cents,
-                        candidate.currency,
-                        candidate.seller_count,
-                    )
-            first = candidates[0]
-            # Con la ficha del link, su título es el bueno. Cuando vino del
-            # catálogo, el título del candidato es el de OTRO producto: usarlo
-            # haría que la corroboración por nombre compare contra un nombre que
-            # ya está desviado, y le daría la razón al candidato equivocado. El
-            # único nombre que describe lo que pidió el cliente es el que viaja
-            # en su propia URL.
-            approximate = first.resolved_by == "catalog"
-            title = meli.name_from_url(url) if approximate else first.title
-            return ExtractedProduct(
-                image_urls=images[:_MAX_IMAGES],
-                title=title[:300],
-                marketplace=marketplace,
-                canonical_url=first.permalink or url,
-                kind="page",
-                market_price_cents=first.price_cents,
-                market_currency=first.currency,
-                market_seller_count=first.seller_count,
-                approximate=approximate,
-                price_by_image=price_by_image,
-            )
+        # Con un candidato es la ficha del link. Con varios, ML bloqueó el
+        # link y los sacamos del catálogo por nombre: juntamos las fotos de
+        # todos y que desempate el match de imagen contra nuestro catálogo.
+        images: list[str] = []
+        price_by_image: dict[str, tuple[int | None, str | None, int]] = {}
+        per_candidate = max(1, _MAX_IMAGES // len(candidates))
+        for candidate in candidates:
+            for image in candidate.image_urls[:per_candidate]:
+                if image in price_by_image:
+                    continue
+                images.append(image)
+                price_by_image[image] = (
+                    candidate.price_cents,
+                    candidate.currency,
+                    candidate.seller_count,
+                )
+        first = candidates[0]
+        # Con la ficha del link, su título es el bueno. Cuando vino del
+        # catálogo, el título del candidato es el de OTRO producto: usarlo
+        # haría que la corroboración por nombre compare contra un nombre que
+        # ya está desviado, y le daría la razón al candidato equivocado. El
+        # único nombre que describe lo que pidió el cliente es el que viaja
+        # en su propia URL.
+        approximate = first.resolved_by == "catalog"
+        title = meli.name_from_url(url) if approximate else first.title
+        return ExtractedProduct(
+            image_urls=images[:_MAX_IMAGES],
+            title=title[:300],
+            marketplace=marketplace,
+            canonical_url=first.permalink or url,
+            kind="page",
+            market_price_cents=first.price_cents,
+            market_currency=first.currency,
+            market_seller_count=first.seller_count,
+            approximate=approximate,
+            price_by_image=price_by_image,
+        )
 
     try:
         resp = await safe_get(url, timeout=_TIMEOUT, headers=_BROWSER_HEADERS)
@@ -451,14 +516,14 @@ async def extract(url: str) -> ExtractedProduct:
     except httpx.HTTPError as exc:
         # El sitio no le contesta a httpx: puede ser que sí le conteste a un
         # browser de verdad (TLS fingerprint, JS challenge).
-        rendered = await _via_browser(url, marketplace)
+        rendered = await browser()
         if rendered is not None:
             return rendered
         raise ExtractError(f"No se pudo abrir la URL: {type(exc).__name__}") from exc
 
     final_url = str(resp.url)
     if resp.status_code >= 400:
-        rendered = await _via_browser(url, marketplace)
+        rendered = await browser()
         if rendered is not None:
             return rendered
         raise ExtractError(f"La URL respondió HTTP {resp.status_code}")
@@ -494,7 +559,7 @@ async def extract(url: str) -> ExtractedProduct:
     if not images:
         # Los dos motivos por los que llegamos acá —página anti-bot y galería
         # armada por JS— son exactamente los que un browser real resuelve.
-        rendered = await _via_browser(url, marketplace)
+        rendered = await browser()
         if rendered is not None:
             return rendered
 
