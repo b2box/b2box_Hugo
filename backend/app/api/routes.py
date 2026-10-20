@@ -904,6 +904,7 @@ async def list_settings() -> list[dict[str, Any]]:
 # fue se descubre recién en la factura.
 _COSTLY_SETTINGS = frozenset({
     "apify_meli_daily_budget",
+    "apify_1688_daily_budget",
     "otapi_daily_budget",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",

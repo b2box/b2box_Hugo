@@ -13,7 +13,8 @@ from app.config import Settings
 from app.db.models import AuditLog, Setting
 from app.db.session import engine, init_db
 
-KEYS = ("apify_meli_daily_budget", "otapi_daily_budget", "pm_green_min_pct")
+KEYS = ("apify_meli_daily_budget", "apify_1688_daily_budget", "otapi_daily_budget",
+        "pm_green_min_pct")
 
 
 def _wipe():
@@ -71,3 +72,12 @@ def test_cupo_de_apify_tope_500(client):
     with pytest.raises(ValueError):
         runtime.set_value("apify_meli_daily_budget", 5000)
     assert _rows() == []
+
+
+def test_cupo_de_apify_1688_queda_en_el_audit_log_y_tope_500(client):
+    assert client.put("/api/settings/apify_1688_daily_budget", json={"value": 20}).status_code == 200
+    (row,) = _rows()
+    assert row.detail == "nico@b2box.pro cambió apify_1688_daily_budget: 0 → 20"
+    assert client.put("/api/settings/apify_1688_daily_budget", json={"value": 501}).status_code == 400
+    assert client.delete("/api/settings/apify_1688_daily_budget").status_code == 200
+    assert [r.detail for r in _rows()][-1].endswith("20 → 0")

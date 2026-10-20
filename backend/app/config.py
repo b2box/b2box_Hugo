@@ -150,6 +150,23 @@ class Settings(BaseSettings):
     )
     apify_meli_daily_budget: int = 100
 
+    # ── Apify: búsqueda en 1688 por foto (cotizador rápido) ────
+    # Ver app/ingest/apify_1688.py. Mismo APIFY_TOKEN. El actor tiene que estar
+    # en la lista blanca del módulo (cambiar de actor cambia el formato de
+    # salida: eso es un PR, no un env). Build vacío = el default del actor.
+    apify_1688_actor: str = Field(
+        default="piotrv1001/1688-image-search-scraper",
+        description="Actor de búsqueda por foto en 1688 (usuario/nombre, en lista blanca)",
+    )
+    apify_1688_build: str = Field(default="", description="Build o tag fijado del actor (vacío = default)")
+    # Medido el 20-oct-2026: p50 28 s, p90 52 s y 1 de cada 6 corridas colgada.
+    # A los N segundos sin resultado se lanza una segunda corrida igual.
+    apify_1688_hedge_after_s: float = Field(
+        default=20.0, ge=5.0, le=60.0, description="Segundos sin resultado antes de la corrida de cobertura"
+    )
+    # 0 = apagado. Se prende de a poco desde el dashboard (runtime).
+    apify_1688_daily_budget: int = 0
+
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
     storefront_product_path: str = Field(
