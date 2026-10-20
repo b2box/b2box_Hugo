@@ -76,16 +76,19 @@ def apify_on(monkeypatch):
 
 class FakeApify:
     """Hace de la API de Apify. `behaviors` dice qué hace cada corrida lanzada, en
-    orden (la última se repite): ok, empty, hang (RUNNING para siempre), fail."""
+    orden (la última se repite): ok, empty, hang (RUNNING para siempre), fail,
+    late (RUNNING hasta `late_s` después de lanzada, después ok)."""
 
     def __init__(self, *behaviors: str, items: list | None = None, raw_items: bytes | None = None,
-                 start_status: int = 201, usage: float = 0.021, exc: Exception | None = None):
+                 start_status: int = 201, usage: float = 0.021, exc: Exception | None = None,
+                 late_s: float = 0.0):
         self.behaviors = list(behaviors) or ["ok"]
         self.items = [ITEM_A, ITEM_B] if items is None else items
         self.raw_items = raw_items
         self.start_status = start_status
         self.usage = usage
         self.exc = exc
+        self.late_s = late_s
         self.requests: list[httpx.Request] = []
         self.starts: list[float] = []
         self.aborted: list[str] = []
@@ -99,6 +102,10 @@ class FakeApify:
         if rid in self.aborted:
             status, usage = "ABORTED", 0.0
         else:
+            if behavior == "late":
+                # Termina bien recién `late_s` después de lanzada.
+                late = time.monotonic() - self.starts[n - 1] < self.late_s
+                behavior = "hang" if late else "ok"
             status = {"ok": "SUCCEEDED", "empty": "SUCCEEDED", "hang": "RUNNING",
                       "fail": "FAILED"}[behavior]
             usage = self.usage if behavior == "ok" else 0.0
@@ -127,7 +134,7 @@ class FakeApify:
         if m := re.fullmatch(r"/v2/datasets/ds(\d+)/items", path):
             if self.raw_items is not None:
                 return httpx.Response(200, content=self.raw_items)
-            items = self.items if self._behavior(int(m.group(1))) == "ok" else []
+            items = self.items if self._behavior(int(m.group(1))) in ("ok", "late") else []
             return httpx.Response(200, json=items)
         return httpx.Response(404)
 
@@ -598,3 +605,83 @@ async def test_cuarta_busqueda_en_paralelo_es_busy(apify_on, monkeypatch):
     assert len(fake.starts) == 3
     # La que se salteó no reservó cupo.
     assert _used() == 3
+
+
+# ─── Regresiones (QA, 20-oct) ──────────────────────────────────────
+
+
+async def test_entero_gigante_no_tira_todos_los_candidatos(apify_on, monkeypatch):
+    """`float(10**400)` lanza OverflowError: tiraba la corrida entera (y pagaba
+    una de cobertura que traía lo mismo) por un campo roto de una sola oferta."""
+    raw = json.dumps([dict(ITEM_A, soldQuantity=10**400, similarityScore=-10**400),
+                      dict(ITEM_A, offerId="999999999", price=10**400),
+                      ITEM_B]).encode()
+    fake = FakeApify("ok", raw_items=raw).install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO)
+
+    assert result.status == "ok"
+    assert [c.offer_id for c in result.candidates] == ["675101017401", "666233922092"]
+    a = result.candidates[0]
+    assert a.sold_quantity is None and a.similarity is None
+    assert len(fake.starts) == 1 and _used() == 1
+
+
+@pytest.mark.parametrize("deadline", [float("nan"), float("inf"), -1.0, 0, "35", True, None])
+async def test_deadline_invalido_no_llama_ni_gasta_cupo(apify_on, monkeypatch, deadline):
+    """NaN dejaba el loop sin corte (colgado hasta que Apify cortara); <= 0 o un
+    tipo raro reservaban cupo sin lanzar nada."""
+    fake = FakeApify("hang").install(monkeypatch)
+
+    result = await asyncio.wait_for(apify_1688.search_by_image(PHOTO, deadline_s=deadline),
+                                    timeout=2)
+
+    assert result.status == "error"
+    assert fake.requests == [] and _used() == 0
+
+
+@pytest.mark.parametrize("digest", [123, ["a" * 64], b"a" * 64])
+async def test_hash_que_no_es_str_cae_a_la_url(apify_on, monkeypatch, digest):
+    fake = FakeApify("ok").install(monkeypatch)
+
+    first = await apify_1688.search_by_image(PHOTO, image_bytes_hash=digest)
+    again = await apify_1688.search_by_image(PHOTO, image_bytes_hash=digest)
+
+    assert first.status == "ok" and again.cached is True
+    assert len(fake.starts) == 1
+
+
+def _slow_reserve(monkeypatch, *, slow_call: int, seconds: float):
+    """La reserva número `slow_call` tarda `seconds` (una base trabada)."""
+    real = apify_1688.daily_budget.reserve_async
+    calls = []
+
+    async def reserve(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == slow_call:
+            await asyncio.sleep(seconds)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(apify_1688.daily_budget, "reserve_async", reserve)
+
+
+async def test_reserva_lenta_de_la_cobertura_no_estira_el_deadline(apify_on, monkeypatch):
+    _slow_reserve(monkeypatch, slow_call=2, seconds=3.0)
+    fake = FakeApify("hang").install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=0.6)
+    await apify_1688.wait_pending_aborts()
+
+    assert result.status == "timeout"
+    assert result.elapsed_s < 0.9
+    assert len(fake.starts) == 1 and fake.aborted == ["run1"]
+
+
+async def test_reserva_lenta_de_la_primera_no_estira_el_deadline(apify_on, monkeypatch):
+    _slow_reserve(monkeypatch, slow_call=1, seconds=3.0)
+    fake = FakeApify("ok").install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=0.4)
+
+    assert result.status == "timeout" and result.elapsed_s < 0.7
+    assert fake.requests == []

@@ -258,7 +258,11 @@ def _number(value: object) -> float | None:
             return None
     if not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        # Un entero JSON de cientos de dígitos: no entra en un float.
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -546,7 +550,7 @@ def _cache_key(image_url: str, image_bytes_hash: str | None) -> str:
     """La misma foto, la misma clave: el sha256 de los bytes si el llamador lo
     tiene (la misma foto subida dos veces trae otra URL firmada); si no, el de
     la URL ya normalizada."""
-    digest = (image_bytes_hash or "").strip().lower()
+    digest = image_bytes_hash.strip().lower() if isinstance(image_bytes_hash, str) else ""
     if _SHA256_RE.fullmatch(digest):
         return f"bytes:{digest}"
     return f"url:{hashlib.sha256(image_url.encode()).hexdigest()}"
@@ -587,6 +591,11 @@ async def search_by_image(image_url: str, *, image_bytes_hash: str | None = None
     mandar) | busy (las 3 búsquedas en curso).
     """
     started = time.monotonic()
+    if (isinstance(deadline_s, bool) or not isinstance(deadline_s, (int, float))
+            or not math.isfinite(deadline_s) or deadline_s <= 0):
+        # NaN dejaba el loop sin corte; <= 0 gastaba cupo sin lanzar nada.
+        log.warning("Apify 1688: deadline inválido, no se llama")
+        return Search1688Result(status="error")
     try:
         result = await _search(image_url, image_bytes_hash, deadline_s, started)
     except Exception as exc:  # noqa: BLE001
@@ -627,7 +636,10 @@ async def _search(image_url: str, image_bytes_hash: str | None, deadline_s: floa
         log.info("Apify 1688: %d búsquedas en curso, salteo", _MAX_CONCURRENT)
         return Search1688Result(status="busy")
     try:
-        if await daily_budget.reserve_async(COUNTER_KEY, budget) is None:
+        reserved = await _reserve(budget, started + deadline_s)
+        if reserved is None:
+            return Search1688Result(status="timeout")
+        if not reserved:
             log.info("Apify 1688: cupo diario agotado (%d), no se manda", budget)
             return Search1688Result(status="over_budget")
         result = await _hedged_search(actor, build, target, budget, started + deadline_s,
@@ -641,6 +653,19 @@ async def _search(image_url: str, image_bytes_hash: str | None, deadline_s: floa
         return result
     finally:
         slots.release()
+
+
+async def _reserve(budget: int, deadline_at: float) -> bool | None:
+    """Reserva una corrida sin pasarse del deadline: la reserva es I/O de DB en
+    un thread y una base lenta no puede estirar el lookup. True = reservada,
+    False = sin cupo, None = la base no contestó a tiempo (cuenta como sin cupo;
+    la reserva puede entrar igual: se pierde una unidad, nunca se gasta de más)."""
+    try:
+        return await asyncio.wait_for(daily_budget.reserve_async(COUNTER_KEY, budget),
+                                      timeout=max(deadline_at - time.monotonic(), 0.0)) is not None
+    except asyncio.TimeoutError:
+        log.warning("Apify 1688: la reserva de cupo no contestó antes del deadline")
+        return None
 
 
 async def _hedged_search(actor: str, build: str, target: str, budget: int,
@@ -689,7 +714,7 @@ async def _hedged_search(actor: str, build: str, target: str, budget: int,
             if may_hedge and len(runs) < _MAX_RUNS and due and deadline_at - now < _MIN_RUN_WINDOW_S:
                 may_hedge = False
             if may_hedge and len(runs) < _MAX_RUNS and due:
-                if await daily_budget.reserve_async(COUNTER_KEY, budget) is None:
+                if not await _reserve(budget, deadline_at):
                     log.info("Apify 1688: sin cupo para la corrida de cobertura")
                     may_hedge = False
                 else:
