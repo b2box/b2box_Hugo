@@ -28,9 +28,10 @@ def _wipe():
     runtime.invalidate()
 
 
-def _client(monkeypatch, *, admins: str, user: str | None) -> TestClient:
+def _client(monkeypatch, *, admins: str, user: str | None, secret: str = "k" * 40) -> TestClient:
     s = Settings(vendure_api_url="https://example.invalid/admin-api", dashboard_password="",
-                 supabase_url="", supabase_anon_key="", dashboard_admins=admins)
+                 supabase_url="", supabase_anon_key="", dashboard_admins=admins,
+                 dashboard_secret=secret)
     for mod in (auth, security, main_mod):
         monkeypatch.setattr(mod, "get_settings", lambda s=s: s)
     monkeypatch.setattr(auth, "session_username", lambda token: user)
@@ -96,3 +97,76 @@ def test_estimate_test_solo_admin_y_con_tope_por_usuario(monkeypatch):
     with Session(engine) as s:
         scopes = [u.scope for u in s.exec(select(EstimateUsage)).all()]
     assert scopes and all(sc.startswith("dash:") for sc in scopes)
+
+
+def test_sin_dashboard_secret_nadie_es_admin(monkeypatch):
+    # Clave derivada de la password del login local: alcanza para entrar, no
+    # para gastar plata.
+    http = _client(monkeypatch, admins="nico@b2box.pro", user="nico@b2box.pro", secret="")
+    assert http.put("/api/settings/apify_1688_daily_budget", json={"value": 5}).status_code == 403
+
+
+# ─── Clave de la cookie de sesión ──────────────────────────────────
+
+
+def _forge(key: bytes, user: str = "nico@b2box.pro") -> str:
+    import base64
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    payload = b64(json.dumps({"u": user, "exp": int(time.time()) + 3600}).encode())
+    return payload + "." + b64(hmac.new(key, payload.encode(), hashlib.sha256).digest())
+
+
+def _auth_settings(monkeypatch, **over):
+    base = dict(vendure_api_url="https://example.invalid/admin-api", dashboard_password="",
+                dashboard_secret="", supabase_url="https://x.supabase.co", supabase_anon_key="a",
+                hugo_env="development")
+    base.update(over)
+    s = Settings(**base)
+    monkeypatch.setattr(auth, "get_settings", lambda: s)
+    return s
+
+
+def test_cookie_firmada_con_la_clave_publica_vieja_se_rechaza(monkeypatch):
+    import hashlib
+
+    public = hashlib.sha256(b"hugo-session::").digest()
+    for env in ("development", "production"):
+        _auth_settings(monkeypatch, hugo_env=env)
+        assert auth.session_username(_forge(public)) is None
+        with pytest.raises(auth.SessionKeyMissing):
+            auth.issue_session_token("nico@b2box.pro")
+
+
+def test_con_dashboard_secret_la_sesion_anda(monkeypatch):
+    _auth_settings(monkeypatch, dashboard_secret="z" * 40, hugo_env="production")
+    token = auth.issue_session_token("nico@b2box.pro")
+    assert auth.session_username(token) == "nico@b2box.pro"
+    assert auth.session_username(_forge(b"z" * 40)) == "nico@b2box.pro"
+    assert auth.session_username(_forge(b"otra-clave" * 4)) is None
+
+
+def test_en_produccion_un_secreto_corto_o_la_password_no_alcanzan(monkeypatch):
+    _auth_settings(monkeypatch, dashboard_secret="corto", dashboard_password="pw",
+                   hugo_env="production")
+    with pytest.raises(auth.SessionKeyMissing):
+        auth.issue_session_token("admin")
+    # En desarrollo, una password NO vacía todavía sirve para el login local.
+    _auth_settings(monkeypatch, dashboard_password="pw", supabase_url="", supabase_anon_key="")
+    assert auth.session_username(auth.issue_session_token("admin")) == "admin"
+
+
+def test_login_sin_clave_responde_503_y_no_tira_la_app(monkeypatch):
+    s = _auth_settings(monkeypatch, supabase_url="", supabase_anon_key="",
+                       dashboard_password="pw", hugo_env="production")
+    for mod in (security, main_mod):
+        monkeypatch.setattr(mod, "get_settings", lambda s=s: s)
+    http = TestClient(main_mod.app)
+    r = http.post("/api/login", json={"username": "admin", "password": "pw"})
+    assert r.status_code == 503 and "hugo_session" not in r.cookies
