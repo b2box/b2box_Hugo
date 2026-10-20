@@ -2,7 +2,7 @@
 
 Condición B1 del PR 3: a Apify (y a Qwen) solo viajan fotos de CDNs conocidos
 (mlstatic de Mercado Libre, alicdn y alibaba.com) o del bucket propio
-(`ESTIMATE_UPLOAD_IMAGE_HOSTS`). Cualquier otra URL que pegue el visitante no
+(`ESTIMATE_UPLOAD_IMAGE_PREFIXES`: host + bucket + prefijo). Cualquier otra URL que pegue el visitante no
 sale de Hugo.
 
 Condición M1: el sha256 de la foto (clave de la caché de Apify) lo calcula Hugo
@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from app.config import get_settings
+from app import upload_urls
 from app.dedup import image_embed
 from app.dedup.image_hash import _fetch
 from app.ingest import apify_1688
@@ -42,20 +42,17 @@ class QueryPhoto:
     vector: np.ndarray | None = None
 
 
-def _upload_hosts() -> set[str]:
-    raw = get_settings().estimate_upload_image_hosts or ""
-    return {h.strip().lower().rstrip(".") for h in raw.split(",") if h.strip()}
-
-
 def allowed_search_image(url: object) -> str:
-    """La foto que se puede mandar a Apify y a Qwen, o "" si no."""
+    """La foto que se puede mandar a Apify y a Qwen, o "" si no: un CDN conocido,
+    o el bucket propio bajo un prefijo permitido y con firma de ≤ 10 min (ver
+    app/upload_urls.py)."""
     target = apify_1688.allowed_image_url(url)
     if not target:
         return ""
     host = (urlsplit(target).hostname or "").lower()
     if any(host == d or host.endswith("." + d) for d in _CDN_DOMAINS):
         return target
-    return target if host in _upload_hosts() else ""
+    return target if upload_urls.allowed_upload(target) else ""
 
 
 def pick_search_image(image_urls: Sequence[str]) -> str:

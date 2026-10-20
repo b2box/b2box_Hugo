@@ -181,10 +181,57 @@ def test_solo_cdns_conocidos_o_el_bucket_propio(monkeypatch):
     assert not images.allowed_search_image("https://evil.example.com/foto.jpg")
     assert not images.allowed_search_image("http://http2.mlstatic.com/x.jpg")
     assert not images.allowed_search_image("https://127.0.0.1/x.jpg")
-    monkeypatch.setattr(get_settings(), "estimate_upload_image_hosts", "fotos.b2box.app",
-                        raising=False)
-    assert images.allowed_search_image("https://fotos.b2box.app/u/1.jpg?sig=abc")
-    assert not images.allowed_search_image("https://otro.b2box.app/u/1.jpg")
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos/", raising=False)
+    base = "https://s3.b2box.app/b2box-media/lookup-photos/2026-10-20/abc.jpg"
+    assert images.allowed_search_image(base + "?X-Amz-Expires=600&X-Amz-Signature=x")
+    assert images.allowed_search_image(base)
+    assert not images.allowed_search_image("https://otro.b2box.app/b2box-media/lookup-photos/a.jpg")
+    # Otro bucket u otro prefijo del mismo host: no.
+    assert not images.allowed_search_image("https://s3.b2box.app/otro-bucket/lookup-photos/a.jpg")
+    assert not images.allowed_search_image("https://s3.b2box.app/b2box-media/products/a.jpg")
+
+
+@pytest.mark.parametrize("path", [
+    "/b2box-media/lookup-photos/../products/a.jpg",
+    "/b2box-media/lookup-photos/%2e%2e/products/a.jpg",
+    "/b2box-media/lookup-photos/%2E%2E/products/a.jpg",
+    "/b2box-media/lookup-photos/..%2fproducts/a.jpg",
+    "/b2box-media/lookup-photos//a.jpg",
+])
+def test_bucket_propio_sin_salirse_del_prefijo(monkeypatch, path):
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos/", raising=False)
+    assert not images.allowed_search_image("https://s3.b2box.app" + path)
+
+
+def test_url_firmada_que_vive_mas_de_10_minutos_no_sale(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos/", raising=False)
+    base = "https://s3.b2box.app/b2box-media/lookup-photos/a.jpg"
+    assert not images.allowed_search_image(base + "?X-Amz-Expires=3600&X-Amz-Signature=x")
+    assert not images.allowed_search_image(base + "?X-Amz-Expires=nope")
+    v2 = int(_time.time()) + 7200
+    assert not images.allowed_search_image(f"{base}?Expires={v2}&Signature=x")
+    assert images.allowed_search_image(f"{base}?Expires={int(_time.time()) + 300}&Signature=x")
+
+
+def test_redact_saca_la_firma_de_logs_y_registros(monkeypatch):
+    from app import upload_urls
+
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos/", raising=False)
+    signed = ("https://s3.b2box.app/b2box-media/lookup-photos/a.jpg"
+              "?X-Amz-Credential=AKIA&X-Amz-Signature=deadbeef")
+    assert upload_urls.redact(signed) == "https://s3.b2box.app/b2box-media/lookup-photos/a.jpg"
+    # Firma en cualquier host también se saca; una URL normal queda igual.
+    assert upload_urls.redact("https://x.com/a.jpg?token=abc") == "https://x.com/a.jpg"
+    assert upload_urls.redact("https://http2.mlstatic.com/a.jpg?w=2") \
+        == "https://http2.mlstatic.com/a.jpg?w=2"
+    text = upload_urls.redact_text(f"El app buscó {signed[:90]} y no estaba")
+    assert "X-Amz" not in text and "AKIA" not in text
 
 
 # ─── IP y límites ──────────────────────────────────────────────────
@@ -296,3 +343,32 @@ async def test_otapi_lee_la_oferta(monkeypatch):
     assert read.status == "ok" and read.calls == 1
     assert read.offer.price_ladder() == [(1, 12.5)]
     assert seen == {"key": "k", "item": "abb-666233922092"}
+
+
+def test_audit_log_y_cache_de_fotos_sin_firma(monkeypatch):
+    from sqlmodel import select
+
+    from app.api import app_routes
+    from app.db.models import AuditLog, ImageHashCache
+    from app.dedup import image_hash
+
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos/", raising=False)
+    SQLModel.metadata.create_all(engine)
+    signed = ("https://s3.b2box.app/b2box-media/lookup-photos/z.jpg"
+              "?X-Amz-Credential=AKIAXX&X-Amz-Signature=deadbeef")
+    app_routes._record(action="app_lookup_no_image", detail=f"No se pudo sacar la foto de {signed}",
+                       source="test-m2", product_id="(sin foto)", image_url=signed,
+                       source_url=signed)
+    with Session(engine) as s:
+        row = s.exec(select(AuditLog).where(AuditLog.source == "test-m2")).one()
+        assert "AKIA" not in row.detail and "Signature" not in row.detail
+        assert row.product_image_url == signed.split("?")[0]
+        assert row.product_source_url == signed.split("?")[0]
+        s.delete(row)
+        s.commit()
+    import imagehash
+    import numpy as np
+    image_hash._db_put(signed, imagehash.ImageHash(np.zeros((8, 8), dtype=bool)))
+    with Session(engine) as s:
+        assert s.get(ImageHashCache, signed) is None

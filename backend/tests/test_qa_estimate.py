@@ -485,7 +485,7 @@ def _assert_no_candidate_leak(body: str) -> None:
 
 @pytest.mark.parametrize("kind", ["ml", "alibaba", "1688", "photo"])
 async def test_er08_cuatro_caminos_sin_datos_de_proveedores(env, monkeypatch, kind):
-    monkeypatch.setattr(get_settings(), "estimate_upload_image_hosts", "fotos.b2box.app",
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes", "fotos.b2box.app/u/",
                         raising=False)
     if kind == "1688":
         env.otapi = otapi_item.Offer1688(

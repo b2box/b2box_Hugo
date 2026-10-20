@@ -18,6 +18,7 @@ from sqlmodel import Session
 from app.clock import utcnow
 from app.db.models import AuditLog, LookupEstimate
 from app.db.session import engine
+from app.upload_urls import redact, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +74,10 @@ def save(row: dict[str, Any], audit: dict[str, Any] | None = None) -> None:
                     action="app_lookup_estimated",
                     source=(row.get("source") or "b2box-app")[:40],
                     product_id="(estimado)",
-                    detail=str(audit.get("detail") or "")[:500],
+                    detail=(redact_text(str(audit.get("detail") or "")) or "")[:500],
                     product_name=(audit.get("product_name") or "")[:200] or None,
-                    product_image_url=audit.get("image_url"),
-                    product_source_url=audit.get("source_url"),
+                    product_image_url=redact(audit.get("image_url")),
+                    product_source_url=redact(audit.get("source_url")),
                 ))
             s.commit()
     except Exception:  # noqa: BLE001
