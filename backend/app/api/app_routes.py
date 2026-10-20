@@ -655,19 +655,20 @@ async def _pick_match(est, query_urls, shortlist, title):
 
 
 async def _check_visitor_limit(payload: AppLookupRequest, request: Request | None) -> None:
-    """Límite de TODO /app/lookup por visitante, solo cuando un cliente de
-    confianza (el storefront) manda `visitor.ip`. Pasarse = 429. Fail-closed:
-    una base caída también es 429. El app y los pedidos sin `visitor` no pasan
-    por acá (su respuesta no cambia)."""
-    if request is None or payload.visitor is None or not payload.visitor.ip:
+    """Límite de TODO /app/lookup por visitante para los clientes de confianza
+    (el storefront). Pasarse = 429. Fail-closed: una base caída también es 429,
+    y un pedido sin `visitor.ip` (o con una inválida o privada) cuenta contra el
+    hash de la IP del socket, compartido por todos los que llegan así. Los demás
+    clientes (el app) no pasan por acá: su respuesta no cambia."""
+    if request is None:
         return
     state = getattr(request, "state", None)
     client = getattr(state, "api_client", None) if state is not None else None
     if not client or client not in estimate_service.trusted_ip_clients():
         return
+    declared = payload.visitor.ip if payload.visitor is not None else None
     try:
-        # IP declarada inválida o privada: cuenta la del socket (compartida).
-        ip_hash = estimate_identity.ip_hash(payload.visitor.ip) or estimate_identity.ip_hash(
+        ip_hash = estimate_identity.ip_hash(declared) or estimate_identity.ip_hash(
             client_ip(request), kind="sock")
     except estimate_identity.SaltMissing:
         raise HTTPException(503, "Límite por visitante sin configurar en el servidor.")
