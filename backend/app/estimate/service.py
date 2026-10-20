@@ -165,6 +165,9 @@ class EstimateSession:
         self.apify_launched = False
         self._task: asyncio.Task | None = None
         self._done = False
+        # skip_found / abandon: ya no hay que lanzar Apify (lo mira _prepare
+        # justo antes de lanzar, sin await de por medio: no hay carrera).
+        self._stop = False
 
     # ── tiempo ────────────────────────────────────────────────────
 
@@ -181,6 +184,11 @@ class EstimateSession:
     @property
     def done(self) -> bool:
         return self._done
+
+    @property
+    def searching(self) -> bool:
+        """Hay una búsqueda (foto o Apify) corriendo en segundo plano."""
+        return self._task is not None and not self._task.done()
 
     @property
     def spent(self) -> bool:
@@ -249,6 +257,8 @@ class EstimateSession:
         if window < _MIN_APIFY_WINDOW_S:
             self.search = apify_1688.Search1688Result(status="timeout")
             return
+        if self._stop:
+            return            # el lookup ya resolvió sin estimado: no se paga
         t = time.monotonic()
         self.apify_launched = True
         self.search = await apify_1688.search_by_image(
@@ -264,6 +274,7 @@ class EstimateSession:
         if self._done:
             return result
         self._done = True
+        self._stop = True
         if self.blocked:
             result.internal["reason"] += f" (además: {self.preset}, {self.reason})"
             await self._persist(result)
@@ -278,13 +289,24 @@ class EstimateSession:
         task.add_done_callback(_background.discard)
         return result
 
-    async def _persist_after_search(self, result: EstimateResult) -> None:
-        try:
-            await asyncio.wait_for(asyncio.shield(self._task), timeout=max(self.remaining(), 0) + 5)
-        except Exception:  # noqa: BLE001
-            pass
-        if not self.spent:
+    async def _settle_task(self) -> bool:
+        """Espera a que la búsqueda en segundo plano termine para saber si se
+        gastó. Con `_stop` puesto ya no lanza nada nuevo, y lo que lanzó tiene
+        deadline propio. True = terminó; False = no terminó a tiempo (se asume
+        que gastó: nunca se devuelve cupo a ciegas)."""
+        if self._task is None or self._task.done():
+            return True
+        limit = max(self.remaining(), 0.0) + apify_1688.DEFAULT_DEADLINE_S + 10.0
+        done, _ = await asyncio.wait({self._task}, timeout=limit)
+        return bool(done)
+
+    async def _refund_if_unspent(self) -> None:
+        settled = await self._settle_task()
+        if settled and not self.blocked and not self.spent:
             await limits.refund_all_async(self.taken)
+
+    async def _persist_after_search(self, result: EstimateResult) -> None:
+        await self._refund_if_unspent()
         await self._persist(result, ended_found=self.apify_launched)
 
     async def abandon(self, reason: str) -> EstimateResult:
@@ -293,10 +315,12 @@ class EstimateSession:
         if self._done:
             return EstimateResult(ERROR, internal={"reason": reason})
         self._done = True
+        self._stop = True
         status = self.preset or ERROR
         result = EstimateResult(status, internal={"reason": self.reason or reason})
-        if not self.blocked and not self.spent:
-            await limits.refund_all_async(self.taken)
+        # La búsqueda puede estar a mitad de camino (bajando la foto): se espera
+        # a que termine antes de decidir el reembolso. Con _stop ya no lanza.
+        await self._refund_if_unspent()
         await self._persist(result)
         return result
 

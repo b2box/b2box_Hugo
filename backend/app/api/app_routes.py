@@ -629,9 +629,15 @@ async def _abandon_estimate(
     """El lookup terminó antes de poder estimar (sin foto, índice armándose)."""
     if est is None:
         return
-    result = await est.abandon(reason)
+    if est.searching:
+        # Hay que esperar la búsqueda para decidir el reembolso: en segundo
+        # plano, sin demorar la respuesta.
+        estimate_service.abandon_later(est, reason)
+        status = est.preset or estimate_service.ERROR
+    else:
+        status = (await est.abandon(reason)).status
     if base is not None:
-        base.estimate_status = result.status
+        base.estimate_status = status
 
 
 async def _pick_match(est, query_urls, shortlist, title):
