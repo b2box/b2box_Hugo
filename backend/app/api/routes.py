@@ -9,6 +9,7 @@ GET  /health           ← liveness probe
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import timedelta
@@ -905,14 +906,24 @@ async def list_settings() -> list[dict[str, Any]]:
     return runtime.get_all_with_meta()
 
 
-# Settings que gastan plata o cupo pago: quién los cambió y de cuánto a cuánto
-# queda en el audit log. Un tope de Apify subido a 500 sin que nadie sepa quién
+# Settings que gastan plata o cupo pago (o que mueven el precio estimado que ve
+# un cliente): solo los cambia un administrador (DASHBOARD_ADMINS; vacía =
+# nadie) y quién los cambió y de cuánto a cuánto queda en el audit log. Un tope de Apify subido a 500 sin que nadie sepa quién
 # fue se descubre recién en la factura.
 _COSTLY_SETTINGS = frozenset({
     "apify_meli_daily_budget",
     "apify_1688_daily_budget",
     "estimate_enabled",
     "estimate_daily_budget",
+    # No gastan directo, pero mueven el precio que ve un cliente.
+    "estimate_price_factor_k",
+    "estimate_margin_pct",
+    "estimate_tier_qty_1",
+    "estimate_tier_qty_2",
+    "estimate_tier_qty_3",
+    "lookup_visitor_daily_limit",
+    "lookup_visitor_per_minute",
+    "vision_rerank_daily_budget",
     "otapi_daily_budget",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
@@ -941,9 +952,17 @@ def _audit_costly_setting(request: Request, key: str, before: Any, after: Any) -
         log.exception("No se pudo registrar el cambio de %s en el audit log", key)
 
 
+def _require_admin_for(request: Request, key: str) -> None:
+    if key in _COSTLY_SETTINGS:
+        from app.auth import require_admin
+
+        require_admin(request)
+
+
 @router.put("/api/settings/{key}")
 async def update_setting(key: str, payload: SettingUpdate, request: Request) -> dict[str, Any]:
     """Actualiza un setting runtime. Persiste en DB y aplica en la próxima lectura."""
+    _require_admin_for(request, key)
     before = runtime.get(key)
     try:
         new_value = runtime.set_value(key, payload.value)
@@ -956,6 +975,7 @@ async def update_setting(key: str, payload: SettingUpdate, request: Request) -> 
 @router.delete("/api/settings/{key}")
 async def reset_setting(key: str, request: Request) -> dict[str, Any]:
     """Borra el override y vuelve al default del .env."""
+    _require_admin_for(request, key)
     before = runtime.get(key)
     try:
         new_value = runtime.reset_to_default(key)
@@ -1918,14 +1938,31 @@ async def vision_compare_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/api/estimate-test")
-async def estimate_test_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
-    """Prueba del estimado por foto desde el dashboard (sesión, no X-API-Key).
+async def estimate_test_dashboard(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    """Prueba del estimado por foto desde el dashboard (sesión de un admin).
 
     Corre el estimado completo sobre un link o una foto y devuelve también el
     detalle interno (candidatos, tiempos por paso, costo). GASTA (Apify, Qwen,
-    OTAPI) y cuenta para el cupo diario del estimado.
+    OTAPI): cuenta para el cupo global del estimado y tiene además un tope por
+    usuario y por día (ESTIMATE_TEST_USER_DAILY_LIMIT), aparte del de visitantes.
     """
     from app.api.app_routes import run_estimate_test
+    from app.auth import require_admin
+    from app.config import get_settings
+    from app.estimate import identity, limits
+
+    user = require_admin(request)
+    cap = int(get_settings().estimate_test_user_daily_limit)
+    try:
+        scope = f"dash:{identity.hash_value('user', user.strip().lower())}"
+    except identity.SaltMissing:
+        raise HTTPException(status_code=503, detail="Falta ESTIMATE_HASH_SALT en el servidor.")
+    if not await asyncio.to_thread(limits.reserve, scope, cap):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Llegaste al tope de {cap} pruebas del estimado por hoy.",
+            headers={"Retry-After": str(limits.seconds_until_midnight())},
+        )
 
     url = payload.get("url") if isinstance(payload.get("url"), str) else ""
     image_url = payload.get("image_url") if isinstance(payload.get("image_url"), str) else ""

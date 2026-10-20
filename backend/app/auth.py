@@ -266,6 +266,40 @@ def session_username(token: str | None) -> str | None:
     return str(user)[:120] if user else None
 
 
+def admin_users() -> set[str]:
+    """DASHBOARD_ADMINS normalizado (minúsculas, sin vacíos)."""
+    raw = get_settings().dashboard_admins or ""
+    return {u.strip().lower() for u in raw.split(",") if u.strip()}
+
+
+def admin_username(request: Request) -> str | None:
+    """El usuario de la sesión si es administrador, o None.
+
+    FAIL-CLOSED: sin DASHBOARD_ADMINS nadie es admin, tampoco con el login
+    deshabilitado (modo dev): un dashboard abierto no puede gastar plata."""
+    admins = admin_users()
+    if not admins:
+        return None
+    user = session_username(request.cookies.get(COOKIE_NAME))
+    return user if user and user.strip().lower() in admins else None
+
+
+def require_admin(request: Request) -> str:
+    """403 si la sesión no es de un administrador. Devuelve el usuario."""
+    from fastapi import HTTPException
+
+    user = admin_username(request)
+    if user is None:
+        if not admin_users():
+            log.warning("DASHBOARD_ADMINS vacío: %s %s rechazado (fail-closed)",
+                        request.method, request.url.path)
+        raise HTTPException(
+            status_code=403,
+            detail="Solo un administrador del dashboard puede hacer esto.",
+        )
+    return user
+
+
 def check_credentials(username: str, password: str) -> bool:
     """Compara usuario+contraseña contra el .env en tiempo constante."""
     s = get_settings()
