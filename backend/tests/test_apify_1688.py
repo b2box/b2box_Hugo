@@ -685,3 +685,174 @@ async def test_reserva_lenta_de_la_primera_no_estira_el_deadline(apify_on, monke
 
     assert result.status == "timeout" and result.elapsed_s < 0.7
     assert fake.requests == []
+
+
+# ─── Huecos de cobertura (QA, 20-oct) ──────────────────────────────
+
+
+class _Clock:
+    """time.monotonic desplazable, solo para el módulo (asyncio sigue con el real)."""
+
+    def __init__(self):
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+
+async def test_ttl_ok_24_horas(apify_on, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(apify_1688, "time", clock)
+    fake = FakeApify("ok").install(monkeypatch)
+
+    await apify_1688.search_by_image(PHOTO)
+    clock.offset = 24 * 3600 - 60
+    assert (await apify_1688.search_by_image(PHOTO)).cached is True
+    assert len(fake.starts) == 1
+    clock.offset = 24 * 3600 + 1
+    assert (await apify_1688.search_by_image(PHOTO)).cached is False
+    assert len(fake.starts) == 2
+
+
+async def test_ttl_timeout_una_hora(apify_on, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(apify_1688, "time", clock)
+    fake = FakeApify("hang").install(monkeypatch)
+
+    assert (await apify_1688.search_by_image(PHOTO, deadline_s=0.4)).status == "timeout"
+    clock.offset = 3600 - 60
+    hit = await apify_1688.search_by_image(PHOTO, deadline_s=0.4)
+    assert hit.status == "timeout" and hit.cached is True and hit.usd_imputado == 0.0
+    assert len(fake.starts) == 2
+    clock.offset = 3600 + 1
+    assert (await apify_1688.search_by_image(PHOTO, deadline_s=0.4)).cached is False
+    await apify_1688.wait_pending_aborts()
+    assert len(fake.starts) == 4
+
+
+async def test_over_budget_y_busy_no_se_cachean(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_1688, "_daily_budget", lambda: 0)
+    fake = FakeApify("ok").install(monkeypatch)
+    assert (await apify_1688.search_by_image(PHOTO)).status == "over_budget"
+
+    # Se carga cupo: la misma foto ya se busca, sin esperar ningún TTL.
+    monkeypatch.setattr(apify_1688, "_daily_budget", lambda: 5)
+    assert (await apify_1688.search_by_image(PHOTO)).status == "ok"
+    assert len(fake.starts) == 1
+
+
+async def test_api_que_no_contesta_vuelve_al_deadline(apify_on, monkeypatch):
+    """Ni siquiera el POST de lanzar contesta: igual se vuelve al deadline."""
+    fake = FakeApify()
+
+    async def never(request):
+        fake.requests.append(request)
+        await asyncio.sleep(60)
+
+    fake.handler = never
+    fake.install(monkeypatch)
+
+    result = await asyncio.wait_for(apify_1688.search_by_image(PHOTO, deadline_s=0.7), timeout=3)
+
+    assert result.status == "timeout"
+    assert 0.65 <= result.elapsed_s < 1.0
+    # Se lanzó la cobertura igual, y no hay run id que imputar ni abortar.
+    assert result.run_ids == [] and result.usd_imputado == 0.0
+    assert _used() == 2
+
+
+async def test_gana_la_primera_aunque_termine_despues_de_la_cobertura(apify_on, monkeypatch):
+    fake = FakeApify("late", "hang", late_s=0.45).install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=3.0)
+    await apify_1688.wait_pending_aborts()
+
+    assert result.status == "ok" and result.hedged is True
+    assert result.run_ids == ["run1", "run2"]
+    assert len(result.candidates) == 2
+    # La perdedora es la de cobertura.
+    assert fake.aborted == ["run2"]
+    assert 0.4 <= result.elapsed_s < 1.5
+
+
+async def test_nunca_mas_de_dos_corridas(apify_on, monkeypatch):
+    fake = FakeApify("fail").install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=2.0)
+
+    assert result.status == "error"
+    assert len(fake.starts) == 2 and _used() == 2
+
+
+async def test_cobertura_sin_ventana_no_se_lanza(apify_on, monkeypatch):
+    """Si al hedge le quedan menos de _MIN_RUN_WINDOW_S hasta el deadline, no se paga."""
+    monkeypatch.setattr(apify_1688, "_MIN_RUN_WINDOW_S", 8.0)
+    fake = FakeApify("hang").install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=0.5)
+    await apify_1688.wait_pending_aborts()
+
+    assert result.status == "timeout" and result.hedged is False
+    assert len(fake.starts) == 1 and _used() == 1
+
+
+async def test_dataset_de_2mb_justos_se_descarta_con_el_tope_real(apify_on, monkeypatch):
+    raw = b"[" + b" " * (2 * 1024 * 1024) + b"]"
+    fake = FakeApify("ok", raw_items=raw).install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO)
+
+    assert result.status == "error" and len(fake.starts) == 1
+
+
+async def test_respuesta_gigante_al_lanzar_no_rompe(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_1688, "_MAX_RESPONSE_BYTES", 100)
+    fake = FakeApify()
+
+    async def big(request):
+        fake.requests.append(request)
+        if request.url.path.endswith("/runs"):
+            fake.starts.append(time.monotonic())
+        return httpx.Response(201, content=b'{"data": {"id": "' + b"x" * 500 + b'"}}')
+
+    fake.handler = big
+    fake.install(monkeypatch)
+
+    result = await apify_1688.search_by_image(PHOTO)
+
+    assert result.status == "error" and result.run_ids == []
+
+
+async def test_token_no_sale_en_logs_si_el_abort_falla(apify_on, monkeypatch, caplog):
+    fake = FakeApify("hang")
+    real = fake.handler
+
+    async def abort_roto(request):
+        if request.url.path.endswith("/abort"):
+            raise httpx.ConnectError(f"no pude conectar con {TOKEN}")
+        return await real(request)
+
+    fake.handler = abort_roto
+    fake.install(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await apify_1688.search_by_image(PHOTO, deadline_s=0.4)
+        await apify_1688.wait_pending_aborts()
+
+    assert result.status == "timeout"
+    assert "no se pudo abortar" in caplog.text and "ConnectError" in caplog.text
+    assert TOKEN not in caplog.text
+
+
+@pytest.mark.xfail(strict=True, reason="sin single-flight: la misma foto en paralelo paga N corridas")
+async def test_misma_foto_en_paralelo_paga_una_sola_corrida(apify_on, monkeypatch):
+    """Cliente impaciente que reenvía mientras espera ~30 s: hoy cada reenvío
+    reserva cupo y lanza otra corrida. Cuando haya single-flight, sacar el xfail."""
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    fake = FakeApify("late", late_s=0.2).install(monkeypatch)
+
+    results = await asyncio.gather(*(apify_1688.search_by_image(PHOTO, deadline_s=3.0)
+                                     for _ in range(3)))
+
+    assert [r.status for r in results] == ["ok"] * 3
+    assert len(fake.starts) == 1 and _used() == 1
