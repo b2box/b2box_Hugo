@@ -258,8 +258,9 @@ hace una sola búsqueda.
   la trajo (el juez no se llama dos veces por la misma). Un IGUAL sin vendedores que
   cuenten no corta: sigue con la variante siguiente.
 - **Cada búsqueda cuenta contra `pm_ml_daily_budget`** (la reserva atómica de siempre). Sin
-  cupo a mitad de camino el producto queda `skipped`; un fallo de ML en una variante lo
-  deja `failed`, igual que con la primera.
+  cupo a mitad de camino el producto queda `skipped`; un fallo de ML en la búsqueda de una
+  variante lo deja `failed`, igual que con la primera (un 404 en los vendedores de una ficha,
+  no: ver "Robustez").
 - Para medir: el snapshot guarda en `ml_variant` qué búsqueda encontró el match
   (`titulo` | `corto` | `claves` | `inicio`) y la corrida suma en `variant_stats` cuántos
   productos resolvió cada una (el dashboard lo muestra debajo de la última corrida).
@@ -368,6 +369,17 @@ Robustez:
   `no_data`), así con un budget corto todo el catálogo rota. 429/5xx/red →
   backoff exponencial; si persiste, ese producto queda `failed` y la corrida
   **sigue**.
+- **Un 404 de una ficha no es un fallo.** Si ML contesta 404 al pedir los vendedores
+  de UNA ficha IGUAL (`/products/{id}/items`), esa ficha queda **idéntica sin precio**
+  con el motivo ("ML no tiene vendedores para esta ficha (404)") y el producto sigue:
+  las otras fichas, las otras variantes, la web o la oficina. Sin ningún precio queda
+  `no_data` (`igual_sin_precio`), no `failed`. En la corrida #15 eran 107 productos
+  `failed` por esto. Un 429/5xx/red persistente (o cualquier otro 4xx) en los vendedores
+  **sigue siendo `failed`** si el producto terminó sin ningún precio, **aunque la web o la
+  oficina hayan corrido sin encontrar un idéntico**: ese error puede esconder el precio
+  de una ficha que ES el producto, y `failed` hace que la noche siguiente se mida
+  primero. Si la web o la oficina sí trajeron un idéntico con precio, queda `ok` (como
+  siempre).
 - El consumo (requests a ML, llamadas al juez) se suma a la corrida en la
   misma transacción que reserva el cupo: después de un corte, la corrida
   refleja exactamente lo gastado.

@@ -169,6 +169,11 @@ class MlUnavailable(meli.MeliError):
     """ML siguió en 429/5xx después de todos los reintentos."""
 
 
+class MlNotFound(meli.MeliError):
+    """ML contestó 404 (o el id no es uno de ficha): no es un fallo transitorio de ML, esa ficha no
+    tiene lo que se le pidió. El semáforo la deja sin precio y sigue con las demás."""
+
+
 # Origen de un candidato: la API de fichas de catálogo, la búsqueda web del servidor o la
 # búsqueda web hecha por la Mac de la oficina (ver oficina_ml.py). Los dos últimos son
 # "web": publicaciones de la página de ML, con precio y ventas en el propio resultado.
@@ -470,7 +475,7 @@ class MlMarket:
     async def get_json(self, path: str) -> dict:
         resp = await self.request(path)
         if resp.status_code == 404:
-            raise meli.MeliError(f"ML no encontró {path}")
+            raise MlNotFound(f"ML no encontró {path}")
         if resp.status_code >= 400:
             raise meli.MeliError(f"HTTP {resp.status_code} en {path.split('?')[0]}")
         try:
@@ -494,7 +499,7 @@ class MlMarket:
         """Vendedores de la ficha con su precio. Devuelve también el payload
         crudo para la sonda de `sold_quantity`."""
         if not valid_product_id(product_id):
-            raise meli.MeliError(f"id de ficha inválido: {product_id[:40]!r}")
+            raise MlNotFound(f"id de ficha inválido: {product_id[:40]!r}")
         raw = await self.get_json(f"/products/{quote(product_id, safe='')}/items?limit={_ITEMS_LIMIT}")
         return parse_listings(raw), raw
 

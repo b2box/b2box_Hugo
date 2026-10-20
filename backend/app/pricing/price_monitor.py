@@ -32,7 +32,10 @@ invocación (register_jobs la programa con _STARTUP_GRACE) retoma ESA corrida y
 procesa solo los productos sin snapshot en ese `run_id`.
 
 Robustez: un 429/5xx persistente de ML deja al producto `failed` y el job
-sigue; si al final más del 20 % quedó `failed`, la corrida es `degraded`. El
+sigue; si al final más del 20 % quedó `failed`, la corrida es `degraded`. Un 404
+al pedir los vendedores de UNA ficha no es un fallo: esa ficha queda idéntica sin
+precio (con el motivo) y el producto sigue; `failed` es solo cuando un error que
+puede ser pasajero dejó al producto sin ningún precio (ver _match_via_api). El
 budget diario de requests corta con `skipped` (no con `failed`): no es culpa
 de ML. Nada de esto tira el job.
 """
@@ -84,6 +87,7 @@ from app.pricing.market_ml import (
     MlCandidate,
     MlListing,
     MlMarket,
+    MlNotFound,
     ml_budget_status,
     payload_has_sold_quantity,
     probe_recorded,
@@ -792,7 +796,11 @@ class _ApiPass:
     prices: list[int] = field(default_factory=list)
     sellers: set[str] = field(default_factory=set)
     matched_json: list[dict[str, Any]] = field(default_factory=list)
+    # Errores de ML que pueden ser pasajeros (429/5xx/red tras los reintentos, otro 4xx): sin
+    # ningún precio, dejan el producto `failed` para que se vuelva a medir primero.
     ml_errors: list[str] = field(default_factory=list)
+    # Fichas IGUAL a las que ML les contestó 404 al pedir vendedores: esa ficha no tiene, nada más.
+    not_found: int = 0
     # Etiqueta de la variante que dio el IGUAL con precio.
     variant: str | None = None
 
@@ -805,6 +813,12 @@ async def _price_matches(ctx: RunContext, matches: list[market_match.Decision],
     for d in matches[:MAX_MATCHED_PRODUCTS]:
         try:
             listings, raw = prefetched.get(d.candidate.id) or await ctx.ml.listings(d.candidate.id)
+        except MlNotFound:
+            # Un 404 de UNA ficha no es un fallo de ML: esa ficha queda idéntica sin precio y el
+            # producto sigue (las demás fichas, las otras búsquedas, la web o la oficina).
+            acc.not_found += 1
+            why[d.candidate.id] = "ML no tiene vendedores para esta ficha (404)"
+            continue
         except meli.MeliError as exc:
             acc.ml_errors.append(str(exc))
             why[d.candidate.id] = "no se pudo consultar su precio (ML falló)"
@@ -892,7 +906,8 @@ async def _match_via_api(ctx: RunContext, product: VendureProduct, snap: MarketP
         if acc.ml_errors and not acc.matched_json:
             return _mark(snap, FAILED, f"vendedores ML: {acc.ml_errors[0]}")
         if acc.has_matches:
-            return _mark(snap, NO_DATA, "las fichas no tienen vendedores que cuenten")
+            gone = f" ({acc.not_found} sin vendedores en ML: 404)" if acc.not_found else ""
+            return _mark(snap, NO_DATA, f"las fichas no tienen vendedores que cuenten{gone}")
         if acc.decided:
             return _mark(snap, NO_DATA, "ninguna ficha es el mismo producto")
         return _mark(snap, NO_DATA, "ML no devolvió fichas para el título")
