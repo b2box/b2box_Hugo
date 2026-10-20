@@ -8,6 +8,7 @@ regla de sal (obligatoria en producción, derivada de secretos en desarrollo).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 from functools import lru_cache
 
@@ -69,8 +70,8 @@ def _salt() -> bytes:
 
 
 def hash_value(kind: str, value: str) -> str:
-    """sha256(sal + kind:valor), 32 hex. Lanza SaltMissing en producción sin sal."""
-    return hashlib.sha256(_salt() + f"{kind}:{value}".encode()).hexdigest()[:32]
+    """HMAC-SHA256(sal, kind:valor), 32 hex. Lanza SaltMissing en producción sin sal."""
+    return hmac.new(_salt(), f"{kind}:{value}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def ip_hash(raw_ip: object, *, kind: str = "ip") -> str | None:
