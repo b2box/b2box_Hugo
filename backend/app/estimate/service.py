@@ -189,8 +189,15 @@ class EstimateSession:
         if not offer_id:
             return None
         t = time.monotonic()
-        read = await otapi_item.read_offer(
-            offer_id, timeout_s=max(0.5, min(_OTAPI_TIMEOUT_S, self.remaining())))
+        window = max(0.5, min(_OTAPI_TIMEOUT_S, self.remaining()))
+        try:
+            # El timeout de httpx es por operación: una respuesta que gotea (o
+            # un DNS colgado) lo pasa. Este es el corte duro.
+            read = await asyncio.wait_for(otapi_item.read_offer(offer_id, timeout_s=window),
+                                          timeout=window + 0.5)
+        except asyncio.TimeoutError:
+            # El cupo ya se reservó y RapidAPI cobra el intento: cuenta como llamada.
+            read = otapi_item.OfferRead("timeout", calls=1)
         self._mark("otapi", t)
         self.otapi_calls += read.calls
         self.input_kind = "link_1688"
@@ -468,7 +475,8 @@ class EstimateSession:
         margin = float(runtime.get("estimate_margin_pct") or 0.0)
         if not judged:
             margin += _EXTRA_MARGIN_NO_JUDGE
-        if est.box_source != "neighbors":
+        # Vendure manda el enum ImportPriceEstimateBoxSource en mayúsculas.
+        if (est.box_source or "").upper() != "NEIGHBORS":
             margin += _EXTRA_MARGIN_BOX_NOT_NEIGHBORS
         detail["margin_pct"] = margin
         max_ratio = float(get_settings().estimate_max_range_ratio)

@@ -206,6 +206,19 @@ Los links de 1688 se leen por id en OTAPI (escalera real, sin búsqueda por foto
 - Prueba desde el dashboard: `POST /api/estimate-test {url | image_url}` (sesión). **Gasta** y cuenta
   para el cupo diario; devuelve además candidatos, yuanes, escenarios de Vendure, tiempos y costo.
 
+**Migración y rollback.** Es automática en el arranque (`init_db`): crea las tablas `estimate_usage`
+(contadores por visitante y global) y `lookup_estimate` (con su índice `ix_lookup_estimate_status_time`)
+y no toca ninguna otra (hay un test sobre SQLite y Postgres 16). Para volver el esquema atrás, primero
+`estimate_enabled` = 0 y después:
+
+```sql
+DROP TABLE IF EXISTS lookup_estimate;
+DROP TABLE IF EXISTS estimate_usage;
+DELETE FROM settings WHERE key LIKE 'estimate_%' OR key IN ('_meta:estimate_otapi_calls_today', '_meta:estimate_llm_calls_today');
+```
+
+Las filas `app_lookup_estimated` del audit log pueden quedar (es texto).
+
 ### 5. Acción
 
 - **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
