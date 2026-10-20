@@ -169,6 +169,42 @@ class Settings(BaseSettings):
     # 0 = apagado. Se prende de a poco desde el dashboard (runtime).
     apify_1688_daily_budget: int = 0
 
+    # ── Cotizador rápido por foto (estimado en /app/lookup) ────
+    # Ver app/estimate/. Apagado por defecto: se prende desde el dashboard
+    # (runtime `estimate_enabled`) y además necesita cupo de Apify 1688.
+    estimate_enabled: int = 0
+    # Estimados por día (hora de Argentina) para todos los visitantes juntos.
+    estimate_daily_budget: int = 50
+    # Por visitante (IP real, hash con sal): por día y ráfaga por minuto.
+    estimate_visitor_daily_limit: int = 5
+    estimate_visitor_per_minute: int = 2
+    # Factor sobre el precio del actor de Apify (medido el 20-oct: k ≈ 1,10,
+    # `cotizador-rapido-foto-medicion.md`) y margen ± en % del rango.
+    estimate_price_factor_k: float = 1.10
+    estimate_margin_pct: float = 15.0
+    # Cantidades de la tabla por tramos. PROVISORIAS: confirmarlas con el
+    # usuario antes de prender (decisión del 20-oct: "tabla por tramos").
+    estimate_tier_qty_1: int = 50
+    estimate_tier_qty_2: int = 200
+    estimate_tier_qty_3: int = 1000
+    # Deadline global del estimado, contado desde que entra el request.
+    estimate_deadline_s: float = 50.0
+    # Clientes (nombre en HUGO_API_KEYS) a los que se les cree `visitor.ip`.
+    # A cualquier otro se le cuenta la IP del socket.
+    estimate_trusted_ip_clients: str = "storefront"
+    # Sal del hash de la IP del visitante. En producción es obligatoria (32+
+    # caracteres): sin ella el estimado no corre (fail-closed).
+    estimate_hash_salt: str = ""
+    # Hosts del bucket propio de donde puede venir una foto subida (además de
+    # los CDNs de ML y Alibaba). Separados por coma, sin esquema.
+    estimate_upload_image_hosts: str = ""
+    # Lecturas de OTAPI por día para links de 1688 (dentro del cupo de OTAPI).
+    estimate_otapi_daily_budget: int = 60
+    estimate_valid_hours: int = 24
+    # techo/piso por encima de esto no se muestra rango (diseño 2.5).
+    estimate_max_range_ratio: float = 2.0
+    estimate_retention_days: int = 90
+
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
     storefront_product_path: str = Field(
