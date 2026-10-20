@@ -925,6 +925,10 @@ _COSTLY_SETTINGS = frozenset({
     "lookup_visitor_per_minute",
     "vision_rerank_daily_budget",
     "otapi_daily_budget",
+    "pm_ml_daily_budget",
+    "pm_ml_web_daily_budget",
+    "catalog_full_refresh_seconds",
+    "audit_interval_hours",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
 })
@@ -1952,6 +1956,13 @@ async def estimate_test_dashboard(payload: dict[str, Any], request: Request) -> 
     from app.estimate import identity, limits
 
     user = require_admin(request)
+    url = payload.get("url") if isinstance(payload.get("url"), str) else ""
+    image_url = payload.get("image_url") if isinstance(payload.get("image_url"), str) else ""
+    url, image_url = url.strip()[:2048], image_url.strip()[:2048]
+    # Validar ANTES de reservar: un pedido mal armado no gasta una prueba.
+    problem = _estimate_test_input_problem(url, image_url)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
     cap = int(get_settings().estimate_test_user_daily_limit)
     try:
         scope = f"dash:{identity.hash_value('user', user.strip().lower())}"
@@ -1964,6 +1975,25 @@ async def estimate_test_dashboard(payload: dict[str, Any], request: Request) -> 
             headers={"Retry-After": str(limits.seconds_until_midnight())},
         )
 
-    url = payload.get("url") if isinstance(payload.get("url"), str) else ""
-    image_url = payload.get("image_url") if isinstance(payload.get("image_url"), str) else ""
-    return await run_estimate_test(url[:2048], image_url[:2048])
+    return await run_estimate_test(url, image_url)
+
+
+def _estimate_test_input_problem(url: str, image_url: str) -> str | None:
+    """Qué está mal en el pedido de /api/estimate-test, o None."""
+    from urllib.parse import urlsplit
+
+    from app.estimate import images
+
+    if not url and not image_url:
+        return "Mandá `url` (publicación) o `image_url` (foto)."
+    if url:
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            parts = None
+        if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
+            return "`url` tiene que ser un link http(s)."
+    if image_url and not images.allowed_search_image(image_url):
+        return ("`image_url` tiene que ser una foto https de Mercado Libre, Alibaba o del "
+                "bucket propio (ESTIMATE_UPLOAD_IMAGE_PREFIXES).")
+    return None
