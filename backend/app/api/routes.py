@@ -149,6 +149,11 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "El app mandó un link del que no se pudo sacar la foto",
         "tone": "danger",
     },
+    "app_lookup_estimated": {
+        "icon": "price",
+        "title": "La web buscó algo que no tenemos · se mostró un precio estimado",
+        "tone": "info",
+    },
 }
 
 
@@ -301,6 +306,7 @@ SECTIONS: dict[str, dict[str, Any]] = {
             "app_lookup_request_sent",
             "app_lookup_request_failed",
             "app_lookup_no_image",
+            "app_lookup_estimated",
         ],
     },
     "all": {
@@ -905,6 +911,8 @@ async def list_settings() -> list[dict[str, Any]]:
 _COSTLY_SETTINGS = frozenset({
     "apify_meli_daily_budget",
     "apify_1688_daily_budget",
+    "estimate_enabled",
+    "estimate_daily_budget",
     "otapi_daily_budget",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
@@ -1907,3 +1915,18 @@ async def vision_compare_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
     url = (payload.get("url") or "").strip()
     image_url = (payload.get("image_url") or "").strip()
     return await run_vision_compare(AppLookupRequest(url=url or None, image_url=image_url or None))
+
+
+@router.post("/api/estimate-test")
+async def estimate_test_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
+    """Prueba del estimado por foto desde el dashboard (sesión, no X-API-Key).
+
+    Corre el estimado completo sobre un link o una foto y devuelve también el
+    detalle interno (candidatos, tiempos por paso, costo). GASTA (Apify, Qwen,
+    OTAPI) y cuenta para el cupo diario del estimado.
+    """
+    from app.api.app_routes import run_estimate_test
+
+    url = payload.get("url") if isinstance(payload.get("url"), str) else ""
+    image_url = payload.get("image_url") if isinstance(payload.get("image_url"), str) else ""
+    return await run_estimate_test(url[:2048], image_url[:2048])

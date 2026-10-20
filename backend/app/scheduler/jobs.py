@@ -733,7 +733,8 @@ async def prune_price_history() -> None:
     Evita que la tabla `price_history` crezca sin techo en Supabase (storage $ +
     queries más lentas). Con 0 días, la retención queda deshabilitada.
 
-    También poda el cache de fotos de ML y el historial del semáforo
+    También poda el registro del estimado por foto (`lookup_estimate`, 90 días,
+    y los contadores de `estimate_usage`), el cache de fotos de ML y el historial del semáforo
     (`market_price_snapshot` y `price_monitor_run`, `price_monitor_retention_days`,
     180 por default): se conserva el último snapshot de cada producto.
     """
@@ -752,6 +753,14 @@ async def prune_price_history() -> None:
         store_match.prune_embed_cache(int(runtime.get("pm_embed_cache_days") or 0))
     except Exception as exc:  # noqa: BLE001
         log.warning("prune de las tiendas falló: %s", exc)
+    try:
+        from app.estimate import limits as estimate_limits
+        from app.estimate import store as estimate_store
+
+        estimate_store.prune(get_settings().estimate_retention_days)
+        estimate_limits.prune()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("prune del registro del estimado falló: %s", exc)
     days = get_settings().price_history_retention_days
     if days <= 0:
         return
