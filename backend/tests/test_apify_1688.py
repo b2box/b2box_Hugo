@@ -783,9 +783,11 @@ async def test_api_que_no_contesta_vuelve_al_deadline(apify_on, monkeypatch):
 
 
 async def test_gana_la_primera_aunque_termine_despues_de_la_cobertura(apify_on, monkeypatch):
-    fake = FakeApify("late", "hang", late_s=0.45).install(monkeypatch)
+    # 0,6 s de margen entre la cobertura (0,2 s) y el fin de la 1: con la máquina
+    # cargada (xdist -n 16) 0,25 s no alcanzaba para que la 2 tuviera run id.
+    fake = FakeApify("late", "hang", late_s=0.8).install(monkeypatch)
 
-    result = await apify_1688.search_by_image(PHOTO, deadline_s=3.0)
+    result = await apify_1688.search_by_image(PHOTO, deadline_s=5.0)
     await apify_1688.wait_pending_aborts()
 
     assert result.status == "ok" and result.hedged is True
@@ -793,7 +795,7 @@ async def test_gana_la_primera_aunque_termine_despues_de_la_cobertura(apify_on, 
     assert len(result.candidates) == 2
     # La perdedora es la de cobertura.
     assert fake.aborted == ["run2"]
-    assert 0.4 <= result.elapsed_s < 1.5
+    assert 0.75 <= result.elapsed_s < 3.0
 
 
 async def test_nunca_mas_de_dos_corridas(apify_on, monkeypatch):
@@ -1099,3 +1101,24 @@ async def test_lanzamiento_que_vence_antes_que_el_loop_igual_es_timeout(apify_on
     result = await apify_1688.search_by_image(PHOTO, deadline_s=1.0)
 
     assert result.status == "timeout"
+
+
+@pytest.mark.xfail(strict=True, reason="el timeout de un deadline corto se cachea 1 h y lo hereda "
+                                       "el que se sumó con un deadline más largo")
+async def test_deadline_corto_no_envenena_al_que_se_suma_ni_a_la_cache(apify_on, monkeypatch):
+    """Un pedido con poco tiempo (p. ej. el resto del presupuesto de un request)
+    abre la búsqueda; otro con la misma foto y 5 s se suma. Hoy el segundo
+    vuelve timeout a los 0,3 s y la foto queda en timeout 1 h para todos,
+    aunque la corrida terminaba bien a los 0,6 s."""
+    monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
+    FakeApify("late", late_s=0.6).install(monkeypatch)
+
+    leader = asyncio.create_task(apify_1688.search_by_image(PHOTO, deadline_s=0.3))
+    await asyncio.sleep(0.02)
+    joiner = await apify_1688.search_by_image(PHOTO, deadline_s=5.0)
+    await leader
+    await apify_1688.wait_pending_aborts()
+    later = await apify_1688.search_by_image(PHOTO, deadline_s=5.0)
+
+    assert joiner.status == "ok"
+    assert later.status == "ok"
