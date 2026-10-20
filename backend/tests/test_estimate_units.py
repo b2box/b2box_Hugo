@@ -398,3 +398,11 @@ async def test_excepciones_de_descarga_sin_firma(monkeypatch):
     with pytest.raises(net_guard.SsrfBlocked) as exc:
         await image_hash._fetch(signed, interactive=True)
     assert "AKIA" not in str(exc.value) and "lookup-photos/a.jpg" in str(exc.value)
+
+
+def test_prefijo_sin_barra_final_no_abre_carpetas_hermanas(monkeypatch):
+    monkeypatch.setattr(get_settings(), "estimate_upload_image_prefixes",
+                        "s3.b2box.app/b2box-media/lookup-photos", raising=False)
+    assert images.allowed_search_image("https://s3.b2box.app/b2box-media/lookup-photos/a.jpg")
+    assert not images.allowed_search_image(
+        "https://s3.b2box.app/b2box-media/lookup-photos-viejas/a.jpg")
