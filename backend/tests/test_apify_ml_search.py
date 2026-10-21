@@ -95,8 +95,11 @@ class FakeApify:
     """Hace de la API de Apify. Cada corrida devuelve `per_run` publicaciones con la consulta que recibió.
     `behavior`: ok | hang (RUNNING para siempre) | fail (FAILED). `start_status`: HTTP al lanzar."""
 
-    def __init__(self, behavior: str = "ok", *, per_run: int = 20, items_for=None, start_status: int = 201):
+    def __init__(self, behavior: str = "ok", *, per_run: int = 20, items_for=None, start_status: int = 201,
+                 permission: str | None = "LIMITED_PERMISSIONS", usage: float = 0.001):
         self.behavior = behavior
+        self.permission = permission
+        self.usage = usage
         self.per_run = per_run
         self.items_for = items_for
         self.start_status = start_status
@@ -115,6 +118,11 @@ class FakeApify:
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
+        if request.method == "GET" and path == "/v2/acts/devcake~mercadolibre-scraper":
+            data = {"id": "act1", "name": "mercadolibre-scraper", "username": "devcake"}
+            if self.permission is not None:
+                data["actorPermissionLevel"] = self.permission
+            return httpx.Response(200, json={"data": data})
         if request.method == "POST" and path.endswith("/runs"):
             if self.start_status not in (200, 201):
                 return httpx.Response(self.start_status, json={"error": {"message": f"token {TOKEN}"}})
@@ -136,7 +144,7 @@ class FakeApify:
                 status = "SUCCEEDED" if self.behavior == "ok" else "FAILED"
                 self._in_flight -= 1
             return httpx.Response(200, json={"data": {"id": f"run{n}", "status": status,
-                                                      "defaultDatasetId": f"ds{n}", "usageTotalUsd": 0.001}})
+                                                      "defaultDatasetId": f"ds{n}", "usageTotalUsd": self.usage}})
         if m := re.fullmatch(r"/v2/datasets/ds(\d+)/items", path):
             # A mano: un actor roto puede mandar NaN, y httpx.Response(json=...) no lo serializa.
             return httpx.Response(200, content=json.dumps(self._items(int(m.group(1)))).encode(),
@@ -201,8 +209,8 @@ async def test_el_input_del_actor_y_el_token(env, monkeypatch):
 
     start = next(r for r in fake.requests if r.method == "POST" and r.url.path.endswith("/runs"))
     assert start.url.path == "/v2/acts/devcake~mercadolibre-scraper/runs"
-    assert dict(start.url.params) == {"timeout": "30", "memory": "512", "maxTotalChargeUsd": "0.03",
-                                      "build": "1.0.103"}
+    assert dict(start.url.params) == {"timeout": "30", "memory": "512", "maxItems": "20",
+                                      "maxTotalChargeUsd": "0.03", "build": "1.0.103"}
     body = json.loads(start.content)
     assert body == {"queries": body["queries"], "country": "AR", "maxItems": 20, "enrichDetailPage": False,
                     "sort": "relevance", "condition": "new"}
@@ -380,15 +388,19 @@ async def test_salida_invalida_se_descarta_y_lo_valido_se_guarda(env, monkeypatc
     assert [c["id"] for c in json.loads(row.candidates)] == ["MLA1001"]
 
 
-async def test_todo_invalido_queda_empty(env, monkeypatch):
+async def test_todo_invalido_es_error_y_el_producto_queda_en_la_cola(env, monkeypatch):
+    """Publicaciones que vinieron y ninguna sirve no es "ML no tiene nada": un empty pasaría a la siguiente variante."""
     _snaps(1)
     FakeApify(items_for=lambda q, n: [_item(q, k, n, price=-1) for k in range(20)]).install(monkeypatch)
 
     report = await ams.run_search()
 
-    assert report.empty == 1
+    assert report.errors == 1 and report.empty == 0
     (row,) = _rows()
-    assert row.status == "empty" and "validación" in (row.reason or "")
+    assert row.status == "error" and "validación" in (row.reason or "")
+    # Se cobraron las 20: se imputa eso, no el peor caso ni cero.
+    assert report.usd_imputado == pytest.approx(20 * 0.001 + 0.00005)
+    assert [i["product_id"] for i in oficina_ml.build_queue(10)] == ["100"]
 
 
 # ─── Timeouts y fallas ─────────────────────────────────────────────
@@ -563,3 +575,207 @@ async def test_el_job_corre_apagado_sin_gastar(env, monkeypatch):
     out = await jobs.apify_ml_search()
 
     assert out["status"] == "disabled" and fake.requests == []
+
+
+# ─── Revisión de QA y seguridad (21-oct) ───────────────────────────
+
+
+def _claim_rows() -> dict[str, MlWebClaim]:
+    with Session(engine) as s:
+        return {c.product_id: c for c in s.exec(select(MlWebClaim))}
+
+
+def test_un_get_repetido_de_la_mac_no_estira_su_reserva(env):
+    pids = _snaps(2)
+    t0 = utcnow().replace(microsecond=0) - timedelta(minutes=30)
+    assert len(oficina_ml.queue_for_oficina(10, now=t0)) == 2
+    first = {p: c.expires_at for p, c in _claim_rows().items()}
+
+    again = oficina_ml.queue_for_oficina(10)                    # la Mac vuelve a pedir (crash y relanzado)
+
+    assert [i["product_id"] for i in again] == pids              # siguen siendo suyos…
+    assert {p: c.expires_at for p, c in _claim_rows().items()} == first   # …pero no se estiraron
+    assert all(e == t0 + oficina_ml.OFICINA_CLAIM_LEASE for e in first.values())
+    assert oficina_ml.OFICINA_CLAIM_LEASE == timedelta(minutes=90)
+
+
+def test_cada_lote_de_la_mac_renueva_sus_reservas_restantes(env):
+    pids = _snaps(3)
+    t0 = utcnow().replace(microsecond=0) - timedelta(minutes=60)
+    oficina_ml.queue_for_oficina(10, now=t0)
+    done = {"product_id": pids[0], "query": "q", "fetched_at": (utcnow() - timedelta(minutes=1)).isoformat() + "Z",
+            "status": "ok", "reason": "", "candidates": []}
+
+    oficina_ml.ingest([done])
+
+    rows = _claim_rows()
+    assert set(rows) == set(pids[1:])
+    now = utcnow()
+    for c in rows.values():
+        assert c.renewed_at > t0 + timedelta(minutes=50)
+        assert c.expires_at > now + oficina_ml.OFICINA_CLAIM_LEASE - timedelta(minutes=1)
+
+
+def test_claim_0_mira_sin_reservar_y_release_suelta_todo(env, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main as main_mod
+    from app.api import oficina_routes
+    from app.config import Settings
+    from tests.test_price_monitor_routes import _use_settings
+
+    pids = _snaps(2)
+    key = "oficina-key-" + "0123456789abcdef" * 2
+    _use_settings(monkeypatch)
+    settings = Settings(vendure_api_url="https://example.invalid/admin-api", oficina_search_key=key)
+    monkeypatch.setattr(oficina_ml, "get_settings", lambda: settings)
+    oficina_routes.reset_limits()
+    api, h = TestClient(main_mod.app), {"x-oficina-key": key}
+
+    peek = api.get("/api/oficina/ml-queue", params={"claim": 0}, headers=h)
+    assert [i["product_id"] for i in peek.json()["items"]] == pids and _claim_rows() == {}
+    assert api.get("/api/oficina/ml-queue", headers=h).status_code == 200 and set(_claim_rows()) == set(pids)
+    assert api.post("/api/oficina/ml-queue/release").status_code == 401          # misma auth que el resto
+
+    resp = api.post("/api/oficina/ml-queue/release", headers=h)
+
+    assert resp.status_code == 200 and resp.json() == {"released": 2} and _claim_rows() == {}
+    oficina_routes.reset_limits()
+
+
+async def test_apify_toma_la_reserva_de_una_mac_colgada_pero_no_la_de_una_viva(env, monkeypatch):
+    pids = _snaps(2)
+    t_old = utcnow() - timedelta(minutes=50)                   # reservada hace 50 min, sin lotes desde entonces
+    assert oficina_ml.claim([pids[0]], "oficina", oficina_ml.OFICINA_CLAIM_LEASE, now=t_old) == [pids[0]]
+    t_live = utcnow() - timedelta(minutes=50)
+    assert oficina_ml.claim([pids[1]], "oficina", oficina_ml.OFICINA_CLAIM_LEASE, now=t_live) == [pids[1]]
+    oficina_ml.renew("oficina", oficina_ml.OFICINA_CLAIM_LEASE, now=utcnow() - timedelta(minutes=5))
+    # La renovación alcanza a las dos: se vuelve a dejar colgada la primera a mano.
+    with Session(engine) as s:
+        row = s.get(MlWebClaim, pids[0])
+        row.renewed_at = t_old
+        s.add(row)
+        s.commit()
+    fake = FakeApify().install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.searches == 1 and fake.starts == 1
+    assert [r.product_id for r in _rows()] == [pids[0]]
+    assert set(_claim_rows()) == {pids[1]} and _claim_rows()[pids[1]].claimed_by == "oficina"
+
+
+def test_reserva_en_lote_de_muchos_productos(env):
+    pids = [str(10_000 + i) for i in range(300)]
+    assert oficina_ml.claim(pids, "apify-bulk", timedelta(minutes=30)) == pids
+    assert oficina_ml.claim(pids[::-1], "oficina", timedelta(minutes=90)) == []
+    assert oficina_ml.release("apify-bulk") == 300
+
+
+async def test_apagarlo_durante_la_corrida_frena_en_el_lote_siguiente(env, monkeypatch):
+    _snaps()
+
+    def items(query, n):
+        if n == 1:
+            runtime.set_value("apify_meli_search_enabled", 0)      # alguien lo apaga desde el dashboard
+        return [_item(query, k, n) for k in range(20)]
+
+    fake = FakeApify(items_for=items).install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.status == "stopped" and "apagó" in report.reason
+    assert fake.starts == 4 and report.searches == 4
+
+
+async def test_bajar_el_tope_durante_la_corrida_corta_con_el_valor_nuevo(env, monkeypatch):
+    _snaps()
+
+    def items(query, n):
+        if n == 1:
+            runtime.set_value("apify_meli_search_daily_max", 5)
+        return [_item(query, k, n) for k in range(20)]
+
+    fake = FakeApify(items_for=items).install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.status == "over_budget" and fake.starts == 5 and _used() == 5
+
+
+def test_el_tope_diario_no_pasa_de_500(env):
+    with pytest.raises(ValueError):
+        runtime.set_value("apify_meli_search_daily_max", 600)
+    assert runtime.set_value("apify_meli_search_daily_max", 500) == 500
+
+
+@pytest.mark.parametrize("permission", ["FULL_PERMISSIONS", None])
+async def test_actor_sin_permisos_limitados_no_corre_avisa_y_audita(env, monkeypatch, permission):
+    _snaps()
+    sent = []
+
+    async def fake_notify(subject, body):
+        sent.append((subject, body))
+        return {"email": True, "webhook": False}
+
+    monkeypatch.setattr(ams, "notify", fake_notify)
+    fake = FakeApify(permission=permission).install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.status == "stopped" and report.fatal and fake.starts == 0 and _used() == 0
+    assert ("FULL_PERMISSIONS" in report.reason) if permission else ("no se pudo confirmar" in report.reason)
+    assert len(sent) == 1 and "Apify" in sent[0][0]
+    with Session(engine) as s:
+        (row,) = s.exec(select(AuditLog).where(AuditLog.action == "apify_ml_search_run")).all()
+    assert json.loads(row.after)["fatal"] is True
+    assert _claim_rows() == {}
+
+
+@pytest.mark.parametrize("code", [401, 402, 403, 404])
+async def test_error_fatal_avisa_por_el_notifier(env, monkeypatch, code):
+    _snaps(2)
+    sent = []
+
+    async def fake_notify(subject, body):
+        sent.append(body)
+        return {}
+
+    monkeypatch.setattr(ams, "notify", fake_notify)
+    FakeApify(start_status=code).install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.status == "stopped" and report.fatal and len(sent) == 1 and str(code) in sent[0]
+    assert TOKEN not in sent[0]
+
+
+async def test_corrida_normal_no_avisa(env, monkeypatch):
+    _snaps(1)
+    monkeypatch.setattr(ams, "notify", lambda *a: pytest.fail("no hay nada que avisar"))
+    FakeApify().install(monkeypatch)
+    assert (await ams.run_search()).status == "ok"
+
+
+async def test_cobro_informado_de_mas_se_avisa_en_el_log_y_el_audit(env, monkeypatch, caplog):
+    _snaps(1)
+    FakeApify(usage=0.07).install(monkeypatch)
+
+    report = await ams.run_search()
+
+    assert report.overcharged == [{"run_id": "run1", "usage_usd": 0.07}]
+    assert "más del doble" in caplog.text
+    with Session(engine) as s:
+        (row,) = s.exec(select(AuditLog).where(AuditLog.action == "apify_ml_search_run")).all()
+    assert json.loads(row.after)["overcharged_runs"] == [{"run_id": "run1", "usage_usd": 0.07}]
+    assert report.usd_imputado == pytest.approx(0.07)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("+100 vendidos", 100), ("+5 mil vendidos", 5000), ("1.234 vendidos", 1234), ("+1 vendido", 1),
+    ("Nuevo | +50 vendidos", None), ("muchos vendidos", None), ("+100 sold", None), (None, None), (100, None),
+    ("+999999999999 vendidos", None),
+])
+def test_ventas_del_texto_del_actor(text, expected):
+    wire = ams.to_wire(_item("termo", 1, 1, sold_quantity_text=text))
+    assert wire["sold_quantity"] == expected
