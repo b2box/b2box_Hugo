@@ -93,6 +93,31 @@ def reserve(
     del proceso en cualquier punto deja la corrida y el contador del día
     iguales (o se commitean los dos, o ninguno).
     """
+    done = _reserve_cas(key, budget, 1, floor, also)
+    return done[0] if done else None
+
+
+def reserve_up_to(key: str, budget: int, wanted: int) -> int:
+    """Reserva de una hasta `wanted` unidades contra `budget` (un lote entero).
+
+    Devuelve cuántas se reservaron: `wanted` si había lugar, menos si quedaba
+    menos cupo, 0 si está agotado o no se pudo reservar (fail-closed). Es UN
+    compare-and-swap: dos lotes que corren a la vez no pueden pasarse juntos
+    del tope, aunque cada uno vea "todavía hay lugar"."""
+    if wanted <= 0:
+        return 0
+    done = _reserve_cas(key, budget, wanted, None, None)
+    return done[1] if done else 0
+
+
+def _reserve_cas(
+    key: str,
+    budget: int,
+    wanted: int,
+    floor: Callable[[], int] | None,
+    also: Callable[[Session], None] | None,
+) -> tuple[int, int] | None:
+    """El compare-and-swap de `reserve` y `reserve_up_to`: (total del día, reservadas) o None."""
     today = today_utc()
     try:
         with _lock, Session(engine) as s:
@@ -106,7 +131,8 @@ def reserve(
                     base = floor()
                 if base >= budget:
                     return None  # sin cupo: no se reserva ni se incrementa
-                total = base + 1
+                granted = min(wanted, budget - base)
+                total = base + granted
                 value = f"{today}:{total}"
                 if row is None:
                     s.add(Setting(key=key, value=value))
@@ -118,7 +144,7 @@ def reserve(
                         # Otro worker creó la fila primero: se reintenta el CAS.
                         s.rollback()
                         continue
-                    return total
+                    return total, granted
                 done = s.execute(
                     update(Setting)
                     .where(Setting.key == key, Setting.value == previous)
@@ -128,7 +154,7 @@ def reserve(
                     if also is not None:
                         also(s)
                     s.commit()
-                    return total
+                    return total, granted
                 # rowcount 0 = alguien más escribió entre la lectura y el UPDATE.
                 s.rollback()
                 s.expire_all()
