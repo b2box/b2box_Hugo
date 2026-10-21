@@ -198,7 +198,9 @@ def _ar_permalink(item: dict) -> str | None:
 
 def _price_cents(value: object) -> int | None:
     price = _number(value)
-    if price is None or not math.isfinite(price) or price <= 0:
+    # El tope va ANTES de multiplicar: 1e308 es finito pero x100 da infinito y round() lanza OverflowError,
+    # que tiraba la corrida entera del producto (ya cobrada) en vez de descartar solo esa publicación.
+    if price is None or not math.isfinite(price) or price <= 0 or price >= MAX_PRICE_CENTS / 100:
         return None
     cents = round(price * 100)
     return cents if 0 < cents < MAX_PRICE_CENTS else None
