@@ -872,23 +872,41 @@ toma **la misma cola** (`oficina_ml.build_queue`) y busca con el actor `devcake/
 - **Cuándo:** job `apify_ml_search` del scheduler, `APIFY_MELI_SEARCH_CRON_UTC` (default `30 4 * * *` = 01:30 ART, antes
   del semáforo de las 06:00 UTC). Sin recuperación al arrancar: un deploy no lanza búsquedas pagas.
 - **Prender / tope** (dashboard, grupo monitor, quedan en el audit log): `apify_meli_search_enabled` (default **0 = apagado**)
-  y `apify_meli_search_daily_max` (default 200 búsquedas por día UTC). El cupo de cada lote se reserva **atómico** antes de
-  lanzarlo (`daily_budget.reserve_up_to`): dos corridas a la vez no se pasan del tope. Al agotarse, la corrida termina
+  y `apify_meli_search_daily_max` (default 200, máximo 500 búsquedas por día UTC). El cupo de cada lote se reserva
+  **atómico** antes de lanzarlo (`daily_budget.reserve_up_to`): dos corridas a la vez no se pasan del tope. Los dos se
+  releen **en cada lote**: apagarlo o bajar el tope corta esa misma noche. Al agotarse el cupo la corrida termina
   `over_budget` y lo que falta queda para mañana.
+- **Permisos del actor:** antes de cada noche Hugo lee `GET /v2/acts/{actor}` y exige
+  `actorPermissionLevel = LIMITED_PERMISSIONS` (el actor no puede tocar otros recursos de la cuenta con nuestro token).
+  Si es otro valor o no viene, no corre: queda `stopped` en el audit log y se avisa por el notifier (mail / webhook).
 - **Una corrida del actor por producto**, de a lotes de `APIFY_MELI_SEARCH_CONCURRENCY` (4) en paralelo. El actor acepta
   varias consultas, pero sus publicaciones no dicen qué consulta las trajo y una repetida sale una sola vez: agrupar
   atribuiría publicaciones al producto equivocado. Se guardan las primeras `pm_ml_web_max_results` (8) de las 20 que cobra.
 - **Costo:** USD 0,001 por publicación con mínimo de 20 por consulta + USD 0,00005 por arranque ≈ **USD 0,02 por búsqueda**
-  (200 por día ≈ USD 4). Cada corrida lleva `maxTotalChargeUsd=0.03`; se imputa para arriba y queda en el audit log
-  (`apify_ml_search_run`: búsquedas, publicaciones, `usd_imputado`).
+  (200 por día ≈ USD 4). Cada corrida lleva `maxItems=20` y `maxTotalChargeUsd=0.03`; se imputa para arriba y queda en el
+  audit log (`apify_ml_search_run`: búsquedas, publicaciones, `usd_imputado`). Una corrida que informa más del doble del
+  techo (USD 0,06) se loguea como warning y va en `overcharged_runs` del audit.
 - **Validación:** id de ML, título, precio numérico finito > 0 con moneda, link https de `mercadolibre.com.ar` (otro host →
-  se descarta), foto de `mlstatic`; y después `ingest` vuelve a sanear todo. Corrida que no termina en
-  `APIFY_MELI_SEARCH_TIMEOUT_S` (120) → se aborta y queda `error` (el producto sigue en la cola). 401/402/403/404 frenan la noche.
+  se descarta), foto de `mlstatic`; y después `ingest` vuelve a sanear todo. Si el actor trajo publicaciones y **ninguna**
+  pasa, queda `error` (no `empty`: el producto sigue en la cola y no salta a la siguiente variante). Corrida que no termina
+  en `APIFY_MELI_SEARCH_TIMEOUT_S` (120) → se aborta y queda `error`. 401/402/403/404 o 6 errores seguidos frenan la noche
+  y se avisa por el notifier.
+- **Ventas:** el actor no trae un número de ventas, solo `sold_quantity_text` (texto, y según su esquema más bien con
+  `enrichDetailPage`, que no se usa). Si viene con la forma «+100 vendidos» / «+5 mil vendidos» se pasa a `sold_quantity`;
+  cualquier otra forma queda sin dato. En la práctica, sin la página de detalle, lo esperable es que no venga.
 - **La Mac y Apify no buscan lo mismo:** quien toma un producto lo reserva en `ml_web_claim` y la cola no se lo ofrece al
-  otro mientras la reserva esté viva. La Mac reserva su cola por 3 h al pedirla; cuando reporta un producto se suelta, y si
-  reporta un **bloqueo** se sueltan todas (así Apify las toma esa misma noche). Apify reserva de a lote (30 min) y suelta al terminar.
+  otro mientras la reserva esté viva.
+  - La Mac reserva su cola al pedirla por **90 min**, y la reserva **se desliza**: cada lote que manda renueva las que le
+    quedan. Pedir la cola de nuevo NO las estira. Lo que reporta se suelta; si reporta un **bloqueo**, o al terminar por
+    cualquier camino (`POST /api/oficina/ml-queue/release`, misma auth, lo llama el runner en un `finally`), se sueltan todas.
+  - `--check` y `--dry-run` piden la cola con `?claim=0`: miran sin reservar.
+  - Una reserva de la Mac con más de 45 min y sin ningún lote suyo en 45 min es de una Mac colgada: Apify la toma aunque
+    no haya vencido.
+  - Apify reserva de a lote (30 min) y suelta al terminar. La reserva es UNA sentencia por lote
+    (`INSERT … ON CONFLICT DO UPDATE … WHERE libre … RETURNING`, igual en SQLite y Postgres).
 
-**Migración y rollback.** Automática en el arranque: la tabla `ml_web_claim` (nueva, no toca las existentes). Para volver atrás:
+**Migración y rollback.** Automática en el arranque: la tabla `ml_web_claim` (nueva, con `renewed_at`; no toca las
+existentes). Para volver atrás:
 
 ```sql
 DROP TABLE IF EXISTS ml_web_claim;
