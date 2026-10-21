@@ -26,7 +26,7 @@ def qa3_clean():
 
     init_db()                    # (este test puede correr solo: las tablas tienen que existir para vaciarlas)
     # MlWebResult no existe en origin/main: así este archivo también corre en el worktree de e8209e1 (dorado).
-    web_results = [m for m in (getattr(models, "MlWebResult", None),) if m is not None]
+    web_results = [m for m in (getattr(models, "MlWebResult", None), getattr(models, "MlWebClaim", None)) if m is not None]
     with Session(engine) as s:
         for model in (*web_results, MarketPriceSnapshot, PriceMonitorRun, MarketMatchFeedback, MlSellerCache):
             for row in s.exec(select(model)).all():

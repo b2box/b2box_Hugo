@@ -25,7 +25,7 @@ from app import main as main_mod  # noqa: E402
 from app.api import oficina_routes  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.config import Settings  # noqa: E402
-from app.db.models import MarketPriceSnapshot, MlWebResult  # noqa: E402
+from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.pricing import market_ml_web, oficina_ml  # noqa: E402
 from tests.test_oficina_api import H, KEY, _card, _iso, _post, _queue, _res, _rows, _snap, api  # noqa: E402,F401
@@ -465,7 +465,7 @@ def test_forty_nights_of_the_real_queue_keep_every_product_fresh_when_capacity_a
     def simulate(margin: timedelta) -> list[int]:
         monkeypatch.setattr(oficina_ml, "QUEUE_REFRESH_MARGIN", margin)
         with Session(engine) as s:
-            for model in (MlWebResult, MarketPriceSnapshot):
+            for model in (MlWebResult, MlWebClaim, MarketPriceSnapshot):
                 for row in s.exec(select(model)).all():
                     s.delete(row)
             s.commit()
