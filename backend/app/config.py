@@ -258,6 +258,32 @@ class Settings(EnvSettings):
     lookup_shared_per_minute: int = 40
     # Llamadas por día al rerank de visión del catálogo (Sonnet), runtime.
     vision_rerank_daily_budget: int = 300
+    # ── Apify: búsqueda web de ML para el semáforo ─────────────
+    # Ver app/pricing/apify_ml_search.py. Reemplaza a la Mac de la oficina (ML la
+    # bloquea desde el 20-oct): toma la misma cola y guarda por el mismo camino.
+    # Actor y build fijados (cambiar de actor cambia el formato de salida: PR, no env).
+    # Prendido y tope diario son runtime (`apify_meli_search_enabled`,
+    # `apify_meli_search_daily_max`); el cron es solo env.
+    apify_meli_search_actor: str = Field(
+        default="devcake/mercadolibre-scraper",
+        description="Actor de búsqueda en ML (usuario/nombre, en lista blanca)",
+    )
+    apify_meli_search_build: str = Field(
+        default="1.0.103", description="Build fijado del actor (vacío = el default del actor)")
+    apify_meli_search_timeout_s: int = Field(
+        default=120, ge=30, le=600, description="Techo de cada corrida (una búsqueda); al vencer se aborta")
+    # Corridas en paralelo = productos por lote. Una corrida por producto: la salida del
+    # actor no dice qué consulta trajo cada publicación.
+    apify_meli_search_concurrency: int = Field(default=4, ge=1, le=10)
+    apify_meli_search_cron_utc: str = Field(
+        default="30 4 * * *",
+        description=(
+            "Cron (UTC) de la búsqueda con Apify. 04:30 UTC = 01:30 ART: después de que arranca la Mac "
+            "(01:00 ART) y antes del semáforo (06:00 UTC). Vacío = sin corrida programada"
+        ),
+    )
+    apify_meli_search_enabled: int = 0
+    apify_meli_search_daily_max: int = 200
 
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")

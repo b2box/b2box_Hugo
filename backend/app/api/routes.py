@@ -926,6 +926,8 @@ _COSTLY_SETTINGS = frozenset({
     "lookup_shared_daily_limit",
     "lookup_shared_per_minute",
     "vision_rerank_daily_budget",
+    "apify_meli_search_enabled",
+    "apify_meli_search_daily_max",
     "otapi_daily_budget",
     "pm_ml_daily_budget",
     "pm_ml_web_daily_budget",

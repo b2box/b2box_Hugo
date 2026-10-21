@@ -369,6 +369,30 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="estimate_tier_qty_3",
         min=1, max=100000, step=10, group="app",
     ),
+    SettingMeta(
+        key="apify_meli_search_enabled",
+        label="Apify: búsqueda web de ML para el semáforo (1 / 0)",
+        description=(
+            "1 = cada madrugada Hugo busca en Mercado Libre con Apify los productos de la cola de la "
+            "oficina (los que el semáforo no pudo medir) y el semáforo usa esos resultados igual que los "
+            "de la Mac. ~USD 0,02 por búsqueda. 0 = apagado. Sin APIFY_TOKEN no corre."
+        ),
+        type="int", parser=int,
+        default_attr="apify_meli_search_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="apify_meli_search_daily_max",
+        label="Apify: búsquedas de ML por día",
+        description=(
+            "Tope de búsquedas por día (UTC) de la búsqueda web de ML con Apify. Cada búsqueda es un "
+            "producto y cuesta ~USD 0,02 (el actor cobra 20 publicaciones como mínimo; se guardan 8). "
+            "El cupo se reserva antes de cada lote: dos corridas a la vez no se pasan del tope."
+        ),
+        type="int", parser=int,
+        default_attr="apify_meli_search_daily_max",
+        min=0, max=2000, step=10, group="monitor",
+    ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",
