@@ -304,8 +304,11 @@ async def test_lanzamiento_colgado_no_imputa_y_el_producto_queda_en_la_cola(env,
     monkeypatch.setattr(env, "apify_meli_search_timeout_s", 1)
     monkeypatch.setattr(ams, "_DEADLINE_MARGIN_S", 0.2)
     fake = FakeApify().install(monkeypatch)
+    normal = fake.handler
 
     async def handler(request):
+        if request.method == "GET" and request.url.path.startswith("/v2/acts/"):
+            return await normal(request)            # el chequeo de permisos del actor contesta normal
         fake.requests.append(request)
         await asyncio.sleep(5)
         return httpx.Response(500)

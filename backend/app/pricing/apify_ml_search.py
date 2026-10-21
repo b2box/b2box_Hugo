@@ -55,6 +55,7 @@ from app.clock import utcnow
 from app.config import get_settings
 from app.db.models import AuditLog
 from app.db.session import engine
+from app.notifier.dispatcher import notify
 from app.ingest.apify_1688 import _json, _number, _request_bounded, _Run
 from app.pricing import daily_budget, oficina_ml
 from app.pricing.market_ml import (
@@ -111,7 +112,14 @@ _STATUS_REASON = {
     404: "actor o corrida inexistente",
     429: "Apify limitó los requests",
 }
+# Lo único que se acepta del actor: que corra con permisos LIMITADOS (no puede tocar otros recursos de la cuenta
+# con nuestro token). Si el autor lo cambia a FULL_PERMISSIONS, la noche no corre hasta que alguien lo revise.
+_REQUIRED_PERMISSION = "LIMITED_PERMISSIONS"
+# Una corrida que informa más que esto se avisa: el techo de cobro no se respetó o el precio del actor cambió.
+_OVERCHARGE_USD = 2 * _MAX_CHARGE_USD
 _AR_HOST = "mercadolibre.com.ar"
+# "+100 vendidos", "+5 mil vendidos", "1.234 vendidos". Otra forma (o en otro idioma) → sin dato, no se adivina.
+_SOLD_RE = re.compile(r"^\+?\s*(\d{1,3}(?:\.\d{3})*|\d{1,9})\s*(mil)?\s+vendid[oa]s?$", re.ASCII | re.IGNORECASE)
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$", re.ASCII)
 _DOMAIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,60}$", re.ASCII)
 _CATALOG_IN_PATH = re.compile(r"/p/(MLA\d{1,20})(?:[/?#]|$)", re.ASCII)
@@ -172,7 +180,8 @@ def _actor_input(query: str) -> dict[str, Any]:
 def _start_url(actor: str, build: str, timeout_s: int) -> str:
     url = (
         f"{API_BASE}/acts/{quote(actor.replace('/', '~'), safe='~')}/runs"
-        f"?timeout={timeout_s}&memory={_ACTOR_MEMORY_MB}&maxTotalChargeUsd={_MAX_CHARGE_USD}"
+        f"?timeout={timeout_s}&memory={_ACTOR_MEMORY_MB}&maxItems={_MAX_ITEMS}"
+        f"&maxTotalChargeUsd={_MAX_CHARGE_USD}"
     )
     return f"{url}&build={quote(build, safe='')}" if build else url
 
@@ -206,6 +215,18 @@ def _price_cents(value: object) -> int | None:
     return cents if 0 < cents < MAX_PRICE_CENTS else None
 
 
+def _sold_quantity(value: object) -> int | None:
+    """`sold_quantity_text` del actor ("+100 vendidos", "+5 mil vendidos") → 100, 5000. Lo que no tenga esa
+    forma exacta queda sin dato."""
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    m = _SOLD_RE.fullmatch(value.strip())
+    if m is None:
+        return None
+    number = int(m.group(1).replace(".", "")) * (1000 if m.group(2) else 1)
+    return number if number <= 10**9 else None
+
+
 def to_wire(item: object) -> dict[str, Any] | None:
     """Una publicación del actor en la forma en que la Mac manda las suyas (oficina_ml.candidate_to_wire),
     o None si no pasa: id de ML, título, precio finito > 0 con moneda, link de mercadolibre.com.ar."""
@@ -233,7 +254,7 @@ def to_wire(item: object) -> dict[str, Any] | None:
         "id": ref, "name": name, "image_urls": [image] if image else [], "permalink": permalink,
         "domain_id": domain if isinstance(domain, str) and _DOMAIN_ID_RE.fullmatch(domain) else "",
         "price_cents": price, "currency": currency, "brand": clean_line(item.get("brand"), 40),
-        "seller": clean_line(seller, 60), "sold_quantity": None,
+        "seller": clean_line(seller, 60), "sold_quantity": _sold_quantity(item.get("sold_quantity_text")),
         "catalog_id": catalog.group(1) if catalog else "",
     }
 
@@ -267,6 +288,7 @@ class SearchOutcome:
     raw_items: int = 0
     run_id: str = ""
     usd_imputado: float = 0.0
+    usage_usd: float = 0.0
     fatal: bool = False
 
     def as_result(self) -> dict[str, Any]:
@@ -311,7 +333,11 @@ async def search_one(http: httpx.AsyncClient, product_id: str, query: str, *, ac
     if run.run_id and not run.finished:
         await _abort(http, run, headers)
     out.run_id = run.run_id
-    if out.status in ("ok", "empty"):
+    out.usage_usd = run.usage_usd
+    if run.usage_usd > _OVERCHARGE_USD:
+        log.warning("Apify ML: la corrida %s informa USD %.4f (más del doble del techo de %.2f)",
+                    run.run_id, run.usage_usd, _MAX_CHARGE_USD)
+    if out.status in ("ok", "empty") or out.raw_items:
         # Lo que vino en el dataset es lo que se cobró; Apify puede informar más (nunca se imputa menos).
         out.usd_imputado = max(run.usage_usd, out.raw_items * _USD_PER_RESULT + _USD_PER_START)
     elif not run.run_id:
@@ -359,10 +385,12 @@ async def _drive(http: httpx.AsyncClient, run: _Run, out: SearchOutcome, actor: 
     out.candidates = normalize(items, limit)
     if out.candidates:
         out.status = "ok"
+    elif not items:
+        out.status, out.reason = "empty", "ML no tiene publicaciones para la consulta"
     else:
-        out.status = "empty"
-        out.reason = ("ML no tiene publicaciones para la consulta" if not items
-                      else f"ninguna de las {len(items)} publicaciones pasó la validación")
+        # El actor trajo publicaciones y ninguna sirve: no es "ML no tiene nada" (eso haría pasar el producto a la
+        # siguiente variante). Es una falla nuestra o del actor: el producto queda en la cola.
+        out.status, out.reason = "error", f"ninguna de las {len(items)} publicaciones pasó la validación"
 
 
 # ─── La corrida de la noche ────────────────────────────────────────
@@ -381,12 +409,16 @@ class RunReport:
     rejected: int = 0
     usd_imputado: float = 0.0
     run_ids: list[str] = field(default_factory=list)
+    # Corridas que informaron más de _OVERCHARGE_USD: [{run_id, usage_usd}].
+    overcharged: list[dict[str, Any]] = field(default_factory=list)
+    # Se frenó por algo que hay que mirar (token, saldo, permisos del actor, racha de errores): se avisa.
+    fatal: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {"status": self.status, "reason": self.reason, "searches": self.searches, "ok": self.ok,
                 "empty": self.empty, "errors": self.errors, "results": self.results, "stored": self.stored,
                 "rejected": self.rejected, "usd_imputado": round(self.usd_imputado, 6),
-                "runs": len(self.run_ids)}
+                "runs": len(self.run_ids), "overcharged_runs": self.overcharged, "fatal": self.fatal}
 
 
 async def run_search(trigger: str = "cron") -> RunReport:
@@ -408,7 +440,37 @@ async def run_search(trigger: str = "cron") -> RunReport:
                  report.errors, report.results, report.usd_imputado, time.monotonic() - started)
         if report.status != "disabled":
             _audit(report, trigger)
+        if report.fatal:
+            await _notify_stop(report, trigger)
         return report
+
+
+async def _notify_stop(report: RunReport, trigger: str) -> None:
+    """Aviso por los canales de siempre (mail / webhook): la búsqueda de la noche se frenó y no se arregla sola."""
+    try:
+        await notify(
+            "Hugo: la búsqueda de ML con Apify se frenó",
+            f"La búsqueda web de ML con Apify ({trigger}) se frenó: {report.reason}.\n"
+            f"Hizo {report.searches} búsquedas (USD {report.usd_imputado:.4f} imputados) antes de frenar.\n"
+            "Revisar el token y el saldo de Apify, o los permisos del actor, antes de la próxima noche.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Apify ML: no se pudo avisar que la corrida se frenó (%s)", type(exc).__name__)
+
+
+async def _actor_permission(http: httpx.AsyncClient, actor: str, headers: dict) -> str:
+    """El nivel de permisos con que corre el actor (`actorPermissionLevel`), o "" si no se pudo saber."""
+    try:
+        status, body = await asyncio.wait_for(
+            _request_bounded(http, "GET", f"{API_BASE}/acts/{quote(actor.replace('/', '~'), safe='~')}", headers),
+            timeout=_ABORT_WAIT_S + 10.0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Apify ML: no se pudo leer el actor (%s)", type(exc).__name__)
+        return ""
+    data = _json(body) if status in (200, 201) else None
+    data = data.get("data") if isinstance(data, dict) else None
+    level = data.get("actorPermissionLevel") if isinstance(data, dict) else None
+    return level if isinstance(level, str) and len(level) <= 40 else ""
 
 
 async def _run(report: RunReport, started: float) -> None:
@@ -429,7 +491,8 @@ async def _run(report: RunReport, started: float) -> None:
     # Un lote de más que el cupo libre: quien corta es la reserva atómica (otra corrida puede gastar entre medio),
     # y así se sabe si quedó cola sin buscar por falta de cupo.
     queue = await asyncio.to_thread(
-        oficina_ml.build_queue, min(left + batch_size, oficina_ml.MAX_QUEUE), claimer=claimer)
+        oficina_ml.build_queue, min(left + batch_size, oficina_ml.MAX_QUEUE), claimer=claimer,
+        take_stale_oficina=True)
     if not queue:
         report.reason = "la cola está vacía"
         return
@@ -437,12 +500,25 @@ async def _run(report: RunReport, started: float) -> None:
     http = _new_client(_POLL_WAIT_S + 15.0)
     fail_streak = 0
     try:
+        level = await _actor_permission(http, actor, headers)
+        if level != _REQUIRED_PERMISSION:
+            report.status, report.fatal = "stopped", True
+            report.reason = (f"el actor corre con permisos {level}, se exige {_REQUIRED_PERMISSION}" if level
+                             else "no se pudo confirmar que el actor corra con permisos limitados")
+            return
         for at in range(0, len(queue), batch_size):
             if time.monotonic() - started > _JOB_MAX_S:
                 report.status, report.reason = "stopped", "se pasó el tiempo máximo de la corrida"
                 return
+            # Prendido y tope se releen en cada lote: apagarlo o bajarlo desde el dashboard corta esta misma noche.
+            runtime.invalidate()
+            if not is_enabled():
+                report.status, report.reason = "stopped", "se apagó durante la corrida"
+                return
+            budget = daily_max()
             batch = {i["product_id"]: i["queries"][0] for i in queue[at:at + batch_size]}
-            claimed = await asyncio.to_thread(oficina_ml.claim, list(batch), claimer, _CLAIM_LEASE)
+            claimed = await asyncio.to_thread(oficina_ml.claim, list(batch), claimer, _CLAIM_LEASE,
+                                              take_stale_oficina=True)
             if not claimed:
                 continue                     # los tomó la Mac entre que se armó la cola y ahora
             granted = await asyncio.to_thread(daily_budget.reserve_up_to, COUNTER_KEY, budget, len(claimed))
@@ -455,12 +531,13 @@ async def _run(report: RunReport, started: float) -> None:
                 await asyncio.to_thread(_store, outcomes, report)
                 await asyncio.to_thread(oficina_ml.release, claimer, todo)
                 if any(o.fatal for o in outcomes):
-                    report.status = "stopped"
+                    report.status, report.fatal = "stopped", True
                     report.reason = next(o.reason for o in outcomes if o.fatal)
                     return
                 fail_streak = 0 if any(o.status != "error" for o in outcomes) else fail_streak + len(outcomes)
                 if fail_streak >= _FAIL_STREAK:
-                    report.status, report.reason = "stopped", f"{fail_streak} búsquedas seguidas con error"
+                    report.status, report.fatal = "stopped", True
+                    report.reason = f"{fail_streak} búsquedas seguidas con error"
                     return
             if granted < len(claimed):
                 report.status = "over_budget"
@@ -477,6 +554,8 @@ def _store(outcomes: list[SearchOutcome], report: RunReport) -> None:
         report.usd_imputado += o.usd_imputado
         if o.run_id:
             report.run_ids.append(o.run_id)
+        if o.usage_usd > _OVERCHARGE_USD:
+            report.overcharged.append({"run_id": o.run_id, "usage_usd": round(o.usage_usd, 6)})
         if o.status == "ok":
             report.ok += 1
             report.results += len(o.candidates)

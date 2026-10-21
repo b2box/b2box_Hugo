@@ -269,7 +269,7 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="int", parser=int,
         default_attr="apify_meli_search_daily_max",
-        min=0, max=2000, step=10, group="monitor",
+        min=0, max=500, step=10, group="monitor",
     ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
