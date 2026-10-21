@@ -318,11 +318,23 @@ class HugoClient:
         except ValueError:
             raise HugoError("Hugo contestó algo que no es JSON") from None
 
-    def queue(self, limit: int) -> dict[str, Any]:
-        data = self._json(self._request("GET", "/api/oficina/ml-queue", params={"limit": limit}))
+    def queue(self, limit: int, claim: bool = True) -> dict[str, Any]:
+        """La cola. Con `claim` Hugo la reserva para la oficina (Apify no la busca); sin él solo se mira."""
+        data = self._json(self._request("GET", "/api/oficina/ml-queue",
+                                        params={"limit": limit, "claim": 1 if claim else 0}))
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise HugoError("Hugo contestó una cola con otra forma")
         return data
+
+    def release(self) -> None:
+        """Suelta las reservas de la cola: así Apify toma esa misma noche lo que la Mac no buscó. Un solo intento y
+        nunca lanza (se llama al salir, por cualquier camino); si falla, las reservas vencen solas."""
+        try:
+            resp = self._call("POST", "/api/oficina/ml-queue/release")
+            if resp.status_code != 200:
+                log.warning("Hugo no soltó las reservas de la cola (HTTP %s): vencen solas", resp.status_code)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("no se pudieron soltar las reservas de la cola (%s): vencen solas", type(exc).__name__)
 
     def send(self, results: list[dict[str, Any]]) -> dict[str, Any]:
         """Un lote (idempotente por producto y fetched_at, así que reintentarlo no duplica nada)."""
@@ -635,9 +647,11 @@ def main(argv: list[str] | None = None) -> int:
     # launchd (o el apagado de la Mac) corta con SIGTERM: se trata como Ctrl+C, así lo que ya se buscó se entrega.
     previous_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     hugo = HugoClient(config)
+    # --check y --dry-run no reservan la cola (no van a mandar nada): Apify la puede tomar igual.
+    claims = not (args.check or args.dry_run)
     try:
         try:
-            queue = hugo.queue(1 if args.check else args.max)
+            queue = hugo.queue(1 if args.check else args.max, claim=claims)
         except (HugoError, SendFailed) as exc:
             log.error("%s", exc)
             return EXIT_CONFIG if isinstance(exc, HugoError) else EXIT_SEND
@@ -662,6 +676,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
+        if claims:
+            hugo.release()                  # por cualquier camino: terminó bien, bloqueo, error o Ctrl+C
         hugo.close()
         if lock is not None:
             lock.close()                    # suelta el candado

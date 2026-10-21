@@ -447,6 +447,9 @@ class MlWebClaim(SQLModel, table=True):
     # "oficina" o "apify-<hex>" (cada corrida de Apify tiene el suyo).
     claimed_by: str = Field(max_length=24)
     claimed_at: datetime = Field(default_factory=utcnow)
+    # Última señal de vida de quien reservó (la Mac: su último lote). Con claimed_at, decide si la reserva
+    # de una Mac está colgada (oficina_ml.OFICINA_STALE_AFTER).
+    renewed_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime = Field(index=True)
 
 
