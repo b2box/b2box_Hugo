@@ -7,6 +7,7 @@ Jobs:
   4. price_monitor       → semáforo de precios contra Mercado Libre y tiendas (sombra).
   5. store_index         → indexa las tiendas (Casa Perfecta, Gadnic…) de madrugada.
   6. seo_text_audit      → audita los textos del catálogo (SEO); solo lee Vendure.
+  7. apify_ml_search     → busca en la web de ML con Apify la cola de la oficina (antes del semáforo).
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -37,6 +38,7 @@ from app.db.session import engine
 from app.dedup.orchestrator import find_duplicate_pairs
 from app.dedup.url_match import normalize_url
 from app.notifier.dispatcher import notify, notify_digest
+from app.pricing import apify_ml_search as apify_ml_search_mod
 from app.pricing import price_monitor as price_monitor_mod
 from app.pricing import store_catalog, store_match
 from app.pricing.diff import compare_source_snapshots
@@ -850,6 +852,33 @@ def _cron_missed(trigger: CronTrigger, last_run: datetime | None, now: datetime)
     return due is not None and due <= now
 
 
+# ─── Job 10: búsqueda web de ML con Apify (cola de la oficina) ─────
+
+APIFY_ML_SEARCH_JOB_ID = apify_ml_search_mod.JOB_ID
+_APIFY_ML_SEARCH_DEFAULT_CRON = "30 4 * * *"
+
+
+async def apify_ml_search(trigger: str = "cron") -> dict:
+    """Busca con Apify lo que el semáforo no pudo medir (ver app/pricing/apify_ml_search.py). Apagado por
+    defecto (`apify_meli_search_enabled`): el job corre igual y sale sin gastar nada."""
+    report = await apify_ml_search_mod.run_search(trigger=trigger)
+    if report.status in ("ok", "over_budget"):
+        _mark_job_run(APIFY_ML_SEARCH_JOB_ID)
+    return report.as_dict()
+
+
+def _apify_ml_search_trigger(expr: str) -> CronTrigger | None:
+    """None = sin corrida programada (APIFY_MELI_SEARCH_CRON_UTC vacío)."""
+    if not expr.strip():
+        return None
+    try:
+        return CronTrigger.from_crontab(expr, timezone="UTC")
+    except ValueError as exc:
+        log.error("APIFY_MELI_SEARCH_CRON_UTC=%r inválido (%s); uso %r",
+                  expr, exc, _APIFY_ML_SEARCH_DEFAULT_CRON)
+        return CronTrigger.from_crontab(_APIFY_ML_SEARCH_DEFAULT_CRON, timezone="UTC")
+
+
 async def daily_digest() -> None:
     cutoff = utcnow() - timedelta(hours=24)
     with Session(engine) as session:
@@ -959,6 +988,16 @@ def register_jobs() -> None:
             id=SEO_TEXT_AUDIT_JOB_ID,
             replace_existing=True, coalesce=True, max_instances=1,
             **seo_kwargs,
+        )
+    # Búsqueda web de ML con Apify: de madrugada, antes del semáforo. Sin recuperación al arrancar: un
+    # deploy a media tarde no tiene que lanzar búsquedas pagas (lo que falte lo toma la noche siguiente).
+    apify_trigger = _apify_ml_search_trigger(getattr(s, "apify_meli_search_cron_utc", None) or "")
+    if apify_trigger is not None:
+        scheduler.add_job(
+            apify_ml_search,
+            apify_trigger,
+            id=APIFY_ML_SEARCH_JOB_ID,
+            replace_existing=True, coalesce=True, max_instances=1,
         )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:

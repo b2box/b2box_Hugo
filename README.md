@@ -778,6 +778,38 @@ búsquedas por palabra a los agentes genéricos) pero desde una IP de oficina, a
 el corte al primer bloqueo y el ritmo lento. **No se revisaron los Términos y Condiciones de ML**: conviene el OK de Nico y Gabriel.
 La key vive en el `.env` de la Mac y en Coolify; rotarla es borrar la línea, `--init` y actualizar Coolify.
 
+### Búsqueda web de ML con Apify (fuente 2c: la cola de la oficina, desde el servidor)
+
+Desde el 20-oct ML bloquea también a la Mac de la oficina en la primera búsqueda de la noche. `pricing/apify_ml_search.py`
+toma **la misma cola** (`oficina_ml.build_queue`) y busca con el actor `devcake/mercadolibre-scraper` (build fijado en
+`APIFY_MELI_SEARCH_BUILD`, default `1.0.103`; el actor va por lista blanca). Guarda por el mismo `oficina_ml.ingest`, en
+`ml_web_result` con `origin = apify`: el semáforo lo usa exactamente igual que lo de la Mac. La Mac sigue funcionando.
+
+- **Cuándo:** job `apify_ml_search` del scheduler, `APIFY_MELI_SEARCH_CRON_UTC` (default `30 4 * * *` = 01:30 ART, antes
+  del semáforo de las 06:00 UTC). Sin recuperación al arrancar: un deploy no lanza búsquedas pagas.
+- **Prender / tope** (dashboard, grupo monitor, quedan en el audit log): `apify_meli_search_enabled` (default **0 = apagado**)
+  y `apify_meli_search_daily_max` (default 200 búsquedas por día UTC). El cupo de cada lote se reserva **atómico** antes de
+  lanzarlo (`daily_budget.reserve_up_to`): dos corridas a la vez no se pasan del tope. Al agotarse, la corrida termina
+  `over_budget` y lo que falta queda para mañana.
+- **Una corrida del actor por producto**, de a lotes de `APIFY_MELI_SEARCH_CONCURRENCY` (4) en paralelo. El actor acepta
+  varias consultas, pero sus publicaciones no dicen qué consulta las trajo y una repetida sale una sola vez: agrupar
+  atribuiría publicaciones al producto equivocado. Se guardan las primeras `pm_ml_web_max_results` (8) de las 20 que cobra.
+- **Costo:** USD 0,001 por publicación con mínimo de 20 por consulta + USD 0,00005 por arranque ≈ **USD 0,02 por búsqueda**
+  (200 por día ≈ USD 4). Cada corrida lleva `maxTotalChargeUsd=0.03`; se imputa para arriba y queda en el audit log
+  (`apify_ml_search_run`: búsquedas, publicaciones, `usd_imputado`).
+- **Validación:** id de ML, título, precio numérico finito > 0 con moneda, link https de `mercadolibre.com.ar` (otro host →
+  se descarta), foto de `mlstatic`; y después `ingest` vuelve a sanear todo. Corrida que no termina en
+  `APIFY_MELI_SEARCH_TIMEOUT_S` (120) → se aborta y queda `error` (el producto sigue en la cola). 401/402/403/404 frenan la noche.
+- **La Mac y Apify no buscan lo mismo:** quien toma un producto lo reserva en `ml_web_claim` y la cola no se lo ofrece al
+  otro mientras la reserva esté viva. La Mac reserva su cola por 3 h al pedirla; cuando reporta un producto se suelta, y si
+  reporta un **bloqueo** se sueltan todas (así Apify las toma esa misma noche). Apify reserva de a lote (30 min) y suelta al terminar.
+
+**Migración y rollback.** Automática en el arranque: la tabla `ml_web_claim` (nueva, no toca las existentes). Para volver atrás:
+
+```sql
+DROP TABLE IF EXISTS ml_web_claim;
+```
+
 ### Tiendas (Gadnic, Casa Perfecta…)
 
 Además de Mercado Libre, la **misma corrida** del semáforo compara cada producto contra las
