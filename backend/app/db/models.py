@@ -425,6 +425,8 @@ class MlWebResult(SQLModel, table=True):
     # Cuándo buscó la Mac (UTC, sin zona, a los segundos) y cuándo lo recibió Hugo.
     fetched_at: datetime
     received_at: datetime = Field(default_factory=utcnow)
+    # Quién buscó: "oficina" (la Mac) o "apify" (pricing/apify_ml_search.py). El semáforo
+    # usa los dos igual; esto queda para auditar de dónde salió cada resultado.
     origin: str = Field(default="oficina", max_length=8)
     # JSON: lista de publicaciones (id, name, image_urls, permalink, price_cents…), ya saneadas.
     candidates: str = Field(default="[]")
@@ -432,6 +434,20 @@ class MlWebResult(SQLModel, table=True):
     # ok | empty | blocked | error
     status: str = Field(max_length=8)
     reason: str | None = Field(default=None, max_length=300)
+
+
+class MlWebClaim(SQLModel, table=True):
+    """Quién está buscando un producto de la cola de búsqueda web de ML (ver
+    pricing/oficina_ml.py: claim/release). La Mac de la oficina y el job de Apify
+    toman productos de la MISMA cola: el que lo reserva primero lo busca y el
+    otro lo saltea hasta que la reserva vence o se libera. Una fila por producto."""
+    __tablename__ = "ml_web_claim"
+
+    product_id: str = Field(primary_key=True, max_length=64)
+    # "oficina" o "apify-<hex>" (cada corrida de Apify tiene el suyo).
+    claimed_by: str = Field(max_length=24)
+    claimed_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(index=True)
 
 
 # ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───
