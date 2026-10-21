@@ -1,7 +1,9 @@
 """Endpoints del buscador de la oficina (la Mac de la oficina busca en ML y Hugo hace el matching).
 
-GET  /api/oficina/ml-queue?limit=N   → productos a buscar y con qué consultas
-POST /api/oficina/ml-results         → lote de resultados por producto (Hugo los re-sanea)
+GET  /api/oficina/ml-queue?limit=N[&claim=0] → productos a buscar y con qué consultas (reservados para la oficina,
+                                              salvo con claim=0: --check y --dry-run solo miran)
+POST /api/oficina/ml-results         → lote de resultados por producto (Hugo los re-sanea; renueva las reservas)
+POST /api/oficina/ml-queue/release   → la Mac terminó (por lo que sea): suelta todas sus reservas
 
 Autenticación PROPIA: el header `x-oficina-key` contra OFICINA_SEARCH_KEY, comparado en tiempo
 constante. No usan la cookie del dashboard (están en las rutas públicas del middleware, auth.py).
@@ -184,14 +186,22 @@ async def _read_body(request: Request, limit: int) -> bytes:
 
 
 @router.get("/ml-queue")
-async def ml_queue(limit: int = Query(50, ge=1, le=oficina_ml.MAX_QUEUE)) -> dict[str, Any]:
+async def ml_queue(limit: int = Query(50, ge=1, le=oficina_ml.MAX_QUEUE),
+                   claim: int = Query(1, ge=0, le=1)) -> dict[str, Any]:
     # La cola de la Mac sale RESERVADA para la oficina: el job de Apify no busca esos productos mientras tanto.
-    items = await asyncio.to_thread(oficina_ml.queue_for_oficina, limit)
+    items = await asyncio.to_thread(oficina_ml.queue_for_oficina, limit, take=bool(claim))
     return {
         "items": items,
         "max_results": int(runtime.get("pm_ml_web_max_results") or 8),
         "ttl_days": int(oficina_ml.ttl().days),
     }
+
+
+@router.post("/ml-queue/release")
+async def ml_queue_release(request: Request) -> dict[str, Any]:
+    released = await asyncio.to_thread(oficina_ml.release, oficina_ml.CLAIM_OFICINA)
+    log.info("oficina: la Mac soltó %d reservas de la cola (%s)", released, client_ip(request))
+    return {"released": released}
 
 
 @router.post("/ml-results")

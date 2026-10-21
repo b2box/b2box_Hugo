@@ -64,7 +64,7 @@ def _snaps(engine, n: int) -> list[str]:
 def test_la_tabla_de_reservas_en_postgres(pg):
     insp = inspect(pg)
     cols = {c["name"]: c for c in insp.get_columns("ml_web_claim")}
-    assert set(cols) == {"product_id", "claimed_by", "claimed_at", "expires_at"}
+    assert set(cols) == {"product_id", "claimed_by", "claimed_at", "renewed_at", "expires_at"}
     assert insp.get_pk_constraint("ml_web_claim")["constrained_columns"] == ["product_id"]
     assert cols["product_id"]["type"].length == 64 and cols["claimed_by"]["type"].length == 24
     assert all(not getattr(cols[c]["type"], "timezone", False) for c in ("claimed_at", "expires_at")), \

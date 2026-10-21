@@ -192,7 +192,8 @@ def test_cleaning_the_lock_table_never_overwrites_the_configured_key(api, monkey
 def test_every_route_of_the_router_is_behind_the_guard():
     """La auth es del router, no de cada ruta: una ruta nueva no se puede olvidar de protegerla."""
     assert any(d.dependency is oficina_routes.guard for d in oficina_routes.router.dependencies)
-    assert {r.path for r in oficina_routes.router.routes} == {"/api/oficina/ml-queue", "/api/oficina/ml-results"}
+    assert {r.path for r in oficina_routes.router.routes} == {"/api/oficina/ml-queue", "/api/oficina/ml-results",
+                                                              "/api/oficina/ml-queue/release"}
 
 
 def test_simple_rate_limit_per_ip(api, monkeypatch):

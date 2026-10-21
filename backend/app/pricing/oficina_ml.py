@@ -32,7 +32,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, or_, update
+from sqlalchemy import and_, delete, or_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
@@ -78,11 +80,14 @@ SNAPSHOT_MAX_AGE = timedelta(days=3)
 # Los resultados se purgan por tiempo (nunca antes de que venza el TTL, con margen).
 RESULT_RETENTION = timedelta(days=30)
 
-# Quién reserva productos de la cola (ver `claim`). La Mac pide la cola UNA vez por noche y tarda ~1 h en 250
-# productos (una página cada 8-15 s): 3 h de reserva le sobran. Si ML la bloquea, al recibir el aviso se le
-# sueltan todas (ver `ingest`) para que Apify las tome esa misma noche.
+# Quién reserva productos de la cola (ver `claim`). La reserva de la Mac es CORTA y DESLIZANTE: 90 min desde que pide
+# la cola, y cada lote que manda la renueva (manda uno cada ~3 min mientras busca). Un GET repetido NO la estira. Lo
+# que reporta se suelta; si reporta un bloqueo, o al terminar (POST /ml-queue/release), se sueltan todas.
 CLAIM_OFICINA = "oficina"
-OFICINA_CLAIM_LEASE = timedelta(hours=3)
+OFICINA_CLAIM_LEASE = timedelta(minutes=90)
+# Una reserva de la Mac con más de esto y sin ningún lote de la Mac en ese tiempo es de una Mac que se colgó o se
+# apagó sin avisar: Apify la puede tomar aunque no haya vencido.
+OFICINA_STALE_AFTER = timedelta(minutes=45)
 _CLAIMER = re.compile(r"^[a-z0-9-]{1,24}$", re.ASCII)
 
 # Una key de `secrets.token_urlsafe(32)` tiene ~30 caracteres distintos; esto frena "aaaa…" o "abcabcabc…".
@@ -345,6 +350,8 @@ def _release_after_oficina(cleaned: list[CleanResult]) -> None:
     for pid in blocked:
         log.warning("oficina: la Mac reportó que ML bloqueó la búsqueda (producto %s)", pid)
     release(CLAIM_OFICINA, None if blocked else [r.product_id for r in cleaned])
+    if not blocked:
+        renew(CLAIM_OFICINA, OFICINA_CLAIM_LEASE)       # la Mac sigue viva: sus reservas restantes se estiran
 
 
 def _insert(s: Session, fresh: list[CleanResult], report: IngestReport, origin: str = ORIGIN_OFICINA) -> None:
@@ -393,7 +400,8 @@ def _prune(s: Session, product_ids: set[str], now: datetime) -> None:
 # ─── La cola ───────────────────────────────────────────────────────
 
 
-def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None = None) -> list[dict[str, Any]]:
+def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None = None,
+                take_stale_oficina: bool = False) -> list[dict[str, Any]]:
     """Qué buscar esta noche, en este orden:
 
       1. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
@@ -408,7 +416,8 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
     ni costos ni proveedor ni nada interno. Los productos cuyo último snapshot es viejo (ya no se miden) no entran.
 
     Tampoco entran los que tiene reservados OTRO (`claim` vigente de alguien que no es `claimer`; sin `claimer`,
-    de cualquiera). Armar la cola no reserva nada: eso lo hace quien la va a buscar."""
+    de cualquiera). Armar la cola no reserva nada: eso lo hace quien la va a buscar. Con `take_stale_oficina` (Apify)
+    las reservas de una Mac colgada (ver OFICINA_STALE_AFTER) no cuentan."""
     now = now or utcnow()
     variants = market_query.clamp_variants(runtime.get("pm_ml_query_variants"))
     refresh_after = max(ttl() - QUEUE_REFRESH_MARGIN, MIN_REFRESH_AGE)
@@ -424,7 +433,7 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             select(MlWebResult.product_id, MlWebResult.fetched_at, MlWebResult.status, MlWebResult.query)
             .where(MlWebResult.status.in_(RESULT_STATUSES))  # type: ignore[attr-defined]
         ).all()
-        taken_by_others = _claimed_by_others(s, claimer, now)
+        taken_by_others = _claimed_by_others(s, claimer, now, take_stale_oficina)
     last_result: dict[str, tuple[datetime, str, str]] = {}
     for pid, fetched, status, query in results:
         if pid not in last_result or fetched > last_result[pid][0]:
@@ -471,72 +480,115 @@ def _sort_id(pid: str) -> tuple[int, str]:
 # ─── Reservas de la cola (la Mac y Apify no buscan lo mismo) ───────
 
 
-def _claimed_by_others(s: Session, claimer: str | None, now: datetime) -> set[str]:
-    stmt = select(MlWebClaim.product_id).where(MlWebClaim.expires_at > now)
+def _stale_oficina(now: datetime):
+    """Reserva de la Mac sin señales de vida: tomada hace más de OFICINA_STALE_AFTER y sin lotes desde entonces."""
+    t = MlWebClaim.__table__.c
+    edge = now - OFICINA_STALE_AFTER
+    return and_(t.claimed_by == CLAIM_OFICINA, t.claimed_at <= edge, t.renewed_at <= edge)
+
+
+def _claimed_by_others(s: Session, claimer: str | None, now: datetime, take_stale_oficina: bool = False) -> set[str]:
+    t = MlWebClaim.__table__.c
+    stmt = select(t.product_id).where(t.expires_at > now)
     if claimer is not None:
-        stmt = stmt.where(MlWebClaim.claimed_by != claimer)
+        stmt = stmt.where(t.claimed_by != claimer)
+    if take_stale_oficina:
+        stmt = stmt.where(~_stale_oficina(now))
     return set(s.exec(stmt).all())
 
 
-def claim(product_ids: list[str], claimer: str, lease: timedelta, *, now: datetime | None = None) -> list[str]:
-    """Reserva para `claimer` los productos que estén libres (sin reserva, vencida o ya suya) y devuelve
-    los que reservó, en el mismo orden. Producto por producto y atómico: si la Mac y Apify piden el mismo a la
-    vez, uno solo se lo lleva (el UPDATE condicionado o el INSERT contra la clave primaria lo deciden en la base).
-    Si la base falla no se reserva nada (y quien llama no busca nada): fail-closed, como el cupo."""
+def _insert_stmt():
+    return pg_insert if engine.dialect.name == "postgresql" else sqlite_insert
+
+
+def claim(product_ids: list[str], claimer: str, lease: timedelta, *, now: datetime | None = None,
+          renew: bool = True, take_stale_oficina: bool = False) -> list[str]:
+    """Reserva para `claimer` los productos libres y devuelve los que quedaron suyos, en el mismo orden.
+
+    Libre = sin reserva, vencida o (con `take_stale_oficina`) de una Mac colgada. UNA sentencia para todo el lote
+    (`INSERT … ON CONFLICT DO UPDATE … WHERE libre … RETURNING`, en SQLite y en Postgres): si la Mac y Apify piden lo
+    mismo a la vez, la base decide fila por fila y cada producto queda de uno solo.
+
+    Las reservas vivas del propio `claimer` se devuelven como suyas; con `renew=True` además se estiran, con
+    `renew=False` (la cola de la Mac pedida de nuevo) quedan como estaban. Si la base falla no se reserva nada (y
+    quien llama no busca nada): fail-closed, como el cupo."""
     if not _CLAIMER.fullmatch(claimer or ""):
         raise ValueError("claimer inválido")
+    pids = list(dict.fromkeys(product_ids))
+    if not pids:
+        return []
     now = now or utcnow()
     until = now + lease
-    got: list[str] = []
+    t = MlWebClaim.__table__
+    free = t.c.expires_at <= now
+    if renew:
+        free = or_(free, t.c.claimed_by == claimer)
+    if take_stale_oficina:
+        free = or_(free, _stale_oficina(now))
+    ins = _insert_stmt()(t).values([
+        {"product_id": pid, "claimed_by": claimer, "claimed_at": now, "renewed_at": now, "expires_at": until}
+        for pid in pids])
+    stmt = ins.on_conflict_do_update(
+        index_elements=[t.c.product_id],
+        set_={"claimed_by": ins.excluded.claimed_by, "claimed_at": ins.excluded.claimed_at,
+              "renewed_at": ins.excluded.renewed_at, "expires_at": ins.excluded.expires_at},
+        where=free,
+    ).returning(t.c.product_id)
     try:
         with Session(engine) as s:
-            s.execute(delete(MlWebClaim).where(MlWebClaim.expires_at <= now))  # type: ignore[arg-type]
+            got = set(s.execute(stmt).scalars().all())
+            if not renew:
+                got |= set(s.execute(select(t.c.product_id).where(
+                    t.c.claimed_by == claimer, t.c.expires_at > now, t.c.product_id.in_(pids))).scalars().all())
             s.commit()
-            for pid in dict.fromkeys(product_ids):
-                done = s.execute(
-                    update(MlWebClaim)
-                    .where(MlWebClaim.product_id == pid,
-                           or_(MlWebClaim.claimed_by == claimer, MlWebClaim.expires_at <= now))
-                    .values(claimed_by=claimer, claimed_at=now, expires_at=until))
-                if done.rowcount == 1:
-                    s.commit()
-                    got.append(pid)
-                    continue
-                s.rollback()
-                s.add(MlWebClaim(product_id=pid, claimed_by=claimer, claimed_at=now, expires_at=until))
-                try:
-                    s.commit()
-                    got.append(pid)
-                except IntegrityError:
-                    s.rollback()             # lo tiene otro y su reserva sigue viva
     except Exception as exc:  # noqa: BLE001
         log.warning("cola de ML: no se pudieron reservar productos para %s (%s)", claimer, type(exc).__name__)
-        release(claimer, got)
         return []
-    return got
+    return [pid for pid in pids if pid in got]
 
 
-def release(claimer: str, product_ids: list[str] | None = None) -> None:
-    """Suelta las reservas de `claimer` (todas, o solo esos productos). Nunca lanza: si falla, la reserva
-    vence sola."""
+def renew(claimer: str, lease: timedelta, *, now: datetime | None = None) -> int:
+    """Estira las reservas vivas de `claimer` (la Mac mandó un lote: sigue viva). Nunca lanza."""
+    now = now or utcnow()
+    try:
+        with Session(engine) as s:
+            done = s.execute(
+                update(MlWebClaim)
+                .where(MlWebClaim.claimed_by == claimer, MlWebClaim.expires_at > now)  # type: ignore[arg-type]
+                .values(expires_at=now + lease, renewed_at=now))
+            s.commit()
+            return int(done.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cola de ML: no se pudieron renovar las reservas de %s (%s)", claimer, type(exc).__name__)
+        return 0
+
+
+def release(claimer: str, product_ids: list[str] | None = None) -> int:
+    """Suelta las reservas de `claimer` (todas, o solo esos productos) y dice cuántas. Nunca lanza: si falla, la
+    reserva vence sola."""
     if product_ids is not None and not product_ids:
-        return
+        return 0
     try:
         with Session(engine) as s:
             stmt = delete(MlWebClaim).where(MlWebClaim.claimed_by == claimer)  # type: ignore[arg-type]
             if product_ids is not None:
                 stmt = stmt.where(MlWebClaim.product_id.in_(list(product_ids)))  # type: ignore[attr-defined]
-            s.execute(stmt)
+            done = s.execute(stmt)
             s.commit()
+            return int(done.rowcount or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning("cola de ML: no se pudieron soltar las reservas de %s (%s)", claimer, type(exc).__name__)
+        return 0
 
 
-def queue_for_oficina(limit: int, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """La cola que se le da a la Mac: lo que nadie más tiene reservado, reservado para la oficina."""
+def queue_for_oficina(limit: int, *, now: datetime | None = None, take: bool = True) -> list[dict[str, Any]]:
+    """La cola que se le da a la Mac: lo que nadie más tiene reservado. Con `take` queda reservado para la oficina
+    (sin estirar lo que ya tenía: eso lo hacen sus lotes); sin `take` (--check, --dry-run) solo se mira."""
     now = now or utcnow()
     items = build_queue(limit, now=now, claimer=CLAIM_OFICINA)
-    got = set(claim([i["product_id"] for i in items], CLAIM_OFICINA, OFICINA_CLAIM_LEASE, now=now))
+    if not take:
+        return items
+    got = set(claim([i["product_id"] for i in items], CLAIM_OFICINA, OFICINA_CLAIM_LEASE, now=now, renew=False))
     return [i for i in items if i["product_id"] in got]
 
 

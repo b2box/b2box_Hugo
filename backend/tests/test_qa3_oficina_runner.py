@@ -275,6 +275,7 @@ def test_even_if_hugo_sent_several_queries_the_runner_opens_one_page(box, ml):
         ml.default = (200, {}, listing_html([]))
         r = box()
         assert r.code == 0 and ml.slugs == ["taza-ceramica"] and stub.posts == 1
+        assert stub.releases == 1                    # al terminar suelta las reservas de la cola
     finally:
         stub.close()
 
@@ -544,7 +545,7 @@ class StubHugo:
     """Un Hugo de mentira que falla las primeras N veces el GET de la cola (un redeploy de Coolify a la 01:00) y después anda."""
 
     def __init__(self, fail_first: int, items: list[dict]) -> None:
-        self.fail_first, self.items, self.gets, self.posts = fail_first, items, 0, 0
+        self.fail_first, self.items, self.gets, self.posts, self.releases = fail_first, items, 0, 0, 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -568,6 +569,9 @@ class StubHugo:
                 self._send(200, {"items": outer.items, "max_results": 8, "ttl_days": 7})
 
             def do_POST(self) -> None:  # noqa: N802
+                if self.path.startswith("/api/oficina/ml-queue/release"):
+                    outer.releases += 1
+                    return self._send(200, {"released": 0})
                 outer.posts += 1
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 n = len(body["results"])

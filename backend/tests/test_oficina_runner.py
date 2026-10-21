@@ -85,6 +85,7 @@ class FakeHugo:
         self.post_status = post_status
         self.posts: list[list[dict]] = []
         self.queue_calls: list[str] = []
+        self.releases = 0
         self.headers: list[dict] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -92,6 +93,9 @@ class FakeHugo:
         if request.method == "GET":
             self.queue_calls.append(str(request.url))
             return httpx.Response(200, json={"items": self.items, "max_results": 8, "ttl_days": 7})
+        if request.url.path == "/api/oficina/ml-queue/release":
+            self.releases += 1
+            return httpx.Response(200, json={"released": 0})
         results = json.loads(request.content)["results"]
         if self.post_status != 200:
             return httpx.Response(self.post_status, json={"detail": "x"})
@@ -484,21 +488,28 @@ def test_cli_check_talks_to_hugo_but_does_not_search(tmp_path, monkeypatch, caps
     monkeypatch.setattr(runner, "HugoClient", lambda cfg: hugo.client())
     monkeypatch.setattr(runner, "_run_real", lambda *a, **k: pytest.fail("--check no busca"))
     assert runner.main(["--check", "--env-file", str(env), "--log-file", str(tmp_path / "run.log")]) == 0
-    assert hugo.queue_calls[0].endswith("limit=1") and "OK" in capsys.readouterr().out
+    assert hugo.queue_calls[0].endswith("limit=1&claim=0") and "OK" in capsys.readouterr().out
+    assert hugo.releases == 0                        # --check no reservó nada: no hay qué soltar
 
 
 def test_cli_maps_hugo_errors_to_exit_codes(tmp_path, monkeypatch):
     env = _write_env(tmp_path / ".env", f"OFICINA_SEARCH_KEY={SECRET}\nHUGO_URL=https://hugo.example\n")
 
     class Down:
-        def queue(self, limit):
+        released = 0
+
+        def queue(self, limit, claim=True):
             raise runner.HugoError("Hugo rechazó la key (401)")
+
+        def release(self):
+            Down.released += 1
 
         def close(self):
             pass
 
     monkeypatch.setattr(runner, "HugoClient", lambda cfg: Down())
     assert runner.main(["--env-file", str(env), "--log-file", str(tmp_path / "l")]) == runner.EXIT_CONFIG
+    assert Down.released == 1                        # aunque falle, intenta soltar lo que Hugo pudo haber reservado
 
 
 def test_cli_an_empty_queue_is_a_normal_night(tmp_path, monkeypatch):
@@ -515,9 +526,12 @@ def test_sigterm_is_handled_like_ctrl_c_while_it_runs_and_restored_after(tmp_pat
     seen = {}
 
     class Spy:
-        def queue(self, limit):
+        def queue(self, limit, claim=True):
             seen["during"] = signal.getsignal(signal.SIGTERM)
             return {"items": [], "max_results": 8}
+
+        def release(self):
+            seen["released"] = True
 
         def close(self):
             pass
