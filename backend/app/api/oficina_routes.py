@@ -185,7 +185,8 @@ async def _read_body(request: Request, limit: int) -> bytes:
 
 @router.get("/ml-queue")
 async def ml_queue(limit: int = Query(50, ge=1, le=oficina_ml.MAX_QUEUE)) -> dict[str, Any]:
-    items = await asyncio.to_thread(oficina_ml.build_queue, limit)
+    # La cola de la Mac sale RESERVADA para la oficina: el job de Apify no busca esos productos mientras tanto.
+    items = await asyncio.to_thread(oficina_ml.queue_for_oficina, limit)
     return {
         "items": items,
         "max_results": int(runtime.get("pm_ml_web_max_results") or 8),
