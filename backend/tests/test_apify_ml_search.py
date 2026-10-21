@@ -57,6 +57,13 @@ def env(monkeypatch):
     runtime.set_value("apify_meli_search_enabled", 1)
     runtime.set_value("apify_meli_search_daily_max", 200)
     yield settings
+    # Las reservas usan el reloj real: si quedaran, otros tests (que simulan noches con otro reloj) verían
+    # productos tomados.
+    with Session(engine) as s:
+        for model in (MlWebClaim, Setting):
+            for row in s.exec(select(model)).all():
+                s.delete(row)
+        s.commit()
     runtime.invalidate()
 
 

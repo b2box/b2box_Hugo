@@ -21,7 +21,7 @@ from app import main as main_mod  # noqa: E402
 from app.api import oficina_routes  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.config import Settings  # noqa: E402
-from app.db.models import MarketPriceSnapshot, MlWebResult, Setting  # noqa: E402
+from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult, Setting  # noqa: E402
 from app.db.session import engine, init_db  # noqa: E402
 from app.pricing import market_query, oficina_ml  # noqa: E402
 from tests.test_price_monitor_routes import _use_settings  # noqa: E402
@@ -38,7 +38,8 @@ def _iso(delta: timedelta = timedelta(0)) -> str:
 def api(monkeypatch):
     init_db()
     with Session(engine) as s:
-        for model in (MlWebResult, MarketPriceSnapshot):
+        # Las reservas de la cola (ml_web_claim) también son estado de la cola: GET /ml-queue reserva lo que entrega.
+        for model in (MlWebResult, MlWebClaim, MarketPriceSnapshot):
             for row in s.exec(select(model)).all():
                 s.delete(row)
         for key in ("pm_ml_query_variants", "pm_ml_web_max_results"):
