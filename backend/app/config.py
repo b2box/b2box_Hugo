@@ -117,6 +117,11 @@ class Settings(EnvSettings):
     dashboard_secret: str = Field(default="", description="Secreto para firmar la cookie de sesión")
     # Duración de la sesión en horas.
     dashboard_session_hours: int = 12
+    # Administradores del dashboard: quiénes pueden cambiar los settings que
+    # gastan plata y correr pruebas pagas. Mails de Supabase (o el usuario de
+    # DASHBOARD_USER con login local), separados por coma. FAIL-CLOSED: vacía =
+    # nadie puede (ni en desarrollo).
+    dashboard_admins: str = Field(default="", description="Admins del dashboard, coma-separados")
 
     # ── Integración con Paco (cuando NO es duplicado, le reenviamos) ──
     # Luis / b2box-app  → Paco APP  (paco_url, /api/search/start, JSON).
@@ -200,6 +205,59 @@ class Settings(EnvSettings):
     )
     # 0 = apagado. Se prende de a poco desde el dashboard (runtime).
     apify_1688_daily_budget: int = 0
+
+    # ── Cotizador rápido por foto (estimado en /app/lookup) ────
+    # Ver app/estimate/. Apagado por defecto: se prende desde el dashboard
+    # (runtime `estimate_enabled`) y además necesita cupo de Apify 1688.
+    estimate_enabled: int = 0
+    # Estimados por día (hora de Argentina) para todos los visitantes juntos.
+    estimate_daily_budget: int = 50
+    # Por visitante (IP real, hash con sal): por día y ráfaga por minuto.
+    estimate_visitor_daily_limit: int = 5
+    estimate_visitor_per_minute: int = 2
+    # Factor sobre el precio del actor de Apify (medido el 20-oct: k ≈ 1,10,
+    # `cotizador-rapido-foto-medicion.md`) y margen ± en % del rango.
+    estimate_price_factor_k: float = 1.10
+    estimate_margin_pct: float = 15.0
+    # Cantidades de la tabla por tramos. PROVISORIAS: confirmarlas con el
+    # usuario antes de prender (decisión del 20-oct: "tabla por tramos").
+    estimate_tier_qty_1: int = 50
+    estimate_tier_qty_2: int = 200
+    estimate_tier_qty_3: int = 1000
+    # Deadline global del estimado, contado desde que entra el request.
+    estimate_deadline_s: float = 50.0
+    # Clientes (nombre en HUGO_API_KEYS) a los que se les cree `visitor.ip`.
+    # A cualquier otro se le cuenta la IP del socket.
+    estimate_trusted_ip_clients: str = "storefront"
+    # Sal del hash de la IP del visitante. En producción es obligatoria (32+
+    # caracteres): sin ella el estimado no corre (fail-closed).
+    estimate_hash_salt: str = ""
+    # Lecturas de OTAPI por día para links de 1688 (dentro del cupo de OTAPI).
+    estimate_otapi_daily_budget: int = 60
+    estimate_valid_hours: int = 24
+    # techo/piso por encima de esto no se muestra rango (diseño 2.5).
+    estimate_max_range_ratio: float = 2.0
+    estimate_retention_days: int = 90
+    # Fotos subidas que pueden ir a Apify/Qwen: entradas "host/bucket/prefijo/"
+    # separadas por coma (S3 path-style: el bucket va en el path). Vacío =
+    # ninguna. Ej: "s3.b2box.app/b2box-media/lookup-photos/". Ver upload_urls.py.
+    estimate_upload_image_prefixes: str = ""
+    # Una URL firmada del bucket propio que vive más que esto no se acepta.
+    estimate_upload_max_expiry_s: int = 600
+    # Pruebas del estimado desde el dashboard: por usuario y por día.
+    estimate_test_user_daily_limit: int = 20
+
+    # ── Límites del lookup público (comparador del storefront) ─
+    # Solo con un cliente de confianza que manda `visitor.ip`: todo /app/lookup
+    # por visitante (runtime). Pasarse = 429.
+    lookup_visitor_daily_limit: int = 30
+    lookup_visitor_per_minute: int = 5
+    # Cliente de confianza SIN visitor.ip válida (el storefront de hoy, o sin
+    # captcha): todos comparten el bucket del socket, con estos topes propios.
+    lookup_shared_daily_limit: int = 1500
+    lookup_shared_per_minute: int = 40
+    # Llamadas por día al rerank de visión del catálogo (Sonnet), runtime.
+    vision_rerank_daily_budget: int = 300
 
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")

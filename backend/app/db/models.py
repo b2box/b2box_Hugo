@@ -32,6 +32,8 @@ ActionType = Literal[
     "app_lookup_request_sent",
     "app_lookup_request_failed",
     "app_lookup_no_image",
+    # /app/lookup con want_estimate: rango de precio estimado (app/estimate/)
+    "app_lookup_estimated",
     # Cambio de un setting runtime que gasta plata (cupo de Apify, OTAPI, juez IA)
     "setting_changed",
 ]
@@ -636,3 +638,81 @@ class TextAuditItem(SQLModel, table=True):
     issues: str = Field(default="")
     # JSON {regla: detalle}. Sin valores del proveedor.
     details: str | None = Field(default=None)
+
+
+# ─── Cotizador rápido por foto (app/estimate/) ─────────────────────
+
+
+class EstimateUsage(SQLModel, table=True):
+    """Contadores diarios del estimado: por visitante (hash de IP) y global.
+
+    Tabla propia y no `settings`: hay una fila por visitante y día, y `runtime`
+    lee `settings` entera cada 30 s. El incremento es un UPDATE condicional
+    (`count < limit`), atómico en SQLite y Postgres. Se poda a los 2 días.
+    """
+    __tablename__ = "estimate_usage"
+
+    scope: str = Field(primary_key=True, max_length=96)   # "global" | "ip:<hash>"
+    day: str = Field(max_length=10)                        # YYYY-MM-DD (Argentina)
+    count: int = Field(default=0)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class LookupEstimate(SQLModel, table=True):
+    """Una fila por consulta de /app/lookup que pidió estimado (diseño 3.4).
+
+    Sirve para el backtest, para recalibrar k y m y para el tablero de gasto.
+    Sin datos personales: la IP va solo como hash con sal y no hay mail. Los
+    detalles internos (candidatos de 1688, yuanes, escenarios de Vendure) viven
+    acá y NUNCA en la respuesta al navegador. Retención: 90 días.
+    """
+    __tablename__ = "lookup_estimate"
+    __table_args__ = (
+        Index("ix_lookup_estimate_status_time", "estimate_status", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    # "e_…" que viaja en la respuesta (vacío si no hubo rango).
+    estimate_id: str | None = Field(default=None, max_length=40, index=True)
+    source: str = Field(default="", max_length=40)
+    # link | photo | link_1688 | dashboard
+    input_kind: str = Field(default="link", max_length=16)
+    marketplace: str = Field(default="other", max_length=24)
+    image_sha256: str | None = Field(default=None, max_length=64)
+    ip_hash: str | None = Field(default=None, max_length=32)
+    # ok | skipped_found | no_candidates | low_confidence | over_budget |
+    # rate_limited | timeout | error | disabled
+    estimate_status: str = Field(default="error", max_length=20)
+    # Motivo corto para diagnóstico (nunca el statusDetail crudo de Vendure).
+    reason: str | None = Field(default=None, max_length=200)
+    # Qué deadline cortó (global | apify | qwen | vendure | otapi), si alguno.
+    deadline_hit: str | None = Field(default=None, max_length=20)
+    total_ms: int = Field(default=0)
+    # JSON {paso: ms}
+    timings: str | None = Field(default=None)
+    # Apify
+    apify_launched: bool = Field(default=False)
+    apify_status: str | None = Field(default=None, max_length=20)
+    apify_run_ids: str | None = Field(default=None)      # JSON list
+    apify_results: int = Field(default=0)
+    apify_usd: float = Field(default=0.0)
+    # El lookup terminó encontrando el producto en el catálogo (Apify perdido).
+    ended_found: bool = Field(default=False)
+    # JSON de candidatos: offerId, precio, CLIP, score_visual, banderas, si entró.
+    candidates: str | None = Field(default=None)
+    qwen_used: bool = Field(default=False)
+    price_factor_k: float | None = Field(default=None)
+    margin_pct: float | None = Field(default=None)
+    # Caja / NCM según Vendure
+    box_source: str | None = Field(default=None, max_length=24)
+    box_sample_size: int | None = Field(default=None)
+    tax_classification_code: str | None = Field(default=None, max_length=24)
+    tax_classification_share: float | None = Field(default=None)
+    profile_version: int | None = Field(default=None)
+    # JSON: escenarios enviados y devueltos por Vendure
+    vendure_scenarios: str | None = Field(default=None)
+    # JSON: tramos mostrados [{quantity, low_cents, high_cents}]
+    tiers: str | None = Field(default=None)
+    currency: str | None = Field(default=None, max_length=8)
+    cost_usd: float = Field(default=0.0)

@@ -99,15 +99,41 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + pad)
 
 
-def _signing_secret() -> bytes:
-    """Secreto para firmar la cookie.
+MIN_SECRET_LEN = 32
+SESSION_KEY_MISSING_DETAIL = (
+    "No hay clave para firmar las sesiones del dashboard: cargá DASHBOARD_SECRET "
+    "(32+ caracteres, ver README). Sin ella nadie puede iniciar sesión."
+)
 
-    Usa DASHBOARD_SECRET si está seteado; si no, lo deriva de la password (así es
-    estable entre reinicios y workers sin tener que configurar nada extra).
+
+class SessionKeyMissing(RuntimeError):
+    """No hay clave secreta para firmar la cookie: no se emiten sesiones."""
+
+
+def session_secret_configured() -> bool:
+    """DASHBOARD_SECRET de 32+ caracteres: la única clave que vale en producción
+    y la única con la que una sesión puede ser de un administrador."""
+    return len((get_settings().dashboard_secret or "").strip()) >= MIN_SECRET_LEN
+
+
+def _signing_secret() -> bytes | None:
+    """Clave para firmar la cookie, o None si no hay ninguna que sea secreta.
+
+    BUG 20-oct-2026: sin DASHBOARD_SECRET se derivaba de DASHBOARD_PASSWORD
+    aunque estuviera VACÍA (prod con login por Supabase): la clave era
+    sha256("hugo-session::"), pública en un repo público, y cualquiera podía
+    falsificar la cookie. Ahora:
+      * DASHBOARD_SECRET de 32+ caracteres → esa;
+      * en producción, nada más: sin él no hay sesiones;
+      * en desarrollo, derivada de una DASHBOARD_PASSWORD NO vacía;
+      * si no, None: no se emite ni se acepta ninguna sesión.
     """
     s = get_settings()
-    if s.dashboard_secret:
-        return s.dashboard_secret.encode("utf-8")
+    secret = (s.dashboard_secret or "").strip()
+    if len(secret) >= MIN_SECRET_LEN:
+        return secret.encode("utf-8")
+    if _is_production() or not s.dashboard_password:
+        return None
     return hashlib.sha256(b"hugo-session::" + s.dashboard_password.encode("utf-8")).digest()
 
 
@@ -228,7 +254,11 @@ def issue_session_token(username: str) -> str:
     exp = int(time.time()) + s.dashboard_session_hours * 3600
     payload = json.dumps({"u": username, "exp": exp}, separators=(",", ":")).encode("utf-8")
     payload_b64 = _b64url(payload)
-    sig = hmac.new(_signing_secret(), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    key = _signing_secret()
+    if key is None:
+        log.error(SESSION_KEY_MISSING_DETAIL)
+        raise SessionKeyMissing(SESSION_KEY_MISSING_DETAIL)
+    sig = hmac.new(key, payload_b64.encode("ascii"), hashlib.sha256).digest()
     return f"{payload_b64}.{_b64url(sig)}"
 
 
@@ -236,8 +266,11 @@ def _read_session(token: str | None) -> dict | None:
     """Payload del token de sesión si la firma y la expiración son válidas."""
     if not token or "." not in token:
         return None
+    key = _signing_secret()
+    if key is None:
+        return None
     payload_b64, _, sig_b64 = token.partition(".")
-    expected = hmac.new(_signing_secret(), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    expected = hmac.new(key, payload_b64.encode("ascii"), hashlib.sha256).digest()
     try:
         got = _b64url_decode(sig_b64)
     except Exception:  # noqa: BLE001
@@ -264,6 +297,42 @@ def session_username(token: str | None) -> str | None:
     data = _read_session(token)
     user = data.get("u") if data else None
     return str(user)[:120] if user else None
+
+
+def admin_users() -> set[str]:
+    """DASHBOARD_ADMINS normalizado (minúsculas, sin vacíos)."""
+    raw = get_settings().dashboard_admins or ""
+    return {u.strip().lower() for u in raw.split(",") if u.strip()}
+
+
+def admin_username(request: Request) -> str | None:
+    """El usuario de la sesión si es administrador, o None.
+
+    FAIL-CLOSED: sin DASHBOARD_ADMINS nadie es admin, tampoco con el login
+    deshabilitado (modo dev): un dashboard abierto no puede gastar plata."""
+    admins = admin_users()
+    # Admin solo con una clave de sesión de verdad secreta (DASHBOARD_SECRET):
+    # una derivada de la password del login local no alcanza para gastar plata.
+    if not admins or not session_secret_configured():
+        return None
+    user = session_username(request.cookies.get(COOKIE_NAME))
+    return user if user and user.strip().lower() in admins else None
+
+
+def require_admin(request: Request) -> str:
+    """403 si la sesión no es de un administrador. Devuelve el usuario."""
+    from fastapi import HTTPException
+
+    user = admin_username(request)
+    if user is None:
+        if not admin_users():
+            log.warning("DASHBOARD_ADMINS vacío: %s %s rechazado (fail-closed)",
+                        request.method, request.url.path)
+        raise HTTPException(
+            status_code=403,
+            detail="Solo un administrador del dashboard puede hacer esto.",
+        )
+    return user
 
 
 def check_credentials(username: str, password: str) -> bool:

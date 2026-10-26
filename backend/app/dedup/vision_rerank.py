@@ -396,9 +396,34 @@ async def pick_match(
     if payload is None:
         return None
 
+    if not await _reserve_call():
+        # Sin cupo (o sin base para saberlo): "no sé", el lookup sigue con CLIP.
+        # No se cachea: mañana hay cupo.
+        return None
     verdict = await _ask(opts, payload)
     _cache_put(key, verdict)
     return verdict
+
+
+RERANK_COUNTER_KEY = "_meta:vision_rerank_calls_today"
+
+
+async def _reserve_call() -> bool:
+    """Reserva una llamada del cupo diario (`vision_rerank_daily_budget`).
+    Fail-closed: cupo en 0, agotado o la base sin contestar = no se llama."""
+    from app import runtime
+    from app.pricing import daily_budget
+
+    try:
+        raw = runtime.get("vision_rerank_daily_budget")
+        budget = int(get_settings().vision_rerank_daily_budget if raw is None else raw)
+        if budget <= 0:
+            return False
+        return await daily_budget.reserve_async(RERANK_COUNTER_KEY, budget) is not None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Rerank de visión: no se pudo reservar cupo (%s), no se llama",
+                    type(exc).__name__)
+        return False
 
 
 async def compare(

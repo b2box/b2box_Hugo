@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import auth, security
+from app.estimate import identity
 from app.api.app_routes import router as app_router
 from app.api.oficina_routes import router as oficina_router
 from app.api.price_monitor_routes import router as price_monitor_router
@@ -85,10 +86,21 @@ def _enforce_prod_secrets() -> None:
     # clientes por API key siguen funcionando. Pero se avisa fuerte.
     if auth.allowlist_misconfigured():
         log.error("Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL)
+    # Sin DASHBOARD_SECRET no hay sesiones (la clave derivada era pública). No se
+    # cae el arranque: /verify y /app/* (Paco, el app) siguen andando.
+    if not auth.session_secret_configured():
+        log.error("Dashboard sin login posible: %s", auth.SESSION_KEY_MISSING_DETAIL)
     # Tampoco tira el arranque: es una ruta de diagnóstico. Pero sin esto el 403
     # de /api/debug-config no tiene explicación a la vista.
     for problem in security.admin_config_warnings():
         log.warning("/api/debug-config: %s", problem)
+    # Sin sal no se puede contar por visitante: /app/lookup responde 503 a los clientes con
+    # límite por visitante (el storefront), no solo el estimado. No tira el arranque.
+    if len((s.estimate_hash_salt or "").strip()) < identity.MIN_SALT_LEN:
+        log.error(
+            "/app/lookup del storefront responde 503: falta ESTIMATE_HASH_SALT (%d+ caracteres)",
+            identity.MIN_SALT_LEN,
+        )
 
 
 def _seed_stores() -> None:
@@ -281,7 +293,12 @@ async def login(payload: LoginRequest, request: Request) -> JSONResponse:
         )
     auth.record_successful_login(ip)
     resp = JSONResponse({"ok": True})
-    auth.set_session_cookie(resp, request, identity or payload.username)
+    try:
+        auth.set_session_cookie(resp, request, identity or payload.username)
+    except auth.SessionKeyMissing:
+        return JSONResponse(
+            {"ok": False, "detail": auth.LOGIN_DISABLED_DETAIL}, status_code=503
+        )
     return resp
 
 
