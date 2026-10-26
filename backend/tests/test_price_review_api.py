@@ -262,7 +262,11 @@ async def test_item_links_use_the_configured_templates(client, monkeypatch):
 # ─── 2-6: «No es el mismo» cierra la ficha en la misma respuesta ────
 
 
-async def test_not_the_same_closes_the_ficha_in_the_same_response_and_recounts_the_run(client):
+async def test_not_the_same_closes_the_ficha_in_the_same_response_and_recounts_the_run(client, monkeypatch):
+    # La pasada corre a las w.NOW (fecha fija): «No es el mismo» recalcula con la misma hora. Con el reloj real,
+    # pasadas 48 h el dato del test sale «dato_viejo» y no «pocas_publicaciones».
+    from app.pricing import price_review
+    monkeypatch.setattr(price_review, "utcnow", lambda: NOW + timedelta(minutes=30))
     cheap_two_and_one_dear = [w.listing(1, 800_000), w.listing(2, 810_000), w.listing(3, 1_500_000)]
     today = await open_items({"a": dict(matched=cheap_two_and_one_dear)})
     [item] = w.items()
