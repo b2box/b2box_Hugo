@@ -1508,8 +1508,9 @@ No vas a tener que borrar la DB cada vez que crezca el modelo.
    Coolify → Environment Variables. Las críticas:
    - `HUGO_ENV=production` (activa los chequeos estrictos de seguridad) —
      **no** copiar el `development` del `.env` local. Con `development` el
-     middleware de login se apaga y el panel entero (auditoría, config,
-     `/docs`) queda abierto a internet.
+     login deja de ser obligatorio (sin método de login configurado, el panel
+     entero —auditoría, config, `/docs`— queda abierto a internet), la
+     allowlist vacía deja entrar a todos y las API keys débiles valen.
    - `SUPABASE_URL` + `SUPABASE_ANON_KEY` — login del dashboard vía el Supabase
      Auth de Cloud_B2BOX (mismos usuarios que Paco). Sin esto (o sin
      `DASHBOARD_PASSWORD`) no hay login y con `HUGO_ENV=production` Hugo no

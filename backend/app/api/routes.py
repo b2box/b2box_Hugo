@@ -1653,6 +1653,16 @@ async def debug_config() -> dict[str, Any]:
             return {"set": False, "length": 0}
         return {"set": True, "length": len(v)}
 
+    def _host(url: str | None) -> str | None:
+        # Solo el host: las URLs de webhook llevan el token en el path y la de
+        # la DB lleva usuario y contraseña antes del @.
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        try:
+            return urlparse(url).hostname if url else None
+        except ValueError:
+            return None
+
     # Estado del browser (Camoufox), separando los 3 modos de falla:
     #   flag off      → BROWSER_FETCH_ENABLED no está en true (runtime)
     #   package False → no se instaló .[browser] (INSTALL_BROWSER no era true al build)
@@ -1725,10 +1735,10 @@ async def debug_config() -> dict[str, Any]:
             "smtp_user": _mask(s.alert_smtp_user),
             "smtp_pass": _mask(s.alert_smtp_pass),
             "email_to": s.alert_email_to,
-            "webhook_url": s.alert_webhook_url or None,
+            "webhook_url": {**_mask(s.alert_webhook_url), "host": _host(s.alert_webhook_url)},
         },
         "database": {
-            "url_starts_with": (s.database_url[:30] + "…") if s.database_url else None,
+            "host": _host(s.database_url),
             "is_postgres": s.database_url.startswith("postgresql"),
         },
     }

@@ -34,10 +34,11 @@ def _settings(**over):
 
 
 def _use(monkeypatch, s):
-    """Todos los módulos que leen Settings ven el mismo: main, auth y security."""
+    """Todos los módulos que leen Settings ven el mismo: main, auth, security y
+    config (las rutas que hacen `from app.config import get_settings` adentro)."""
     from app import main, security
 
-    for mod in (auth, security, main):
+    for mod in (auth, security, main, config):
         monkeypatch.setattr(mod, "get_settings", lambda: s)
 
 
@@ -339,3 +340,24 @@ def test_debug_config_en_development_sin_login_ni_keys_queda_abierto(monkeypatch
     from app import main
 
     assert TestClient(main.app).get("/api/debug-config").status_code == 200
+
+
+def test_debug_config_no_filtra_token_del_webhook_ni_password_de_la_db(monkeypatch):
+    s = _settings(
+        hugo_env="production",
+        dashboard_password="pw-qa",
+        hugo_api_keys=f"qa:{_GOOD_KEY}",
+        alert_webhook_url="https://hooks.slack.com/services/T000/B000/tok3n-secreto",
+        database_url="postgresql://hu:s3cr3t-pass@db.example.test:5432/hugo",
+    )
+    _use(monkeypatch, s)
+    from app import main
+
+    c = TestClient(main.app)
+    c.cookies.update(_session_cookie(monkeypatch, s))
+    r = c.get("/api/debug-config", headers={"X-API-Key": _GOOD_KEY})
+    assert r.status_code == 200, r.text
+    assert "tok3n" not in r.text and "s3cr3t" not in r.text and "hu:" not in r.text
+    body = r.json()
+    assert body["alerts"]["webhook_url"] == {"set": True, "length": 56, "host": "hooks.slack.com"}
+    assert body["database"]["host"] == "db.example.test"
