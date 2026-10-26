@@ -33,6 +33,9 @@ def _patch(monkeypatch, settings_over, resp):
     from app.config import Settings, get_settings
 
     base = {
+        # Estos tests son del login en sí; el cierre de producción tiene los suyos.
+        # Desde que el default de HUGO_ENV es production, hay que pedir development.
+        "hugo_env": "development",
         "vendure_api_url": "https://x/admin-api",
         "supabase_url": "https://ref.supabase.co",
         "supabase_anon_key": "anon",

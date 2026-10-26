@@ -24,7 +24,7 @@ from app.api.price_monitor_routes import router as price_monitor_router
 from app.api.routes import router
 from app.api.seo_routes import router as seo_router
 from app.api.store_routes import router as store_router
-from app.config import get_settings
+from app.config import EnvSettings, get_settings
 from app.db.session import init_db
 from app.scheduler.jobs import register_jobs, scheduler
 
@@ -189,11 +189,25 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         await _drain_apify_aborts()
 
 
+# En producción no publicamos Swagger: el mapa completo de rutas es
+# reconocimiento gratis para un atacante y acá no le sirve a nadie. En
+# development sigue disponible en /docs.
+#
+# EnvSettings en vez de get_settings(): esto corre al importar el módulo, y
+# Settings() exige campos obligatorios (VENDURE_API_URL) que no tienen por qué
+# estar presentes solo para importar app.main. EnvSettings lee HUGO_ENV de las
+# mismas fuentes y con el mismo validador que Settings, así que /docs se publica
+# si y solo si los chequeos de seguridad están en development.
+_DEV = EnvSettings().hugo_env == "development"
+
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
     version="0.1.0",
     description="Anti-duplicados + vigilancia de precios de proveedor para Vendure (no modifica precios)",
     lifespan=lifespan,
+    docs_url="/docs" if _DEV else None,
+    redoc_url="/redoc" if _DEV else None,
+    openapi_url="/openapi.json" if _DEV else None,
 )
 
 # ─── Login del dashboard (cookie de sesión) ────────────────────────

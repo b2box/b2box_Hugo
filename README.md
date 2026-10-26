@@ -1506,7 +1506,15 @@ No vas a tener que borrar la DB cada vez que crezca el modelo.
 3. **Build pack**: Docker Compose (Coolify detecta el `docker-compose.yml` solo).
 4. **Variables de entorno**: copiar el contenido de tu `.env` local en
    Coolify → Environment Variables. Las críticas:
-   - `HUGO_ENV=production` (activa los chequeos estrictos de seguridad)
+   - `HUGO_ENV=production` (activa los chequeos estrictos de seguridad) —
+     **no** copiar el `development` del `.env` local. Con `development` el
+     login deja de ser obligatorio (sin método de login configurado, el panel
+     entero —auditoría, config, `/docs`— queda abierto a internet), la
+     allowlist vacía deja entrar a todos y las API keys débiles valen.
+   - `SUPABASE_URL` + `SUPABASE_ANON_KEY` — login del dashboard vía el Supabase
+     Auth de Cloud_B2BOX (mismos usuarios que Paco). Sin esto (o sin
+     `DASHBOARD_PASSWORD`) no hay login y con `HUGO_ENV=production` Hugo no
+     arranca, a propósito.
    - `DATABASE_URL` (Supabase Session Pooler, ver más abajo)
    - `VENDURE_API_URL`, `VENDURE_BEARER`, `VENDURE_CHANNEL_TOKEN`
    - `HUGO_API_KEYS` y `SUPABASE_ALLOWED_EMAILS` (ver *Seguridad*)
@@ -1560,7 +1568,8 @@ Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
 loguea el nombre del cliente en cada request autenticado y cada key se rota por
 separado. `HUGO_API_KEY` (una sola key compartida) sigue valiendo como cliente
-`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys).
+`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys)
+y pide las dos cosas: sesión del dashboard **y** `X-API-Key`.
 
 ### `POST /app/lookup`
 

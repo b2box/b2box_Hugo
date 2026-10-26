@@ -5,11 +5,19 @@ Usa los nombres de variables del ecosistema B2Box (compartidas con Paco/Luis).
 
 from functools import lru_cache
 
-from pydantic import EmailStr, Field
+from pydantic import EmailStr, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class EnvSettings(BaseSettings):
+    """Solo HUGO_ENV, leído exactamente igual que en Settings.
+
+    main.py lo usa al importarse para decidir si publica /docs, antes de que
+    Settings pueda construirse (exige VENDURE_API_URL). Al compartir fuentes
+    (entorno + .env, sin distinguir mayúsculas) y validador, /docs y los
+    chequeos de producción nunca pueden discrepar.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -18,9 +26,28 @@ class Settings(BaseSettings):
 
     # ── Entorno ────────────────────────────────────────────────
     # "production" hace que el arranque FALLE si faltan credenciales
-    # (DASHBOARD_PASSWORD / HUGO_API_KEY). En "development" solo warnea.
-    hugo_env: str = Field(default="development", description="development | production")
+    # (login del dashboard / API keys). En "development" solo warnea.
+    #
+    # El default es "production" a propósito: un deploy que se olvide de setear
+    # HUGO_ENV tiene que caer, no quedar abierto a internet. Para correr local
+    # hay que pedir development explícitamente (está en .env.example).
+    hugo_env: str = Field(default="production", description="development | production")
 
+    @field_validator("hugo_env", mode="after")
+    @classmethod
+    def _normalize_env(cls, v: str) -> str:
+        """Todo lo que no sea exactamente "development" es production.
+
+        Fail-closed ante typos: el panel quedó abierto a internet porque el valor
+        en el server era "production." (con punto) y el chequeo era
+        `!= "production"` → se saltaba el guardarraíl entero sin avisar. Con un
+        allowlist en vez de un denylist, un typo endurece la config en vez de
+        aflojarla. Un "prod", "Production " o "" ahora caen en production.
+        """
+        return "development" if v.strip().lower() == "development" else "production"
+
+
+class Settings(EnvSettings):
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")
     # Bearer opcional: si está vacío, Hugo se loguea con user/pass al primer call.

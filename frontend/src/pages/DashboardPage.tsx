@@ -243,10 +243,7 @@ export default function DashboardPage() {
       </div>
 
       <footer className="max-w-7xl mx-auto px-6 py-6 text-xs text-muted-foreground text-center">
-        Hugo · agente B2Box ·{" "}
-        <a href="/docs" className="text-primary underline hover:no-underline transition-colors">
-          API docs
-        </a>
+        Hugo · agente B2Box
       </footer>
 
       {historyProductId && (

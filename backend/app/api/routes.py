@@ -1631,12 +1631,17 @@ async def product_history(
     }
 
 
-@router.get("/api/debug-config")
+@router.get("/api/debug-config", dependencies=[Depends(verify_api_key)])
 async def debug_config() -> dict[str, Any]:
     """Diagnóstico: dice qué env vars están seteadas (sin exponer los valores).
 
     Útil para verificar desde fuera del container que la config está completa
     sin necesidad de entrar a Coolify ni mirar logs.
+
+    Doble llave a propósito: el login del dashboard (cookie) MÁS la X-API-Key.
+    Aunque los valores van enmascarados, el mapa de qué credenciales existen es
+    reconocimiento útil para un atacante, y esta ruta no puede quedar expuesta
+    por una sola variable de entorno mal seteada.
     """
     from app.config import get_settings
     s = get_settings()
@@ -1647,6 +1652,16 @@ async def debug_config() -> dict[str, Any]:
         if not v:
             return {"set": False, "length": 0}
         return {"set": True, "length": len(v)}
+
+    def _host(url: str | None) -> str | None:
+        # Solo el host: las URLs de webhook llevan el token en el path y la de
+        # la DB lleva usuario y contraseña antes del @.
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        try:
+            return urlparse(url).hostname if url else None
+        except ValueError:
+            return None
 
     # Estado del browser (Camoufox), separando los 3 modos de falla:
     #   flag off      → BROWSER_FETCH_ENABLED no está en true (runtime)
@@ -1720,10 +1735,10 @@ async def debug_config() -> dict[str, Any]:
             "smtp_user": _mask(s.alert_smtp_user),
             "smtp_pass": _mask(s.alert_smtp_pass),
             "email_to": s.alert_email_to,
-            "webhook_url": s.alert_webhook_url or None,
+            "webhook_url": {**_mask(s.alert_webhook_url), "host": _host(s.alert_webhook_url)},
         },
         "database": {
-            "url_starts_with": (s.database_url[:30] + "…") if s.database_url else None,
+            "host": _host(s.database_url),
             "is_postgres": s.database_url.startswith("postgresql"),
         },
     }
