@@ -8,6 +8,7 @@ Jobs:
   5. store_index         → indexa las tiendas (Casa Perfecta, Gadnic…) de madrugada.
   6. seo_text_audit      → audita los textos del catálogo (SEO); solo lee Vendure.
   7. apify_ml_search     → busca en la web de ML con Apify la cola de la oficina (antes del semáforo).
+  8. price_review_digest → resumen diario de la bandeja de revisión para Pao (08:30 ART).
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -40,6 +41,7 @@ from app.dedup.url_match import normalize_url
 from app.notifier.dispatcher import notify, notify_digest
 from app.pricing import apify_ml_search as apify_ml_search_mod
 from app.pricing import price_monitor as price_monitor_mod
+from app.pricing import price_review_digest as price_review_digest_mod
 from app.pricing import store_catalog, store_match
 from app.pricing.diff import compare_source_snapshots
 from app.pricing.source_check import fetch_source_price
@@ -839,6 +841,33 @@ def _seo_text_audit_trigger(expr: str) -> CronTrigger | None:
         return CronTrigger.from_crontab(_SEO_TEXT_AUDIT_DEFAULT_CRON, timezone="UTC")
 
 
+# ─── Job 11: resumen diario de la bandeja de revisión (Pao) ───────
+
+PRICE_REVIEW_DIGEST_JOB_ID = "price_review_digest"
+# 11:30 UTC = 08:30 hora de Argentina.
+_PRICE_REVIEW_DIGEST_DEFAULT_CRON = "30 11 * * *"
+
+
+async def price_review_digest() -> dict | None:
+    """Manda el resumen de la bandeja a los emails de PM_REVIEW_EMAILS (vacío = no manda). Sin novedades no
+    sale nada. Un fallo del mail no tira el job: los eventos quedan sin marcar y salen en el próximo."""
+    try:
+        result = await price_review_digest_mod.send_digest()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("price_review_digest falló: %s", exc)
+        return None
+    _mark_job_run(PRICE_REVIEW_DIGEST_JOB_ID)
+    return result
+
+
+def _price_review_digest_trigger(expr: str) -> CronTrigger:
+    try:
+        return CronTrigger.from_crontab(expr, timezone="UTC")
+    except ValueError as exc:
+        log.error("PRICE_REVIEW_DIGEST_CRON_UTC=%r inválido (%s); uso %r", expr, exc, _PRICE_REVIEW_DIGEST_DEFAULT_CRON)
+        return CronTrigger.from_crontab(_PRICE_REVIEW_DIGEST_DEFAULT_CRON, timezone="UTC")
+
+
 def _price_monitor_trigger(expr: str) -> CronTrigger:
     try:
         return CronTrigger.from_crontab(expr, timezone="UTC")
@@ -1008,6 +1037,21 @@ def register_jobs() -> None:
             id=APIFY_ML_SEARCH_JOB_ID,
             replace_existing=True, coalesce=True, max_instances=1,
         )
+    # Resumen diario de la bandeja de revisión para Pao: 08:30 ART. Si el proceso estaba caído a esa hora se
+    # recupera al arrancar; no duplica nada porque cada evento lleva `notified_at`.
+    digest_trigger = _price_review_digest_trigger(
+        getattr(s, "price_review_digest_cron_utc", None) or _PRICE_REVIEW_DIGEST_DEFAULT_CRON)
+    digest_kwargs: dict = {}
+    if _cron_missed(digest_trigger, _last_job_run(PRICE_REVIEW_DIGEST_JOB_ID), now):
+        digest_kwargs["next_run_time"] = now + _STARTUP_GRACE
+        log.info("price_review_digest: se perdió la corrida programada → corre en %s", _STARTUP_GRACE)
+    scheduler.add_job(
+        price_review_digest,
+        digest_trigger,
+        id=PRICE_REVIEW_DIGEST_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+        **digest_kwargs,
+    )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:
     # el refresh es incremental (ver app/vendure/catalog.py).

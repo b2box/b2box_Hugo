@@ -273,7 +273,7 @@ def test_monitor_settings_are_listed_and_editable_without_redeploy(client):
 
     assert client.put("/api/settings/pm_green_min_pct", json={"value": 45}).status_code == 200
     assert runtime.get("pm_green_min_pct") == 45.0
-    assert client.put("/api/settings/pm_mode", json={"value": 2}).status_code == 400  # fuera de rango
+    assert client.put("/api/settings/pm_mode", json={"value": 3}).status_code == 400  # fuera de rango
     assert client.delete("/api/settings/pm_green_min_pct").status_code == 200
     assert runtime.get("pm_green_min_pct") == 30.0
     anon = TestClient(main_mod.app)

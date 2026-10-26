@@ -1,0 +1,405 @@
+{
+  "_meta": "buildQuantityBrackets de B2BOX-Cloud/b2box fdd7579df (engine/minimum-purchase.ts), costos en yuanes (no centavos)",
+  "vectors": [
+    {
+      "costs": [
+        42,
+        36,
+        31
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 100
+        }
+      ]
+    },
+    {
+      "costs": [
+        9.5,
+        8.2,
+        7.4
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 249,
+          "minQuantity": 100
+        },
+        {
+          "maxQuantity": 499,
+          "minQuantity": 250
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 500
+        }
+      ]
+    },
+    {
+      "costs": [
+        14,
+        12.5,
+        11
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": 249,
+          "minQuantity": 100
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 250
+        }
+      ]
+    },
+    {
+      "costs": [
+        600
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": null,
+          "minQuantity": 1
+        }
+      ]
+    },
+    {
+      "costs": [
+        500
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": null,
+          "minQuantity": 1
+        }
+      ]
+    },
+    {
+      "costs": [
+        499.99
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": null,
+          "minQuantity": 5
+        }
+      ]
+    },
+    {
+      "costs": [
+        100,
+        50,
+        20,
+        10,
+        5
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 9,
+          "minQuantity": 5
+        },
+        {
+          "maxQuantity": 24,
+          "minQuantity": 10
+        },
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 100
+        }
+      ]
+    },
+    {
+      "costs": [
+        0.8,
+        0.7,
+        0.5
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 714,
+          "minQuantity": 625
+        },
+        {
+          "maxQuantity": 999,
+          "minQuantity": 715
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 1000
+        }
+      ]
+    },
+    {
+      "costs": [
+        3,
+        3,
+        3
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 499,
+          "minQuantity": 250
+        },
+        {
+          "maxQuantity": 500,
+          "minQuantity": 500
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 501
+        }
+      ]
+    },
+    {
+      "costs": [
+        42,
+        null,
+        31
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        null,
+        {
+          "maxQuantity": null,
+          "minQuantity": 50
+        }
+      ]
+    },
+    {
+      "costs": [
+        42,
+        36,
+        31
+      ],
+      "threshold": 500,
+      "override": 10,
+      "brackets": [
+        {
+          "maxQuantity": 24,
+          "minQuantity": 10
+        },
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 50
+        }
+      ]
+    },
+    {
+      "costs": [
+        42,
+        36,
+        31
+      ],
+      "threshold": 1000,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 100
+        }
+      ]
+    },
+    {
+      "costs": [
+        1200,
+        900
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 4,
+          "minQuantity": 1
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 5
+        }
+      ]
+    },
+    {
+      "costs": [
+        null,
+        20,
+        10
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        null,
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 50
+        }
+      ]
+    },
+    {
+      "costs": [
+        7,
+        6,
+        5,
+        4
+      ],
+      "threshold": 300,
+      "override": 3,
+      "brackets": [
+        {
+          "maxQuantity": 49,
+          "minQuantity": 3
+        },
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": 249,
+          "minQuantity": 100
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 250
+        }
+      ]
+    },
+    {
+      "costs": [
+        0,
+        10
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        null,
+        {
+          "maxQuantity": null,
+          "minQuantity": 50
+        }
+      ]
+    },
+    {
+      "costs": [
+        0.1,
+        0.05
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 9999,
+          "minQuantity": 5000
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 10000
+        }
+      ]
+    },
+    {
+      "costs": [
+        25,
+        20,
+        15,
+        10,
+        8,
+        6,
+        4,
+        2
+      ],
+      "threshold": 500,
+      "override": null,
+      "brackets": [
+        {
+          "maxQuantity": 49,
+          "minQuantity": 25
+        },
+        {
+          "maxQuantity": 99,
+          "minQuantity": 50
+        },
+        {
+          "maxQuantity": 249,
+          "minQuantity": 100
+        },
+        {
+          "maxQuantity": 499,
+          "minQuantity": 250
+        },
+        {
+          "maxQuantity": 500,
+          "minQuantity": 500
+        },
+        {
+          "maxQuantity": 501,
+          "minQuantity": 501
+        },
+        {
+          "maxQuantity": 502,
+          "minQuantity": 502
+        },
+        {
+          "maxQuantity": null,
+          "minQuantity": 503
+        }
+      ]
+    }
+  ]
+}

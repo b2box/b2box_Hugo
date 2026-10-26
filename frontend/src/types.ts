@@ -360,6 +360,9 @@ export interface PriceMonitorSnapshot {
   cheapest_outside?: CheapestOutside | null;
   // De qué precios sale el color: ml | ml+tiendas | tiendas.
   price_basis?: "ml" | "ml+tiendas" | "tiendas";
+  // De cuándo es el dato de los idénticos y lo que decidió la bandeja de Pao: "firme" | "dudoso:<motivo>" | null.
+  data_at?: string | null;
+  review_flag?: string | null;
 }
 
 export interface PriceMonitorSnapshotsResponse {
@@ -609,4 +612,187 @@ export interface SeoListsResponse {
   lists: Record<SeoListName, SeoList>;
   max_items: number;
   max_item_len: number;
+}
+
+
+// ─── Bandeja de revisión de precios (Pao) ──────────────────────────
+// Solo lectura en esta etapa: Hugo propone, no toca Vendure.
+
+export type ReviewState =
+  | "propuesto"
+  | "en_revision"
+  | "corrigiendo"
+  | "buscando_proveedor"
+  | "mantenido"
+  | "despublicado"
+  | "corregido"
+  | "cerrado_auto";
+
+export type ReviewTab = "para_decidir" | "en_proceso" | "mantenidos" | "cerrados";
+export type ReviewCause = "a" | "b" | "c" | "d" | "e" | "ninguna" | "sin_dato";
+export type ReviewFix = "si" | "no" | "aprox";
+
+export interface PriceReviewSummary {
+  mode: number;
+  mode_label: string;
+  mode_effective: number;
+  read_only: boolean;
+  counts: Partial<Record<ReviewState, number>>;
+  groups: Record<ReviewTab, number>;
+  pending: number;
+  oldest_pending_days: number | null;
+  last_pass: {
+    run_id: number;
+    at: string | null;
+    run_started_at: string | null;
+    new: number;
+    firm: number;
+    doubtful: number;
+    doubtful_by_reason: Record<string, number>;
+    closed: number;
+    flips: number;
+    vendure_reads: number;
+    read_cap_reached: boolean;
+    note: string | null;
+  } | null;
+  last_pass_error: string | null;
+  params: {
+    confirm_nights: number;
+    data_max_age_h: number;
+    min_listings: number;
+    min_sellers: number;
+    max_price_ratio: number;
+  };
+}
+
+export interface PriceReviewItemRow {
+  id: number;
+  product: { id: string; name: string | null; code: string | null; slug: string | null; image_url: string | null };
+  state: ReviewState;
+  state_label: string;
+  state_since: string | null;
+  opened_at: string | null;
+  closed_at: string | null;
+  waiting_days: number | null;
+  mode_at_open: number;
+  streak_nights: number;
+  last_color: SemaforoColor | null;
+  last_margin_pct: number | null;
+  our_price_cents: number | null;
+  ml_median_cents: number | null;
+  firm_listing_count: number | null;
+  firm_seller_count: number | null;
+  price_ratio: number | null;
+  reff_ratio: number | null;
+  flags: string[];
+  probable_cause: ReviewCause | null;
+  cause_label: string | null;
+  cause_summary: string | null;
+  fixable: ReviewFix | null;
+  diag_status: "completo" | "pendiente" | "parcial" | null;
+  links: { vendure_admin: string | null; storefront: string | null };
+}
+
+export interface PriceReviewItemsResponse {
+  items: PriceReviewItemRow[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  causes: Partial<Record<ReviewCause, number>>;
+}
+
+export interface DiagRule {
+  code: "a" | "b" | "c" | "d" | "e";
+  title: string;
+  status: "dispara" | "no" | "sin_dato" | "no_aplica";
+  summary: string;
+  subcodes: string[];
+  fixes: ReviewFix | null;
+  p_si_cents: number | null;
+  estimated: boolean;
+  action: string;
+}
+
+export interface ReviewDiagnosis {
+  rules: DiagRule[];
+  probable_cause: ReviewCause;
+  fixable: ReviewFix;
+  fix_not_enough: boolean;
+  p_max_cents: number;
+  p_cents: number;
+  gap: number | null;
+  missing: string[];
+  suggestion: string;
+  errors?: string[];
+  attempts?: number;
+}
+
+export interface BreakdownComponent {
+  key: string;
+  label: string;
+  usd: number;
+  // Faltan para quien no es responsable de costos (con ellos se despejaría la fábrica).
+  pct?: number | null;
+  ars_unit?: number | null;
+  detail: { code: string; usd: number }[];
+}
+
+export interface ReviewBreakdown {
+  tier_id: string;
+  min_quantity: number | null;
+  max_quantity: number | null;
+  quantity: number;
+  usd_available: boolean;
+  chargeable: number;
+  total_cbm: number;
+  factura_unit_cents: number;
+  neto_unit_cents: number;
+  currency: string;
+  components: BreakdownComponent[];
+  // Solo para los responsables de costos (PRICE_REVIEW_VIEWERS): el costo de fábrica en yuanes, el cambio, el total
+  // en dólares y el fee. Para el resto el servidor no los manda y `restricted` vale true.
+  restricted?: boolean;
+  cny_unit?: number;
+  cny_to_usd?: number;
+  usd_to_channel?: number;
+  factura_usd?: number;
+  neto_usd?: number;
+  fee_pct?: number | null;
+}
+
+export interface ReviewTierLine {
+  min_quantity: number | null;
+  max_quantity: number | null;
+  cny_unit?: number; // falta = solo para responsables de costos
+  neto_cents: number;
+  price_cents: number;
+  margin_pct: number | null;
+}
+
+export interface ReviewEvent {
+  id: number;
+  at: string | null;
+  actor: string;
+  kind: string;
+  from_state: string | null;
+  to_state: string | null;
+  motive_code: string | null;
+  motive_text: string | null;
+  run_id: number | null;
+  snapshot_id: number | null;
+  payload: Record<string, unknown> | null;
+}
+
+export interface PriceReviewDetail extends PriceReviewItemRow {
+  diagnosis: ReviewDiagnosis | null;
+  breakdown: ReviewBreakdown | null;
+  tiers: ReviewTierLine[];
+  snapshot: PriceMonitorSnapshot | null;
+  data: { at: string | null; origin: MatchOrigin | null; via: "oficina" | null; run_id: number; captured_at: string | null } | null;
+  doubtful_today: string | null;
+  events: ReviewEvent[];
+  decisions_enabled: boolean;
+  // false: el costo de fábrica y el fee no vienen (solo los ve quien está en PRICE_REVIEW_VIEWERS).
+  costs_visible: boolean;
 }

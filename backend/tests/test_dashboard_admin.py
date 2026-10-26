@@ -16,7 +16,8 @@ from app.db.models import AuditLog, EstimateUsage, Setting
 from app.db.session import engine, init_db
 
 KEYS = ("apify_1688_daily_budget", "estimate_price_factor_k", "estimate_margin_pct",
-        "estimate_tier_qty_1", "vision_rerank_daily_budget", "pm_green_min_pct")
+        "estimate_tier_qty_1", "vision_rerank_daily_budget", "pm_green_min_pct",
+        "pm_mode", "pm_review_min_listings")
 
 
 def _wipe():
@@ -191,3 +192,23 @@ def test_estimate_test_valida_antes_de_reservar(monkeypatch, body):
 def test_cupos_de_ml_y_frecuencias_son_de_admin(monkeypatch, key):
     http = _client(monkeypatch, admins="nico@b2box.pro", user="pao@b2box.pro")
     assert http.delete(f"/api/settings/{key}").status_code == 403
+
+
+def test_el_modo_de_la_bandeja_es_de_admin_y_queda_auditado(monkeypatch):
+    """pm_mode prende la bandeja de Pao y su resumen diario por mail; el 2 (automático) va a tocar Vendure."""
+    pao = _client(monkeypatch, admins="nico@b2box.pro", user="pao@b2box.pro")
+    assert pao.put("/api/settings/pm_mode", json={"value": 1}).status_code == 403
+    assert pao.delete("/api/settings/pm_mode").status_code == 403
+    runtime.invalidate()
+    assert runtime.get("pm_mode") == 0
+    # Los umbrales de la bandeja solo deciden qué entra: los cambia cualquiera con sesión y no ensucian el log.
+    assert pao.put("/api/settings/pm_review_min_listings", json={"value": 4}).status_code == 200
+
+    nico = _client(monkeypatch, admins="nico@b2box.pro", user="nico@b2box.pro")
+    assert nico.put("/api/settings/pm_mode", json={"value": 3}).status_code == 400   # fuera de rango
+    assert nico.put("/api/settings/pm_mode", json={"value": 1}).status_code == 200
+    with Session(engine) as s:
+        rows = s.exec(select(AuditLog).where(AuditLog.action == "setting_changed")).all()
+    assert [r.detail for r in rows] == ["nico@b2box.pro cambió pm_mode: 0 → 1"]
+    assert nico.delete("/api/settings/pm_mode").status_code == 200
+    assert runtime.get("pm_mode") == 0

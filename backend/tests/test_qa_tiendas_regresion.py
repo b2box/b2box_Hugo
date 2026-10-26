@@ -40,7 +40,8 @@ RUN_SKIP = {"id", "started_at", "finished_at"}
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
                         "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
                         "llm_skipped_cut", "llm_status",
-                        "unmeasurable", "n_no_medible"}
+                        "unmeasurable", "n_no_medible",
+                        "data_at", "review_flag", "review_at", "review_summary", "n_flipped"}
 
 
 def _mixed_world(w) -> None:

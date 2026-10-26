@@ -344,6 +344,33 @@ def search(query: np.ndarray, top_k: int = 3) -> list[tuple[VendureProduct, floa
     return out
 
 
+def neighbors_of(product_id: str, top_k: int = 10) -> list[tuple[str, float]]:
+    """Los `top_k` productos del catálogo más parecidos por foto a UN producto del índice, sin
+    él mismo: (id, score coseno), de mayor a menor. Todo en memoria (los vectores ya están en la
+    matriz), sin red ni DB. Lista vacía si el índice no está listo o el producto no tiene vector.
+
+    Lo usa el diagnóstico de la bandeja para tener una caja "típica" de referencia sin pedirle a
+    Vendure las colecciones de cada producto."""
+    if not is_ready() or product_id not in _state.vector_ids or top_k <= 0:
+        return []
+    rows = [i for i, pid in enumerate(_state.product_ids) if pid == product_id]
+    if not rows:
+        return []
+    # Las filas de la matriz ya están en el espacio centrado: se comparan entre sí sin proyectar.
+    best = (_state.matrix @ _state.matrix[rows].T).max(axis=1)
+    out: list[tuple[str, float]] = []
+    seen = {product_id}
+    for i in np.argsort(-best):
+        pid = _state.product_ids[int(i)]
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append((pid, float(best[int(i)])))
+        if len(out) >= top_k:
+            break
+    return out
+
+
 def score_products(
     query: np.ndarray, product_ids: Iterable[str]
 ) -> list[tuple[VendureProduct, float, str]]:

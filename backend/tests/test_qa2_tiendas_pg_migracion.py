@@ -54,6 +54,10 @@ OLD_TABLES = ("audit_log", "image_embed_cache", "image_hash_cache", "market_matc
               "ml_seller_cache", "price_history", "price_monitor_run", "settings")
 # ml_web_result: el buscador de la oficina (feat/semaforo-variantes-y-oficina), que se apila sobre las tiendas.
 NEW_TABLES = ("market_store", "store_catalog_item", "store_match", "store_match_feedback", "ml_web_result")
+# La bandeja de revisión (PR posterior a este esquema de partida) agrega estas columnas y las tablas price_review_*:
+# las prueba test_price_review_pg.py. Estos tests miran solo lo que agregaban los PRs anteriores.
+BANDEJA_COLS = {("market_price_snapshot", "data_at"), ("market_price_snapshot", "review_flag"),
+                ("price_monitor_run", "review_at"), ("price_monitor_run", "review_summary"), ("price_monitor_run", "n_flipped")}
 ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run", "source_stats"),
                  # variantes de búsqueda y buscador de la oficina
                  ("market_price_snapshot", "ml_variant"), ("market_price_snapshot", "web_via"),
@@ -61,7 +65,7 @@ ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run",
                  ("price_monitor_run", "n_oficina_ok"),
                  # «sin dato»: no medible y lo que el juez no contestó o no consultó (fix/semaforo-sin-dato)
                  ("market_price_snapshot", "unmeasurable"),
-                 *(("price_monitor_run", c) for c in ("llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"))}
+                 *(("price_monitor_run", c) for c in ("llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"))} | BANDEJA_COLS
 PROD_TIMESTAMPTZ = [("price_monitor_run", "started_at"), ("price_monitor_run", "finished_at"), ("market_price_snapshot", "captured_at"),
                     ("ml_seller_cache", "fetched_at"), ("market_match_feedback", "created_at")]
 
@@ -87,11 +91,13 @@ def _signature(engine) -> dict:
         con = [tuple(map(str, r)) for r in c.execute(text(
             "select conrelid::regclass::text, conname, pg_get_constraintdef(oid) from pg_constraint "
             "where connamespace = current_schema()::regnamespace order by 1, 2"))]
-    # Las tablas de la auditoría de textos (HG1), del estimado por foto y de reservas de la cola (ml_web_claim,
-    # búsqueda con Apify) son de PRs posteriores a este esquema de partida: las prueban test_seo_text_audit_pg.py,
-    # test_qa_estimate_migracion.py y test_qa_apify_ml_search_pg.py.
-    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim")
+    # Las tablas de la auditoría de textos (HG1), del estimado por foto, de reservas de la cola (ml_web_claim,
+    # búsqueda con Apify) y de la bandeja de revisión (price_review_*) son de PRs posteriores a este esquema de
+    # partida: las prueban test_seo_text_audit_pg.py, test_qa_estimate_migracion.py, test_qa_apify_ml_search_pg.py
+    # y test_price_review_pg.py. Lo mismo con las cinco columnas de la bandeja.
+    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_")
     keep = lambda rows: [r for r in rows if not any(x in r[0] for x in later)]  # noqa: E731
+    cols = [r for r in cols if (r[0], r[1]) not in BANDEJA_COLS]
     return {"columns": keep(cols), "indexes": keep(idx), "constraints": keep(con)}
 
 

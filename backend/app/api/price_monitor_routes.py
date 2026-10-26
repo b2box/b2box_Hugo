@@ -19,6 +19,7 @@ Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -31,7 +32,7 @@ from app import auth, runtime
 from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
-from app.pricing import match_feedback, price_monitor, store_match
+from app.pricing import match_feedback, price_monitor, price_review, store_match
 from app.pricing.market_ml import ml_budget_status
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
@@ -58,6 +59,8 @@ ORIGINS = ("api", "web", "oficina")
 COLOR_FILTERS = (*COLORS, NO_MEDIBLE)
 # Color estimado por similares: uno concreto o cualquiera.
 ESTIMATED_FILTERS = ("verde", "amarillo", "rojo", "any")
+# review=: lo que decidió la bandeja de Pao para los rojos: firme | dudoso | dudoso:<motivo>.
+_REVIEW_RE = re.compile(r"^(firme|dudoso(:[a-z_]{1,24})?)$")
 
 # El event loop solo guarda referencias débiles a las tasks: sin esto, una
 # corrida de horas disparada a mano podría ser recolectada a mitad de camino.
@@ -89,7 +92,7 @@ def _manual_run_blocker(session: Session) -> tuple[int, str, int | None] | None:
 
 @router.post("/run", status_code=202)
 async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
-    """Dispara una corrida en background (modo sombra: no toca Vendure).
+    """Dispara una corrida en background (no toca Vendure, en ningún modo).
     409 si ya hay una en curso; 429 si no hay cupo de ML o si la última
     arrancó hace menos de `pm_manual_cooldown_min`."""
     from app.scheduler import jobs  # import tardío: jobs arrastra todo el scheduler
@@ -102,7 +105,7 @@ async def run_now(session: Session = Depends(get_session)) -> dict[str, Any]:
     task = asyncio.create_task(jobs.price_monitor(trigger="manual"))
     _background.add(task)
     task.add_done_callback(_background.discard)
-    return {"status": "scheduled", "mode": "sombra"}
+    return {"status": "scheduled", "mode": price_review.mode_label(int(runtime.get("pm_mode") or 0))}
 
 
 @router.get("/summary")
@@ -181,9 +184,15 @@ def _color_condition(color: str) -> list[Any]:
 
 
 def _scope_conditions(enabled: str, match: str | None, origin: str | None,
-                      estimated: str | None = None) -> list[Any]:
-    """Condiciones SQL de enabled / match / origin / estimated."""
+                      estimated: str | None = None, review: str | None = None) -> list[Any]:
+    """Condiciones SQL de enabled / match / origin / estimated / review."""
     conds: list[Any] = []
+    if review == "firme":
+        conds.append(MarketPriceSnapshot.review_flag == "firme")
+    elif review == "dudoso":
+        conds.append(MarketPriceSnapshot.review_flag.like("dudoso:%"))  # type: ignore[union-attr]
+    elif review:
+        conds.append(MarketPriceSnapshot.review_flag == review)
     if enabled == "enabled":
         conds.append(MarketPriceSnapshot.product_enabled.is_(True))  # type: ignore[union-attr]
     elif enabled == "disabled":
@@ -209,6 +218,7 @@ async def list_snapshots(
     match: str | None = Query(None, max_length=16),
     origin: str | None = Query(None, max_length=8),
     estimated: str | None = Query(None, max_length=8),
+    review: str | None = Query(None, max_length=40),
     source: str | None = Query(None, max_length=16),
     igual_in: str | None = Query(None, max_length=160),
     page: int = Query(0, ge=0, le=PAGE_MAX),
@@ -241,6 +251,8 @@ async def list_snapshots(
         raise HTTPException(400, f"origin inválido: {origin}")
     if estimated and estimated not in ESTIMATED_FILTERS:
         raise HTTPException(400, f"estimated inválido: {estimated}")
+    if review and not _REVIEW_RE.match(review):
+        raise HTTPException(400, f"review inválido: {review}")
     source_key = store_match.parse_source(source) if source else None
     if source and source_key is None:
         raise HTTPException(400, f"source inválido: {source}")
@@ -259,7 +271,7 @@ async def list_snapshots(
         MarketPriceSnapshot.run_id == run_id
     )
     # Filtros que también acotan los contadores por color (los chips de arriba).
-    scope = _scope_conditions(enabled, match, origin, estimated)
+    scope = _scope_conditions(enabled, match, origin, estimated, review)
     scope += store_match.filter_conditions(source_key, [k for k in igual_keys if k])
     for cond in scope:
         base = base.where(cond)
@@ -310,7 +322,7 @@ async def list_snapshots(
     colors[NO_MEDIBLE] = no_medible
     # Chips aparte del color real: el estimado (solo productos sin idéntico) y
     # cuántos productos hay en cada estado, con los filtros de producto y origen.
-    base_scope = _scope_conditions(enabled, None, origin)
+    base_scope = _scope_conditions(enabled, None, origin, None, review)
     estimated_counts = dict(session.exec(
         select(MarketPriceSnapshot.estimated_color, func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
         .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.ml_status != "ok",
@@ -358,11 +370,14 @@ class NotSameBody(BaseModel):
     ml_id: str = Field(min_length=3, max_length=24)
 
 
-def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id: int, added: bool) -> dict[str, Any]:
-    """Guarda en UNA transacción la corrección, el snapshot recalculado y los
-    contadores de la corrida. Si otra pestaña guardó la misma corrección en este
-    instante (IntegrityError), responde "ya estaba" con lo que quedó."""
+def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id: int, added: bool,
+                       actor: str | None = None) -> dict[str, Any]:
+    """Guarda en UNA transacción la corrección, el snapshot recalculado, los
+    contadores de la corrida y, si el producto deja de ser rojo, el cierre de su ficha en la
+    bandeja de Pao. Si otra pestaña guardó la misma corrección en este instante
+    (IntegrityError), responde "ya estaba" con lo que quedó."""
     store_match.reapply_color(session, snap)       # con las tiendas contando, el color las incluye
+    review = price_review.after_correction(session, snap, actor)    # re-marca el snapshot y cierra la ficha si ya no es rojo
     session.add(snap)
     price_monitor.recount_run(session, snap.run_id)
     try:
@@ -373,7 +388,10 @@ def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id:
         fresh = session.get(MarketPriceSnapshot, snapshot_id)
         return {"snapshot": price_monitor.snapshot_to_dict(fresh), "already": True}  # type: ignore[arg-type]
     session.refresh(snap)
-    return {"snapshot": price_monitor.snapshot_to_dict(snap), "already": not added}
+    out: dict[str, Any] = {"snapshot": price_monitor.snapshot_to_dict(snap), "already": not added}
+    if review is not None:
+        out["review"] = review
+    return out
 
 
 @router.post("/snapshots/{snapshot_id}/not-same")
@@ -409,7 +427,7 @@ async def not_the_same(
         product_id=snap.product_id, ml_id=body.ml_id, entry=removed, snapshot_id=snapshot_id,
         product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_NOT_SAME, session=session,
     )
-    return _commit_correction(session, snap, snapshot_id, added)
+    return _commit_correction(session, snap, snapshot_id, added, actor)
 
 
 @router.post("/snapshots/{snapshot_id}/same")
@@ -441,7 +459,7 @@ async def same_product(
         product_id=snap.product_id, ml_id=body.ml_id, entry=promoted, snapshot_id=snapshot_id,
         product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_SAME, session=session,
     )
-    return _commit_correction(session, snap, snapshot_id, added)
+    return _commit_correction(session, snap, snapshot_id, added, actor)
 
 
 @router.delete("/products/{product_id}/feedback/{ml_id}")

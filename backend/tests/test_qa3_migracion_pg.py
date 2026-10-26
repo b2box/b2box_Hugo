@@ -38,6 +38,10 @@ NEW_SNAPSHOT_COLS = {"ml_variant", "web_via", "unmeasurable"}
 NEW_RUN_COLS = {"variant_stats", "oficina_fresh", "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible"}
 
 
+_BANDEJA_COLS = {"market_price_snapshot": {"data_at", "review_flag"},
+                 "price_monitor_run": {"review_at", "review_summary", "n_flipped"}}
+
+
 def _rollback_sql() -> str:
     """El rollback de la oficina y, encima, el de fix/semaforo-sin-dato (los dos copiados tal cual del README)."""
     blocks = re.findall(r"```sql\n(.*?)```", README, flags=re.S)
@@ -53,9 +57,11 @@ def _shape(engine) -> dict:
     # Las tablas de la auditoría de textos (HG1), del estimado por foto y de reservas de la cola
     # (ml_web_claim, búsqueda con Apify) son de PRs posteriores a este esquema de partida: las prueban
     # test_seo_text_audit_pg.py, test_qa_estimate_migracion.py y test_apify_ml_search.py.
-    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim")
+    # Lo mismo con la bandeja de revisión: sus tablas price_review_* y sus cinco columnas las prueba test_price_review_pg.py.
+    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_")
     for table in sorted(t for t in insp.get_table_names() if not t.startswith(later)):
-        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)}
+        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)
+                if c["name"] not in _BANDEJA_COLS.get(table, ())}
         idx = {i["name"]: (tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
         out[table] = (cols, idx)
     return out

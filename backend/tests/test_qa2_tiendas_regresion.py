@@ -45,10 +45,12 @@ GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77
 # unmeasurable y n_no_medible: «No medible» aparte de «Sin dato» (fix/semaforo-sin-dato, aditivas).
 # llm_failures, llm_skipped_* y llm_status: lo que el juez no contestó o no consultó y su corte por fallas seguidas
 # (fix/semaforo-sin-dato, aditivas; en este mundo el juez nunca falla, así que quedan en 0 / None).
+# data_at, review_flag, review_at, review_summary y n_flipped: la bandeja de revisión (aditivos; no cambian ML).
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
                         "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
                         "llm_skipped_cut", "llm_status",
-                        "unmeasurable", "n_no_medible"}
+                        "unmeasurable", "n_no_medible",
+                        "data_at", "review_flag", "review_at", "review_summary", "n_flipped"}
 CP_IMG = "https://acdn-us.mitiendanube.com/stores/001/133/924/products/{}.webp"
 GD_IMG = "https://static.bidcom.com.ar/publicacionesML/productos/{}.jpg"
 
@@ -274,7 +276,8 @@ async def test_with_the_ml_judge_off_the_stores_do_not_use_theirs_even_with_a_ca
 # ─── 4) lo que el dashboard recibe de ML: la API, clave por clave ────────────
 
 API_GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_api_qa2.json").read_text())
-NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant", "web_via", "unmeasurable"}
+NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant", "web_via", "unmeasurable",
+                 "data_at", "review_flag"}
 NEW_LIST_KEYS = {"sources", "stores_affect_color"}
 # failures / skipped / cut: dentro de `llm`, lo que el juez no contestó o no consultó (fix/semaforo-sin-dato).
 NEW_RUN_KEYS = {"sources", "variants", "oficina", "failures", "skipped", "cut"}
@@ -343,8 +346,8 @@ async def test_the_dashboard_api_serves_every_old_key_with_the_same_value_stores
                 else:
                     _assert_old_keys_equal(value, new[key], f"{path}.{key}", set())
         else:
-            _assert_old_keys_equal(old["body"], new, path, {"price_basis", "ml_variant", "web_via", "unmeasurable"},
-                                   deep=True)
+            _assert_old_keys_equal(old["body"], new, path, {"price_basis", "ml_variant", "web_via", "unmeasurable",
+                                                             "data_at", "review_flag"}, deep=True)
     if stores == "prendidas_sin_identicos":
         items = client.get("/api/price-monitor/snapshots?page_size=200").json()["items"]
         assert all(i["price_basis"] == "ml" for i in items) and any(i["stores"] for i in items)
