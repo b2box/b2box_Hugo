@@ -230,7 +230,9 @@ ninguna de las dos, la clave era pública y cualquiera podía falsificar la cook
 
 Los settings que gastan plata o mueven el precio que ve un cliente (cupos de Apify, OTAPI, juez IA y
 rerank de visión, prendido/cupo/k/margen/tramos del estimado, límites del lookup público) solo los
-cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en el audit log.
+cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en el audit log. Lo mismo
+`pm_mode`, el modo de la bandeja de Pao: con 1 manda el resumen diario por mail y el 2 (automático) va a
+tocar Vendure; sus umbrales (`pm_review_*`, `pm_diag_*`) los cambia cualquiera con sesión.
 
 - Setear `DASHBOARD_ADMINS` con los usuarios separados por coma: el **mail** con login por Supabase
   (`nico@b2box.pro,gabriel@b2box.pro`), o el `DASHBOARD_USER` con login local.
@@ -1118,7 +1120,7 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 
 | Setting | Default | Qué hace |
 |---|---|---|
-| `pm_mode` | 0 | 0 sombra (solo marca los rojos); 1 propuesta (llena la bandeja de Pao, no toca Vendure); 2 automático (todavía no existe: se comporta como 1) |
+| `pm_mode` | 0 | 0 sombra (solo marca los rojos); 1 propuesta (llena la bandeja de Pao, no toca Vendure); 2 automático (todavía no existe: se comporta como 1). Solo lo cambia un admin (`DASHBOARD_ADMINS`) y queda en el audit log |
 | `pm_green_min_pct` | 30 | ganancia mínima para verde |
 | `pm_yellow_min_pct` | 10 | ganancia mínima para amarillo |
 | `pm_ml_commission_pct` | 13 | comisión de ML, % de la mediana (a definir por Gabriel) |
