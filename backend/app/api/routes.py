@@ -26,7 +26,7 @@ from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_tar
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
 from app.pricing.source_check import fetch_source_price
-from app.security import configured_api_keys, verify_api_key, verify_rate_limit
+from app.security import configured_api_keys, verify_admin_api_key, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
 from app.vendure.client import VendureClient
 
@@ -1631,17 +1631,18 @@ async def product_history(
     }
 
 
-@router.get("/api/debug-config", dependencies=[Depends(verify_api_key)])
+@router.get("/api/debug-config", dependencies=[Depends(verify_admin_api_key)])
 async def debug_config() -> dict[str, Any]:
     """Diagnóstico: dice qué env vars están seteadas (sin exponer los valores).
 
     Útil para verificar desde fuera del container que la config está completa
     sin necesidad de entrar a Coolify ni mirar logs.
 
-    Doble llave a propósito: el login del dashboard (cookie) MÁS la X-API-Key.
-    Aunque los valores van enmascarados, el mapa de qué credenciales existen es
-    reconocimiento útil para un atacante, y esta ruta no puede quedar expuesta
-    por una sola variable de entorno mal seteada.
+    Doble llave a propósito: el login del dashboard (cookie) MÁS la X-API-Key
+    de un cliente admin (HUGO_ADMIN_CLIENTS); la de Luis o la del app no
+    alcanzan. Aunque los valores van enmascarados, el mapa de qué credenciales
+    existen es reconocimiento útil para un atacante, y esta ruta no puede quedar
+    expuesta por una sola variable de entorno mal seteada.
     """
     from app.config import get_settings
     s = get_settings()
@@ -1655,13 +1656,28 @@ async def debug_config() -> dict[str, Any]:
 
     def _host(url: str | None) -> str | None:
         # Solo el host: las URLs de webhook llevan el token en el path y la de
-        # la DB lleva usuario y contraseña antes del @.
+        # la DB lleva usuario y contraseña antes del @. Si la contraseña tiene
+        # "/", "#" o "?" sin escapar, urlparse corta el netloc antes del @ y el
+        # "hostname" que devuelve es el usuario (o un pedazo de la contraseña).
+        # Si hay algún @ fuera del netloc no se sabe dónde está el host: None.
         from urllib.parse import urlparse  # noqa: PLC0415
 
+        if not url:
+            return None
         try:
-            return urlparse(url).hostname if url else None
+            parsed = urlparse(url)
         except ValueError:
             return None
+        if url.count("@") != parsed.netloc.count("@"):
+            return None
+        return parsed.hostname
+
+    def _exc_type(err: str) -> str | None:
+        # last_anthropic_error es "<modelo>: <TipoDeExcepción>: <mensaje>". El
+        # tipo alcanza para diagnosticar (auth, rate limit, modelo inexistente);
+        # el mensaje puede traer pedazos del request o de la key.
+        parts = err.split(": ", 2)
+        return parts[1] if len(parts) == 3 and parts[1].isidentifier() else None
 
     # Estado del browser (Camoufox), separando los 3 modos de falla:
     #   flag off      → BROWSER_FETCH_ENABLED no está en true (runtime)
@@ -1686,6 +1702,7 @@ async def debug_config() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         browser_pkg = False
 
+    vision_err = _vision_last_anthropic_error()
     return {
         "browser": {
             "enabled_flag": s.browser_fetch_enabled,
@@ -1703,13 +1720,14 @@ async def debug_config() -> dict[str, Any]:
             "model": s.vision_model,
             "effort": s.vision_effort,
             "adaptive_effort": _vision_supports_adaptive_effort(s.vision_model),
-            # Último error del call a Anthropic (vacío si el último anduvo).
-            "last_anthropic_error": _vision_last_anthropic_error() or None,
+            # Último error del call a Anthropic (set=False si el último anduvo):
+            # solo el tipo de excepción, nunca el texto.
+            "last_anthropic_error": {**_mask(vision_err), "type": _exc_type(vision_err)},
         },
         "vendure": {
             "api_url": s.vendure_api_url,
             "bearer": _mask(s.vendure_bearer),
-            "channel_token": s.vendure_channel_token,
+            "channel_token": _mask(s.vendure_channel_token),
             "user": _mask(s.vendure_user),
             "pass": _mask(s.vendure_pass),
             "source_url_field": s.vendure_source_url_field,
@@ -1734,7 +1752,7 @@ async def debug_config() -> dict[str, Any]:
             "smtp_host": s.alert_smtp_host,
             "smtp_user": _mask(s.alert_smtp_user),
             "smtp_pass": _mask(s.alert_smtp_pass),
-            "email_to": s.alert_email_to,
+            "email_to": _mask(s.alert_email_to),
             "webhook_url": {**_mask(s.alert_webhook_url), "host": _host(s.alert_webhook_url)},
         },
         "database": {

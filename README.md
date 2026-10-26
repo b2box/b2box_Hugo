@@ -1569,7 +1569,11 @@ key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
 loguea el nombre del cliente en cada request autenticado y cada key se rota por
 separado. `HUGO_API_KEY` (una sola key compartida) sigue valiendo como cliente
 `legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys)
-y pide las dos cosas: sesión del dashboard **y** `X-API-Key`.
+y pide las dos cosas: sesión del dashboard **y** la `X-API-Key` de un cliente
+admin. Admin es el cliente que se llame como diga `HUGO_ADMIN_CLIENTS` (default
+`admin`, o sea una entrada `admin:<key>` en `HUGO_API_KEYS`); con la key de Luis,
+de Cloud, del app o la `legacy` responde 403, y también si la key del admin la
+comparte un cliente que no es admin.
 
 ### `POST /app/lookup`
 

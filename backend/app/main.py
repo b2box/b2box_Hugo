@@ -55,7 +55,18 @@ def _enforce_prod_secrets() -> None:
     descartaba → /verify y /app/* abiertos con solo un warning.
     """
     s = get_settings()
+    log = logging.getLogger(__name__)
     if s.hugo_env.strip().lower() != "production":
+        # development no puede arrancar callado: es el modo en que el panel quedó
+        # abierto a internet. Si alguien lo prende en un server, que el log de
+        # arranque diga qué quedó sin traba.
+        log.error(
+            "HUGO_ENV=development: arranque SIN los chequeos de producción. Se relaja: "
+            "login del dashboard no obligatorio (sin credenciales queda abierto); "
+            "SUPABASE_ALLOWED_EMAILS vacía deja entrar a cualquier usuario de Cloud_B2BOX; "
+            "API keys débiles o placeholder aceptadas (y sin keys, /verify y /app/* abiertos); "
+            "/docs, /redoc y /openapi.json publicados. No exponer a internet."
+        )
         return
     missing = []
     # Login del dashboard: vale Supabase (preferido) o password local.
@@ -73,9 +84,11 @@ def _enforce_prod_secrets() -> None:
     # variable): los logins por Supabase reciben 403 con el motivo, y los
     # clientes por API key siguen funcionando. Pero se avisa fuerte.
     if auth.allowlist_misconfigured():
-        logging.getLogger(__name__).error(
-            "Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL
-        )
+        log.error("Dashboard sin acceso: %s", auth.ALLOWLIST_MISSING_DETAIL)
+    # Tampoco tira el arranque: es una ruta de diagnóstico. Pero sin esto el 403
+    # de /api/debug-config no tiene explicación a la vista.
+    for problem in security.admin_config_warnings():
+        log.warning("/api/debug-config: %s", problem)
 
 
 def _seed_stores() -> None:
