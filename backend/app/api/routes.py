@@ -1,6 +1,8 @@
 """Endpoints REST de Hugo.
 
 POST /verify           ← Paco/Luis preguntan: "¿este candidato es duplicado?"
+POST /radar/ml-supply  ← Luis pregunta cuántas publicaciones hay en ML por palabra
+GET  /radar/ml-supply/usage ← gasto del radar en Apify (día y mes)
 POST /audit            ← dispara auditoría completa on-demand
 GET  /products/{id}/check  ← chequea un producto específico (precio + duplicado)
 GET  /audit-log        ← últimas N acciones (para dashboard)
@@ -16,7 +18,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, func, select
 
 from app import runtime
@@ -26,6 +28,7 @@ from app.db.session import engine, get_session
 from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_target_for
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
+from app.pricing import radar_ml_supply
 from app.pricing.source_check import fetch_source_price
 from app.security import configured_api_keys, verify_admin_api_key, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
@@ -412,6 +415,26 @@ class VerifyResponse(BaseModel):
     matched_product: dict[str, Any] | None = None
 
 
+RADAR_MAX_TERMS = 20
+RADAR_MAX_TERM_LEN = 100
+
+
+class RadarMlSupplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Tope 20: una corrida del actor tarda ~1 min cada pocos términos y el pedido la espera entera.
+    terms: list[str] = Field(min_length=1, max_length=RADAR_MAX_TERMS)
+    source: str = Field(default="luis", max_length=MAX_SOURCE_LEN)
+
+    @field_validator("terms", mode="after")
+    @classmethod
+    def _clean_terms(cls, v: list[str]) -> list[str]:
+        clean = [t.strip() for t in v]
+        if any(not 1 <= len(t) <= RADAR_MAX_TERM_LEN for t in clean):
+            raise ValueError(f"cada término tiene que tener entre 1 y {RADAR_MAX_TERM_LEN} caracteres")
+        return list(dict.fromkeys(clean))
+
+
 # ─── Endpoints ───────────────────────────────────────────────────
 
 
@@ -570,6 +593,19 @@ def _record_verify(
             session.commit()
     except Exception:  # noqa: BLE001
         log.exception("No se pudo registrar AuditLog del verify")
+
+
+@router.post("/radar/ml-supply", dependencies=[Depends(verify_api_key)])
+async def radar_ml_supply_endpoint(payload: RadarMlSupplyRequest) -> dict[str, Any]:
+    """Luis (radar): cuántas publicaciones tiene ML Argentina por palabra. Siempre 200: cada término dice si salió
+    (`ok`) o por qué no (`error`). Puede tardar hasta ~4 min si hay términos sin caché (una corrida de Apify)."""
+    return await radar_ml_supply.lookup(payload.terms)
+
+
+@router.get("/radar/ml-supply/usage", dependencies=[Depends(verify_api_key)])
+async def radar_ml_supply_usage() -> dict[str, Any]:
+    """Gasto del radar en Apify: por día (últimos 30) y del mes calendario UTC, contra el tope mensual."""
+    return await asyncio.to_thread(radar_ml_supply.usage_report)
 
 
 @router.post(

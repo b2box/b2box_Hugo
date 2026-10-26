@@ -425,6 +425,33 @@ class MlSellerCache(SQLModel, table=True):
     fetched_at: datetime = Field(default_factory=utcnow)
 
 
+class RadarMlSupplyCache(SQLModel, table=True):
+    """Cuántas publicaciones tiene ML para una palabra (radar de Luis, ver
+    pricing/radar_ml_supply.py). Solo se guardan los totales que ML informó: un
+    error no se cachea. Vale 7 días: la oferta cambia lento y cada consulta paga."""
+    __tablename__ = "radar_ml_supply_cache"
+
+    term_key: str = Field(primary_key=True, max_length=100)
+    total: int
+    fetched_at: datetime = Field(default_factory=utcnow)
+
+
+class ApifySpend(SQLModel, table=True):
+    """Lo que costó una corrida de Apify, por proyecto (`label`, p. ej. "radar_ml"). Es lo que informa Apify
+    (`usageTotalUsd`); si no lo informa, una estimación marcada `estimated`. De acá salen el tope mensual en USD
+    y el reporte de gasto (GET /radar/ml-supply/usage)."""
+    __tablename__ = "apify_spend"
+    __table_args__ = (Index("ix_apify_spend_label_created", "label", "created_at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    label: str = Field(max_length=40)
+    run_id: str = Field(default="", max_length=40)
+    terms: int = 0
+    usd: float = 0.0
+    estimated: bool = False
+
+
 class MlWebResult(SQLModel, table=True):
     """Una búsqueda web de ML hecha por la Mac de la oficina para un producto (ver
     pricing/oficina_ml.py). Hugo guarda lo que la Mac manda YA saneado; el semáforo lo

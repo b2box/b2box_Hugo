@@ -285,6 +285,15 @@ class Settings(EnvSettings):
     apify_meli_search_enabled: int = 0
     apify_meli_search_daily_max: int = 200
 
+    # ── Radar de Luis: cuánta oferta hay en ML por palabra ─────
+    # Ver app/pricing/radar_ml_supply.py (POST /radar/ml-supply). Mismo APIFY_TOKEN.
+    # Términos PAGOS por día UTC (los de caché no cuentan); pasado el tope vuelven "tope diario".
+    hugo_radar_ml_daily_cap: int = Field(default=300, ge=0, le=5000)
+    # Key de Apify propia del radar, para separar su gasto en Apify Console (vacía = usa APIFY_TOKEN).
+    hugo_radar_apify_token: str = Field(default="", description="Token de Apify solo para el radar (vacío = APIFY_TOKEN)")
+    # Tope de gasto del radar en Apify por mes calendario UTC, en USD (lo registrado en apify_spend).
+    hugo_radar_apify_monthly_usd: float = Field(default=3.0, ge=0, le=1000)
+
     # ── Storefront (botón "comprar ahora") ─────────────────────
     storefront_url: str = Field(default="", description="https://b2box.app (base de la tienda)")
     storefront_product_path: str = Field(

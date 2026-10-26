@@ -1809,10 +1809,37 @@ Resultado típico:
 postgresql+psycopg://postgres.<project>:<pass>@aws-0-<region>.pooler.supabase.com:5432/postgres
 ```
 
+### Radar de Luis: oferta en ML por palabra (`POST /radar/ml-supply`)
+
+Luis pregunta cuántas publicaciones hay en Mercado Libre Argentina por palabra para calcular la escasez
+(`e_ml = 1 − clamp(log10(N+1)/4, 0, 1)`). Lo resuelve `pricing/radar_ml_supply.py` con el actor
+`lergassy/mercadolibre-reviews-scraper` (modo `search`): una fila `type:"product"` por término con `totalResults`
+(ML lo corta en 9.999). La API oficial no sirve: `/sites/MLA/search` da 403 con el token de Hugo y `/products/search`
+cuenta fichas de catálogo con techo 10.000.
+
+- **Auth:** `X-API-Key` de `HUGO_API_KEYS`, igual que `/verify` (cliente `luis`).
+- **Pedido:** `{"terms": [...], "source": "luis"}`, 1 a 20 términos de 1 a 100 caracteres (con strip; los repetidos
+  exactos se unifican; campos de más → 422). `term` vuelve con el texto que mandó Luis.
+- **Una corrida de Apify por pedido** con todos los términos sin caché, `maxTotalChargeUsd = 0,01 × términos + 0,05`,
+  timeout 240 s: el pedido puede tardar ~4 min. El actor tiene que correr con `LIMITED_PERMISSIONS`.
+- **Siempre 200.** Un término sin total válido vuelve `ok:false`, `total:null` con `error` corto. Nunca un 0 inventado.
+- **Caché** de 7 días por término normalizado (lower, strip, espacios colapsados) en `radar_ml_supply_cache`.
+- **Tope diario** de términos pagos: `HUGO_RADAR_ML_DAILY_CAP` (default 300, día UTC) → `error:"tope diario"`.
+- **Gasto:** cada corrida lanzada queda en `apify_spend` (etiqueta `radar_ml`) con el `usageTotalUsd` de Apify, o
+  estimado (USD 0,0025 por fila cobrada, `estimated = true`) si no viene. **Tope mensual** `HUGO_RADAR_APIFY_MONTHLY_USD`
+  (default 3, mes calendario UTC): si lo gastado + el techo de la corrida lo pasa, no corre → `error:"tope mensual de Apify"`.
+  `budget` en la respuesta trae `used_today`, `daily_cap`, `apify_usd_month`, `apify_usd_cap_month` y `apify_usd_today`;
+  `GET /radar/ml-supply/usage` (misma auth) da el gasto por día de los últimos 30 días y el del mes.
+- **Key de Apify:** `HUGO_RADAR_APIFY_TOKEN` si está, si no `APIFY_TOKEN`. Sin ninguna → `error:"apify no configurado"`.
+  Recomendado: en Apify Console → API & Integrations crear una key con nombre (p. ej. `hugo-radar-ml`) con permiso
+  **Run** solo sobre el actor `lergassy/mercadolibre-reviews-scraper`; así el gasto se separa del resto de Hugo y la key no
+  sirve para otra cosa. La key va solo en el header `Authorization`: nunca a logs ni a respuestas.
+
 ## Endpoints
 
 - `GET  /health` — liveness probe (lo usa el healthcheck de Docker)
 - `POST /verify` — Paco/Luis preguntan si un candidato es duplicado
+- `POST /radar/ml-supply`, `GET /radar/ml-supply/usage` — radar de Luis: oferta en ML por palabra y su gasto (ver su sección)
 - `POST /audit?target=all|duplicates|prices` — auditoría on-demand
 - `GET  /products/{id}/check` — chequea un producto puntual (precio fuente)
 - `GET  /audit-log?limit=N` — últimas N acciones (para dashboard)
