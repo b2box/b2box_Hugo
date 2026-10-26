@@ -53,6 +53,14 @@ README = (Path(__file__).resolve().parents[2] / "README.md").read_text()
 NEW_TABLES = {"price_review_item", "price_review_event"}
 NEW_COLS = {"market_price_snapshot": {"data_at", "review_flag"},
             "price_monitor_run": {"review_at", "review_summary", "n_flipped"}}
+# Lo que agregan los PRs que entran antes que la bandeja y no está en el esquema de partida: las tablas del estimado por
+# foto y de reservas de la cola de la búsqueda con Apify (las prueban test_qa_estimate_migracion.py y
+# test_qa_apify_ml_search_pg.py) y las columnas de «No medible» y del juez de fix/semaforo-sin-dato (#25, las prueban
+# test_qa_postgres_migration.py y compañía). Las crea el mismo arranque; acá no se miran.
+OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim"}
+OTHER_PRS_COLS = {"market_price_snapshot": {"unmeasurable"},
+                  "price_monitor_run": {"llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
+                                        "llm_skipped_cut", "llm_status", "n_no_medible"}}
 NOW = w.NOW
 
 
@@ -66,8 +74,9 @@ def _rollback_sql() -> str:
 def _shape(engine) -> dict:
     insp = inspect(engine)
     out = {}
-    for table in sorted(insp.get_table_names()):
-        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)}
+    for table in sorted(set(insp.get_table_names()) - OTHER_PRS_TABLES):
+        cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)
+                if c["name"] not in OTHER_PRS_COLS.get(table, ())}
         idx = {i["name"]: (tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
         out[table] = (cols, idx)
     return out

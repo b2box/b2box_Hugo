@@ -43,6 +43,10 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Post
 REPO = Path(__file__).resolve().parents[2]
 NEW_TABLES = {"price_review_item", "price_review_event"}
 NEW_COLS = {"market_price_snapshot": {"data_at", "review_flag"}, "price_monitor_run": {"review_at", "review_summary", "n_flipped"}}
+# Tablas de los PRs que entran antes que la bandeja (estimado por foto y reservas de la cola de la búsqueda con Apify): mientras
+# no estén en origin/main las crea el mismo arranque. Las prueban test_qa_estimate_migracion.py y test_qa_apify_ml_search_pg.py;
+# acá no se miran, ni antes ni después (así el test vale igual con esos PRs mergeados o no).
+OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim"}
 
 
 def dsn() -> str:
@@ -58,7 +62,7 @@ def shape(engine) -> dict:
     """Todo lo que describe el esquema: columnas (tipo, null, default), PK, únicos, FK, checks e índices de cada tabla."""
     insp = inspect(engine)
     out = {}
-    for t in sorted(insp.get_table_names()):
+    for t in sorted(set(insp.get_table_names()) - OTHER_PRS_TABLES):
         out[t] = {
             "cols": {c["name"]: (str(c["type"]) + (" WITH TIME ZONE" if getattr(c["type"], "timezone", False) else ""), c["nullable"],
                              str(c.get("default"))) for c in insp.get_columns(t)},
