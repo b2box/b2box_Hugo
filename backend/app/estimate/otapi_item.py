@@ -140,7 +140,9 @@ def parse_item(offer_id: str, item: object) -> Offer1688 | None:
 
 async def _reserve() -> bool:
     s = get_settings()
-    general = int(runtime.get("otapi_daily_budget") or s.otapi_daily_budget)
+    # 0 en el panel tiene que frenar: `or` lo trataba como "sin valor" y volvía al default del env.
+    raw = runtime.get("otapi_daily_budget")
+    general = int(s.otapi_daily_budget if raw is None else raw)
     own = int(s.estimate_otapi_daily_budget)
     if own <= 0 or general <= 0:
         return False

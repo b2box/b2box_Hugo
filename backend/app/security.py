@@ -285,6 +285,19 @@ def _is_admin(client: str, keys: dict[str, str]) -> bool:
     )
 
 
+def has_own_key(client: str) -> bool:
+    """El cliente tiene una key válida que ningún otro cliente comparte: con una key
+    compartida, match_api_key decide el nombre por el orden de HUGO_API_KEYS."""
+    keys = configured_api_keys()
+    mine = keys.get(client)
+    if not mine:
+        return False
+    return not any(
+        name != client and hmac.compare_digest(mine.encode("utf-8"), key.encode("utf-8"))
+        for name, key in keys.items()
+    )
+
+
 def admin_config_warnings() -> list[str]:
     """Por qué /api/debug-config puede quedar cerrado, para el log de arranque."""
     keys = configured_api_keys()

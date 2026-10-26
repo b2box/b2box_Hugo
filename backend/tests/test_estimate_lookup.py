@@ -188,6 +188,9 @@ def env(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "estimate_deadline_s", 50.0, raising=False)
     monkeypatch.setattr(s, "estimate_trusted_ip_clients", "storefront", raising=False)
+    # A «storefront» se le cree visitor.ip solo con key propia en HUGO_API_KEYS: acá la tiene.
+    from app import security
+    monkeypatch.setattr(security, "has_own_key", lambda client: client == "storefront")
     monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
     monkeypatch.setattr(app_routes.vendure_catalog, "get_catalog", fake_catalog)
     monkeypatch.setattr(app_routes.image_embed, "available", lambda: False)

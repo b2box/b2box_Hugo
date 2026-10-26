@@ -406,3 +406,42 @@ def test_prefijo_sin_barra_final_no_abre_carpetas_hermanas(monkeypatch):
     assert images.allowed_search_image("https://s3.b2box.app/b2box-media/lookup-photos/a.jpg")
     assert not images.allowed_search_image(
         "https://s3.b2box.app/b2box-media/lookup-photos-viejas/a.jpg")
+
+
+# ─── Revisión de seguridad del stack (#28 → #29 → #24) ────────────
+
+
+def test_visitor_ip_solo_con_key_propia_y_nunca_legacy(monkeypatch):
+    from app.estimate import service
+
+    s = get_settings()
+    monkeypatch.setattr(s, "estimate_trusted_ip_clients", "storefront,legacy", raising=False)
+    assert service.trusted_ip_clients() == {"storefront"}
+    declared, sock = "190.1.2.3", "10.0.0.9"
+    own, shared = "k" * 30, "j" * 30
+
+    monkeypatch.setattr(service.security, "configured_api_keys", lambda: {"storefront": own, "luis": shared})
+    assert service.visitor_ip_hash(api_client="storefront", declared_ip=declared, socket_ip=sock) == identity.ip_hash(declared)
+    # Otro cliente con la misma key: match_api_key decide el nombre por orden, no se le cree visitor.ip.
+    monkeypatch.setattr(service.security, "configured_api_keys", lambda: {"storefront": shared, "luis": shared})
+    assert service.visitor_ip_hash(api_client="storefront", declared_ip=declared,
+                                   socket_ip=sock) == identity.ip_hash(sock, kind="sock")
+    # "legacy" (HUGO_API_KEY, la compartida) nunca, aunque lo nombren.
+    monkeypatch.setattr(service.security, "configured_api_keys", lambda: {"legacy": own})
+    assert service.visitor_ip_hash(api_client="legacy", declared_ip=declared,
+                                   socket_ip=sock) == identity.ip_hash(sock, kind="sock")
+
+
+async def test_otapi_con_el_cupo_general_en_cero_desde_el_panel_no_lee(monkeypatch):
+    s = get_settings()
+    monkeypatch.setattr(s, "otapi_daily_budget", 500, raising=False)
+    monkeypatch.setattr(s, "estimate_otapi_daily_budget", 60, raising=False)
+    monkeypatch.setattr(otapi_item.runtime, "get", lambda k: 0)
+    reserved = []
+
+    async def reserve(*a, **k):
+        reserved.append(a)
+        return 1
+    monkeypatch.setattr(otapi_item.daily_budget, "reserve_async", reserve)
+    assert await otapi_item._reserve() is False
+    assert reserved == []

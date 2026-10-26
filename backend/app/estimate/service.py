@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app import runtime
+from app import runtime, security
 from app.config import get_settings
 from app.dedup import catalog_index
 from app.estimate import identity, images, judge, limits, otapi_item, pricing, store
@@ -120,8 +120,10 @@ def tier_quantities() -> list[int]:
 
 
 def trusted_ip_clients() -> set[str]:
+    """A quién se le cree `visitor.ip`. "legacy" nunca: HUGO_API_KEY es la key
+    compartida (la misma regla que los clientes admin de /api/debug-config)."""
     raw = get_settings().estimate_trusted_ip_clients or ""
-    return {c.strip() for c in raw.split(",") if c.strip()}
+    return {c.strip() for c in raw.split(",") if c.strip()} - {security.LEGACY_CLIENT}
 
 
 def visitor_ip_hash(*, api_client: str | None, declared_ip: object,
@@ -133,7 +135,7 @@ def visitor_ip_hash(*, api_client: str | None, declared_ip: object,
     socket es para buscar en el catálogo, no para gastar Apify. Cualquier otro
     cliente: la IP del socket (rotar `visitor.ip` no le da cupo). Lanza
     SaltMissing."""
-    if api_client and api_client in trusted_ip_clients():
+    if api_client and api_client in trusted_ip_clients() and security.has_own_key(api_client):
         return identity.ip_hash(declared_ip)
     return identity.ip_hash(socket_ip, kind="sock")
 

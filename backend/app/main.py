@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import auth, security
+from app.estimate import identity
 from app.api.app_routes import router as app_router
 from app.api.oficina_routes import router as oficina_router
 from app.api.price_monitor_routes import router as price_monitor_router
@@ -93,6 +94,13 @@ def _enforce_prod_secrets() -> None:
     # de /api/debug-config no tiene explicación a la vista.
     for problem in security.admin_config_warnings():
         log.warning("/api/debug-config: %s", problem)
+    # Sin sal no se puede contar por visitante: /app/lookup responde 503 a los clientes con
+    # límite por visitante (el storefront), no solo el estimado. No tira el arranque.
+    if len((s.estimate_hash_salt or "").strip()) < identity.MIN_SALT_LEN:
+        log.error(
+            "/app/lookup del storefront responde 503: falta ESTIMATE_HASH_SALT (%d+ caracteres)",
+            identity.MIN_SALT_LEN,
+        )
 
 
 def _seed_stores() -> None:

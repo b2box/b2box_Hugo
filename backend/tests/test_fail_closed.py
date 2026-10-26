@@ -104,6 +104,27 @@ def test_production_con_supabase_y_api_key_arranca(monkeypatch):
     main._enforce_prod_secrets()  # no levanta
 
 
+def test_production_sin_sal_del_estimado_avisa_fuerte_al_arrancar(monkeypatch, caplog):
+    """Sin ESTIMATE_HASH_SALT /app/lookup del storefront responde 503 (#28): no tira el arranque,
+    pero tiene que quedar a la vista en el log."""
+    import logging
+
+    from app import main
+
+    base = dict(hugo_env="production", supabase_url="https://ref.supabase.co", supabase_anon_key="anon-key",
+                hugo_api_key="k" * 43)
+    _use(monkeypatch, _settings(**base, estimate_hash_salt=""))
+    with caplog.at_level(logging.ERROR):
+        main._enforce_prod_secrets()
+    assert any("ESTIMATE_HASH_SALT" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+    caplog.clear()
+    _use(monkeypatch, _settings(**base, estimate_hash_salt="s" * 32))
+    with caplog.at_level(logging.ERROR):
+        main._enforce_prod_secrets()
+    assert not any("ESTIMATE_HASH_SALT" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize(
     "path",
     ["/", "/api/debug-config", "/docs", "/openapi.json", "/audit-log", "/api/metrics"],
