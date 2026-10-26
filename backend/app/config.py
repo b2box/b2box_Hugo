@@ -77,6 +77,11 @@ class Settings(EnvSettings):
     # Legacy: una sola key compartida. Sigue valiendo (cliente "legacy") para no
     # romper a quien ya la tenga; conviene migrar a HUGO_API_KEYS.
     hugo_api_key: str = Field(default="", description="Key única compartida (legacy)")
+    # Clientes de HUGO_API_KEYS (coma-separados) que pueden entrar a las rutas de
+    # diagnóstico (/api/debug-config). La key de Luis o del app sirve para
+    # /verify y /app/*, no para leer el mapa de config del servidor. Sin un
+    # cliente con este nombre y key válida, la ruta responde 403.
+    hugo_admin_clients: str = Field(default="admin", description='Clientes admin, ej. "admin"')
 
     # ── Proxy de confianza (Traefik de Coolify) ────────────────
     # Cuántos proxies confiables hay delante de Hugo. Con N, la IP real del

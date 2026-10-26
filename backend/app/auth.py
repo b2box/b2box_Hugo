@@ -282,7 +282,14 @@ def cookie_is_secure(request: Request) -> bool:
 
 
 def _is_public_path(path: str) -> bool:
-    return any(path == p or path.startswith(p) for p in _PUBLIC_PREFIXES)
+    """¿La ruta está en la allowlist pública?
+
+    El prefijo corta en límite de segmento: "/verify" cubre "/verify" y
+    "/verify/...", pero no "/verify-admin". Con un startswith pelado, cualquier
+    ruta nueva que empezara con el nombre de una pública salteaba el login sin
+    que nadie lo hubiera decidido.
+    """
+    return any(path == p or path.startswith(p.rstrip("/") + "/") for p in _PUBLIC_PREFIXES)
 
 
 def _wants_html(request: Request) -> bool:
@@ -296,15 +303,20 @@ async def auth_middleware(request: Request, call_next):
 
     - Navegación de browser sin sesión → redirect 302 a /login.
     - Llamada fetch/API sin sesión      → 401 JSON (el front redirige).
+
+    La ruta sale de scope["path"], el mismo string contra el que matchea el
+    router. request.url.path NO sirve: Starlette arma request.url pegando el
+    header Host, y con "Host: x/verify" un GET /api/settings se veía acá como
+    /verify/api/settings (pública) mientras el router servía /api/settings.
     """
+    path = request.scope["path"]
     if not login_enabled():
-        if not _is_public_path(request.url.path):
+        if not _is_public_path(path):
             log.warning(
                 "DASHBOARD_PASSWORD vacío — el dashboard queda ABIERTO, no usar en producción"
             )
         return await call_next(request)
 
-    path = request.url.path
     if _is_public_path(path):
         return await call_next(request)
 
@@ -325,7 +337,10 @@ def set_session_cookie(response, request: Request, username: str) -> None:
         max_age=get_settings().dashboard_session_hours * 3600,
         httponly=True,
         samesite="lax",
-        secure=cookie_is_secure(request),
+        # En producción va Secure siempre: no puede depender de que el proxy
+        # mande X-Forwarded-Proto. Si un día no lo manda, la cookie de sesión
+        # saldría sin Secure y el browser la mandaría también por http.
+        secure=cookie_is_secure(request) or _is_production(),
         path="/",
     )
 

@@ -255,3 +255,67 @@ def verify_api_key(request: Request, x_api_key: str | None = Header(default=None
     request.state.api_client = client
     log.info("API key OK: cliente=%s %s %s", client, request.method, request.url.path)
     return client
+
+
+def _admin_names() -> frozenset[str]:
+    raw = getattr(get_settings(), "hugo_admin_clients", "") or ""
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def admin_clients() -> frozenset[str]:
+    """Nombres de cliente con acceso a las rutas de diagnóstico (HUGO_ADMIN_CLIENTS).
+
+    "legacy" nunca cuenta: HUGO_API_KEY es la key compartida que todavía pueden
+    tener Luis o el app, y nombrarla admin anularía la restricción entera.
+    """
+    return _admin_names() - {LEGACY_CLIENT}
+
+
+def _is_admin(client: str, keys: dict[str, str]) -> bool:
+    """Admin y con key propia. Si un cliente que no es admin tiene la misma key,
+    no vale: match_api_key se queda con el primero de HUGO_API_KEYS, y que el
+    orden decida quién es admin no es una regla."""
+    admins = admin_clients()
+    if client not in admins:
+        return False
+    mine = keys[client].encode("utf-8")
+    return not any(
+        name not in admins and hmac.compare_digest(mine, key.encode("utf-8"))
+        for name, key in keys.items()
+    )
+
+
+def admin_config_warnings() -> list[str]:
+    """Por qué /api/debug-config puede quedar cerrado, para el log de arranque."""
+    keys = configured_api_keys()
+    problems = []
+    if LEGACY_CLIENT in _admin_names():
+        problems.append(
+            f"HUGO_ADMIN_CLIENTS nombra a {LEGACY_CLIENT!r}, que se ignora (HUGO_API_KEY es compartida)"
+        )
+    if not any(_is_admin(name, keys) for name in keys):
+        problems.append(
+            "cerrado: ningún cliente de HUGO_ADMIN_CLIENTS tiene una key válida y propia en HUGO_API_KEYS"
+        )
+    return problems
+
+
+def verify_admin_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> str | None:
+    """FastAPI dependency: como verify_api_key, y además el cliente tiene que ser admin.
+
+    Para /api/debug-config: si se filtra la key de Luis o la del app, con eso
+    no alcanza para leer qué credenciales tiene el servidor. Sin keys
+    configuradas en development, verify_api_key ya dejó pasar (con warning) y
+    acá no hay cliente que chequear.
+    """
+    client = verify_api_key(request, x_api_key)
+    if client is None:
+        return None
+    if not _is_admin(client, configured_api_keys()):
+        log.warning("Cliente %r sin permiso de admin (HUGO_ADMIN_CLIENTS) en %s %s",
+                    client, request.method, request.url.path)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Esta API key no tiene acceso a esta ruta",
+        )
+    return client
