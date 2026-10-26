@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # ── Entorno ────────────────────────────────────────────────
     # "production" hace que el arranque FALLE si faltan credenciales
-    # (login del dashboard / HUGO_API_KEY). En "development" solo warnea.
+    # (login del dashboard / API keys). En "development" solo warnea.
     #
     # El default es "production" a propósito: un deploy que se olvide de setear
     # HUGO_ENV tiene que caer, no quedar abierto a internet. Para correr local

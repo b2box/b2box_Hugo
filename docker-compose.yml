@@ -39,10 +39,10 @@ services:
 
     # HUGO_ENV es el interruptor de TODO el fail-closed (secretos obligatorios
     # al arranque, allowlist del dashboard, 503 sin API keys, keys placeholder
-    # ignoradas). El default del código es "development", así que si nadie la
-    # define, producción corre abierta. Este compose es el que deploya Coolify:
-    # acá el default es production. En local, el .env (HUGO_ENV=development) lo
-    # pisa vía la interpolación de abajo; `environment` gana sobre `env_file`.
+    # ignoradas, sin /docs). El código ya trata como production todo lo que no
+    # sea exactamente "development"; este default es la segunda traba. Este
+    # compose es el que deploya Coolify. En local, el .env (HUGO_ENV=development)
+    # lo pisa vía la interpolación de abajo; `environment` gana sobre `env_file`.
     environment:
       HUGO_ENV: ${HUGO_ENV:-production}
 
