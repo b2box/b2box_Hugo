@@ -50,9 +50,10 @@ def _rollback_sql() -> str:
 def _shape(engine) -> dict:
     insp = inspect(engine)
     out = {}
-    # Las tablas de la auditoría de textos (HG1) y del estimado por foto son de PRs posteriores a
-    # este esquema de partida: las prueban test_seo_text_audit_pg.py y test_qa_estimate_migracion.py.
-    later = ("text_audit_", "estimate_usage", "lookup_estimate")
+    # Las tablas de la auditoría de textos (HG1), del estimado por foto y de reservas de la cola
+    # (ml_web_claim, búsqueda con Apify) son de PRs posteriores a este esquema de partida: las prueban
+    # test_seo_text_audit_pg.py, test_qa_estimate_migracion.py y test_apify_ml_search.py.
+    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim")
     for table in sorted(t for t in insp.get_table_names() if not t.startswith(later)):
         cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)}
         idx = {i["name"]: (tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
