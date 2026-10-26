@@ -43,6 +43,10 @@ def pgapi(pg, monkeypatch):
             s.add(MarketPriceSnapshot(run_id=1, product_id=str(pid), ml_status="no_data", product_name=f"Organizador cocina {pid}",
                                       product_enabled=True))
         s.commit()
+    # pg_base carga 11 y 12 con fecha fija (08-oct); la cola deja afuera lo medido hace más de SNAPSHOT_MAX_AGE respecto
+    # de lo más nuevo, así que sin esto el test empieza a fallar solo con el paso de los días.
+    with pg.begin() as c:
+        c.execute(text("UPDATE market_price_snapshot SET captured_at = :now WHERE product_id IN ('11', '12')"), {"now": utcnow()})
     yield TestClient(main_mod.app), pg
     oficina_routes.reset_limits()
 
