@@ -25,6 +25,9 @@ def _settings(**over):
         "vendure_api_url": "https://example.test/admin-api",
         "hugo_api_key": "",
         "dashboard_password": "",
+        # Desde #28 las sesiones del panel se firman solo con DASHBOARD_SECRET (32+): sin ella
+        # ningún test de acá podría loguearse en production.
+        "dashboard_secret": "s" * 40,
         "supabase_url": "",
         "supabase_anon_key": "",
         "_env_file": None,
@@ -151,7 +154,11 @@ def test_docs_apagado_en_production(monkeypatch):
         assert main.app.openapi_url is None
         assert main.app.redoc_url is None
     finally:
+        # Entorno, caché y app.main vuelven a como estaban: si no, los tests que
+        # siguen heredan los settings de production (y la app recargada).
+        monkeypatch.undo()
         config.get_settings.cache_clear()
+        importlib.reload(main)
 
 
 # ─── QA: paridad Settings ↔ main._DEV, guardas de producción y /api/debug-config ──
@@ -171,6 +178,8 @@ from app import security  # noqa: E402
 
 _GOOD_KEY = "qa-" + "a1b2c3d4e5f6g7h8i9j0k1l2m3"  # >= 24 chars: válida en production
 _LUIS_KEY = "luis-" + "z9y8x7w6v5u4t3s2r1q0p9o8n7"  # válida, pero no es cliente admin
+# Desde #28 las sesiones del panel se firman solo con DASHBOARD_SECRET (32+ caracteres).
+_SECRET = "s" * 40
 _RAROS = [None, "", "production", "production.", "Production ", "prod", "dev", "develop",
           "development.", "developmentt", "development,production", "'development'", "\"development\""]
 _DEVS = ["development", "  Development ", "DEVELOPMENT", "development\n", "\tdevelopment"]
@@ -193,6 +202,7 @@ def _main_con_env(**env):
         os.environ.pop(k, None)
     for k, v in env.items():
         _set_env(k, v)
+    config.get_settings.cache_clear()
     try:
         yield importlib.reload(main)
     finally:
@@ -200,6 +210,9 @@ def _main_con_env(**env):
             os.environ.pop(k, None)
         for k, v in prev.items():
             _set_env(k, v)
+        # Sin esto el caché de get_settings() queda con el entorno del test y los
+        # tests que siguen corren con esos settings (p. ej. production sin sal).
+        config.get_settings.cache_clear()
         importlib.reload(main)
 
 
@@ -289,7 +302,7 @@ def _session_cookie(monkeypatch, s) -> dict[str, str]:
 @pytest.fixture
 def prod_client(monkeypatch):
     """Production por typo, con login local, una key admin y una que no lo es."""
-    s = _settings(hugo_env="production.", dashboard_password="pw-qa",
+    s = _settings(hugo_env="production.", dashboard_password="pw-qa", dashboard_secret=_SECRET,
                   hugo_api_keys=f"qa:{_GOOD_KEY},luis:{_LUIS_KEY}", hugo_admin_clients="qa")
     _use(monkeypatch, s)
     from app import main
@@ -332,7 +345,7 @@ def test_debug_config_con_login_y_key_valida_es_200(prod_client):
 
 def test_debug_config_en_production_sin_keys_es_503(monkeypatch):
     """Segunda traba: si algo se salteó _enforce_prod_secrets, la ruta igual cierra."""
-    s = _settings(hugo_env="prod", dashboard_password="pw-qa", hugo_api_keys="qa:corta")
+    s = _settings(hugo_env="prod", dashboard_password="pw-qa", dashboard_secret=_SECRET, hugo_api_keys="qa:corta")
     _use(monkeypatch, s)
     from app import main
 
@@ -354,6 +367,7 @@ def test_debug_config_no_filtra_token_del_webhook_ni_password_de_la_db(monkeypat
     s = _settings(
         hugo_env="production",
         dashboard_password="pw-qa",
+        dashboard_secret=_SECRET,
         hugo_api_keys=f"qa:{_GOOD_KEY}",
         hugo_admin_clients="qa",
         alert_webhook_url="https://hooks.slack.com/services/T000/B000/tok3n-secreto",

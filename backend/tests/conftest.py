@@ -21,6 +21,9 @@ _fd, _DB_PATH = tempfile.mkstemp(prefix="hugo-tests-", suffix=".sqlite3")
 os.close(_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB_PATH}"
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
+# Desde #30 el default del código es production (fail-closed). La suite corre en development salvo
+# que el test diga otra cosa: los que prueban production fijan HUGO_ENV o hugo_env explícitamente.
+os.environ.setdefault("HUGO_ENV", "development")
 
 
 def _engine_is_a_temp_sqlite(url) -> bool:
