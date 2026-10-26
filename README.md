@@ -1567,7 +1567,8 @@ Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
 loguea el nombre del cliente en cada request autenticado y cada key se rota por
 separado. `HUGO_API_KEY` (una sola key compartida) sigue valiendo como cliente
-`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys).
+`legacy`; `GET /api/debug-config` lista los nombres configurados (nunca las keys)
+y pide las dos cosas: sesión del dashboard **y** `X-API-Key`.
 
 ### `POST /app/lookup`
 

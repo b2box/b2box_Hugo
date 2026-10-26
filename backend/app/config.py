@@ -9,7 +9,15 @@ from pydantic import EmailStr, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class EnvSettings(BaseSettings):
+    """Solo HUGO_ENV, leído exactamente igual que en Settings.
+
+    main.py lo usa al importarse para decidir si publica /docs, antes de que
+    Settings pueda construirse (exige VENDURE_API_URL). Al compartir fuentes
+    (entorno + .env, sin distinguir mayúsculas) y validador, /docs y los
+    chequeos de producción nunca pueden discrepar.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -38,6 +46,8 @@ class Settings(BaseSettings):
         """
         return "development" if v.strip().lower() == "development" else "production"
 
+
+class Settings(EnvSettings):
     # ── Vendure Admin API ──────────────────────────────────────
     vendure_api_url: str = Field(..., description="https://admin.b2-box.com/admin-api")
     # Bearer opcional: si está vacío, Hugo se loguea con user/pass al primer call.

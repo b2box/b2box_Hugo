@@ -9,7 +9,6 @@ Uso:
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from app.api.price_monitor_routes import router as price_monitor_router
 from app.api.routes import router
 from app.api.seo_routes import router as seo_router
 from app.api.store_routes import router as store_router
-from app.config import get_settings
+from app.config import EnvSettings, get_settings
 from app.db.session import init_db
 from app.scheduler.jobs import register_jobs, scheduler
 
@@ -194,11 +193,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 # reconocimiento gratis para un atacante y acá no le sirve a nadie. En
 # development sigue disponible en /docs.
 #
-# Leemos el env directo en vez de get_settings(): esto corre al importar el
-# módulo, y Settings() exige campos obligatorios (VENDURE_API_URL) que no tienen
-# por qué estar presentes solo para importar app.main. Mismo default que
-# Settings.hugo_env: si no está seteado, asumimos production.
-_DEV = os.getenv("HUGO_ENV", "").strip().lower() == "development"
+# EnvSettings en vez de get_settings(): esto corre al importar el módulo, y
+# Settings() exige campos obligatorios (VENDURE_API_URL) que no tienen por qué
+# estar presentes solo para importar app.main. EnvSettings lee HUGO_ENV de las
+# mismas fuentes y con el mismo validador que Settings, así que /docs se publica
+# si y solo si los chequeos de seguridad están en development.
+_DEV = EnvSettings().hugo_env == "development"
 
 app = FastAPI(
     title="Hugo — B2Box Catalog QC",
