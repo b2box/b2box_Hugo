@@ -178,7 +178,7 @@ async def test_ok_trae_candidatos_validados(apify_on, monkeypatch):
     assert start.method == "POST"
     assert start.url.host == "api.apify.com"
     assert start.url.path == "/v2/acts/piotrv1001~1688-image-search-scraper/runs"
-    assert dict(start.url.params) == {"timeout": "40", "memory": "1024", "maxItems": "20",
+    assert dict(start.url.params) == {"timeout": "120", "memory": "1024", "maxItems": "20",
                                       "maxTotalChargeUsd": "0.05"}
     assert json.loads(start.content) == {
         "imageUrls": [PHOTO], "maxResultsPerImage": 20, "excludeSponsored": True,
