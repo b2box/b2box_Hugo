@@ -225,7 +225,11 @@ class Settings(EnvSettings):
     estimate_tier_qty_2: int = 200
     estimate_tier_qty_3: int = 1000
     # Deadline global del estimado, contado desde que entra el request.
-    estimate_deadline_s: float = 50.0
+    # 80 s: el chat espera con "dame un minuto"; con 50 Apify lento cortaba (28-oct).
+    estimate_deadline_s: float = 80.0
+    # Tope de la búsqueda de Apify en 1688 dentro de ese deadline. Medido: p50
+    # 28 s, p90 52 s; con 38 s ~1 de cada 4 estimados volvía `timeout`.
+    estimate_apify_deadline_s: float = 60.0
     # Clientes (nombre en HUGO_API_KEYS) a los que se les cree `visitor.ip`.
     # A cualquier otro se le cuenta la IP del socket.
     estimate_trusted_ip_clients: str = "storefront"
