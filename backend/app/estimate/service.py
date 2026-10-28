@@ -261,7 +261,8 @@ class EstimateSession:
         self._mark("photo", t)
         if self.offer is not None:
             return            # link de 1688: el precio ya está, no se busca
-        window = min(apify_1688.DEFAULT_DEADLINE_S, self.remaining() - TAIL_RESERVE_S)
+        window = min(float(get_settings().estimate_apify_deadline_s),
+                     self.remaining() - TAIL_RESERVE_S)
         if window < _MIN_APIFY_WINDOW_S:
             self.search = apify_1688.Search1688Result(status="timeout")
             return
