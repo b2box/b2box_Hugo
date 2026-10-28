@@ -45,7 +45,7 @@ class VendureEstimate:
     reference_product_count: int | None = None
     tax_classification_code: str | None = None
     tax_classification_share: float | None = None
-    contains_batteries: bool | None = None
+    is_imo_cargo: bool | None = None
     sales_vat_pct: float | None = None
     profile_version: int | None = None
     computed_at: str | None = None
@@ -140,8 +140,8 @@ def parse(raw: object, quantities: Sequence[int]) -> VendureEstimate:
     out.reference_product_count = int(refs) if refs is not None else None
     out.tax_classification_code = _short(raw.get("taxClassificationCode"), 24)
     out.tax_classification_share = _num(raw.get("taxClassificationShare"))
-    batteries = raw.get("containsBatteries")
-    out.contains_batteries = batteries if isinstance(batteries, bool) else None
+    imo = raw.get("isImoCargo")
+    out.is_imo_cargo = imo if isinstance(imo, bool) else None
     out.sales_vat_pct = _num(raw.get("salesVatPct"))
     version = _num(raw.get("profileVersion"))
     out.profile_version = int(version) if version is not None else None

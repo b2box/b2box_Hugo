@@ -584,7 +584,7 @@ class EstimateSession:
             "box_sample_size": est.box_sample_size, "reference_product_count":
             est.reference_product_count, "tax_classification_code": est.tax_classification_code,
             "tax_classification_share": est.tax_classification_share,
-            "contains_batteries": est.contains_batteries, "sales_vat_pct": est.sales_vat_pct,
+            "is_imo_cargo": est.is_imo_cargo, "sales_vat_pct": est.sales_vat_pct,
             "profile_version": est.profile_version, "computed_at": est.computed_at,
             "scenarios": [{"label": sc.label, "purchase_price_cny": sc.purchase_price_cny,
                            "box_quantile": sc.box_quantile, "cbm_per_unit": sc.cbm_per_unit,

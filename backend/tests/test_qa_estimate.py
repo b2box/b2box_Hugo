@@ -132,8 +132,8 @@ type ImportPriceEstimate {
   referenceProductCount: Int!
   taxClassificationCode: String
   taxClassificationShare: Float
-  containsBatteries: Boolean!
-  containsBatteriesShare: Float
+  isImoCargo: Boolean!
+  isImoCargoShare: Float
   goodsKind: String!
   salesVatPct: Float!
   profileVersion: Int
@@ -173,7 +173,7 @@ def _vendure_answer(inp: dict, *, box_source: str = "NEIGHBORS") -> dict:
         } for i, s in enumerate(inp["scenarios"])],
         "boxSource": box_source, "boxSampleSize": 8, "referenceProductCount": 2,
         "taxClassificationCode": "9617.00.10", "taxClassificationShare": 0.6,
-        "containsBatteries": False, "containsBatteriesShare": 0.0, "goodsKind": "resale",
+        "isImoCargo": False, "isImoCargoShare": 0.0, "goodsKind": "resale",
         "salesVatPct": 21.0, "profileVersion": 4, "computedAt": "2026-10-20T12:00:00Z",
     }
 

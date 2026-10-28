@@ -960,7 +960,7 @@ class VendureClient:
                 referenceProductCount
                 taxClassificationCode
                 taxClassificationShare
-                containsBatteries
+                isImoCargo
                 salesVatPct
                 profileVersion
                 computedAt

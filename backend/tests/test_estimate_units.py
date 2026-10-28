@@ -145,7 +145,7 @@ def _vendure_ok(**over):
         ],
         "boxSource": "neighbors", "boxSampleSize": 7, "referenceProductCount": 10,
         "taxClassificationCode": "9503.00.99", "taxClassificationShare": 0.7,
-        "containsBatteries": False, "salesVatPct": 21, "profileVersion": 3,
+        "isImoCargo": False, "salesVatPct": 21, "profileVersion": 3,
         "computedAt": "2026-10-20T12:00:00Z",
     }
     raw.update(over)

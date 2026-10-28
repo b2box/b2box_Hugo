@@ -101,7 +101,7 @@ class FakeVendure:
                 "boxSampleSize": 8,
                 "referenceProductCount": len(payload["referenceProductIds"]),
                 "taxClassificationCode": FakeVendure.tax_code, "taxClassificationShare": 0.6,
-                "containsBatteries": False, "salesVatPct": 21, "profileVersion": 4,
+                "isImoCargo": False, "salesVatPct": 21, "profileVersion": 4,
                 "computedAt": "2026-10-20T12:00:00Z"}
 
 
