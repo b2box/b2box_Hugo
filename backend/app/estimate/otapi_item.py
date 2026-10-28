@@ -24,7 +24,7 @@ import httpx
 
 from app import runtime
 from app.config import get_settings
-from app.estimate.measures import UnitMeasures, from_size_info
+from app.estimate.measures import UnitMeasures, attributes_text, from_attributes, from_physical, from_size_info
 from app.ingest.apify_1688 import safe_image_url
 from app.pricing import daily_budget, source_check
 from app.pricing.market_ml_web import clean_line
@@ -51,6 +51,11 @@ class Offer1688:
     pictures: list[str] = field(default_factory=list)
     # La unidad empaquetada según el vendedor (sizeInfo), si la cargó.
     unit: UnitMeasures | None = None
+    # Lo demás que publicó, como lo lee Paco (M1): medidas/peso en los atributos,
+    # la caja de UNA pieza (PhysicalParameters) y los atributos en texto para la IA.
+    attr_unit: UnitMeasures | None = None
+    box: UnitMeasures | None = None
+    attributes_text: str = ""
 
     @property
     def detail_url(self) -> str:
@@ -137,6 +142,9 @@ def parse_item(offer_id: str, item: object) -> Offer1688 | None:
             break
     offer.pictures = pictures
     offer.unit = from_size_info(item.get("FeaturedValues"))
+    offer.attr_unit = from_attributes(item.get("Attributes"))
+    offer.box = from_physical(item.get("PhysicalParameters"), item.get("WeightInfos"))
+    offer.attributes_text = attributes_text(item.get("Attributes"))
     if not offer.price_ladder():
         return None
     return offer
