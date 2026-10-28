@@ -65,6 +65,11 @@ _SHORTLIST = judge.MAX_CANDIDATES
 # Sin juez: coseno CLIP crudo mínimo entre la foto y la miniatura (a calibrar
 # en el backtest; el mismo producto con otra foto da ~0,85-0,95).
 CLIP_ONLY_FLOOR = 0.82
+# El `similarityScore` del actor es una DISTANCIA (más bajo = más parecido; su
+# tabla dice "distance (lower = closer)"). Medido el 28-oct con un spinner: las
+# ofertas idénticas a la foto dan 0,056-0,075, las de otro modelo 0,14-0,28.
+# Sin juez ni CLIP, una oferta hasta acá cuenta como buena.
+ACTOR_DISTANCE_GOOD = 0.10
 _NEIGHBORS = 10
 # Ofertas buenas en las que se buscan medidas de vendedor antes de la IA.
 _MEASURE_OFFERS = 2
@@ -398,7 +403,8 @@ class EstimateSession:
         ranked = []
         for c in candidates:
             clip = images.cosine(query_vec, thumbs.get(c.image_url))
-            sim = min(c.similarity, 1.0) if c.similarity is not None else 0.0
+            # Distancia del actor → parecido: los idénticos primero en la lista corta.
+            sim = max(0.0, 1.0 - c.similarity) if c.similarity is not None else 0.0
             combined = 0.5 * (clip if clip is not None else 0.0) + 0.5 * sim
             ranked.append((combined, clip, c))
         ranked.sort(key=lambda r: r[0], reverse=True)
@@ -424,8 +430,12 @@ class EstimateSession:
             verdict = verdicts.verdicts.get(i) if judged and verdicts else None
             # Con juez, una oferta sin veredicto válido (índice que el modelo no
             # devolvió o devolvió mal) no cuenta.
-            ok = ((verdict is not None and verdict.good) if judged
-                  else (clip is not None and clip >= CLIP_ONLY_FLOOR))
+            if judged:
+                ok = verdict is not None and verdict.good
+            elif clip is not None:
+                ok = clip >= CLIP_ONLY_FLOOR
+            else:
+                ok = c.similarity is not None and c.similarity <= ACTOR_DISTANCE_GOOD
             if ok:
                 good.append(c)
             log_rows.append({
