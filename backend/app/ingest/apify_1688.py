@@ -80,8 +80,10 @@ _MAX_CHARGE_USD = 0.05
 _MIN_USD_PER_RUN = 0.02
 _ACTOR_MEMORY_MB = 1024
 # Timeout del lado de Apify. Pasa el deadline a propósito: quien corta es el
-# deadline (y aborta); esto es la red por si el abort no llega.
-_ACTOR_TIMEOUT_S = 40
+# deadline (y aborta); esto es la red por si el abort no llega. Con 40 el actor
+# veía poco margen y cerraba sin buscar ("1 image(s) not searched — raise the
+# timeout"); con 120 la misma foto vuelve en ~26 s (28-oct-2026).
+_ACTOR_TIMEOUT_S = 120
 # Long polling: Apify retiene el GET de la corrida hasta N s o hasta que termine.
 _POLL_WAIT_S = 5
 # Pausa entre polls cuando Apify devolvió antes de tiempo sin terminar.
