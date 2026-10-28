@@ -422,6 +422,55 @@ async def test_sin_medidas_del_vendedor_ni_de_la_ia_no_hay_estimado(env):
     assert len(env.ai_measure_calls) == 1
 
 
+
+async def test_medidas_de_los_atributos_antes_que_la_ia(env, monkeypatch):
+    attrs = measures.UnitMeasures(0.045, 7.5, 7.5, 1.5, measures.SOURCE_ATTRS)
+
+    async def read_offer(offer_id, *, timeout_s=4.0):  # noqa: ARG001
+        offer = otapi_item.Offer1688(offer_id=offer_id, price_cny=16.0, attr_unit=attrs)
+        return otapi_item.OfferRead("ok", offer, calls=1)
+
+    monkeypatch.setattr(otapi_item, "read_offer", read_offer)
+    assert (await _ask()).estimate_status == "ok"
+    sent = FakeVendure.calls[0]["scenarios"][0]
+    assert (sent["cbmPerUnit"], sent["kgPerUnit"]) == (attrs.cbm, attrs.kg)
+    assert env.ai_measure_calls == []
+
+
+async def test_gemini_antes_que_qwen_y_que_la_caja(env, monkeypatch):
+    gem = measures.UnitMeasures(0.06, 8.0, 8.0, 2.0, measures.SOURCE_GEMINI)
+    box = measures.UnitMeasures(0.0926, 9.75, 7.8, 14.5, measures.SOURCE_PHYSICAL)
+
+    async def read_offer(offer_id, *, timeout_s=4.0):  # noqa: ARG001
+        offer = otapi_item.Offer1688(offer_id=offer_id, price_cny=16.0, box=box,
+                                     pictures=["https://cbu01.alicdn.com/x.jpg"])
+        return otapi_item.OfferRead("ok", offer, calls=1)
+
+    calls = []
+
+    async def gemini(photo_url, pictures, title, attributes, *, client=None):  # noqa: ARG001
+        calls.append(pictures)
+        return gem, 0.001
+
+    monkeypatch.setattr(otapi_item, "read_offer", read_offer)
+    monkeypatch.setattr(measures, "gemini_available", lambda: True)
+    monkeypatch.setattr(measures, "estimate_with_gemini", gemini)
+    assert (await _ask()).estimate_status == "ok"
+    assert FakeVendure.calls[0]["scenarios"][0]["kgPerUnit"] == gem.kg
+    assert calls == [["https://cbu01.alicdn.com/x.jpg"]] and env.ai_measure_calls == []
+
+
+async def test_sin_ia_queda_la_caja_de_una_pieza(env, monkeypatch):
+    env.unit = None
+    box = measures.UnitMeasures(0.0926, 9.75, 7.8, 14.5, measures.SOURCE_PHYSICAL)
+
+    async def read_offer(offer_id, *, timeout_s=4.0):  # noqa: ARG001
+        return otapi_item.OfferRead("ok", otapi_item.Offer1688(offer_id=offer_id, box=box), calls=1)
+
+    monkeypatch.setattr(otapi_item, "read_offer", read_offer)
+    assert (await _ask()).estimate_status == "ok"
+    assert FakeVendure.calls[0]["scenarios"][0]["kgPerUnit"] == box.kg
+
 # ─── ER-05: palabras ───────────────────────────────────────────────
 
 

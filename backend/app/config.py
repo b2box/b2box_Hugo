@@ -685,6 +685,9 @@ class Settings(EnvSettings):
     pm_llm_base_url: str = Field(default="", description="Base URL OpenAI-compatible del juez")
     pm_llm_api_key: str = Field(default="", description="API key del juez")
     pm_llm_model: str = "qwen3-vl-plus"
+    # Gemini para las medidas del estimado (lo mismo que usa Paco en M1).
+    gemini_api_key: str = Field(default="", description="API key de Gemini (medidas del estimado)")
+    estimate_gemini_model: str = "gemini-2.5-flash"
     pm_llm_timeout_s: float = 30.0
     # Precio por millón de tokens (USD) para estimar el costo por corrida.
     # Defaults = Qwen3-VL-Plus internacional; MiMo v2.6 Flash es 0.14 / 0.28.

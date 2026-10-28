@@ -72,8 +72,8 @@ CLIP_ONLY_FLOOR = 0.82
 ACTOR_DISTANCE_GOOD = 0.10
 _NEIGHBORS = 10
 # Ofertas buenas en las que se buscan medidas de vendedor antes de la IA.
-_MEASURE_OFFERS = 2
-_MEASURES_AI_TIMEOUT_S = 8.0
+_MEASURE_OFFERS = 5
+_MEASURES_AI_TIMEOUT_S = 12.0
 # NCM de ropa y textiles para vestir (capítulos 61 y 62): categoría excluida.
 _EXCLUDED_NCM_PREFIXES = ("61", "62")
 _APIFY_STATUS_MAP = {
@@ -381,12 +381,12 @@ class EstimateSession:
             "offer_id": offer.offer_id, "price_cny": offer.price_cny, "ladder": offer.ladder,
             "moq": offer.moq, "used": True, "source": "otapi",
         }], "k": None}
-        unit = offer.unit
+        unit = offer.unit or offer.attr_unit
         if unit is not None:
             detail["measures"] = unit.as_dict()
         else:
-            unit = await self._unit_from_ai(offer.pictures[0] if offer.pictures else "",
-                                            offer.title, detail)
+            unit = await self._unit_from_ai(offer.pictures, offer.title, offer.attributes_text,
+                                            detail) or offer.box
         return await self._price(scenarios, quantities, judged=True, detail=detail,
                                  price_from_ladder=True, unit=unit)
 
@@ -480,41 +480,62 @@ class EstimateSession:
 
     async def _unit_from_offers(self, offers: list[apify_1688.Candidate1688],
                                 detail: dict[str, Any]) -> measures.UnitMeasures | None:
-        """Lo que cargó el vendedor de la oferta más parecida que lo tenga (OTAPI);
-        si ninguna lo tiene, la IA. Nunca las cajas de un parecido del catálogo."""
-        tries: list[dict[str, Any]] = []
-        for c in offers[:_MEASURE_OFFERS]:
-            window = min(_OTAPI_TIMEOUT_S, self.remaining() - 6.0)
-            if window <= 0.5:
-                break
+        """Como M1 de Paco, sin el navegador: las fichas de las ofertas más parecidas
+        (OTAPI, en paralelo) y, si ninguna trae medidas, la IA. Nunca las cajas de un
+        parecido del catálogo."""
+        picked = offers[:_MEASURE_OFFERS]
+        window = min(_OTAPI_TIMEOUT_S, self.remaining() - 6.0)
+        reads: list[otapi_item.OfferRead] = []
+        if picked and window > 0.5:
             t = time.monotonic()
-            read = await otapi_item.read_offer(c.offer_id, timeout_s=window)
+            reads = list(await asyncio.gather(
+                *(otapi_item.read_offer(c.offer_id, timeout_s=window) for c in picked)))
             self._mark("otapi_measures", t)
-            self.otapi_calls += read.calls
-            tries.append({"offer_id": c.offer_id, "status": read.status,
-                          "unit": read.offer.unit.as_dict() if read.offer and read.offer.unit else None})
-            if read.offer and read.offer.unit:
-                detail["measures"] = {"tries": tries, **read.offer.unit.as_dict()}
-                return read.offer.unit
-        best = offers[0] if offers else None
-        unit = await self._unit_from_ai(best.image_url if best else "", best.title if best else "",
-                                        detail)
+            self.otapi_calls += sum(r.calls for r in reads)
+        found = [r.offer for r in reads if r.offer]
+        tries = [{"offer_id": c.offer_id, "status": r.status,
+                  "unit": r.offer.unit.as_dict() if r.offer and r.offer.unit else None,
+                  "attr_unit": r.offer.attr_unit.as_dict() if r.offer and r.offer.attr_unit else None,
+                  "box": r.offer.box.as_dict() if r.offer and r.offer.box else None}
+                 for c, r in zip(picked, reads)]
+        for field_name in ("unit", "attr_unit"):
+            unit = next((getattr(o, field_name) for o in found if getattr(o, field_name)), None)
+            if unit:
+                detail["measures"] = {"tries": tries, **unit.as_dict()}
+                return unit
+        best = found[0] if found else None
+        best_candidate = offers[0] if offers else None
+        unit = await self._unit_from_ai(
+            best.pictures if best else ([best_candidate.image_url] if best_candidate else []),
+            best.title if best else (best_candidate.title if best_candidate else ""),
+            best.attributes_text if best else "", detail)
+        if unit is None:
+            unit = next((o.box for o in found if o.box), None)
+            if unit:
+                detail["measures"] = unit.as_dict()
         detail.setdefault("measures", {})["tries"] = tries
         return unit
 
-    async def _unit_from_ai(self, image_url: str, title: str,
+    async def _unit_from_ai(self, pictures: list[str], title: str, attributes: str,
                             detail: dict[str, Any]) -> measures.UnitMeasures | None:
-        # La foto del cliente si la hay (es la que el modelo ve bien); si no, la de la oferta.
-        photo_url = self.photo.url if self.photo else image_url
+        # La foto del cliente primero (es la que el modelo ve bien); después, las de la oferta.
+        photo_url = self.photo.url if self.photo else (pictures[0] if pictures else "")
         window = min(_MEASURES_AI_TIMEOUT_S, self.remaining() - 4.0)
         if window <= 0.5 or not photo_url:
             return None
         t = time.monotonic()
+        unit, cost = None, 0.0
         try:
-            unit, cost = await asyncio.wait_for(measures.estimate_with_ai(photo_url, title),
-                                                timeout=window)
+            if measures.gemini_available():
+                unit, cost = await asyncio.wait_for(
+                    measures.estimate_with_gemini(photo_url, pictures, title, attributes),
+                    timeout=window)
+            if unit is None:
+                more, extra = await asyncio.wait_for(measures.estimate_with_ai(photo_url, title),
+                                                     timeout=max(0.5, window - (time.monotonic() - t)))
+                unit, cost = more, cost + extra
         except asyncio.TimeoutError:
-            unit, cost = None, 0.0
+            pass
         self._mark("ai_measures", t)
         detail["measures"] = {**(unit.as_dict() if unit else {"source": None}),
                               "ai_cost_usd": cost}
