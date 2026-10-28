@@ -12,6 +12,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from app.estimate.measures import UnitMeasures
 from app.estimate.pricing import BOX_QUANTILES, Scenarios
 from app.vendure.client import VendureClient
 
@@ -55,14 +56,23 @@ class VendureEstimate:
 
 
 def build_input(quantities: Sequence[int], scenarios: Scenarios,
-                reference_product_ids: Sequence[str]) -> dict:
+                reference_product_ids: Sequence[str],
+                unit: UnitMeasures | None = None) -> dict:
+    """Con `unit`, Vendure usa esas medidas y no las cajas de los vecinos; los
+    vecinos quedan solo para la clasificación de aduana."""
+    def scenario(label: str, price: float) -> dict:
+        out: dict = {"label": label, "purchasePriceCny": float(price)}
+        if unit is None:
+            out["boxQuantile"] = BOX_QUANTILES[label]
+        else:
+            out["cbmPerUnit"] = unit.cbm
+            out["kgPerUnit"] = unit.kg
+        return out
+
     return {
         "quantities": [int(q) for q in quantities],
         "referenceProductIds": [str(pid) for pid in reference_product_ids],
-        "scenarios": [
-            {"label": label, "purchasePriceCny": float(price), "boxQuantile": BOX_QUANTILES[label]}
-            for label, price in scenarios.as_dict().items()
-        ],
+        "scenarios": [scenario(label, price) for label, price in scenarios.as_dict().items()],
     }
 
 
@@ -143,8 +153,9 @@ def parse(raw: object, quantities: Sequence[int]) -> VendureEstimate:
 
 
 async def estimate(quantities: Sequence[int], scenarios: Scenarios,
-                   reference_product_ids: Sequence[str]) -> VendureEstimate:
+                   reference_product_ids: Sequence[str],
+                   unit: UnitMeasures | None = None) -> VendureEstimate:
     """Llama a Vendure. Lanza lo que lance el cliente (el servicio lo ataja)."""
     raw = await VendureClient().estimate_import_price(
-        build_input(quantities, scenarios, reference_product_ids))
+        build_input(quantities, scenarios, reference_product_ids, unit))
     return parse(raw, quantities)

@@ -24,6 +24,7 @@ import httpx
 
 from app import runtime
 from app.config import get_settings
+from app.estimate.measures import UnitMeasures, from_size_info
 from app.ingest.apify_1688 import safe_image_url
 from app.pricing import daily_budget, source_check
 from app.pricing.market_ml_web import clean_line
@@ -48,6 +49,8 @@ class Offer1688:
     ladder: list[tuple[int, float]] = field(default_factory=list)
     moq: int | None = None
     pictures: list[str] = field(default_factory=list)
+    # La unidad empaquetada según el vendedor (sizeInfo), si la cargó.
+    unit: UnitMeasures | None = None
 
     @property
     def detail_url(self) -> str:
@@ -133,6 +136,7 @@ def parse_item(offer_id: str, item: object) -> Offer1688 | None:
         if len(pictures) >= _MAX_PICTURES:
             break
     offer.pictures = pictures
+    offer.unit = from_size_info(item.get("FeaturedValues"))
     if not offer.price_ladder():
         return None
     return offer
