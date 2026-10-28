@@ -575,7 +575,8 @@ class EstimateSession:
             return self._fail(TIMEOUT, "Vendure no contestó a tiempo", detail, deadline="vendure")
         except Exception as exc:  # noqa: BLE001
             self._mark("vendure", t)
-            log.warning("estimado: Vendure falló (%s)", type(exc).__name__)
+            # El mensaje de GraphQL dice el motivo (permiso, canal, validación).
+            log.warning("estimado: Vendure falló (%s: %s)", type(exc).__name__, str(exc)[:400])
             return self._fail(ERROR, f"Vendure {type(exc).__name__}", detail)
         self._mark("vendure", t)
         detail["vendure"] = {
