@@ -662,3 +662,23 @@ def test_estimate_test_pide_sesion(env, monkeypatch):
 
 
 _REAL_SEARCH = apify_1688.search_by_image
+
+
+async def test_la_distancia_del_actor_ordena_y_sin_juez_ni_clip_decide(env, monkeypatch):
+    """El `similarityScore` del actor es una distancia (28-oct, spinner): las
+    ofertas idénticas (0,05) van primero y, sin juez ni CLIP, cuentan como
+    buenas; las lejanas (0,3) no."""
+    env.candidates = [_cand(0, 30.0, 0.3), _cand(1, 15.0, 0.05), _cand(2, 16.0, 0.056),
+                      _cand(3, 17.0, 0.07)]
+    monkeypatch.setattr(market_judge, "enabled", lambda: False)
+    monkeypatch.setattr(images, "clip_available", lambda: False)
+
+    async def no_thumbs(urls, *, timeout_s):  # noqa: ARG001
+        return {}
+
+    monkeypatch.setattr(images, "embed_thumbnails", no_thumbs)
+    resp = await _ask()
+    assert resp.estimate_status == "ok"
+    sent = FakeVendure.calls[0]["scenarios"]
+    # Los tres cercanos (¥15-17 × k 1,10), no el lejano de ¥30.
+    assert [s["purchasePriceCny"] for s in sent] == [16.5, 17.6, 18.7]
