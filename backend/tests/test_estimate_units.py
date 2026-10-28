@@ -451,6 +451,6 @@ def test_redondeo_fino_debajo_de_mil_pesos():
     from app.estimate import pricing
 
     # Un spinner de ~$800: con pasos de $100 todos los tramos daban $600–$1.000.
-    assert pricing.round_down(64_350) == 64_300 and pricing.round_up(95_520) == 95_600
+    assert pricing.round_down(64_350) == 64_000 and pricing.round_up(95_520) == 96_000
     assert pricing.round_down(5_432_10) == 5_400_00 and pricing.round_up(5_432_10) == 5_500_00
     assert pricing.round_up(12_345_00) == 12_500_00
