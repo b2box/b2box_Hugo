@@ -24,7 +24,7 @@ from app.api.app_routes import AppLookupRequest, AppLookupVisitor, _lookup, app_
 from app.config import get_settings
 from app.db.models import AuditLog, EstimateUsage, LookupEstimate, Setting
 from app.db.session import engine
-from app.estimate import images, limits, otapi_item
+from app.estimate import images, limits, measures, otapi_item
 from app.estimate import service as est_service
 from app.estimate import vendure_estimate
 from app.ingest import apify_1688
@@ -46,7 +46,7 @@ RUNTIME = {
     "embed_name_rescue_image_floor": 0.60, "vision_affirm_confidence": 0.75,
     "vision_affirm_confidence_approximate": 0.90, "dedup_image_threshold": 0.92,
     "estimate_enabled": 1, "estimate_daily_budget": 50, "estimate_price_factor_k": 1.10,
-    "estimate_margin_pct": 15.0, "estimate_tier_qty_1": 50, "estimate_tier_qty_2": 200,
+    "estimate_margin_pct": 20.0, "estimate_tier_qty_1": 50, "estimate_tier_qty_2": 200,
     "estimate_tier_qty_3": 1000, "apify_1688_daily_budget": 100, "otapi_daily_budget": 120,
     # Límite de todo el lookup por visitante: alto acá, se prueba aparte.
     "lookup_visitor_daily_limit": 1000, "lookup_visitor_per_minute": 1000,
@@ -92,10 +92,13 @@ class FakeVendure:
                 prices.append({"quantity": q, "netChannelPerUnit": round(net),
                                "invoiceChannelPerUnit": round(net * 1.21)})
             scenarios.append({"label": sc["label"], "purchasePriceCny": sc["purchasePriceCny"],
-                              "boxQuantile": sc["boxQuantile"], "cbmPerUnit": 0.002,
-                              "kgPerUnit": 0.3, "prices": prices})
+                              "boxQuantile": sc.get("boxQuantile"),
+                              "cbmPerUnit": sc.get("cbmPerUnit", 0.002),
+                              "kgPerUnit": sc.get("kgPerUnit", 0.3), "prices": prices})
         return {"status": "OK", "statusDetail": None, "channelCurrencyCode": "ARS",
-                "scenarios": scenarios, "boxSource": FakeVendure.box_source, "boxSampleSize": 8,
+                "scenarios": scenarios,
+                "boxSource": "INPUT" if "cbmPerUnit" in payload["scenarios"][0] else FakeVendure.box_source,
+                "boxSampleSize": 8,
                 "referenceProductCount": len(payload["referenceProductIds"]),
                 "taxClassificationCode": FakeVendure.tax_code, "taxClassificationShare": 0.6,
                 "containsBatteries": False, "salesVatPct": 21, "profileVersion": 4,
@@ -131,6 +134,10 @@ def _vec(seed: int) -> np.ndarray:
     return v / np.linalg.norm(v)
 
 
+# La unidad empaquetada que devuelve la IA de medidas falsa (un spinner).
+UNIT = measures.UnitMeasures(0.07, 9.0, 9.0, 2.0, measures.SOURCE_AI)
+
+
 @pytest.fixture
 def env(monkeypatch):
     SQLModel.metadata.create_all(engine)
@@ -148,7 +155,8 @@ def env(monkeypatch):
 
     state = SimpleNamespace(extract_calls=[], searches=[], cloud=[], records=[],
                             llm=FakeLLM(_verdicts([90, 85, 80, 75, 72, 10, 10, 10])),
-                            candidates=list(CANDS), search_status="ok", otapi=None)
+                            candidates=list(CANDS), search_status="ok", otapi=None,
+                            unit=UNIT, ai_measure_calls=[])
 
     async def fake_extract(url):
         state.extract_calls.append(url)
@@ -185,7 +193,12 @@ def env(monkeypatch):
             return otapi_item.OfferRead("not_found", calls=1)
         return otapi_item.OfferRead("ok", state.otapi, calls=1)
 
+    async def fake_ai_measures(photo_url, title, *, client=None):  # noqa: ARG001
+        state.ai_measure_calls.append((photo_url, title))
+        return state.unit, 0.0005
+
     s = get_settings()
+    monkeypatch.setattr(est_service.measures, "estimate_with_ai", fake_ai_measures)
     monkeypatch.setattr(s, "estimate_deadline_s", 50.0, raising=False)
     monkeypatch.setattr(s, "estimate_trusted_ip_clients", "storefront", raising=False)
     # A «storefront» se le cree visitor.ip solo con key propia en HUGO_API_KEYS: acá la tiene.
@@ -249,13 +262,15 @@ async def test_link_de_ml_fotos_1688_vendure_rango(env):
     # Juez: 5 buenos; la carnada (¥2) y el pack (¥90) fuera por la mediana.
     # Precios 15/16/17 × k 1,10 → mín/mediana/máx.
     sent = FakeVendure.calls[0]
-    assert [(s["label"], s["purchasePriceCny"], s["boxQuantile"]) for s in sent["scenarios"]] == [
-        ("low", 16.5, 0.25), ("mid", 17.6, 0.5), ("high", 18.7, 0.75)]
+    # Medidas de la unidad, no cajas de vecinos: las mismas en los tres escenarios.
+    assert [(s["label"], s["purchasePriceCny"], s.get("boxQuantile")) for s in sent["scenarios"]] == [
+        ("low", 16.5, None), ("mid", 17.6, None), ("high", 18.7, None)]
+    assert {(s["cbmPerUnit"], s["kgPerUnit"]) for s in sent["scenarios"]} == {(UNIT.cbm, UNIT.kg)}
     assert sent["quantities"] == [50, 200, 1000]
     assert sent["referenceProductIds"] == ["100", "101", "102"]
-    # Rango a 50 u.: mín/máx de invoice ± 15 %, piso abajo y techo arriba.
-    low = 16.5 * 30000 * 2 * 1.21 * 0.85
-    high = 18.7 * 30000 * 2 * 1.21 * 1.15
+    # Rango a 50 u.: mín/máx de invoice ± 20 %, piso abajo y techo arriba.
+    low = 16.5 * 30000 * 2 * 1.21 * 0.80
+    high = 18.7 * 30000 * 2 * 1.21 * 1.20
     t50 = est.tiers[0]
     assert t50.low_cents <= low and t50.low_cents % 500_00 == 0
     assert t50.high_cents >= high and t50.high_cents % 500_00 == 0
@@ -376,19 +391,35 @@ async def test_er03_sin_candidatos(env):
     assert (await _ask()).estimate_status == "no_candidates"
 
 
-async def test_sin_key_de_qwen_sigue_con_clip_y_ensancha(env, monkeypatch):
+async def test_sin_key_de_qwen_sigue_con_clip_y_el_margen_es_el_del_panel(env, monkeypatch):
     monkeypatch.setattr(market_judge, "enabled", lambda: False)
     resp = await _ask()
     assert resp.estimate_status == "ok"
     row = _rows()[-1]
-    assert not row.qwen_used and row.margin_pct == 25.0     # 15 + 10 sin juez
+    # Un solo margen (± 20 %, Nico 28-oct): sin juez no se ensancha aparte.
+    assert not row.qwen_used and row.margin_pct == 20.0
     assert env.llm.requests == []
 
 
-async def test_caja_que_no_sale_de_vecinos_ensancha(env):
-    FakeVendure.box_source = "collection"
-    await _ask()
-    assert _rows()[-1].margin_pct == 20.0
+async def test_medidas_del_vendedor_antes_que_la_ia(env, monkeypatch):
+    seller = measures.UnitMeasures(0.05, 8.0, 8.0, 1.5, measures.SOURCE_OTAPI)
+
+    async def read_offer(offer_id, *, timeout_s=4.0):  # noqa: ARG001
+        offer = otapi_item.Offer1688(offer_id=offer_id, price_cny=16.0, unit=seller)
+        return otapi_item.OfferRead("ok", offer, calls=1)
+
+    monkeypatch.setattr(otapi_item, "read_offer", read_offer)
+    assert (await _ask()).estimate_status == "ok"
+    sent = FakeVendure.calls[0]["scenarios"][0]
+    assert (sent["cbmPerUnit"], sent["kgPerUnit"]) == (seller.cbm, seller.kg)
+    assert env.ai_measure_calls == []
+
+
+async def test_sin_medidas_del_vendedor_ni_de_la_ia_no_hay_estimado(env):
+    env.unit = None
+    resp = await _ask()
+    assert resp.estimate_status == "low_confidence" and FakeVendure.calls == []
+    assert len(env.ai_measure_calls) == 1
 
 
 # ─── ER-05: palabras ───────────────────────────────────────────────

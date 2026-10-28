@@ -49,7 +49,7 @@ def _db():
 
 @pytest.mark.parametrize("key,value", [
     ("apify_1688_daily_budget", 20), ("estimate_price_factor_k", 1.2),
-    ("estimate_margin_pct", 20), ("estimate_tier_qty_1", 60),
+    ("estimate_margin_pct", 25), ("estimate_tier_qty_1", 60),
     ("vision_rerank_daily_budget", 100),
 ])
 def test_admin_cambia_y_queda_auditado(monkeypatch, key, value):

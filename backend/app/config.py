@@ -218,7 +218,7 @@ class Settings(EnvSettings):
     # Factor sobre el precio del actor de Apify (medido el 20-oct: k ≈ 1,10,
     # `cotizador-rapido-foto-medicion.md`) y margen ± en % del rango.
     estimate_price_factor_k: float = 1.10
-    estimate_margin_pct: float = 15.0
+    estimate_margin_pct: float = 20.0
     # Cantidades de la tabla por tramos. PROVISORIAS: confirmarlas con el
     # usuario antes de prender (decisión del 20-oct: "tabla por tramos").
     estimate_tier_qty_1: int = 50

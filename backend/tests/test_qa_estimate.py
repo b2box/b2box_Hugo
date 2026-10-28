@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from types import SimpleNamespace
 
@@ -226,17 +227,10 @@ async def test_tramos_repetidos_no_viajan_repetidos_a_vendure(env, monkeypatch):
     assert len(q) == len(set(q))
 
 
-async def test_box_source_neighbors_como_lo_manda_vendure_no_ensancha(env):
-    """Vendure manda el enum en MAYÚSCULAS (`NEIGHBORS`). Con la caja de los
-    vecinos el margen es el base (15), no 15 + 5."""
-    FakeVendure.box_source = "NEIGHBORS"
-    assert (await _ask()).estimate_status == "ok"
-    assert _rows()[-1].margin_pct == 15.0
-
-
-async def test_box_source_collection_en_mayusculas_si_ensancha(env):
+async def test_el_margen_es_el_del_panel_venga_de_donde_venga_la_caja(env):
+    """Sin recargos por la fuente de la caja: las medidas son de la unidad."""
     FakeVendure.box_source = "COLLECTION"
-    await _ask()
+    assert (await _ask()).estimate_status == "ok"
     assert _rows()[-1].margin_pct == 20.0
 
 
@@ -353,8 +347,10 @@ async def test_er02_peor_caso_apify_al_limite_y_lo_demas_colgado_50s(env, monkey
     if thumbs == "colgadas":
         assert resp.estimate_status == "low_confidence" and FakeVendure.calls == []
     else:
-        assert resp.estimate_status == "timeout" and row.deadline_hit == "vendure"
-        assert len(FakeVendure.calls) == 1
+        # Las medidas van antes que Vendure: con el juez colgado se come el
+        # tiempo y el corte llega ahí, sin llegar a llamar a Vendure.
+        assert resp.estimate_status == "timeout" and row.deadline_hit == "measures"
+        assert FakeVendure.calls == []
 
 
 async def test_er02_otapi_colgado_en_link_de_1688_no_cuelga_el_lookup(env, monkeypatch):
@@ -514,8 +510,9 @@ async def test_er08_cuatro_caminos_sin_datos_de_proveedores(env, monkeypatch, ki
     body = json.dumps(data, ensure_ascii=False)
     _assert_no_candidate_leak(body)
     # Escalera de yuanes de 1688: ningún precio del proveedor en la respuesta.
+    # El número entero: "16.5" no puede pasar por el "$ 16.500" de un tramo.
     for cny in ("33.0", "31.0", "30.0", "16.5", "17.6", "18.7"):
-        assert cny not in body, cny
+        assert not re.search(rf"(?<![\d.]){re.escape(cny)}(?![\d])", body), cny
     estimate_keys = set(data["estimate"])
     assert estimate_keys == {"currency", "vat_included", "tiers", "valid_until", "label",
                              "estimate_id"}

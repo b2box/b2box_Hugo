@@ -36,7 +36,7 @@ from typing import Any
 from app import runtime, security
 from app.config import get_settings
 from app.dedup import catalog_index
-from app.estimate import identity, images, judge, limits, otapi_item, pricing, store
+from app.estimate import identity, images, judge, limits, measures, otapi_item, pricing, store
 from app.estimate import vendure_estimate as vendure
 from app.ingest import apify_1688
 
@@ -66,9 +66,9 @@ _SHORTLIST = judge.MAX_CANDIDATES
 # en el backtest; el mismo producto con otra foto da ~0,85-0,95).
 CLIP_ONLY_FLOOR = 0.82
 _NEIGHBORS = 10
-# Puntos extra de margen (diseño 2.5).
-_EXTRA_MARGIN_NO_JUDGE = 10.0
-_EXTRA_MARGIN_BOX_NOT_NEIGHBORS = 5.0
+# Ofertas buenas en las que se buscan medidas de vendedor antes de la IA.
+_MEASURE_OFFERS = 2
+_MEASURES_AI_TIMEOUT_S = 8.0
 # NCM de ropa y textiles para vestir (capítulos 61 y 62): categoría excluida.
 _EXCLUDED_NCM_PREFIXES = ("61", "62")
 _APIFY_STATUS_MAP = {
@@ -376,8 +376,14 @@ class EstimateSession:
             "offer_id": offer.offer_id, "price_cny": offer.price_cny, "ladder": offer.ladder,
             "moq": offer.moq, "used": True, "source": "otapi",
         }], "k": None}
+        unit = offer.unit
+        if unit is not None:
+            detail["measures"] = unit.as_dict()
+        else:
+            unit = await self._unit_from_ai(offer.pictures[0] if offer.pictures else "",
+                                            offer.title, detail)
         return await self._price(scenarios, quantities, judged=True, detail=detail,
-                                 price_from_ladder=True)
+                                 price_from_ladder=True, unit=unit)
 
     # ── candidatos de Apify ───────────────────────────────────────
 
@@ -455,7 +461,54 @@ class EstimateSession:
             return self._fail(LOW_CONFIDENCE, f"dispersión {spread:.2f} > 2,5", detail)
         detail["median_cny"] = statistics.median(prices)
         scenarios = pricing.scenarios_from_prices(prices, k)
-        return await self._price(scenarios, tier_quantities(), judged=judged, detail=detail)
+        used = [c for c in good if c.price_cny in kept]
+        unit = await self._unit_from_offers(used, detail)
+        return await self._price(scenarios, tier_quantities(), judged=judged, detail=detail,
+                                 unit=unit)
+
+    # ── medidas de la unidad ──────────────────────────────────────
+
+    async def _unit_from_offers(self, offers: list[apify_1688.Candidate1688],
+                                detail: dict[str, Any]) -> measures.UnitMeasures | None:
+        """Lo que cargó el vendedor de la oferta más parecida que lo tenga (OTAPI);
+        si ninguna lo tiene, la IA. Nunca las cajas de un parecido del catálogo."""
+        tries: list[dict[str, Any]] = []
+        for c in offers[:_MEASURE_OFFERS]:
+            window = min(_OTAPI_TIMEOUT_S, self.remaining() - 6.0)
+            if window <= 0.5:
+                break
+            t = time.monotonic()
+            read = await otapi_item.read_offer(c.offer_id, timeout_s=window)
+            self._mark("otapi_measures", t)
+            self.otapi_calls += read.calls
+            tries.append({"offer_id": c.offer_id, "status": read.status,
+                          "unit": read.offer.unit.as_dict() if read.offer and read.offer.unit else None})
+            if read.offer and read.offer.unit:
+                detail["measures"] = {"tries": tries, **read.offer.unit.as_dict()}
+                return read.offer.unit
+        best = offers[0] if offers else None
+        unit = await self._unit_from_ai(best.image_url if best else "", best.title if best else "",
+                                        detail)
+        detail.setdefault("measures", {})["tries"] = tries
+        return unit
+
+    async def _unit_from_ai(self, image_url: str, title: str,
+                            detail: dict[str, Any]) -> measures.UnitMeasures | None:
+        # La foto del cliente si la hay (es la que el modelo ve bien); si no, la de la oferta.
+        photo_url = self.photo.url if self.photo else image_url
+        window = min(_MEASURES_AI_TIMEOUT_S, self.remaining() - 4.0)
+        if window <= 0.5 or not photo_url:
+            return None
+        t = time.monotonic()
+        try:
+            unit, cost = await asyncio.wait_for(measures.estimate_with_ai(photo_url, title),
+                                                timeout=window)
+        except asyncio.TimeoutError:
+            unit, cost = None, 0.0
+        self._mark("ai_measures", t)
+        detail["measures"] = {**(unit.as_dict() if unit else {"source": None}),
+                              "ai_cost_usd": cost}
+        return unit
 
     # ── Vendure y rango ───────────────────────────────────────────
 
@@ -466,8 +519,15 @@ class EstimateSession:
         return [p.id for p, _score, _img in catalog_index.search(vec, top_k=_NEIGHBORS)]
 
     async def _price(self, scenarios: pricing.Scenarios, quantities: list[int], *, judged: bool,
-                     detail: dict[str, Any], price_from_ladder: bool = False) -> EstimateResult:
+                     detail: dict[str, Any], price_from_ladder: bool = False,
+                     unit: measures.UnitMeasures | None = None) -> EstimateResult:
         detail["scenarios_cny"] = scenarios.as_dict()
+        if unit is None:
+            if self.remaining() < _MEASURES_AI_TIMEOUT_S:
+                return self._fail(TIMEOUT, "sin tiempo para las medidas de la unidad", detail,
+                                  deadline="measures")
+            return self._fail(LOW_CONFIDENCE, "sin medidas de la unidad (ni del vendedor ni de la IA)",
+                              detail)
         refs = self._neighbors()
         detail["reference_product_ids"] = refs
         if not quantities:
@@ -477,7 +537,7 @@ class EstimateSession:
             return self._fail(TIMEOUT, "sin tiempo para Vendure", detail, deadline="global")
         t = time.monotonic()
         try:
-            est = await asyncio.wait_for(vendure.estimate(quantities, scenarios, refs),
+            est = await asyncio.wait_for(vendure.estimate(quantities, scenarios, refs, unit),
                                          timeout=window)
         except asyncio.TimeoutError:
             self._mark("vendure", t)
@@ -509,12 +569,9 @@ class EstimateSession:
         if code.replace(".", "").startswith(_EXCLUDED_NCM_PREFIXES):
             return self._fail(LOW_CONFIDENCE, "categoría excluida (textil)", detail)
 
-        margin = float(runtime.get("estimate_margin_pct") or 0.0)
-        if not judged:
-            margin += _EXTRA_MARGIN_NO_JUDGE
-        # Vendure manda el enum ImportPriceEstimateBoxSource en mayúsculas.
-        if (est.box_source or "").upper() != "NEIGHBORS":
-            margin += _EXTRA_MARGIN_BOX_NOT_NEIGHBORS
+        # Un solo margen, el del panel (± 20 % por defecto, Nico 28-oct): sin recargos aparte.
+        raw_margin = runtime.get("estimate_margin_pct")
+        margin = float(get_settings().estimate_margin_pct if raw_margin is None else raw_margin)
         detail["margin_pct"] = margin
         max_ratio = float(get_settings().estimate_max_range_ratio)
         tiers: list[pricing.Tier] = []
