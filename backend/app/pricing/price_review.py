@@ -350,7 +350,7 @@ def close_item(session: Session, item: PriceReviewItem, *, note: str, actor: str
 # de estos. Mientras está abierto la escritura está en curso (o quedó a medias): la ficha no la toca nadie más, ni otra
 # acción ni la pasada de la noche, hasta que se termina o se concilia.
 INTENT_END_KINDS = ("inactivado", "reactivado", "ya_activo", "ya_apagado", "vendure_error", "reactivar_a_mano",
-                    "intent_descartado", "cerrado_auto")
+                    "intent_descartado", "sin_vuelta_atras", "cerrado_auto")
 
 
 def pending_intent(session: Session, item_id: int) -> PriceReviewEvent | None:

@@ -372,8 +372,6 @@ async def test_reqa_a_snapshot_from_before_unpublishing_does_not_open_a_new_fich
     assert [(i.id, i.state) for i in w.items()] == [(item_id, "despublicado")], [(i.id, i.state) for i in w.items()]
 
 
-@pytest.mark.xfail(strict=True, reason="Re-QA #3: volver atrás choca con el open_key de una ficha nueva: 500 y la "
-                                       "intención queda abierta para siempre")
 async def test_reqa_a_failed_unpublish_after_the_night_opened_another_ficha_is_not_left_stuck(c, fake, monkeypatch):
     item_id = _ficha(fake, "propuesto")
     fake.script["SetEnabled"] = [(500, {"errors": [{"message": "Internal error"}]})] * 3

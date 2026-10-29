@@ -84,6 +84,7 @@ const EVENT_LABEL: Record<string, string> = {
   intent_descartado: "Cambio a medias descartado",
   escritura_huerfana: "Vendure tomó un cambio tarde: revisar a mano",
   vendure_incierto: "Vendure no respondió: no se sabe si tomó el cambio (se revisa solo)",
+  sin_vuelta_atras: "No se pudo volver atrás (había otra ficha abierta): se cerró",
   reabierto: "Se reabrió",
 };
 

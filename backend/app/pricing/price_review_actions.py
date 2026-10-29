@@ -491,6 +491,9 @@ def _uncertain(item: PriceReviewItem, mv: _Move, actor: str, error: str) -> Acti
 
 def _vendure_failed(item: PriceReviewItem) -> ActionError:
     current = _load(int(item.id))[0]  # type: ignore[arg-type]
+    if current.state == pr.CERRADO_AUTO:                 # no pudo volver atrás (`_close_after_clash`)
+        return ActionError(502, "vendure_error", f"Vendure no aceptó el cambio. {CLASH}", current,
+                           error=current.vendure_error)
     return ActionError(502, "vendure_error", "Vendure no aceptó el cambio: la ficha quedó como estaba. Probá de nuevo "
                        "en unos minutos.", current, error=current.vendure_error)
 
@@ -535,7 +538,11 @@ def _undo_move(item: PriceReviewItem, mv: _Move, actor: str, kind: str, code: st
     extra = {"vendure_error": error} if kind == "vendure_error" else {}
     with Session(engine, expire_on_commit=False) as s:
         s.add(item)
-        moved = pr.move_item(s, item, mv.from_state, now=now, **mv.before, **extra)
+        try:
+            moved = pr.move_item(s, item, mv.from_state, now=now, **mv.before, **extra)
+        except IntegrityError:                          # volver a abrirla choca con otra ficha abierta del producto
+            s.rollback()
+            return _close_after_clash(item, mv, actor, code, error, now)
         if moved:
             pr.add_event(s, item, kind, actor=actor, from_state=mv.to_state, to_state=mv.from_state, motive_code=code,
                          motive_text=text, now=now, payload={"accion": mv.action, **({"error": error} if error else {})})
@@ -543,6 +550,31 @@ def _undo_move(item: PriceReviewItem, mv: _Move, actor: str, kind: str, code: st
     if not moved:
         log.warning("price_review: la ficha #%s ya se había movido; no se vuelve atrás (%s)", item.id, kind)
     return moved
+
+
+CLASH = ("No se pudo volver atrás: el producto ya tiene otra ficha abierta (la abrió la pasada mientras tanto). Esta se "
+         "cerró; revisalo a mano.")
+
+
+def _close_after_clash(item: PriceReviewItem, mv: _Move, actor: str, code: str, error: str | None,
+                       now: datetime) -> bool:
+    """Volver atrás restauraría `open_key`, pero mientras tanto se abrió otra ficha del mismo producto. En vez de dejar la
+    intención abierta para siempre (cada conciliación chocaría igual), esta ficha se cierra con la nota y la intención se
+    cierra con `sin_vuelta_atras`, que sale en «PARA MIRAR A MANO»."""
+    with Session(engine, expire_on_commit=False) as s:
+        current = s.get(PriceReviewItem, item.id)
+        if current is None:
+            return False
+        old_state = current.state
+        done = pr.close_item(s, current, note=CLASH, actor=actor, code="otra_ficha_abierta", now=now,
+                             **({"vendure_error": error} if error else {}))
+        if done:
+            pr.add_event(s, current, "sin_vuelta_atras", actor=actor, from_state=old_state, to_state=pr.CERRADO_AUTO,
+                         motive_code=code, motive_text=CLASH, now=now,
+                         payload={"accion": mv.action, **({"error": error} if error else {})})
+            s.commit()
+    log.warning("price_review: la ficha #%s no pudo volver atrás (otra ficha abierta del producto): se cerró", item.id)
+    return done
 
 
 def _already(item: PriceReviewItem, mv: _Move, actor: str, target: bool) -> dict[str, Any]:

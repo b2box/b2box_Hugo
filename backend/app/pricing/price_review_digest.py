@@ -42,6 +42,7 @@ ATTENTION = {
     "intent_descartado": "un cambio en Vendure quedó a medias y se descartó",
     "escritura_huerfana": "Vendure tomó un cambio cuando la ficha ya había cambiado: revisalo a mano",
     "vendure_incierto": "no sabemos si Vendure tomó el cambio; Hugo lo revisa solo en 10 minutos",
+    "sin_vuelta_atras": "no se pudo volver atrás porque el producto ya tiene otra ficha abierta: esta se cerró",
 }
 CAUSE_TEXT = {
     "a": "caja fuera de rango", "b": "tramos mal armados", "c": "certificado alto",

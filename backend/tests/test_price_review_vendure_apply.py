@@ -576,3 +576,41 @@ async def test_buttons_are_off_while_a_write_is_in_flight_and_back_on_once_it_is
     assert all(a["enabled"] for a in d["actions"])
     r = k.decide(c, item_id, "corregir", "propuesto", "caja")           # tras conciliar volvió a propuesto
     assert r.status_code == 200 and r.json()["state"] == "corrigiendo"
+
+
+async def test_a_rollback_that_clashes_with_a_new_ficha_closes_the_old_one_and_says_so(c, fake, monkeypatch):
+    """Re-QA 3: Despublicar a medias; mientras tanto se abrió otra ficha del producto. La conciliación no puede volver a
+    abrir la vieja (open_key): la cierra, cierra la intención y lo cuenta en el mail. Nada queda trabado."""
+    from app.pricing import price_review_digest as digest
+
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    restart = _die(monkeypatch, "set_enabled")                     # la escritura no llegó
+    await _crash(actions.act(item_id, "despublicar", k.PAO, expected_state="propuesto", motive_code="calidad"))
+    restart()
+    other = w.make_item("rv1")
+    assert await actions.reconcile(now=later()) == 1
+    item = w.item(item_id)
+    assert item.state == "cerrado_auto" and k.kinds(item_id)[-2:] == ["cerrado_auto", "sin_vuelta_atras"]
+    assert w.item(other).open_key == "rv1" and fake.mutations == []
+    with Session(engine) as s:
+        assert pr.pending_intent(s, item_id) is None
+        assert "sin_vuelta_atras" in [e.kind for e, _ in digest.collect(s).attention]
+    assert "deshacer" not in [a["code"] for a in c.get(f"{k.BASE}/items/{item_id}").json()["actions"]]
+    assert await actions.reconcile(now=later(30)) == 0             # no vuelve a intentarlo
+
+
+async def test_a_rejected_write_that_cannot_roll_back_answers_502_saying_what_happened(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    fake.script["SetEnabled"] = [(500, BOOM)] * 3                 # Vendure lo rechaza (definitivo)
+    real = VendureClient.set_enabled
+
+    async def night_opens_another(self, product_id, enabled):
+        w.make_item("rv1")
+        return await real(self, product_id, enabled)
+
+    monkeypatch.setattr(VendureClient, "set_enabled", night_opens_another)
+    r = k.decide(c, item_id, "despublicar", "propuesto", "calidad")
+    assert r.status_code == 502 and "No se pudo volver atrás" in r.json()["detail"]["message"]
+    assert r.json()["detail"]["state"] == "cerrado_auto"
