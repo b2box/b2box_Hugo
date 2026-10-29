@@ -17,7 +17,7 @@ from types import SimpleNamespace
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
 import pytest  # noqa: E402
-from sqlmodel import Session, select  # noqa: E402
+from sqlmodel import Session  # noqa: E402
 
 from app.db.models import AuditLog, MarketPriceSnapshot, PriceReviewEvent  # noqa: E402
 from app.db.session import engine  # noqa: E402

@@ -45,7 +45,7 @@ def _snapshot_cols(engine) -> dict:
     return {c["name"]: (str(c["type"]), c["nullable"]) for c in inspect(engine).get_columns("market_price_snapshot")}
 
 
-def test_boot_adds_only_the_two_nullable_columns_and_never_touches_the_rows(old_schema):
+def test_boot_adds_only_the_two_nullable_columns_and_never_touches_the_rows(old_schema):  # noqa: F811  (fixture importada)
     before = _snapshot_cols(old_schema)
     assert not COLS & set(before)
     session.init_db()
@@ -65,7 +65,7 @@ def test_boot_adds_only_the_two_nullable_columns_and_never_touches_the_rows(old_
                               "OR recalc_before IS NOT NULL")).scalar() == 0
 
 
-def test_readme_rollback_sql_removes_the_columns_and_the_settings_and_boot_goes_back_up(old_schema):
+def test_readme_rollback_sql_removes_the_columns_and_the_settings_and_boot_goes_back_up(old_schema):  # noqa: F811  (fixture importada)
     session.init_db()
     up = _snapshot_cols(old_schema)
     _seed_old_rows(old_schema)
@@ -84,7 +84,7 @@ def test_readme_rollback_sql_removes_the_columns_and_the_settings_and_boot_goes_
     assert _snapshot_cols(old_schema) == up
 
 
-async def test_the_recalculation_and_the_automatic_reactivation_work_on_postgres(old_schema, monkeypatch):
+async def test_the_recalculation_and_the_automatic_reactivation_work_on_postgres(old_schema, monkeypatch):  # noqa: F811  (fixture importada)
     session.init_db()
     fake = k.setup(monkeypatch)
     price_recalc._pending.clear()
