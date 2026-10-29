@@ -254,9 +254,23 @@ async def test_the_guard_itself_catches_a_write_and_a_call_to_paco(stack):
     assert st.spy.violations[-1]["method"] == "SOCKET"
 
 
+def _names_used(tree) -> tuple[set[str], set[str]]:
+    """(nombres y atributos usados, nombres importados) de un módulo. Los textos y docstrings no cuentan. El decorador
+    `@router.post` de las rutas no es un POST a otro servicio: no cuenta como `post`."""
+    import ast
+
+    used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+            and not (n.attr == "post" and isinstance(n.value, ast.Name) and n.value.id == "router")}
+    used |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    imported |= {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    return used, imported
+
+
 def test_no_module_of_the_review_can_reach_a_write_method_statically():
-    """Defensa en profundidad: ningún módulo nuevo USA (nombres, atributos o llamadas; los textos y docstrings no cuentan) los
-    métodos que escriben en Vendure o hablan con Paco, y el router no declara ningún método que escriba."""
+    """K-2. Defensa en profundidad: la pasada, el diagnóstico, el desglose y las rutas no USAN (nombres, atributos o llamadas)
+    los métodos que escriben en Vendure o hablan con Paco. Las rutas declaran solo los 3 POST de las decisiones, que delegan
+    en `price_review_actions`: el ÚNICO módulo autorizado a escribir (ver el test siguiente)."""
     import ast
     from pathlib import Path
 
@@ -265,14 +279,33 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
               "post", "put", "patch", "delete", "aiosmtplib"}
     for rel in ("pricing/price_review.py", "pricing/diagnosis_source.py", "pricing/price_diagnosis.py", "pricing/price_breakdown.py",
                 "api/price_review_routes.py"):
-        tree = ast.parse((root / rel).read_text())
-        used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        imported = {a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+        used, imported = _names_used(ast.parse((root / rel).read_text()))
         assert not (banned & (used | imported)), (rel, banned & (used | imported))
         assert "paco" not in {m.split(".")[-1] for m in imported}, rel
     routes = (root / "api/price_review_routes.py").read_text()
-    assert "@router.post" not in routes and "@router.put" not in routes and "@router.delete" not in routes \
-        and "@router.patch" not in routes
+    assert "@router.put" not in routes and "@router.delete" not in routes and "@router.patch" not in routes
+    assert sorted(line.split('"')[1] for line in routes.splitlines() if line.startswith("@router.post")) == [
+        "/items/{item_id}/approve", "/items/{item_id}/decision", "/items/{item_id}/undo"]
+
+
+def test_the_actions_module_is_the_only_one_that_calls_set_enabled_and_it_never_talks_to_paco():
+    """K-2. En todo `app/`, `set_enabled` (la escritura que verifica el valor devuelto) lo usa SOLO price_review_actions; los
+    flujos viejos de duplicados siguen con `_set_enabled`. Y el módulo de acciones no usa los métodos viejos ni Paco."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    users = set()
+    for path in root.rglob("*.py"):
+        rel = str(path.relative_to(root))
+        used, _ = _names_used(ast.parse(path.read_text()))
+        if "set_enabled" in used and rel != "vendure/client.py":
+            users.add(rel)
+    assert users == {"pricing/price_review_actions.py"}, users
+    used, imported = _names_used(ast.parse((root / "pricing/price_review_actions.py").read_text()))
+    assert not ({"disable_product", "enable_product", "_set_enabled", "submit", "submit_pro", "get_status", "post", "put",
+                 "patch", "aiosmtplib"} & (used | imported))
+    assert not any("paco" in m for m in imported)
 
 
 async def test_a_crash_of_the_review_pass_never_fails_the_nightly_run_and_the_next_pass_recovers(stack, monkeypatch):

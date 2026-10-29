@@ -9,6 +9,7 @@ Jobs:
   6. seo_text_audit      → audita los textos del catálogo (SEO); solo lee Vendure.
   7. apify_ml_search     → busca en la web de ML con Apify la cola de la oficina (antes del semáforo).
   8. price_review_digest → resumen diario de la bandeja de revisión para Pao (08:30 ART).
+  9. price_review_reconcile → una vez, al arrancar: concilia las escrituras de la bandeja que quedaron a medias.
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -28,6 +29,7 @@ from typing import AsyncIterator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete
 from sqlmodel import Session, select
@@ -860,6 +862,22 @@ async def price_review_digest() -> dict | None:
     return result
 
 
+PRICE_REVIEW_RECONCILE_JOB_ID = "price_review_reconcile"
+# Corre una vez, un rato después de arrancar: así las intenciones que dejó el proceso anterior ya tienen más de 2 minutos.
+_RECONCILE_AFTER_START = timedelta(minutes=3)
+
+
+async def price_review_reconcile() -> None:
+    """Concilia contra Vendure las escrituras de la bandeja que quedaron a medias (el proceso murió entre la intención
+    y la confirmación). Solo lee Vendure; un fallo se loguea y la pasada de la noche lo vuelve a intentar."""
+    from app.pricing import price_review_actions     # lazy: no cargar la bandeja al importar los jobs
+
+    try:
+        await price_review_actions.reconcile()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("price_review_reconcile falló: %s", type(exc).__name__)
+
+
 def _price_review_digest_trigger(expr: str) -> CronTrigger:
     try:
         return CronTrigger.from_crontab(expr, timezone="UTC")
@@ -1051,6 +1069,12 @@ def register_jobs() -> None:
         id=PRICE_REVIEW_DIGEST_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
         **digest_kwargs,
+    )
+    scheduler.add_job(
+        price_review_reconcile,
+        DateTrigger(run_date=now + _RECONCILE_AFTER_START),
+        id=PRICE_REVIEW_RECONCILE_JOB_ID,
+        replace_existing=True, max_instances=1,
     )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL
     # de /verify, para que Luis/admin nunca esperen un cold-fetch. Es barato:

@@ -36,7 +36,7 @@ def world(monkeypatch):
     async def forbidden(*_a, **_k):
         raise AssertionError("la bandeja no puede escribir en Vendure ni mandar nada a Paco")
 
-    for name in ("_set_enabled", "disable_product", "enable_product"):
+    for name in ("set_enabled", "_set_enabled", "disable_product", "enable_product"):
         monkeypatch.setattr(VendureClient, name, forbidden)
     for name in ("submit", "submit_pro"):
         monkeypatch.setattr(paco, name, forbidden)
@@ -761,3 +761,137 @@ async def test_one_manual_run_the_same_art_day_as_the_cron_does_not_make_a_night
     n = item.streak_nights
     await _run_at("a", _ART(13, 18, 0))                      # «Correr ahora» a la tarde: mismo día ART
     assert w.items()[0].streak_nights == n
+
+
+# ─── PR3: fichas vivas en la pasada (regla del 10 %, H3) ──────────
+#
+# Mediana de ML 900.000 y comisión 13 %: al revendedor le quedan 783.000 netos. `reff_ratio` = nuestro precio / 783.000.
+
+NET = 783_000
+
+
+def _kept(pid: str = "p1", kept: float | None = 0.958, **fields) -> int:
+    return w.make_item(pid, "mantenido", kept_ratio=kept, decision="mantener", **fields)
+
+
+def _night(pid: str, *, prev: bool = True, **kw) -> int:
+    """Hoy con los argumentos de `add_snap`; con `prev`, la noche anterior fue rojo firme (racha cumplida)."""
+    return two_nights({pid: kw}, prev_flag="firme" if prev else None)[1]
+
+
+@pytest.mark.parametrize("our,reopens", [(round(1.05 * NET), False), (round(1.06 * NET), True)])
+async def test_f1_a_kept_ficha_reopens_only_when_it_got_10_percent_worse(our, reopens):
+    item_id = _kept()
+    today = _night("p1", our=our)
+    summary = await pr.process_run(today, now=NOW)
+    item = w.item(item_id)
+    assert item.last_run_id == today and item.kept_ratio == 0.958
+    if not reopens:
+        assert item.state == "mantenido" and item.reopen_count == 0 and w.events("reabierto") == []
+        return
+    assert item.state == "propuesto" and item.reopen_count == 1 and item.open_key == "p1" and summary["reabiertas"] == 1
+    assert item.reff_ratio == 1.06 and item.our_price_cents == our                 # la tarjeta muestra lo de hoy
+    [ev] = w.events("reabierto")
+    assert json.loads(ev.payload) == {"kept_ratio": 0.958, "ratio_hoy": 1.06, "empeoro_pct": 10.6}
+    assert (ev.from_state, ev.to_state, ev.actor) == ("mantenido", "propuesto", "hugo:auto")
+
+
+async def test_f1_the_edge_is_greater_or_equal():
+    item_id = _kept(kept=1.0)
+    await pr.process_run(_night("p1", our=round(1.10 * NET)), now=NOW)
+    assert w.item(item_id).state == "propuesto"
+
+
+async def test_f1_the_percent_is_a_setting():
+    w.set_setting("pm_review_worse_pct", 5)
+    item_id = _kept()
+    await pr.process_run(_night("p1", our=round(1.01 * NET)), now=NOW)
+    assert w.item(item_id).state == "propuesto"                                  # 0,958 × 1,05 = 1,006
+
+
+@pytest.mark.parametrize("night,kept,prev", [
+    (dict(color="verde", our=500_000), 0.958, True),
+    (dict(ml_status="failed", color="sin_dato", prices=()), 0.958, True),
+    (dict(sources=("llm",) * 3, our=round(1.2 * NET)), 0.958, True),            # rojo dudoso
+    (dict(our=round(1.2 * NET)), 0.958, False),                                  # sin la racha
+    (dict(our=round(1.5 * NET)), None, True),                                    # sin línea base
+])
+async def test_f2_a_kept_ficha_without_a_firm_worse_red_neither_reopens_nor_closes(night, kept, prev):
+    item_id = _kept(kept=kept)
+    today = _night("p1", prev=prev, **night)
+    await pr.process_run(today, now=NOW)
+    item = w.item(item_id)
+    assert (item.state, item.open_key, item.last_run_id) == ("mantenido", "p1", today)
+
+
+async def test_f3_keeping_it_again_moves_the_baseline_and_an_improvement_does_not():
+    from app.pricing import price_review_actions as actions
+
+    item_id = _kept()
+    await pr.process_run(_night("p1", our=round(1.06 * NET)), now=NOW)
+    await actions.act(item_id, "mantener", "pao@b2box.pro", expected_state="propuesto", motive_code="volumen",
+                      motive_text="Lo seguimos vendiendo por volumen")
+    assert (w.item(item_id).state, w.item(item_id).kept_ratio) == ("mantenido", 1.06)
+    for day, ratio in ((1, 1.0), (2, 1.12)):                                   # mejora; después empeora menos del 10 %
+        run = w.make_run(started=NOW + timedelta(days=day))
+        w.add_snap(run, "p1", our=round(ratio * NET), data_at=NOW + timedelta(days=day),
+                   captured_at=NOW + timedelta(days=day))
+        await pr.process_run(run, now=NOW + timedelta(days=day))
+    item = w.item(item_id)
+    assert (item.state, item.kept_ratio, item.reopen_count) == ("mantenido", 1.06, 1)
+
+
+async def test_f4_a_kept_product_that_someone_else_turned_off_closes_as_already_inactive():
+    item_id = _kept()
+    await pr.process_run(_night("p1", enabled=False), now=NOW)
+    item = w.item(item_id)
+    assert item.state == "cerrado_auto" and item.open_key is None
+    assert w.events("cerrado_auto")[0].motive_code == "ya_inactivo"
+
+
+@pytest.mark.parametrize("state", ["en_revision", "corrigiendo", "buscando_prov"])
+async def test_f5_a_ficha_that_hugo_turned_off_is_not_closed_as_already_inactive(state):
+    item_id = w.make_item("p1", state, hugo_disabled=True, disabled_at=NOW - timedelta(days=2))
+    closed_id = w.make_item("p2", "despublicado", hugo_disabled=True)
+    today = _night("p1", enabled=False)
+    w.add_snap(today, "p2", enabled=False)
+    await pr.process_run(today, now=NOW)
+    item = w.item(item_id)
+    snap = w.snap_of(today, "p1")
+    assert item.state == state and item.open_key == "p1" and w.events("cerrado_auto") == []
+    assert (item.last_run_id, item.last_snapshot_id, item.last_color, item.last_margin_pct) == (
+        today, snap.id, snap.color, snap.est_margin_pct)
+    assert w.item(closed_id).state == "despublicado" and w.item(closed_id).last_run_id is None   # no está viva
+
+
+async def test_h3_a_ficha_in_review_that_hugo_did_not_turn_off_does_close_as_already_inactive():
+    item_id = w.make_item("p1", "en_revision", hugo_disabled=False)
+    await pr.process_run(_night("p1", enabled=False), now=NOW)
+    assert w.item(item_id).state == "cerrado_auto"
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2])
+async def test_k1_the_night_only_reads_vendure_to_reconcile_a_pending_intent(world, mode):
+    """K-1: la noche no escribe en Vendure en ningún modo; la conciliación de una intención a medias solo LEE."""
+    from app.db.models import PriceReviewEvent
+
+    w.set_setting("pm_mode", mode)
+    item_id = w.make_item("p9", "en_revision")
+    with Session(engine) as s:
+        it = s.get(PriceReviewItem, item_id)
+        ev = pr.add_event(s, it, "aprobado", actor="pao@b2box.pro", from_state="propuesto", to_state="en_revision",
+                          payload={"antes": {"state_since": NOW.isoformat()}}, now=NOW)
+        s.flush()
+        s.add(PriceReviewEvent(item_id=item_id, product_id="p9", at=NOW, actor="pao@b2box.pro", kind="intent",
+                               from_state="propuesto", to_state="en_revision", enabled_before=True, enabled_after=False,
+                               payload=json.dumps({"accion": "inactivar", "evento": ev.id,
+                                                   "antes": {"state_since": NOW.isoformat()}})))
+        s.commit()
+    world.enabled["p9"] = False                                         # la escritura había llegado
+    prev, today = two_nights({"p1": {}})
+    await pr.process_run(today, now=NOW)
+    assert world.mutations == [] and "GetEnabled" in world.ops()
+    assert set(world.ops()) <= {"GetEnabled", "ActiveChannelPricing", "FiscalProfile", "PricedVariant", "TierBreakdowns",
+                                "ProductCertification"}
+    item = w.item(item_id)
+    assert item.state == "en_revision" and item.hugo_disabled is True and w.events("inactivado")

@@ -130,3 +130,25 @@ def run_of(run_id: int) -> PriceMonitorRun:
 
 def days_ago(n: float) -> datetime:
     return NOW - timedelta(days=n)
+
+
+def make_item(pid: str, state: str = "propuesto", *, at: datetime | None = None, **fields: Any) -> int:
+    """Una ficha armada a mano (con su evento `propuesto`), sin pasar por la noche. Las vivas llevan `open_key`."""
+    at = at or NOW
+    base = dict(product_id=pid, product_name=f"Producto {pid}", product_code=f"BX{pid}", image_url=f"https://cdn.b2box/{pid}.jpg",
+                open_key=pid if state in ("propuesto", "en_revision", "corrigiendo", "buscando_prov", "mantenido") else None,
+                state=state, state_since=at, opened_at=at, our_price_cents=1_000_000, ml_median_cents=900_000,
+                reff_ratio=1.277, price_ratio=1.111, last_margin_pct=-21.7, probable_cause="a")
+    base.update(fields)
+    with Session(engine) as s:
+        item = PriceReviewItem(**base)
+        s.add(item)
+        s.flush()
+        s.add(PriceReviewEvent(item_id=item.id, product_id=pid, at=at, actor="hugo:auto", kind="propuesto", to_state="propuesto"))
+        s.commit()
+        return int(item.id)
+
+
+def item(item_id: int) -> PriceReviewItem:
+    with Session(engine) as s:
+        return s.get(PriceReviewItem, item_id)

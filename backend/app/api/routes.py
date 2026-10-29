@@ -127,6 +127,17 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Producto 'BX…' sin imagen deshabilitado en Vendure",
         "tone": "warning",
     },
+    # Bandeja de revisión de precios (pricing/price_review_actions.py)
+    "price_review_disabled": {
+        "icon": "price",
+        "title": "Bandeja de precios · inactivado en Vendure por decisión de una persona",
+        "tone": "warning",
+    },
+    "price_review_enabled": {
+        "icon": "price",
+        "title": "Bandeja de precios · reactivado en Vendure por decisión de una persona",
+        "tone": "info",
+    },
     # b2box app → /app/lookup
     "app_lookup_match": {
         "icon": "check",
