@@ -2,13 +2,14 @@
 
 Cada noche, DESPUÉS de cerrar la corrida del semáforo, `process_run(run_id)`:
 
-    0. si la corrida ya tiene `review_at` no hace nada (idempotente, también si el proceso se reinició a mitad);
-    0. concilia las escrituras en Vendure que quedaron a medias (`price_review_actions.reconcile`: solo lee);
-    1. marca cada snapshot rojo como `firme` o `dudoso:<motivo>` (`review_flag`);
-    2. con `pm_mode >= 1`: abre la ficha (estado `propuesto`) de cada rojo firme que lleva `pm_review_confirm_nights`
-       noches con dato seguidas, con su diagnóstico a-e; actualiza las fichas vivas, cierra solas (`cerrado_auto`)
-       las propuestas que dejaron de ser rojo y reabre las «mantenido» que empeoraron (regla del 10 %);
-    3. guarda el resumen en la corrida y escribe `review_at`.
+    0. concilia las escrituras en Vendure que quedaron a medias (`price_review_actions.reconcile`: solo lee; siempre);
+    1. si la corrida ya tiene `review_at` no hace nada más (idempotente, también si el proceso se reinició a mitad);
+    2. marca cada snapshot rojo como `firme` o `dudoso:<motivo>` (`review_flag`);
+    3. con `pm_mode >= 1`: abre la ficha (estado `propuesto`) de cada rojo firme que lleva `pm_review_confirm_nights`
+       noches con dato seguidas, con su diagnóstico a-e; actualiza las fichas vivas (con `open_key`: las abiertas y las
+       «mantenido»), cierra solas (`cerrado_auto`) las propuestas que dejaron de ser rojo y reabre las «mantenido» que
+       empeoraron (regla del 10 %);
+    4. guarda el resumen en la corrida y escribe `review_at`.
 
 **La pasada NO escribe en Vendure** (ni `enabled` ni nada) y NO manda nada a Paco: inactiva o reactiva solo una persona de
 PRICE_REVIEW_DECIDERS, desde `price_review_actions`. `pm_mode = 2` (automático) todavía no existe: se comporta como 1 y lo
@@ -69,9 +70,8 @@ MANTENIDO = "mantenido"
 DESPUBLICADO = "despublicado"
 CORREGIDO = "corregido"
 CERRADO_AUTO = "cerrado_auto"
+# Abiertas: esperan a una persona. `mantenido` no está abierta pero conserva `open_key` (se sigue vigilando).
 OPEN_STATES = (PROPUESTO, EN_REVISION, CORRIGIENDO, BUSCANDO_PROV)
-# Las fichas «vivas» conservan `open_key` (una por producto): las abiertas y las mantenidas, que se siguen vigilando.
-LIVE_STATES = (*OPEN_STATES, MANTENIDO)
 CLOSED_STATES = (DESPUBLICADO, CORREGIDO, CERRADO_AUTO)
 STATE_LABEL = {
     PROPUESTO: "Propuesto", EN_REVISION: "En revisión", CORRIGIENDO: "Corrigiendo", BUSCANDO_PROV: "Buscando proveedor",
