@@ -87,6 +87,8 @@ class FakeReviewVendure:
         if op == "Products":
             skip, take = v["skip"], v["take"]
             return {"products": {"items": self.products[skip:skip + take], "totalItems": len(self.products)}}
+        if op == "PricedProduct":                # el recálculo: UN producto de `products`, con sus variantes y tramos
+            return {"product": next((p for p in self.products if str(p["id"]) == str(v["id"])), None)}
         if op == "TierBreakdowns":
             return {"bulkPriceTierBreakdowns": self.breakdowns.get(str(v["id"]), [])}
         if op == "PricedVariant":

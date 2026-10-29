@@ -869,6 +869,24 @@ class VendureClient:
         mapped = self._map_priced_variants([raw])
         return mapped[0] if mapped else None
 
+    async def get_product_priced(self, product_id: str) -> VendureProduct | None:
+        """UN producto con `priced_variants`: los mismos campos que baja el listado nocturno del semáforo
+        (`fetch_all_products_priced`), para recalcularlo cuando cambió en Vendure. Una consulta (más la repetición sin el
+        campo opcional que el schema no tenga). None si el producto no existe."""
+        while True:     # termina: `_drop_unsupported_field` apaga cada parte opcional una sola vez
+            try:
+                query = self._read_query(
+                    f"query PricedProduct($id: ID!) {{ product(id: $id) {{ {self._product_fields(False, pricing=True)} }} }}")
+                data = await self._execute_with_retry(query, {"id": str(product_id)}, what=f"product_priced({product_id})")
+                break
+            except TransportQueryError as exc:
+                if not self._drop_unsupported_field(exc):
+                    raise
+        raw = data.get("product")
+        if not isinstance(raw, dict):
+            return None
+        return self._map_page([raw], with_variants=False, pricing=True)[0]
+
     async def get_certification(self, product_id: str, channel_id: str) -> CertificationInfo | None:
         """Recargo de certificado del producto en el canal. None = sin fila: no necesita certificado."""
         query = self._read_query(

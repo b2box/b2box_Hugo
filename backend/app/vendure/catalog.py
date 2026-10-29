@@ -29,6 +29,11 @@ Trade-off asumido: un cambio de precio en una variante NO toca el `updatedAt`
 del producto, así que `first_variant_price_cents` puede quedar hasta 12 h viejo.
 Para dedup/"lo tenemos" el precio es secundario; las auditorías de precio
 bajan su propio listado.
+
+Los productos que vuelven con otro `updatedAt` quedan anotados (`pop_changed`)
+para el recálculo del semáforo durante el día (pricing/price_recalc.py). Por lo
+mismo de arriba, un cambio que guarda SOLO la variante no lo dispara: lo toma la
+corrida de la noche.
 """
 
 from __future__ import annotations
@@ -50,6 +55,9 @@ _loaded_at: float = 0.0      # último refresh OK (full o incremental), monotoni
 _full_at: float | None = None  # último refresh FULL OK, monotonic (None = nunca / forzado)
 _watermark: str | None = None  # max updatedAt visto en el cache (ISO-8601)
 _lock = asyncio.Lock()
+# Productos que ya estaban en el cache y volvieron con otro `updatedAt` (alguien los guardó en Vendure), hasta que
+# alguien los saca con `pop_changed()`: el recálculo del semáforo (pricing/price_recalc.py, vía refresh_catalog).
+_changed: set[str] = set()
 
 # Tras un refresh fallido, cuánto esperar antes de volver a intentar contra
 # Vendure. Sin esto, cada request pagaría el timeout completo (60s) mientras
@@ -112,9 +120,24 @@ def _needs_full() -> bool:
     return (time.monotonic() - _full_at) >= _full_interval()
 
 
+def _note_changed(previous: list[VendureProduct], fresh: list[VendureProduct]) -> None:
+    """Anota los productos de `fresh` que ya estaban en `previous` con otro `updatedAt`. Los nuevos no: todavía no tienen
+    nada medido que recalcular. Sin cache previo (el primer full al arrancar) no anota nada: no se sabe qué cambió."""
+    seen = {p.id: p.updated_at for p in previous}
+    _changed.update(p.id for p in fresh if p.id in seen and p.updated_at and p.updated_at != seen[p.id])
+
+
+def pop_changed() -> list[str]:
+    """Los productos que cambiaron en Vendure desde la última llamada (y los olvida)."""
+    out = sorted(_changed)
+    _changed.clear()
+    return out
+
+
 async def _do_full(client: VendureClient) -> None:
     global _cache, _loaded_at, _full_at, _watermark
     products = await _fetch_all(client)
+    _note_changed(_cache, products)
     _cache = products
     _watermark = _max_updated_at(products)
     _full_at = _loaded_at = time.monotonic()
@@ -137,6 +160,8 @@ async def _do_incremental(client: VendureClient) -> None:
     total = await client.count_products()
 
     if changed:
+        # Los del margen del watermark vuelven con el mismo `updatedAt`: esos no cuentan como cambiados.
+        _note_changed(_cache, changed)
         by_id = {p.id: p for p in _cache}
         for p in changed:
             by_id[p.id] = p
