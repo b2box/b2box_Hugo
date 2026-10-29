@@ -1512,7 +1512,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   una escritura en curso la ficha no la toca nadie (otra acción recibe 409, la pasada de la noche la saltea). Una
   intención de más de 10 minutos quedó a medias y se concilia contra Vendure: al arrancar (a los 11 minutos), en la
   pasada de la noche o al tocar la ficha. Si una escritura llega cuando la ficha ya cambió, igual queda en `AuditLog` y
-  sale en el mail en «PARA MIRAR A MANO». Las escrituras no gastan el tope de 150 lecturas de la noche.
+  sale en el mail en «PARA MIRAR A MANO». Si volver atrás choca con otra ficha abierta del producto, la vieja se cierra
+  (`sin_vuelta_atras`, también en el mail). «Hugo lo apagó» cuenta desde la hora de la intención (`disabled_at`). Las escrituras no gastan el tope de 150 lecturas de la noche.
 - **Registro.** Cada acción deja su evento con quién (email), cuándo (UTC) y por qué, y la ficha guarda `decision`,
   `decision_by`, `decision_at` y el motivo. `AuditLog` no tiene actor: el email va en el evento y en el `detail` de la
   fila (que también sale en el resumen diario de `ALERT_EMAIL_TO`, como el resto de `AuditLog`).
