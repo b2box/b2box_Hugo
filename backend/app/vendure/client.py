@@ -1010,9 +1010,11 @@ class VendureClient:
 
     async def set_enabled(self, product_id: str, enabled: bool) -> bool | None:
         """`updateProduct(enabled)` para la bandeja de revisión. Devuelve el `enabled` que respondió Vendure (None si
-        no vino): quien llama lo compara con lo pedido. Apagar reintenta como siempre; REACTIVAR hace UN solo intento
-        (más el re-login si el bearer venció): con contacto del proveedor la reactivación encola la publicación en los
-        otros canales, y un reintento a ciegas puede repetirla. Los flujos de duplicados siguen con `_set_enabled`."""
+        no vino): quien llama lo compara con lo pedido. UN solo intento en las dos direcciones (más el re-login si el bearer
+        venció): con contacto del proveedor la reactivación encola la publicación en los otros canales y un reintento a
+        ciegas puede repetirla; y al apagar, con reintentos, un 504 temprano que igual llega a Vendure quedaba tapado por
+        el error del último intento. Un error ambiguo lo resuelve la conciliación de la bandeja. Los flujos de duplicados
+        siguen con `_set_enabled`."""
         mutation = gql(
             """
             mutation SetEnabled($input: UpdateProductInput!) {
@@ -1024,7 +1026,8 @@ class VendureClient:
             mutation,
             {"input": {"id": product_id, "enabled": enabled}},
             what=f"set_enabled({product_id}, {enabled})",
-            **({"max_attempts": 2, "retry": False} if enabled else {}),
+            max_attempts=2,
+            retry=False,
         )
         got = (data.get("updateProduct") or {}).get("enabled") if isinstance(data, dict) else None
         return got if isinstance(got, bool) else None

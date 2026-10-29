@@ -1489,8 +1489,9 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   después como duplicado o como BX sin foto. Confirmar un duplicado o un BX con el producto ya apagado no toca Vendure
   pero deja su fila (`duplicate_confirmed` con `disable_target_id`, o `bx_no_image_disabled` con `before.enabled =
   false`). Si falta algo: 409 «reactivar a mano» y la ficha queda igual. Si otra persona ya lo
-  reactivó, termina sin escribir. Reactivar hace **un solo intento** (más el re-login): con contacto del proveedor,
-  Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva.
+  reactivó, termina sin escribir. Apagar y reactivar hacen **un solo intento** (más el re-login): con contacto del
+  proveedor, Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva; y un error ambiguo (timeout,
+  5xx) no se reintenta a ciegas, lo resuelve la conciliación.
 - **Deshacer** vuelve al estado y al `enabled` de antes de la **última** acción humana, hasta 30 días después. Si la ficha
   cambió después (otra decisión, la reapertura del 10 %, un cierre solo) responde 409; un intento que falló y volvió
   atrás no le quita el Deshacer a la acción anterior. Un Deshacer no se deshace. Sigue permitido con `pm_mode = 0`.

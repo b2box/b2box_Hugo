@@ -763,9 +763,9 @@ function ActionModal({
       onFinished(true, `Listo: la ficha está en «${r.state_label}».${extra}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "No se pudo hacer.";
-      // 409 (la ficha cambió, u otra regla lo frena) y 502 «no sabemos si Vendure tomó el cambio» (la ficha ya quedó en
-      // el estado nuevo, esperando la conciliación): se recarga y se avisa. 400, 429 y los demás 502: la frase del backend.
-      if (e instanceof ApiError && (e.status === 409 || e.code === "vendure_incierto")) onFinished(false, msg);
+      // 409 (la ficha cambió, u otra regla lo frena) y cualquier 502 (la ficha pudo quedar en otro estado: esperando la
+      // conciliación, o cerrada porque no se pudo volver atrás): se recarga y se avisa. 400 y 429: la frase del backend.
+      if (e instanceof ApiError && (e.status === 409 || e.status === 502)) onFinished(false, msg);
       else setError(msg);
     } finally {
       setBusy(false);

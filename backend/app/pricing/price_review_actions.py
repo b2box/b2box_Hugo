@@ -108,8 +108,8 @@ STATE_KINDS = HUMAN_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto
 # Vuelven la ficha a como estaba antes de la última acción (Vendure falló, reactivar a mano, conciliación): esa acción
 # no cuenta, y el intento fallido no le quita el Deshacer a la anterior.
 ROLLBACK_KINDS = {"vendure_error", "reactivar_a_mano", "intent_descartado"}
-# Tope para leer y escribir en Vendure (pasos 2 a 4). Apagar reintenta 3 veces y cada intento puede tardar 60 s (httpx)
-# o 90 s (gql): sin tope, una escritura podía llegar a Vendure 4 a 9 minutos después del clic.
+# Tope para leer y escribir en Vendure (pasos 2 a 4). Leer reintenta 3 veces y cada intento puede tardar 60 s (httpx)
+# o 90 s (gql): sin tope, una escritura podía llegar a Vendure varios minutos después del clic.
 APPLY_DEADLINE_S = 240.0
 # La relectura después de un error ambiguo al escribir (¿Vendure tomó el cambio o no?).
 REREAD_DEADLINE_S = 60.0

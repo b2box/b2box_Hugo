@@ -49,16 +49,13 @@ async def test_set_enabled_returns_what_vendure_answered(fake):
     assert await VendureClient().set_enabled("rv3", True) is None             # solo un bool cuenta
 
 
-async def test_reactivating_tries_once_and_turning_off_keeps_the_retries(fake):
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_set_enabled_tries_once_in_both_directions(fake, enabled):
+    """Sin reintentos: un error ambiguo de un intento temprano no queda tapado por el del último (lo concilia la bandeja)."""
     fake.script["SetEnabled"] = [(500, BOOM)] * 3
     with pytest.raises(TransportQueryError):
-        await VendureClient().set_enabled("rv1", True)
+        await VendureClient().set_enabled("rv1", enabled)
     assert len(fake.mutations) == 1
-    fake.mutations.clear()
-    fake.script["SetEnabled"] = [(500, BOOM), (500, BOOM)]
-    fake.enabled["rv1"] = True
-    assert await VendureClient().set_enabled("rv1", False) is False
-    assert len(fake.mutations) == 3
 
 
 async def test_reactivating_with_an_expired_bearer_relogs_and_tries_once_more(fake, relogins):

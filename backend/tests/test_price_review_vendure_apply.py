@@ -140,12 +140,12 @@ async def test_v3_reactivating_with_an_expired_bearer_is_one_call_plus_the_relog
     assert r.status_code == 200 and len(fake.mutations) == 2 and relogins == [1]
 
 
-async def test_v3_turning_off_keeps_the_retries(c, fake):
+async def test_v3_turning_off_tries_once_and_a_rejection_rolls_back(c, fake):
     item_id = w.make_item("rv1")
     fake.enabled["rv1"] = True
     fake.script["SetEnabled"] = [(500, BOOM), (500, BOOM)]
     r = k.post(c, item_id, "approve", expected_state="propuesto")
-    assert r.status_code == 200 and len(fake.mutations) == 3 and w.item(item_id).state == "en_revision"
+    assert r.status_code == 502 and len(fake.mutations) == 1 and w.item(item_id).state == "propuesto"
 
 
 async def test_v3_a_read_error_rolls_back_too(c, fake):
