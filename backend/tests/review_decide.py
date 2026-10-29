@@ -19,6 +19,7 @@ from tests.test_price_monitor_routes import _use_settings
 
 BASE = "/api/price-review"
 PAO = "pao@b2box.pro"
+ADMIN = "admin"   # el DASHBOARD_ADMINS de `_use_settings`: confirma duplicados y BX, no decide en la bandeja
 DECIDERS = "pao@b2box.pro, gabriel@b2box.pro"
 
 

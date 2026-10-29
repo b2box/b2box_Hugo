@@ -435,8 +435,9 @@ async def test_reqa_confirming_an_already_off_duplicate_or_bx_is_not_restored_no
     """Seguridad M1: las filas nuevas de routes.py (producto ya apagado) no entran en /api/restore-duplicates ni en
     `disabled_total`, y no tocan Vendure."""
     fake.enabled.update({"rv1": False, "rv2": False})
+    admin = k.client(k.ADMIN)
     total0 = c.get("/api/health-metrics").json()["duplicates"]["disabled_total"]
-    dry0 = c.post("/api/restore-duplicates").json()
+    dry0 = admin.post("/api/restore-duplicates").json()
     with Session(engine) as s:
         dup = AuditLog(action="duplicate_flagged", source="audit", product_id="rv1", related_product_id="rv0",
                        disable_target_id="rv1", canonical_product_id="rv0", confidence=1.0, product_name="Dup rv1")
@@ -445,12 +446,12 @@ async def test_reqa_confirming_an_already_off_duplicate_or_bx_is_not_restored_no
         s.add(bx)
         s.commit()
         ids = (dup.id, bx.id)
-    assert c.post(f"/api/audit-log/{ids[0]}/confirm-duplicate").status_code == 200
-    assert c.post(f"/api/audit-log/{ids[1]}/confirm-disable-bx").status_code == 200
+    assert admin.post(f"/api/audit-log/{ids[0]}/confirm-duplicate").status_code == 200
+    assert admin.post(f"/api/audit-log/{ids[1]}/confirm-disable-bx").status_code == 200
     assert fake.mutations == []
     assert [a.action for a in k.audit("rv1")] == ["duplicate_flagged", "duplicate_confirmed"]
     assert [a.action for a in k.audit("rv2")] == ["bx_no_image_flagged", "bx_no_image_disabled"]
-    dry = c.post("/api/restore-duplicates").json()
+    dry = admin.post("/api/restore-duplicates").json()
     assert (dry["would_restore_max"], dry["total_disable_events"]) == (dry0["would_restore_max"], dry0["total_disable_events"])
     assert "rv1" not in dry["preview_ids"]
     assert c.get("/api/health-metrics").json()["duplicates"]["disabled_total"] == total0
