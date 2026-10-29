@@ -517,8 +517,9 @@ class Settings(EnvSettings):
         default="0 6 * * *", description="Cron (UTC) del job price_monitor. 06:00 UTC = 03:00 ART",
     )
     # Bandeja de revisión de Pao (pricing/price_review.py). 0 = sombra (mide y guarda; solo marca los rojos en
-    # los snapshots). 1 = propuesta: llena la bandeja con los rojos firmes y manda el resumen diario a Pao; NO
-    # toca Vendure. 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
+    # los snapshots; las decisiones quedan frenadas, Deshacer no). 1 = propuesta: llena la bandeja con los rojos
+    # firmes y manda el resumen diario a Pao; Hugo inactiva o reactiva SOLO lo que decide una persona de
+    # PRICE_REVIEW_DECIDERS. 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
     pm_mode: int = 0
     # Cortes del semáforo, en % de ganancia estimada del revendedor.
     pm_green_min_pct: float = 30.0
@@ -665,6 +666,8 @@ class Settings(EnvSettings):
     pm_review_data_max_age_h: int = 48
     # Días que una ficha puede esperar decisión antes de salir en el mail como «esperando».
     pm_review_sla_days: int = 7
+    # Regla del 10 %: una ficha «mantenido» se reabre si el cociente nuestro precio / neto de ML empeora este %.
+    pm_review_worse_pct: float = 10.0
     # Umbrales del diagnóstico a-e.
     pm_diag_cert_share_pct: float = 10.0
     pm_diag_logistics_ratio: float = 1.0
@@ -679,6 +682,9 @@ class Settings(EnvSettings):
     # Quiénes ven el COSTO DE FÁBRICA y el fee en la bandeja (emails de la sesión del dashboard, separados por coma).
     # Fail-closed: vacío = nadie los ve; el resto de las sesiones ve el detalle sin cny_*, FOB, fee ni evidencias.
     price_review_viewers: str = ""
+    # Quiénes DECIDEN en la bandeja (inactivar, corregir, mantener, despublicar, reactivar, deshacer): emails de la
+    # sesión del dashboard, separados por coma. Fail-closed: vacío = nadie, ni en desarrollo.
+    price_review_deciders: str = ""
     # Para los links del detalle y del mail (plantillas con {id} / {slug}). Vacío = sin link.
     hugo_public_url: str = ""
     vendure_admin_product_url: str = ""
