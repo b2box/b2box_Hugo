@@ -21,7 +21,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
-from app import main as main_mod  # noqa: E402
+from app import main as main_mod, runtime  # noqa: E402
 from app.api import oficina_routes  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.config import Settings  # noqa: E402
@@ -434,9 +434,9 @@ def test_an_empty_result_counts_as_searched(api):
 
 @pytest.mark.parametrize("ttl_days, requeue_after", [(7, timedelta(days=6)), (3, timedelta(days=2)), (2, timedelta(days=1)),
                                                     (1, timedelta(hours=12)), (30, timedelta(days=29))])
-def test_the_queue_asks_again_exactly_one_day_before_the_ttl_with_a_12_hour_floor(api, monkeypatch, ttl_days, requeue_after):
-    monkeypatch.setattr(oficina_ml, "get_settings", lambda: Settings(vendure_api_url="https://example.invalid/x",
-                                                                      oficina_search_key=KEY, oficina_result_ttl_days=ttl_days))
+def test_the_queue_asks_again_exactly_one_day_before_the_ttl_with_a_12_hour_floor(api, request, ttl_days, requeue_after):
+    runtime.set_value("oficina_result_ttl_days", ttl_days)
+    request.addfinalizer(lambda: runtime.reset_to_default("oficina_result_ttl_days"))
     _snap("1")
     now = datetime(2026, 10, 9, 4, 0, 0)
     with Session(engine) as s:

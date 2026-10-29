@@ -224,9 +224,9 @@ def test_ttl_edge_in_load_fresh(webw, age, used):
 
 
 @pytest.mark.parametrize("ttl", [1, 3, 14])
-def test_load_fresh_follows_the_configured_ttl(webw, monkeypatch, ttl):
-    from app.config import Settings
-    monkeypatch.setattr(oficina_ml, "get_settings", lambda: Settings(vendure_api_url="https://example.invalid/x", oficina_result_ttl_days=ttl))
+def test_load_fresh_follows_the_configured_ttl(webw, request, ttl):
+    runtime.set_value("oficina_result_ttl_days", ttl)
+    request.addfinalizer(lambda: runtime.reset_to_default("oficina_result_ttl_days"))
     now = utcnow().replace(microsecond=0)
     with Session(engine) as s:
         s.add(MlWebResult(product_id="3", query="q", fetched_at=now - timedelta(days=ttl, hours=-1), candidates="[]", status="empty"))

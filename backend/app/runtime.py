@@ -393,6 +393,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="apify_meli_search_daily_max",
         min=0, max=500, step=10, group="monitor",
     ),
+    SettingMeta(
+        key="oficina_result_ttl_days",
+        label="Apify y oficina: días que vale un resultado de ML",
+        description=(
+            "Lo que trajeron Apify o la Mac de la oficina cuenta para el semáforo durante estos días; un día "
+            "antes de vencer se vuelve a buscar. Más días = menos búsquedas por noche (más barato), pero se "
+            "compara contra precios de ML más viejos. Con N productos hacen falta ~N / (días - 1) búsquedas "
+            "por noche para que no se venza ninguno."
+        ),
+        type="int", parser=int,
+        default_attr="oficina_result_ttl_days",
+        min=1, max=90, step=1, group="monitor",
+    ),
     # Semáforo de precios contra Mercado Libre (app/pricing/price_monitor.py)
     SettingMeta(
         key="pm_mode",
