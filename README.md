@@ -1465,7 +1465,7 @@ código (`TransportServerError 502`), nunca el mensaje; el detalle va al log.
 
 Solo las personas de **`PRICE_REVIEW_DECIDERS`** (emails de la sesión del dashboard, separados por coma; da igual
 mayúsculas y espacios). **Fail-closed:** vacía = nadie decide, tampoco en desarrollo; hace falta `DASHBOARD_SECRET` y una
-sesión con usuario. Quien no está ve los botones deshabilitados («Solo deciden: ver PRICE_REVIEW_DECIDERS»). Los botones
+sesión con usuario. Un POST que el navegador marca como de otro sitio (`Sec-Fetch-Site` distinto de `same-origin`) da 403. Quien no está ve los botones deshabilitados («Solo deciden: ver PRICE_REVIEW_DECIDERS»). Los botones
 salen de `actions` en el detalle: los arma el backend según el estado, la sesión y el modo.
 
 | Desde ↓ / acción → | Inactivar y revisar | Corregir | Mantener activo | Despublicar | Ya lo corregí: reactivar |
@@ -1492,11 +1492,10 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva.
 - **Deshacer** vuelve al estado y al `enabled` de antes de la **última** acción humana, hasta 30 días después. Si la ficha
   cambió después (otra decisión, la reapertura del 10 %, un cierre solo) responde 409; un intento que falló y volvió
-  atrás no le quita el Deshacer a la acción anterior. Un Deshacer no se
-  deshace. Sigue permitido con `pm_mode = 0`.
+  atrás no le quita el Deshacer a la acción anterior. Un Deshacer no se deshace. Sigue permitido con `pm_mode = 0`.
 - **Regla del 10 %.** «Mantener» guarda la línea base (`kept_ratio` = nuestro precio / lo que le queda neto al revendedor
   en ML). Si una noche el producto sigue en rojo firme con la racha cumplida y el cociente llegó a `kept_ratio × (1 +
-  pm_review_worse_pct / 100)` (10 % por defecto), la ficha vuelve a `propuesto` y sale en el mail como reabierta. La
+  pm_review_worse_pct / 100)` (10 % por defecto; lo cambia solo un admin y queda auditado), la ficha vuelve a `propuesto` y sale en el mail como reabierta. La
   línea base no se corre si mejora; la cambia recién una decisión nueva. Sin línea base no se reabre sola.
 - **Cómo se escribe** (`pricing/price_review_actions.py`, el único módulo que escribe en Vendure): cambio de estado
   atómico (`UPDATE … WHERE id AND state AND version`) más un evento `intent` → se lee el `enabled` real → `set_enabled`
