@@ -147,8 +147,12 @@ def test_r1_the_refresh_job_runs_well_within_ten_minutes():
     from app.scheduler import jobs
 
     jobs.register_jobs()
-    job = jobs.scheduler.get_job("refresh_catalog")
-    assert job is not None and job.trigger.interval <= timedelta(minutes=5)
+    try:
+        job = jobs.scheduler.get_job("refresh_catalog")
+        assert job is not None and job.trigger.interval <= timedelta(minutes=5)
+    finally:
+        for job in jobs.scheduler.get_jobs():                                   # como clean_scheduler de test_price_monitor
+            jobs.scheduler.remove_job(job.id)
     assert Settings(vendure_api_url="https://x.invalid/admin-api").verify_catalog_ttl_seconds - 30 <= 300
 
 
