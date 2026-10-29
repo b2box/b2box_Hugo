@@ -332,3 +332,20 @@ async def test_a_crash_of_the_review_pass_never_fails_the_nightly_run_and_the_ne
     out = await real(r1["run_id"], now=utcnow())
     assert out is not None and q.rows(PriceMonitorRun, PriceMonitorRun.id == r1["run_id"])[0].review_at is not None
     assert st.world.writes() == [] and st.spy.violations == []
+
+
+async def test_f6_a_disabled_product_with_a_live_ficha_is_measured_even_without_pm_include_disabled(stack):
+    """H5: con `pm_include_disabled = 0` los apagados no se miden, salvo los que tienen una ficha viva (Hugo los apagó y
+    hay que saber si se arreglaron). Nada de eso escribe en Vendure."""
+    from tests import review_world as rw
+
+    st = stack
+    q.setting("pm_include_disabled", 0)
+    q.setting("pm_mode", 1)
+    st.world.add(healthy("5", name="Otro deshabilitado"), enabled=False)
+    rw.make_item("4", "en_revision", hugo_disabled=True)
+    r = await jobs.price_monitor(trigger="manual")
+    assert r["status"] == "ok", r
+    measured = {s.product_id for s in q.rows(MarketPriceSnapshot, MarketPriceSnapshot.run_id == r["run_id"])}
+    assert "4" in measured and "5" not in measured and {"1", "2", "3"} <= measured
+    assert st.world.writes() == [] and st.spy.violations == []
