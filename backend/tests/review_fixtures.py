@@ -1,9 +1,10 @@
-"""Vendure falso A NIVEL HTTP para la bandeja de revisión (PR1 y PR2).
+"""Vendure falso A NIVEL HTTP para la bandeja de revisión (PR1 a PR3).
 
 Se engancha en el transport de gql con un `MockTransport`: el cliente real de Hugo arma sus
 requests de verdad (headers, JSON, paginado) y lo único que "existe" de Vendure es lo que contesta
-este objeto. Anota cada pedido. **Cualquier `mutation` se contesta con un error 500 y queda
-registrada en `mutations`**: las pruebas de "cero escrituras" miran ahí.
+este objeto. Anota cada pedido. **Cualquier `mutation` queda registrada en `mutations` y, salvo que el
+test ponga `writable = True`, se contesta con un error 500**: las pruebas de "cero escrituras" miran ahí.
+Con `writable`, `SetEnabled` cambia `enabled[product_id]` y devuelve el valor (o lo que diga `write_reply`).
 """
 
 from __future__ import annotations
@@ -47,6 +48,13 @@ class FakeReviewVendure:
         self.errors: dict[str, str] = {}       # operación -> mensaje de error GraphQL (HTTP 200)
         self.unknown_fields: set[str] = set()  # campos que el schema "no tiene": si la query los pide, error
         self.http_fail: set[str] = set()       # operación -> HTTP 500
+        # Lo que lee y escribe la bandeja al decidir (GetEnabled, ReviewGuard, SetEnabled).
+        self.enabled: dict[str, bool] = {}
+        self.approval: dict[str, str | None] = {}
+        self.contact: dict[str, str | None] = {}
+        self.writable = False
+        self.write_reply: dict[str, dict[str, Any]] = {}            # productId -> `updateProduct` que se devuelve tal cual
+        self.script: dict[str, list[tuple[int, dict[str, Any]]]] = {}  # operación -> respuestas en orden, antes de lo normal
 
     # ── el servidor ──
     def handler(self, request: Any) -> Any:
@@ -60,7 +68,11 @@ class FakeReviewVendure:
         self.requests.append(record)
         if kind != "query":
             self.mutations.append(record)
-            return _httpx.Response(500, json={"errors": [{"message": "escritura prohibida en este test"}]})
+            if not self.writable:
+                return _httpx.Response(500, json={"errors": [{"message": "escritura prohibida en este test"}]})
+        if self.script.get(op):
+            status, body = self.script[op].pop(0)
+            return _httpx.Response(status, json=body)
         if op in self.http_fail:
             return _httpx.Response(500, text="Internal Server Error")
         if op in self.errors:
@@ -85,6 +97,18 @@ class FakeReviewVendure:
             return {"activeChannel": self.channel}
         if op == "FiscalProfile":
             return {"pricingFiscalProfile": self.profile}
+        pid = str(v.get("id") or (v.get("input") or {}).get("id"))
+        if op == "GetEnabled":
+            return {"product": {"id": pid, "enabled": self.enabled[pid]} if pid in self.enabled else None}
+        if op == "ReviewGuard":
+            return {"product": None if pid not in self.enabled else {
+                "id": pid, "enabled": self.enabled[pid],
+                "customFields": {"approvalStatus": self.approval.get(pid), "supplierContact": self.contact.get(pid)}}}
+        if op == "SetEnabled":
+            if pid in self.write_reply:
+                return {"updateProduct": self.write_reply[pid]}
+            self.enabled[pid] = bool(v["input"]["enabled"])
+            return {"updateProduct": {"id": pid, "enabled": self.enabled[pid]}}
         raise AssertionError(f"consulta inesperada a Vendure: {op}")
 
     # ── lo que miran las pruebas ──
@@ -93,6 +117,10 @@ class FakeReviewVendure:
 
     def count(self, op: str) -> int:
         return sum(1 for r in self.requests if r["op"] == op)
+
+    def writes(self) -> list[bool]:
+        """Los `enabled` que se pidieron escribir, en orden."""
+        return [bool(r["variables"]["input"]["enabled"]) for r in self.mutations if r["op"] == "SetEnabled"]
 
 
 def install(monkeypatch, fake: FakeReviewVendure) -> None:
