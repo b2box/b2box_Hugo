@@ -1483,8 +1483,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
 - **Apagar algo ya apagado por otra razón** no escribe nada: la ficha se cierra (`cerrado_auto`, «ya estaba inactivo por
   otra razón»). «Verifica apagado»: si sigue apagado por Hugo no se escribe nada; si alguien lo prendió a mano, se vuelve
   a apagar (con su evento y su fila de `AuditLog`).
-- **Reactivar** escribe solo si: lo apagó Hugo (`hugo_disabled`), sigue apagado, el portal de proveedores no lo tiene
-  `pending` ni `rejected` (`approvalStatus`; si no se puede leer, no se reactiva) y nadie lo apagó ni lo confirmó
+- **Reactivar** escribe solo si: lo apagó Hugo (`hugo_disabled`), sigue apagado, el portal de proveedores lo tiene sin
+  estado o `approved` (`approvalStatus`, lista blanca; si no se puede leer, no se reactiva) y nadie lo apagó ni lo confirmó
   después como duplicado o como BX sin foto. Confirmar un duplicado o un BX con el producto ya apagado no toca Vendure
   pero deja su fila (`duplicate_confirmed` con `disable_target_id`, o `bx_no_image_disabled` con `before.enabled =
   false`). Si falta algo: 409 «reactivar a mano» y la ficha queda igual. Si otra persona ya lo

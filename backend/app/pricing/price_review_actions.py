@@ -118,8 +118,11 @@ REREAD_DEADLINE_S = 60.0
 # descarta una escritura que todavía está viajando y que después llega igual.
 INTENT_STALE = timedelta(minutes=10)
 UNDO_WINDOW = timedelta(days=30)
-APPROVAL_BLOCKED = {"pending": "está pendiente de aprobación en el portal de proveedores",
-                    "rejected": "está rechazado en el portal de proveedores"}
+# Portal de proveedores: se reactiva solo sin estado (no vino del portal) o aprobado. Cualquier otro valor (pending,
+# rejected, o uno que Hugo no conoce) frena: lista blanca, no negra.
+APPROVAL_OK = (None, "approved")
+APPROVAL_TEXT = {"pending": "está pendiente de aprobación en el portal de proveedores",
+                 "rejected": "está rechazado en el portal de proveedores"}
 _DATE_KEYS = {"state_since", "decision_at", "closed_at"}
 
 DECIDERS_ONLY = "Solo deciden: ver PRICE_REVIEW_DECIDERS"
@@ -472,8 +475,10 @@ def _reactivation_blocker(item: PriceReviewItem, guard: ReviewGuard | None) -> t
     if item.hugo_disabled is not True:
         return "no_lo_apago_hugo", "no lo apagó Hugo"
     status = guard.approval_status if guard is not None else None
-    if status in APPROVAL_BLOCKED:
-        return f"aprobacion_{status}", APPROVAL_BLOCKED[status]
+    if status not in APPROVAL_OK:
+        # El código no lleva el valor crudo de Vendure (puede ser cualquier texto): solo los conocidos.
+        return (f"aprobacion_{status if status in APPROVAL_TEXT else 'otro'}",
+                APPROVAL_TEXT.get(str(status), "no está aprobado en el portal de proveedores"))
     with Session(engine) as s:
         # Lo apagó o lo confirmó como duplicado / BX sin foto otro flujo después de Hugo. Con el producto ya apagado esos
         # flujos no escriben `*_disabled`: dejan un `duplicate_confirmed` con `disable_target_id` o un

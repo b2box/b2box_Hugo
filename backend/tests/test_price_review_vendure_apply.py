@@ -167,13 +167,13 @@ def _later_audit(action: str, pid: str = "rv1", delta: timedelta = timedelta(hou
 
 @pytest.mark.parametrize("case,code", [
     ("not_hugo", "no_lo_apago_hugo"), ("pending", "aprobacion_pending"), ("rejected", "aprobacion_rejected"),
-    ("duplicate", "duplicado"), ("bx", "bx_sin_imagen"), ("unreadable", "aprobacion_ilegible"),
+    ("draft", "aprobacion_otro"), ("duplicate", "duplicado"), ("bx", "bx_sin_imagen"), ("unreadable", "aprobacion_ilegible"),
 ])
 async def test_v4_reactivation_needs_every_guard_or_it_is_409_reactivate_by_hand(c, fake, case, code):
     item_id = (w.make_item("rv1", "en_revision", hugo_disabled=False) if case == "not_hugo"
                else k.disabled_by_hugo("rv1"))
     fake.enabled["rv1"] = False
-    if case in ("pending", "rejected"):
+    if case in ("pending", "rejected", "draft"):                     # lista blanca: solo vacío o «approved»
         fake.approval["rv1"] = case
     if case == "duplicate":
         _later_audit("duplicate_disabled")
