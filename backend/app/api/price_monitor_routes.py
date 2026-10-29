@@ -73,7 +73,7 @@ def _manual_run_blocker(session: Session) -> tuple[int, str, int | None] | None:
     if price_monitor.price_monitor_lock.locked():
         return 409, "Ya hay una corrida del semáforo en curso.", None
     budget = ml_budget_status()
-    if budget["remaining"] <= 0:
+    if int(runtime.get("pm_ml_api_enabled")) and budget["remaining"] <= 0:
         return 429, (f"Sin cupo de Mercado Libre hoy ({budget['used']} de {budget['budget']} "
                      "requests). Se renueva a las 00:00 UTC."), None
     cooldown_min = int(runtime.get("pm_manual_cooldown_min") or 0)

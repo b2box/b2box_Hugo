@@ -87,6 +87,25 @@ async def test_it_works_with_the_server_web_off(world, monkeypatch):
     assert _runs()[0].web_status.startswith("apagada")
 
 
+async def test_with_the_ml_api_off_only_apify_and_the_oficina_count(world):
+    """ML bloquea la API: se apaga y el semáforo corre igual, sin pedirle nada, con lo que trajo Apify."""
+    _set("pm_ml_api_enabled", 0)
+    _set("pm_ml_daily_budget", 0)                      # con la API apagada el cupo no frena la corrida
+    FakeVendure.products = [_product("1", "Organizador cocina"), _product("3", "Producto raro")]
+    _store("3", [_wire("MLA901", "Producto Raro", 250.0)])
+    world.image_scores[PHOTO.format("901-MLA1_012025")] = 0.9
+
+    await price_monitor.run_price_monitor()
+
+    snaps = _snaps()
+    assert world.ml.calls == []
+    assert snaps["3"].ml_status == "ok" and snaps["3"].match_origin == "oficina"
+    assert snaps["1"].ml_status == "no_data" and snaps["1"].ml_error == "API de ML apagada"
+    assert _runs()[0].status != "skipped"
+    # Lo que quedó sin dato es lo que Apify busca la noche siguiente.
+    assert [i["product_id"] for i in oficina_ml.build_queue(10)] == ["1"]
+
+
 async def test_an_igual_from_the_api_wins_and_the_oficina_is_not_even_looked_at(webw):
     FakeVendure.products = [_product("1", "Organizador cocina")]
     _store("1", [_wire("MLA901", "Organizador cocina", 100.0)])

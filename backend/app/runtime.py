@@ -521,6 +521,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=8, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_ml_api_enabled",
+        label="Usar la API de Mercado Libre (1 / 0)",
+        description=(
+            "1 = cada producto se busca primero en la API de ML, como siempre. 0 = no se le pregunta nada a la "
+            "API: el semáforo usa solo lo que trajeron Apify y la oficina, y corre aunque el budget de ML esté "
+            "en 0. Para cuando ML bloquea la API."
+        ),
+        type="int", parser=int,
+        default_attr="pm_ml_api_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_ml_query_variants",
         label="Búsquedas por producto en la API de ML",
         description=(

@@ -182,6 +182,8 @@ class RunContext:
     spec_check: bool = True
     dim_tol_pct: float = 10.0
     weight_tol_pct: float = 15.0
+    # pm_ml_api_enabled: False = no se le pregunta nada a la API de ML (solo Apify y la oficina).
+    ml_api: bool = True
     # Fuente "ML web": None = apagada (sin proxy, cupo 0, sin browser).
     web: market_ml_web.MlWebSource | None = None
     # Búsquedas web de ML hechas por la Mac de la oficina que siguen frescas, por producto
@@ -1359,7 +1361,11 @@ async def _evaluate_ml(ctx: RunContext, product: VendureProduct) -> MarketPriceS
               promoted=ctx.promoted.get(product.id, frozenset()),
               plan=market_query.query_plan(product.name, ctx.query_variants))
 
-    snap = await _match_via_api(ctx, product, snap, w)
+    if ctx.ml_api:
+        snap = await _match_via_api(ctx, product, snap, w)
+    else:
+        # NO_DATA (no SKIPPED) para que entre en la cola de Apify y de la oficina.
+        snap = _mark(snap, NO_DATA, "API de ML apagada")
     if snap.ml_status != OK:
         fresh = ctx.oficina.get(product.id)
         if fresh is not None:
@@ -1407,6 +1413,7 @@ def _context(run_id: int, ml: MlMarket, web: market_ml_web.MlWebSource | None = 
         keep_listings=int(runtime.get("pm_ml_keep_listings")),
         query_variants=market_query.clamp_variants(runtime.get("pm_ml_query_variants")),
         spec_check=bool(int(runtime.get("pm_spec_check"))),
+        ml_api=bool(int(runtime.get("pm_ml_api_enabled"))),
         dim_tol_pct=float(runtime.get("pm_dim_tol_pct")),
         weight_tol_pct=float(runtime.get("pm_weight_tol_pct")),
         thresholds=market_match.Thresholds.from_runtime(),
@@ -1555,7 +1562,7 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
              len(pending))
 
     budget_now = await asyncio.to_thread(ml_budget_status)
-    if budget_now["remaining"] <= 0:
+    if int(runtime.get("pm_ml_api_enabled")) and budget_now["remaining"] <= 0:
         msg = f"sin cupo de ML hoy: usados {budget_now['used']} de {budget_now['budget']}"
         log.warning("price_monitor #%s: %s; no se evalúa nada", run_id, msg)
         status = _finalize_run(run_id, error=msg, force_status=RUN_SKIPPED)

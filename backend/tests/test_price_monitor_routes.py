@@ -193,6 +193,18 @@ def test_manual_run_without_ml_quota_is_429(client, monkeypatch):
     assert called == []
 
 
+def test_manual_run_with_the_ml_api_off_does_not_need_ml_quota(client, monkeypatch):
+    _no_job(monkeypatch)
+    runtime.set_value("pm_ml_daily_budget", 0)
+    runtime.set_value("pm_ml_api_enabled", 0)
+    try:
+        resp = client.post("/api/price-monitor/run")
+    finally:
+        runtime.reset_to_default("pm_ml_daily_budget")
+        runtime.reset_to_default("pm_ml_api_enabled")
+    assert resp.status_code == 202
+
+
 @pytest.mark.parametrize("minutes_ago,expected", [(5, 429), (29, 429), (31, 202)])
 def test_manual_run_respects_the_cooldown(client, monkeypatch, minutes_ago, expected):
     _no_job(monkeypatch)
