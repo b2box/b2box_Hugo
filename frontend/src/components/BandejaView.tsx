@@ -83,6 +83,7 @@ const EVENT_LABEL: Record<string, string> = {
   reactivar_a_mano: "Hay que reactivarlo a mano",
   intent_descartado: "Cambio a medias descartado",
   escritura_huerfana: "Vendure tomó un cambio tarde: revisar a mano",
+  vendure_incierto: "Vendure no respondió: no se sabe si tomó el cambio (se revisa solo)",
   reabierto: "Se reabrió",
 };
 

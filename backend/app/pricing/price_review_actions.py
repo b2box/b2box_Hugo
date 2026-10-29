@@ -430,14 +430,21 @@ async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureCl
     try:
         async with asyncio.timeout_at(deadline):
             got = await client.set_enabled(item.product_id, target)
-        failure = None if got is target else "valor_no_coincide"
-    except Exception as exc:  # noqa: BLE001  (timeout, 5xx, red: no se sabe si llegó)
-        log.warning("price_review: set_enabled(%s, %s) falló: %s", item.product_id, target, error_code(exc))
-        failure = error_code(exc)
-        got = await _reread(item, client, failure)
+    except TransportQueryError as exc:
+        # Vendure contestó con un error de GraphQL: rechazó la escritura. Es definitivo: se vuelve atrás.
+        log.warning("price_review: Vendure rechazó set_enabled(%s, %s): %s", item.product_id, target, error_code(exc))
+        _undo_move(item, mv, actor, "vendure_error", "escritura", error=error_code(exc))
+        raise _vendure_failed(item) from None
+    except Exception as exc:  # noqa: BLE001
+        # Timeout, 5xx, red, el tope de tiempo: no se sabe si llegó, ni si va a llegar (un 504 del proxy con Vendure
+        # todavía procesando, un UPDATE esperando un lock). Una relectura con el valor viejo no lo prueba: solo se confirma
+        # si ya muestra lo pedido; si no, decide la conciliación cuando venza la intención.
+        log.warning("price_review: set_enabled(%s, %s) sin respuesta clara: %s", item.product_id, target, error_code(exc))
+        if await _reread(item, client) is not target:
+            raise _uncertain(item, mv, actor, error_code(exc)) from None
+        got = target
     if got is not target:
-        _undo_move(item, mv, actor, "vendure_error", "escritura" if failure != "valor_no_coincide" else failure,
-                   error=failure)
+        _undo_move(item, mv, actor, "vendure_error", "valor_no_coincide", error="valor_no_coincide")
         raise _vendure_failed(item)
     if not _confirm(item, mv, actor, target, guard):
         raise _state_changed(_load(int(item.id))[0])  # type: ignore[arg-type]
@@ -455,21 +462,36 @@ def _still_pending(item: PriceReviewItem, mv: _Move) -> bool:
             and intent.id == mv.intent_id)
 
 
-async def _reread(item: PriceReviewItem, client: VendureClient, error: str) -> bool | None:
-    """Después de un error al escribir: ¿Vendure tomó el cambio? Si tampoco se puede leer, NO se vuelve atrás a ciegas:
-    la intención queda abierta (la concilia la noche, o la próxima acción pasado `INTENT_STALE`) y la respuesta lo dice."""
+async def _reread(item: PriceReviewItem, client: VendureClient) -> bool | None:
+    """Después de un error ambiguo al escribir: ¿Vendure ya muestra el cambio? None si tampoco se puede leer."""
     try:
         async with asyncio.timeout(REREAD_DEADLINE_S):
             return await client.get_enabled_status(item.product_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("price_review: no se pudo releer %s después del error: %s", item.product_id, error_code(exc))
-        raise ActionError(502, "vendure_incierto", "Vendure no respondió y no se sabe si tomó el cambio: la ficha queda en "
-                          "espera y Hugo lo verifica solo en unos minutos.", item, error=error) from None
+        return None
+
+
+UNCERTAIN = (f"No sabemos si Vendure tomó el cambio; Hugo lo revisa solo en {int(INTENT_STALE.total_seconds() // 60)} "
+             "minutos. Mientras tanto la ficha queda en espera.")
+
+
+def _uncertain(item: PriceReviewItem, mv: _Move, actor: str, error: str) -> ActionError:
+    """No se sabe si la escritura llegó: NO se vuelve atrás. La intención queda abierta (la ficha en su estado nuevo) y
+    la concilia contra Vendure la noche, el job de arranque o la próxima acción, pasado `INTENT_STALE`. Queda un evento
+    que lo dice (sale en «PARA MIRAR A MANO»)."""
+    with Session(engine, expire_on_commit=False) as s:
+        s.add(item)
+        pr.add_event(s, item, "vendure_incierto", actor=actor, motive_code="sin_respuesta", motive_text=UNCERTAIN,
+                     payload={"accion": mv.action, "error": error, "intent": mv.intent_id})
+        s.commit()
+    return ActionError(502, "vendure_incierto", UNCERTAIN, item, error=error)
 
 
 def _vendure_failed(item: PriceReviewItem) -> ActionError:
+    current = _load(int(item.id))[0]  # type: ignore[arg-type]
     return ActionError(502, "vendure_error", "Vendure no aceptó el cambio: la ficha quedó como estaba. Probá de nuevo "
-                       "en unos minutos.", item, error=item.vendure_error)
+                       "en unos minutos.", current, error=current.vendure_error)
 
 
 def _manual(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -> ActionError:

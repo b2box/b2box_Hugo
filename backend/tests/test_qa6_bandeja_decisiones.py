@@ -345,8 +345,6 @@ def _write_lands_after_the_reread(fake, monkeypatch, how: str) -> None:
         monkeypatch.setattr(VendureClient, "set_enabled", sent_and_hangs)
 
 
-@pytest.mark.xfail(strict=True, reason="Re-QA #1: ante un error ambiguo, una relectura con el valor viejo no prueba que la "
-                                       "escritura no vaya a llegar; la ficha vuelve atrás y la noche la cierra «ya inactivo»")
 @pytest.mark.parametrize("how", ["504", "deadline"])
 async def test_reqa_a_turn_off_that_lands_after_the_reread_is_not_hidden(c, fake, monkeypatch, how):
     item_id = _ficha(fake, "propuesto")
@@ -422,7 +420,8 @@ async def test_reqa_an_uncertain_write_then_the_night_then_undo(c, fake, monkeyp
     run = w.make_run()
     w.add_snap(run, "rv1", color="verde", our=500_000, enabled=not landed, captured_at=utcnow() + timedelta(minutes=1))
     await pr.process_run(run, now=utcnow() + timedelta(minutes=2))
-    assert (w.item(item_id).state, k.kinds(item_id)[-1]) == ("en_revision", "intent")   # la noche no la tocó
+    with Session(engine) as s:                                     # la noche no la tocó: la intención sigue abierta
+        assert w.item(item_id).state == "en_revision" and pr.pending_intent(s, item_id) is not None
     r = k.post(c, item_id, "undo", expected_state="en_revision")
     assert r.status_code == 409 and r.json()["detail"]["code"] == "en_curso"
     monkeypatch.setattr(actions, "utcnow", lambda: later(11))

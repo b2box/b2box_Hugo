@@ -425,8 +425,15 @@ async def test_a_write_that_never_answers_is_cut_at_the_deadline_and_reread(c, f
 
     monkeypatch.setattr(VendureClient, "set_enabled", hangs)
     r = k.post(c, item_id, "approve", expected_state="propuesto")
-    assert r.status_code == 502 and r.json()["detail"]["error"] == "TimeoutError"
-    assert w.item(item_id).state == "propuesto" and fake.count("GetEnabled") == 2       # leyó, y releyó tras el corte
+    d = r.json()["detail"]
+    assert r.status_code == 502 and (d["code"], d["error"]) == ("vendure_incierto", "TimeoutError")
+    assert "No sabemos si Vendure tomó el cambio" in d["message"] and "10 minutos" in d["message"]
+    assert fake.count("GetEnabled") == 2                           # leyó, y releyó tras el corte
+    # La relectura con el valor viejo no prueba que no vaya a llegar: NO se vuelve atrás, decide la conciliación.
+    assert w.item(item_id).state == "en_revision" and "vendure_error" not in k.kinds(item_id)
+    assert [e.motive_code for e in w.events("vendure_incierto")] == ["sin_respuesta"]
+    assert await actions.reconcile(now=later()) == 1               # nunca llegó: se descarta
+    assert w.item(item_id).state == "propuesto" and k.kinds(item_id)[-1] == "intent_descartado"
 
 
 async def test_an_ambiguous_error_that_cannot_be_reread_leaves_the_intent_open_for_reconcile(c, fake, monkeypatch):
@@ -450,7 +457,7 @@ async def test_an_ambiguous_error_that_cannot_be_reread_leaves_the_intent_open_f
     r = k.post(c, item_id, "approve", expected_state="propuesto")
     assert r.status_code == 502 and r.json()["detail"]["code"] == "vendure_incierto"
     item = w.item(item_id)
-    assert item.state == "en_revision" and k.kinds(item_id)[-1] == "intent"          # no vuelve atrás a ciegas
+    assert item.state == "en_revision" and k.kinds(item_id)[-2:] == ["intent", "vendure_incierto"]   # no vuelve atrás
     assert "vendure_error" not in k.kinds(item_id)
     monkeypatch.setattr(VendureClient, "get_enabled_status", real_read)
     assert await actions.reconcile(now=later()) == 1

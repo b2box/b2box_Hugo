@@ -1501,11 +1501,13 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   atómico (`UPDATE … WHERE id AND state AND version`) más un evento `intent` → se lee el `enabled` real → `set_enabled`
   → se verifica el valor que devolvió Vendure → `hugo_disabled`, evento `inactivado` / `reactivado` y una fila de
   `AuditLog` (`price_review_disabled` / `price_review_enabled`, sale en la historia del producto) → se invalida el
-  catálogo. Si Vendure falla o devuelve otra cosa, la ficha vuelve atrás, queda un evento `vendure_error` con el código
-  (nunca el mensaje) y la respuesta es 502. Dos clics a la vez: una sola escritura; el segundo recibe 409 con el estado
+  catálogo. Si Vendure rechaza la escritura (un error de GraphQL) o devuelve otro valor, la ficha vuelve atrás, queda un
+  evento `vendure_error` con el código (nunca el mensaje) y la respuesta es 502. Dos clics a la vez: una sola escritura; el segundo recibe 409 con el estado
   actual. Leer y escribir tienen un tope de 4 minutos; justo antes de escribir se vuelve a mirar que la intención siga
-  abierta. Si la escritura da un error ambiguo (timeout, 5xx, red), Hugo relee Vendure: si tomó el cambio lo confirma, si
-  no vuelve atrás, y si tampoco puede leer deja la ficha en espera (502 «no se sabe si tomó el cambio»). Mientras hay
+  abierta. Si la escritura da un error ambiguo (timeout, 5xx, red, el tope de 4 minutos), Hugo relee Vendure: si ya tomó
+  el cambio lo confirma; si no (o si no puede leer) NO vuelve atrás, porque la escritura todavía puede llegar (un 504 del
+  proxy con Vendure procesando): la ficha queda en espera con un evento `vendure_incierto` (502 «No sabemos si Vendure
+  tomó el cambio; Hugo lo revisa solo en 10 minutos») y decide la conciliación. Mientras hay
   una escritura en curso la ficha no la toca nadie (otra acción recibe 409, la pasada de la noche la saltea). Una
   intención de más de 10 minutos quedó a medias y se concilia contra Vendure: al arrancar (a los 11 minutos), en la
   pasada de la noche o al tocar la ficha. Si una escritura llega cuando la ficha ya cambió, igual queda en `AuditLog` y
