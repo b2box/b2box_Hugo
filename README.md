@@ -1483,8 +1483,10 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
 - **Apagar algo ya apagado por otra razón** no escribe nada: la ficha se cierra (`cerrado_auto`, «ya estaba inactivo por
   otra razón»).
 - **Reactivar** escribe solo si: lo apagó Hugo (`hugo_disabled`), sigue apagado, el portal de proveedores no lo tiene
-  `pending` ni `rejected` (`approvalStatus`; si no se puede leer, no se reactiva) y nadie lo apagó después como
-  duplicado o como BX sin foto. Si falta algo: 409 «reactivar a mano» y la ficha queda igual. Si otra persona ya lo
+  `pending` ni `rejected` (`approvalStatus`; si no se puede leer, no se reactiva) y nadie lo apagó ni lo confirmó
+  después como duplicado o como BX sin foto. Confirmar un duplicado o un BX con el producto ya apagado no toca Vendure
+  pero deja su fila (`duplicate_confirmed` con `disable_target_id`, o `bx_no_image_disabled` con `before.enabled =
+  false`). Si falta algo: 409 «reactivar a mano» y la ficha queda igual. Si otra persona ya lo
   reactivó, termina sin escribir. Reactivar hace **un solo intento** (más el re-login): con contacto del proveedor,
   Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva.
 - **Deshacer** vuelve al estado y al `enabled` de antes de la **última** acción humana, hasta 30 días después. Si la ficha

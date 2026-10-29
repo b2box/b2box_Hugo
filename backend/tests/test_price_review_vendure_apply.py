@@ -201,6 +201,43 @@ async def test_v4_a_duplicate_disabled_from_before_hugo_turned_it_off_does_not_b
     assert fake.writes() == [True]
 
 
+@pytest.mark.parametrize("flow,reason", [("confirm-duplicate", "duplicado"), ("bulk-confirm", "duplicado"),
+                                         ("confirm-disable-bx", "bx_sin_imagen")])
+async def test_v4_a_duplicate_or_bx_confirmed_while_already_off_is_not_turned_on_again(c, fake, flow, reason):
+    """Seguridad M1: Inactivar → alguien confirma que es un duplicado (o un BX sin foto) con el producto ya apagado → esos
+    flujos no escriben en Vendure, pero dejan la confirmación y Mantener no lo vuelve a publicar."""
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    assert k.post(c, item_id, "approve", expected_state="propuesto").status_code == 200
+    bx = flow == "confirm-disable-bx"
+    with Session(engine) as s:
+        flag = AuditLog(action="bx_no_image_flagged" if bx else "duplicate_flagged", source="audit", product_id="rv1",
+                        related_product_id=None if bx else "rv0", disable_target_id=None if bx else "rv1",
+                        canonical_product_id=None if bx else "rv0", confidence=1.0, product_name="BXrv1")
+        s.add(flag)
+        s.commit()
+        s.refresh(flag)
+        flag_id = flag.id
+    r = (c.post("/api/duplicates/bulk-confirm?confirm=true&min_confidence=1.0") if flow == "bulk-confirm"
+         else c.post(f"/api/audit-log/{flag_id}/{flow}"))
+    assert r.status_code == 200, r.text
+    assert fake.writes() == [False]                                # el flujo no tocó Vendure: ya estaba apagado
+    r = k.decide(c, item_id, "mantener", "en_revision", **KEEP)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "reactivar_a_mano"
+    assert r.json()["detail"]["reason"] == reason and fake.writes() == [False] and w.item(item_id).state == "en_revision"
+
+
+def test_m1_a_confirmation_of_an_already_off_duplicate_is_not_counted_as_disabled_nor_restored():
+    """La fila nueva es un `duplicate_confirmed`, no un `duplicate_disabled`: no entra en /api/restore-duplicates."""
+    from app.api import routes as api_routes
+
+    entry = AuditLog(action="duplicate_flagged", source="audit", product_id="rv1", related_product_id="rv0",
+                     disable_target_id="rv1", canonical_product_id="rv0")
+    row = api_routes._already_off_row(entry, "rv1", "rv0", "Confirmado manualmente")
+    assert (row.action, row.product_id, row.disable_target_id) == ("duplicate_confirmed", "rv1", "rv1")
+    assert json.loads(row.before) == json.loads(row.after) == {"enabled": False}
+
+
 async def test_v5_someone_already_turned_it_on_so_keep_writes_nothing_and_does_not_fail(c, fake):
     item_id = k.disabled_by_hugo("rv1")
     fake.enabled["rv1"] = True

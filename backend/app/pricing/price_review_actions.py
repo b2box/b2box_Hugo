@@ -48,6 +48,7 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from gql.transport.exceptions import TransportQueryError
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -472,16 +473,20 @@ def _reactivation_blocker(item: PriceReviewItem, guard: ReviewGuard | None) -> t
     if status in APPROVAL_BLOCKED:
         return f"aprobacion_{status}", APPROVAL_BLOCKED[status]
     with Session(engine) as s:
-        stmt = select(AuditLog.action).where(
-            AuditLog.product_id == item.product_id,
-            AuditLog.action.in_(("duplicate_disabled", "bx_no_image_disabled")))  # type: ignore[attr-defined]
+        # Lo apagó o lo confirmó como duplicado / BX sin foto otro flujo después de Hugo. Con el producto ya apagado esos
+        # flujos no escriben `*_disabled`: dejan un `duplicate_confirmed` con `disable_target_id` o un
+        # `bx_no_image_disabled` con `before.enabled = false` (api/routes.py).
+        stmt = select(AuditLog.action).where(or_(
+            and_(AuditLog.product_id == item.product_id,
+                 AuditLog.action.in_(("duplicate_disabled", "bx_no_image_disabled"))),  # type: ignore[attr-defined]
+            and_(AuditLog.disable_target_id == item.product_id, AuditLog.action == "duplicate_confirmed")))
         if item.disabled_at is not None:
             stmt = stmt.where(AuditLog.created_at > item.disabled_at)
         later = s.exec(stmt.limit(1)).first()
-    if later == "duplicate_disabled":
-        return "duplicado", "después lo apagó el control de duplicados"
+    if later in ("duplicate_disabled", "duplicate_confirmed"):
+        return "duplicado", "después lo apagó o lo confirmó el control de duplicados"
     if later == "bx_no_image_disabled":
-        return "bx_sin_imagen", "después lo apagó el control de productos BX sin foto"
+        return "bx_sin_imagen", "después lo apagó o lo confirmó el control de productos BX sin foto"
     return None
 
 
