@@ -130,7 +130,7 @@ def configured_key() -> str | None:
 
 
 def ttl() -> timedelta:
-    return timedelta(days=int(get_settings().oficina_result_ttl_days))
+    return timedelta(days=int(runtime.get("oficina_result_ttl_days")))
 
 
 # ─── Saneo de lo que manda la Mac ──────────────────────────────────
@@ -643,7 +643,7 @@ def status() -> dict[str, Any]:
         ).one()
     return {
         "enabled": configured_key() is not None,
-        "ttl_days": int(get_settings().oficina_result_ttl_days),
+        "ttl_days": ttl().days,
         "fresh_products": int(fresh or 0),
         "last_received_at": last.isoformat() + "Z" if last else None,
         "last_24h": {k: int(recent.get(k, 0)) for k in STATUSES},
