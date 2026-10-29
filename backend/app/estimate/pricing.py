@@ -28,7 +28,10 @@ _BAIT_LOW, _BAIT_HIGH = 0.5, 2.0
 # Si techo/piso queda por debajo de esto, se abre a ± _MIN_HALF_WIDTH del medio.
 _MIN_RATIO = 1.15
 _MIN_HALF_WIDTH = 0.08
-# Redondeo, en centavos: $100 debajo de $10.000 y $500 arriba.
+# Redondeo, en centavos: $10 debajo de $1.000 (con $100 un spinner de $800
+# mostraba el mismo $600–$1.000 en todos los tramos), $100 hasta $10.000 y $500 arriba.
+_STEP_TINY = 10_00
+_TINY_BELOW = 1_000_00
 _STEP_SMALL = 100_00
 _STEP_BIG = 500_00
 _BIG_FROM = 10_000_00
@@ -111,13 +114,19 @@ def scenarios_from_ladder(ladder: Sequence[tuple[int, float]],
                      round(max(prices), 4))
 
 
+def _step(cents: float) -> int:
+    if cents >= _BIG_FROM:
+        return _STEP_BIG
+    return _STEP_SMALL if cents >= _TINY_BELOW else _STEP_TINY
+
+
 def round_down(cents: float) -> int:
-    step = _STEP_BIG if cents >= _BIG_FROM else _STEP_SMALL
+    step = _step(cents)
     return max(step, int(math.floor(cents / step)) * step)
 
 
 def round_up(cents: float) -> int:
-    step = _STEP_BIG if cents >= _BIG_FROM else _STEP_SMALL
+    step = _step(cents)
     return int(math.ceil(cents / step)) * step
 
 
