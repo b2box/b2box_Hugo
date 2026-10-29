@@ -548,3 +548,12 @@ def test_ui6_the_screen_no_longer_says_hugo_only_proposes():
     view = (Path(__file__).resolve().parents[2] / "frontend/src/components/BandejaView.tsx").read_text()
     assert "Por ahora Hugo solo propone" not in view and "Llega en la próxima etapa" not in view
     assert "Solo deciden" not in view                                       # el motivo lo manda el backend
+
+
+async def test_s7_bidi_characters_do_not_reach_the_stored_text(c, fake):
+    item_id = w.make_item("rv1")
+    r = k.decide(c, item_id, "mantener", "propuesto", "otro", "Proveedor‮ exe.factura ⁦nuevo⁩ ok")
+    assert r.status_code == 200
+    saved = w.item(item_id).decision_motive_text
+    assert saved == "Proveedor exe.factura nuevo ok" and not any(0x202A <= ord(ch) <= 0x202E or 0x2066 <= ord(ch) <= 0x2069
+                                                                for ch in saved)

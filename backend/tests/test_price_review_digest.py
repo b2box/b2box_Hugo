@@ -328,3 +328,15 @@ async def test_m4_a_ficha_in_review_waiting_too_long_comes_out_once_and_again_af
         s.commit()
     await digest.send_digest(NOW + timedelta(days=9))
     assert len(smtp.sent) == 2 and len(item_lines(smtp.sent[1][0])) == 1
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("factura‮gpj.exe", "factura gpj.exe"),                     # RLO: se mostraría «exe.jpg»
+    ("a‪b‫c‬d‭e", "a b c d e"),
+    ("x⁦y⁧z⁨w⁩", "x y z w"),
+    ("línea otra fin", "línea otra fin"),
+    ("tab\tNUL\x00del\x7fc1\x85", "tab NUL del c1"),
+    ("ñandú — «ok»", "ñandú — «ok»"),                                 # lo demás no se toca
+])
+def test_clean_takes_out_control_and_bidi_characters(raw, expected):
+    assert digest.clean(raw, limit=200) == expected

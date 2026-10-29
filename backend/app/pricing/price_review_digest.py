@@ -47,7 +47,9 @@ CAUSE_TEXT = {
     "d": "valor bajo por m³", "e": "ML bajo el costo de fábrica", "ninguna": "sin causa clara",
     "sin_dato": "diagnóstico incompleto",
 }
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]+")
+# Control (C0, DEL, C1), separadores de línea y párrafo, y los de dirección bidi (U+202A-202E, U+2066-2069): con
+# estos un texto se puede mostrar en otro orden del que dice («gpj.exe» que se lee «exe.jpg»).
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+")
 
 
 def clean(text: str | None, limit: int = 80) -> str:
