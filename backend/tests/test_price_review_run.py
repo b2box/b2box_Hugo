@@ -824,11 +824,12 @@ async def test_f2_a_kept_ficha_without_a_firm_worse_red_neither_reopens_nor_clos
     assert (item.state, item.open_key, item.last_run_id) == ("mantenido", "p1", today)
 
 
-async def test_f3_keeping_it_again_moves_the_baseline_and_an_improvement_does_not():
+async def test_f3_keeping_it_again_moves_the_baseline_and_an_improvement_does_not(monkeypatch):
     from app.pricing import price_review_actions as actions
 
     item_id = _kept()
     await pr.process_run(_night("p1", our=round(1.06 * NET)), now=NOW)
+    monkeypatch.setattr(actions, "utcnow", lambda: NOW + timedelta(hours=6))       # decide antes de las noches que siguen
     await actions.act(item_id, "mantener", "pao@b2box.pro", expected_state="propuesto", motive_code="volumen",
                       motive_text="Lo seguimos vendiendo por volumen")
     assert (w.item(item_id).state, w.item(item_id).kept_ratio) == ("mantenido", 1.06)
@@ -895,3 +896,19 @@ async def test_k1_the_night_only_reads_vendure_to_reconcile_a_pending_intent(wor
                                 "ProductCertification"}
     item = w.item(item_id)
     assert item.state == "en_revision" and item.hugo_disabled is True and w.events("inactivado")
+
+
+@pytest.mark.parametrize("captured,closes", [(NOW - timedelta(hours=1), False), (NOW + timedelta(hours=1), True)])
+async def test_a_snapshot_taken_before_the_last_state_change_neither_closes_nor_reopens(captured, closes):
+    """QA PR3 #3: la corrida de la madrugada midió algo que una decisión de la mañana ya cambió."""
+    kept = _kept("p1", state_since=NOW)
+    gone = w.make_item("p2", "mantenido", kept_ratio=0.958, state_since=NOW)
+    prev = w.make_run(started=captured - timedelta(days=1))
+    w.add_snap(prev, "p2", flag="firme", captured_at=captured - timedelta(days=1), data_at=captured - timedelta(days=1))
+    run = w.make_run(started=captured)
+    w.add_snap(run, "p1", enabled=False, captured_at=captured)                  # apagado: cerraría «ya inactivo»
+    w.add_snap(run, "p2", our=round(1.2 * NET), captured_at=captured, data_at=captured)
+    await pr.process_run(run, now=captured + timedelta(minutes=5))
+    assert (w.item(kept).state == "cerrado_auto") is closes
+    assert (w.item(gone).state == "propuesto") is closes                        # 1,2 / 0,958: reabriría
+    assert w.item(kept).last_run_id == run and w.item(gone).last_run_id == run    # el último dato sí se guarda

@@ -191,10 +191,12 @@ async def _night(day: int, ratio: float) -> None:
     await pr.process_run(today, now=w.NOW + timedelta(days=day))
 
 
-async def test_qa_a_kept_ficha_reopens_twice_with_the_new_baseline_each_time(fake):
+async def test_qa_a_kept_ficha_reopens_twice_with_the_new_baseline_each_time(fake, monkeypatch):
     item_id = w.make_item("p1", "mantenido", kept_ratio=0.958, decision="mantener")
     await _night(0, 1.06)
     assert (w.item(item_id).state, w.item(item_id).reopen_count) == ("propuesto", 1)
+    # La decisión ocurre entre las noches (la pasada no decide con un dato anterior a la decisión: QA PR3 #3).
+    monkeypatch.setattr(actions, "utcnow", lambda: w.NOW + timedelta(days=1))
     await actions.act(item_id, "mantener", k.PAO, expected_state="propuesto", **KEEP)
     assert w.item(item_id).kept_ratio == 1.06
     await _night(2, 1.16)                                          # 1,06 x 1,10 = 1,166: no alcanza
@@ -286,7 +288,6 @@ async def test_qa_a_reactivation_that_landed_but_timed_out_then_unpublish_leaves
 # ─── La pasada con un snapshot de antes de la decisión (bug QA PR3 #3) ─
 
 
-@pytest.mark.xfail(strict=True, reason="QA PR3 #3: la pasada cierra «ya inactivo» con un snapshot anterior a la decisión")
 @pytest.mark.parametrize("decision", ["mantener", "deshacer"])
 async def test_qa_a_snapshot_taken_before_the_decision_does_not_close_the_ficha(fake, monkeypatch, decision):
     """La corrida midió el producto apagado (lo había apagado Hugo); la pasada corre DESPUÉS de que Pao lo reactivó."""

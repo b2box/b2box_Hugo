@@ -567,6 +567,7 @@ def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnaps
                        streak: int, params: ReviewParams, run_id: int, now: datetime) -> str:
     """Pone al día una ficha viva con el snapshot de esta corrida. Todas guardan el último dato (`last_*`).
 
+      * un snapshot medido antes del último cambio de estado (`state_since`) solo deja el último dato: no cierra ni reabre;
       * producto apagado y NO lo apagó Hugo (`hugo_disabled` distinto de true) → `cerrado_auto` «ya_inactivo». Si lo
         apagó Hugo (`en_revision`, `corrigiendo`…), apagado es lo esperado: no se cierra;
       * `mantenido` → regla del 10 % (`_watch_kept`);
@@ -576,6 +577,11 @@ def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnaps
     Devuelve «updated», «closed» o «reopened»."""
     item.last_run_id, item.last_snapshot_id = run_id, snap.id
     item.last_color, item.last_margin_pct = snap.color, snap.est_margin_pct
+    if snap.captured_at is not None and snap.captured_at < item.state_since:
+        # Lo midió ANTES del último cambio de estado (la corrida de la madrugada y una decisión de la mañana): ese dato no
+        # alcanza para cerrar ni para reabrir la ficha.
+        s.add(item)
+        return "updated"
     if snap.product_enabled is False and item.hugo_disabled is not True:
         close_item(s, item, note="El producto ya estaba inactivo por otra razón.", code="ya_inactivo",
                    run_id=run_id, snapshot_id=snap.id, now=now)

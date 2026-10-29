@@ -309,7 +309,8 @@ def _plan_undo(item: PriceReviewItem, now: datetime) -> _Move:
     ev, write = found
     if now - ev.at > UNDO_WINDOW:
         raise ActionError(409, "plazo_vencido", "Venció el plazo para deshacer (30 días).", item)
-    return _Move(DESHACER, item.state, str(ev.from_state), write, {"state_since": now, **_parse(_payload(ev)["antes"])})
+    # `state_since` es la hora del Deshacer, no la de antes: así la pasada sabe qué dato es anterior al cambio.
+    return _Move(DESHACER, item.state, str(ev.from_state), write, {**_parse(_payload(ev)["antes"]), "state_since": now})
 
 
 async def act(item_id: int, action: str, actor: str, *, expected_state: str, motive_code: str | None = None,

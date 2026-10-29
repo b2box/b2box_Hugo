@@ -361,7 +361,8 @@ async def test_u1_undo_inactivate_goes_back_to_proposed_and_turns_it_on_through_
     assert r.status_code == 200 and r.json()["state"] == "propuesto"
     assert fake.writes() == [False, True] and fake.count("ReviewGuard") == 1 and fake.enabled["rv1"] is True
     item = w.item(item_id)
-    assert item.hugo_disabled is False and item.open_key == "rv1" and item.state_since == w.NOW
+    assert item.hugo_disabled is False and item.open_key == "rv1"
+    assert item.state_since > w.NOW                     # la hora del Deshacer: la pasada sabe qué dato es anterior
 
 
 async def test_u1_undo_fix_from_in_review_goes_back_without_writing(c, fake):
