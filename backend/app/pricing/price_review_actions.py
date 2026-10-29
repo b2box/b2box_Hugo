@@ -202,6 +202,15 @@ def _load(item_id: int) -> tuple[PriceReviewItem, PriceReviewEvent | None]:
         return item, pr.pending_intent(s, item_id)
 
 
+def _discarded(item_id: int, intent_id: int) -> bool:
+    """¿La intención terminó descartada por la conciliación (la escritura no llegó a Vendure)?"""
+    with Session(engine) as s:
+        first_end = s.exec(select(PriceReviewEvent.kind).where(
+            PriceReviewEvent.item_id == item_id, PriceReviewEvent.id > intent_id,
+            PriceReviewEvent.kind.in_(pr.INTENT_END_KINDS)).order_by(PriceReviewEvent.id).limit(1)).first()  # type: ignore[attr-defined,arg-type]
+    return first_end == "intent_descartado"
+
+
 def _events(item_id: int) -> list[PriceReviewEvent]:
     with Session(engine) as s:
         return list(s.exec(select(PriceReviewEvent).where(PriceReviewEvent.item_id == item_id)
@@ -337,7 +346,11 @@ async def act(item_id: int, action: str, actor: str, *, expected_state: str, mot
     item, pending = _load(item_id)
     if pending is not None and utcnow() - pending.at >= INTENT_STALE:
         await reconcile(item_ids=[item_id], client=client)          # quedó a medias: se concilia antes de seguir
-        item, pending = _load(item_id)
+        item, still = _load(item_id)
+        if still is None and item.state != expected_state and _discarded(item_id, int(pending.id)):  # type: ignore[arg-type]
+            raise ActionError(409, "escritura_descartada", "La escritura anterior no llegó a Vendure: la ficha volvió a "
+                              f"«{pr.STATE_LABEL.get(item.state, item.state)}».", item)
+        pending = still
     if pending is not None:
         raise ActionError(409, "en_curso", IN_PROGRESS + ": probá de nuevo en un par de minutos.", item)
     if item.state != expected_state:

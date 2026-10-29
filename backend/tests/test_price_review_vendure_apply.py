@@ -614,3 +614,25 @@ async def test_a_rejected_write_that_cannot_roll_back_answers_502_saying_what_ha
     r = k.decide(c, item_id, "despublicar", "propuesto", "calidad")
     assert r.status_code == 502 and "No se pudo volver atrás" in r.json()["detail"]["message"]
     assert r.json()["detail"]["state"] == "cerrado_auto"
+
+
+async def test_an_action_after_an_uncertain_write_that_did_not_land_says_so(c, fake, monkeypatch):
+    """La escritura anterior quedó incierta y no llegó: al vencer, la acción concilia, la ficha vuelve atrás y la
+    respuesta lo dice (no «Otra persona ya decidió»)."""
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    monkeypatch.setattr(actions, "APPLY_DEADLINE_S", 0.05)
+
+    async def hangs(self, product_id, enabled):
+        await asyncio.Event().wait()
+
+    real = VendureClient.set_enabled
+    monkeypatch.setattr(VendureClient, "set_enabled", hangs)
+    assert k.post(c, item_id, "approve", expected_state="propuesto").json()["detail"]["code"] == "vendure_incierto"
+    monkeypatch.setattr(VendureClient, "set_enabled", real)
+    monkeypatch.setattr(actions, "utcnow", later)
+    r = k.post(c, item_id, "undo", expected_state="en_revision")     # lo que la pantalla mostraba
+    d = r.json()["detail"]
+    assert r.status_code == 409 and d["code"] == "escritura_descartada" and d["state"] == "propuesto"
+    assert d["message"] == "La escritura anterior no llegó a Vendure: la ficha volvió a «Propuesto»."
+    assert fake.mutations == [] and k.kinds(item_id)[-1] == "intent_descartado"
