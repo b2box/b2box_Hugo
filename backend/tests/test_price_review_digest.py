@@ -164,7 +164,7 @@ async def test_a_ficha_that_closed_itself_before_the_mail_is_counted_not_listed(
 
 
 async def test_text_from_vendure_cannot_break_the_mail(smtp):
-    add_item("n1", name="Taza\r\nBcc: atacante@mala.com\x00   térmica " + "x" * 200)
+    add_item("n1", name="Taza\r\nBcc: atacante@mala.com\x00 \u2028 térmica " + "x" * 200)
     await digest.send_digest(NOW)
     [(msg, _)] = smtp.sent
     [line] = item_lines(msg)
@@ -331,11 +331,13 @@ async def test_m4_a_ficha_in_review_waiting_too_long_comes_out_once_and_again_af
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("factura‮gpj.exe", "factura gpj.exe"),                     # RLO: se mostraría «exe.jpg»
-    ("a‪b‫c‬d‭e", "a b c d e"),
-    ("x⁦y⁧z⁨w⁩", "x y z w"),
-    ("línea otra fin", "línea otra fin"),
+    ("factura\u202egpj.exe", "factura gpj.exe"),                     # RLO: se mostraría «exe.jpg»
+    ("a\u202ab\u202bc\u202cd\u202de", "a b c d e"),
+    ("x\u2066y\u2067z\u2068w\u2069", "x y z w"),
+    ("línea\u2028otra\u2029fin", "línea otra fin"),
     ("tab\tNUL\x00del\x7fc1\x85", "tab NUL del c1"),
+    ("izq\u200ed\u200fer\u061cal", "izq d er al"),                # LRM, RLM, ALM
+    ("cero\u200bancho\u200c\u200dy\ufeffbom", "cero ancho y bom"),    # ancho cero y BOM
     ("ñandú — «ok»", "ñandú — «ok»"),                                 # lo demás no se toca
 ])
 def test_clean_takes_out_control_and_bidi_characters(raw, expected):

@@ -719,7 +719,7 @@ function DecisionBlock({ d, onChanged }: { d: PriceReviewDetail; onChanged: () =
 
 // Mismo saneo que el backend (`clean()` de price_review_digest.py): control, separadores de línea y bidi → espacio,
 // espacios colapsados. Se cuentan code points, como `len()` de Python: así el botón no se habilita con un texto que da 400.
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
 const cleanLength = (text: string): number =>
   Array.from(text.replace(CONTROL, " ").split(/\s+/).filter(Boolean).join(" ")).length;
 

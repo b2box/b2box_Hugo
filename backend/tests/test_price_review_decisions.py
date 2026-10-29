@@ -133,7 +133,7 @@ async def test_s7_control_characters_are_cleaned_html_is_kept_as_text_and_10000_
     item_id = w.make_item("rv1")
     r = k.decide(c, item_id, "mantener", "propuesto", "otro", "x" * 10_000)
     assert r.status_code == 400 and w.item(item_id).state == "propuesto"
-    evil = "<script>alert(1)</script>\x00\r\nlínea 2  y\tmás"
+    evil = "<script>alert(1)</script>\x00\r\nlínea 2\u2028 y\tmás"
     r = k.decide(c, item_id, "mantener", "propuesto", "otro", evil)
     assert r.status_code == 200
     saved = w.item(item_id).decision_motive_text
@@ -553,7 +553,7 @@ def test_ui6_the_screen_no_longer_says_hugo_only_proposes():
 
 async def test_s7_bidi_characters_do_not_reach_the_stored_text(c, fake):
     item_id = w.make_item("rv1")
-    r = k.decide(c, item_id, "mantener", "propuesto", "otro", "Proveedor‮ exe.factura ⁦nuevo⁩ ok")
+    r = k.decide(c, item_id, "mantener", "propuesto", "otro", "Proveedor\u202e exe.factura \u2066nuevo\u2069 ok")
     assert r.status_code == 200
     saved = w.item(item_id).decision_motive_text
     assert saved == "Proveedor exe.factura nuevo ok" and not any(0x202A <= ord(ch) <= 0x202E or 0x2066 <= ord(ch) <= 0x2069
