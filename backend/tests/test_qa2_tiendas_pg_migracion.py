@@ -57,7 +57,9 @@ NEW_TABLES = ("market_store", "store_catalog_item", "store_match", "store_match_
 # La bandeja de revisión (PR posterior a este esquema de partida) agrega estas columnas y las tablas price_review_*:
 # las prueba test_price_review_pg.py. Estos tests miran solo lo que agregaban los PRs anteriores.
 BANDEJA_COLS = {("market_price_snapshot", "data_at"), ("market_price_snapshot", "review_flag"),
-                ("price_monitor_run", "review_at"), ("price_monitor_run", "review_summary"), ("price_monitor_run", "n_flipped")}
+                ("price_monitor_run", "review_at"), ("price_monitor_run", "review_summary"), ("price_monitor_run", "n_flipped"),
+                # recálculo al cambiar en Vendure (feat/semaforo-recalculo-al-cambiar): lo prueba test_recalculo_pg.py
+                ("market_price_snapshot", "recalc_at"), ("market_price_snapshot", "recalc_before")}
 ADDED_COLUMNS = {("market_price_snapshot", "price_basis"), ("price_monitor_run", "source_stats"),
                  # variantes de búsqueda y buscador de la oficina
                  ("market_price_snapshot", "ml_variant"), ("market_price_snapshot", "web_via"),
