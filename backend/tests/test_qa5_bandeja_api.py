@@ -361,22 +361,28 @@ async def test_not_the_same_rejects_garbage(client, stack):
     assert q.rows(PriceReviewItem)[0].state == "propuesto"
 
 
-# ─── Los botones de decisión no existen del lado servidor y están deshabilitados en el front ────────
+# ─── Sin PRICE_REVIEW_DECIDERS nadie decide (fail-closed) y no hay otras rutas que escriban ────────
 
 
-async def test_no_decision_route_exists_so_nothing_can_be_decided(client, stack):
+async def test_without_deciders_nothing_can_be_decided_and_there_are_no_other_write_routes(client, stack):
     await open_fichas(stack, {"1": {}})
     [item] = q.rows(PriceReviewItem)
+    body = {"decision": "mantener", "motive_code": "nicho", "motive_text": "x" * 20, "expected_state": "propuesto"}
     for sub in ("approve", "decision", "undo", "recheck", "corregir", "mantener", "despublicar", "proveedor"):
         for method in ("POST", "PUT", "PATCH"):
-            r = client.request(method, f"{BASE}/items/{item.id}/{sub}", json={"decision": "mantener", "motive_code": "nicho",
-                                                                                "motive_text": "x" * 20})
-            assert r.status_code in (404, 405), (sub, method, r.status_code)
+            r = client.request(method, f"{BASE}/items/{item.id}/{sub}", json=body)
+            if method == "POST" and sub in ("approve", "decision", "undo"):
+                assert r.status_code == 403 and "PRICE_REVIEW_DECIDERS" in r.json()["detail"], (sub, r.status_code)
+            else:
+                assert r.status_code in (404, 405), (sub, method, r.status_code)
     assert q.rows(PriceReviewItem)[0].decision is None and q.rows(PriceReviewItem)[0].state == "propuesto"
+    assert q.rows(PriceReviewEvent) and {e.kind for e in q.rows(PriceReviewEvent)} == {"propuesto"}
     openapi = client.get("/openapi.json")
     if openapi.status_code == 200:
         paths = {p: set(v) for p, v in openapi.json()["paths"].items() if p.startswith(BASE)}
-        assert all(methods == {"get"} for methods in paths.values()), paths
+        posts = {p for p, methods in paths.items() if methods != {"get"}}
+        assert posts == {f"{BASE}/items/{{item_id}}/{s}" for s in ("approve", "decision", "undo")}, paths
+        assert all(paths[p] == {"post"} for p in posts), paths
 
 
 async def test_the_detail_uses_one_median_for_the_card_and_for_the_max_price(client, stack):

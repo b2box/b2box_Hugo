@@ -36,6 +36,9 @@ ActionType = Literal[
     "app_lookup_estimated",
     # Cambio de un setting runtime que gasta plata (cupo de Apify, OTAPI, juez IA)
     "setting_changed",
+    # Bandeja de revisión de precios: una persona de PRICE_REVIEW_DECIDERS inactivó o reactivó el producto
+    "price_review_disabled",
+    "price_review_enabled",
 ]
 
 
@@ -781,12 +784,13 @@ class LookupEstimate(SQLModel, table=True):
 
 # ─── Bandeja de revisión de precios (Pao) ──────────────────────────
 # Ver app/pricing/price_review.py. Una ficha por revisión de un producto (una sola abierta por producto) y
-# un registro de eventos que solo se agrega. En esta etapa Hugo NO escribe en Vendure: las fichas son
-# propuestas; las columnas de decisión, inactivación y Paco PRO (hugo_disabled, decision_*, kept_*, paco_*)
-# existen para las etapas siguientes y quedan en NULL.
+# un registro de eventos que solo se agrega. La pasada de la noche NO escribe en Vendure: inactiva o reactiva
+# solo una persona de PRICE_REVIEW_DECIDERS, desde app/pricing/price_review_actions.py (hugo_disabled, decision_*,
+# kept_*). Las columnas paco_* existen para «Buscar otro proveedor» (etapa siguiente) y quedan en NULL.
+# Los estados entran en VARCHAR(16): «buscando_prov», no «buscando_proveedor» (18), que Postgres rechaza.
 
 REVIEW_STATES = (
-    "propuesto", "en_revision", "corrigiendo", "buscando_proveedor",     # abiertos
+    "propuesto", "en_revision", "corrigiendo", "buscando_prov",          # abiertos
     "mantenido",                                                          # se vigila
     "despublicado", "corregido", "cerrado_auto",                          # cerrados
 )
@@ -836,7 +840,7 @@ class PriceReviewItem(SQLModel, table=True):
     diag_status: str | None = Field(default=None, max_length=12)
     diag: str | None = Field(default=None)                 # JSON, hasta 8 KB: números y códigos
     breakdown: str | None = Field(default=None)            # JSON, hasta 8 KB
-    # ── Etapas siguientes (sin uso todavía) ──
+    # ── Decisiones y escritura de `enabled` (price_review_actions.py) ──
     hugo_disabled: bool | None = Field(default=None)
     enabled_before: bool | None = Field(default=None)
     disabled_at: datetime | None = Field(default=None)
@@ -850,6 +854,7 @@ class PriceReviewItem(SQLModel, table=True):
     kept_ratio: float | None = Field(default=None)
     kept_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     kept_our_price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    # «Buscar otro proveedor» (etapa siguiente, sin uso todavía).
     paco_sid: str | None = Field(default=None, max_length=64)
     paco_sent_at: datetime | None = Field(default=None)
     paco_status: str | None = Field(default=None, max_length=16)

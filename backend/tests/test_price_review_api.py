@@ -83,9 +83,12 @@ def test_every_endpoint_needs_a_dashboard_session():
         assert anon.get(BASE + path).status_code == 401
 
 
-def test_there_is_nothing_to_write_in_this_stage():
+def test_the_routes_are_the_three_reads_and_the_three_decisions():
+    """K-2: las lecturas de siempre más los 3 POST de las decisiones (que delegan en price_review_actions)."""
     methods = {(r.path, m) for r in routes.router.routes for m in r.methods}
-    assert methods == {(BASE + "/summary", "GET"), (BASE + "/items", "GET"), (BASE + "/items/{item_id}", "GET")}
+    assert methods == {(BASE + "/summary", "GET"), (BASE + "/items", "GET"), (BASE + "/items/{item_id}", "GET"),
+                       (BASE + "/items/{item_id}/approve", "POST"), (BASE + "/items/{item_id}/decision", "POST"),
+                       (BASE + "/items/{item_id}/undo", "POST")}
 
 
 # ─── resumen ──────────────────────────────────────────────────────

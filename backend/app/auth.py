@@ -337,6 +337,51 @@ def require_admin(request: Request) -> str:
     return user
 
 
+def review_deciders() -> set[str]:
+    """PRICE_REVIEW_DECIDERS normalizado (solo emails válidos, en minúsculas)."""
+    from app.notifier.email import parse_recipients   # lazy: notifier importa los modelos
+
+    return {e.lower() for e in parse_recipients(get_settings().price_review_deciders)}
+
+
+def review_decider(request: Request) -> str | None:
+    """El usuario de la sesión si puede decidir en la bandeja de precios, o None.
+
+    Mismo criterio que `admin_username`: FAIL-CLOSED (sin PRICE_REVIEW_DECIDERS nadie decide, tampoco en
+    desarrollo), solo con DASHBOARD_SECRET y con una sesión que diga quién es. La comparación ignora
+    mayúsculas y espacios."""
+    deciders = review_deciders()
+    if not deciders or not session_secret_configured():
+        return None
+    user = session_username(request.cookies.get(COOKIE_NAME))
+    return user.strip() if user and user.strip().lower() in deciders else None
+
+
+def require_decider(request: Request) -> str:
+    """403 si la sesión no puede decidir en la bandeja. Devuelve el email (el actor de los eventos).
+
+    CSRF explícito: un navegador manda `Sec-Fetch-Site`; si no es `same-origin`, el pedido lo armó otra página y no
+    pasa (la cookie de sesión iría sola). Sin el header (un cliente que no es un navegador) se deja pasar."""
+    from fastapi import HTTPException
+
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site != "same-origin":
+        log.warning("decisión de la bandeja desde otro sitio (Sec-Fetch-Site=%s): %s rechazado",
+                    site[:20], request.url.path)
+        raise HTTPException(status_code=403, detail="Las decisiones solo se toman desde el dashboard de Hugo.")
+    user = review_decider(request)
+    if user is not None:
+        return user
+    if not review_deciders():
+        log.warning("PRICE_REVIEW_DECIDERS vacío: %s %s rechazado (fail-closed)", request.method, request.url.path)
+        detail = "Nadie puede decidir todavía: falta cargar PRICE_REVIEW_DECIDERS."
+    elif not session_secret_configured():
+        detail = "Para decidir hace falta DASHBOARD_SECRET configurado."
+    else:
+        detail = "No estás en la lista de quienes deciden (PRICE_REVIEW_DECIDERS)."
+    raise HTTPException(status_code=403, detail=detail)
+
+
 def check_credentials(username: str, password: str) -> bool:
     """Compara usuario+contraseña contra el .env en tiempo constante."""
     s = get_settings()

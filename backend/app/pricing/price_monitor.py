@@ -59,7 +59,7 @@ from sqlmodel import Session, func, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import MarketPriceSnapshot, PriceMonitorRun
+from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewItem
 from app.db.session import engine
 from app.dedup import catalog_index, image_embed
 from app.ingest import browser_fetch, meli
@@ -1542,13 +1542,21 @@ def _make_web(run_id: int) -> tuple[market_ml_web.MlWebSource | None, str]:
     return market_ml_web.from_runtime(on_reserve=_usage_increment(run_id, web_searches=1)), "ok"
 
 
+def _live_review_products() -> set[str]:
+    """Productos con una ficha viva en la bandeja de revisión (`open_key` puesto: abierta o mantenida)."""
+    with Session(engine) as s:
+        return set(s.exec(select(PriceReviewItem.open_key).where(PriceReviewItem.open_key.is_not(None))).all())  # type: ignore[union-attr]
+
+
 async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendureProduct]) -> dict[str, Any]:
     # Un id repetido en el listado de Vendure (paginado que se corre mientras
     # se lee) se evalúa una sola vez (QA bug 5).
     unique: dict[str, VendureProduct] = {}
     include_disabled = bool(int(runtime.get("pm_include_disabled") or 0))
+    # Un producto con ficha viva en la bandeja se mide siempre: si lo apagó Hugo, hay que saber si se arregló.
+    live = set() if include_disabled else _live_review_products()
     for p in products:
-        if p.enabled or include_disabled:
+        if p.enabled or include_disabled or p.id in live:
             unique.setdefault(p.id, p)
     enabled = list(unique.values())
     done = _done_product_ids(run_id)

@@ -2,16 +2,19 @@
 
 Cada noche, DESPUÉS de cerrar la corrida del semáforo, `process_run(run_id)`:
 
-    0. si la corrida ya tiene `review_at` no hace nada (idempotente, también si el proceso se reinició a mitad);
-    1. marca cada snapshot rojo como `firme` o `dudoso:<motivo>` (`review_flag`);
-    2. con `pm_mode >= 1`: abre la ficha (estado `propuesto`) de cada rojo firme que lleva `pm_review_confirm_nights`
-       noches con dato seguidas, con su diagnóstico a-e; actualiza las fichas abiertas y cierra solas (`cerrado_auto`)
-       las que dejaron de ser rojo;
-    3. guarda el resumen en la corrida y escribe `review_at`.
+    0. concilia las escrituras en Vendure que quedaron a medias (`price_review_actions.reconcile`: solo lee; siempre);
+    1. si la corrida ya tiene `review_at` no hace nada más (idempotente, también si el proceso se reinició a mitad);
+    2. marca cada snapshot rojo como `firme` o `dudoso:<motivo>` (`review_flag`);
+    3. con `pm_mode >= 1`: abre la ficha (estado `propuesto`) de cada rojo firme que lleva `pm_review_confirm_nights`
+       noches con dato seguidas, con su diagnóstico a-e; actualiza las fichas vivas (con `open_key`: las abiertas y las
+       «mantenido»), cierra solas (`cerrado_auto`) las propuestas que dejaron de ser rojo y reabre las «mantenido» que
+       empeoraron (regla del 10 %);
+    4. guarda el resumen en la corrida y escribe `review_at`.
 
-**En esta etapa Hugo NO escribe en Vendure** (ni `enabled` ni nada) y NO manda nada a Paco PRO: las fichas son propuestas
-que Pao ve en el dashboard. `pm_mode = 2` (automático) todavía no existe: se comporta como 1 y lo loguea. Lo único que
-se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas por noche.
+**La pasada NO escribe en Vendure** (ni `enabled` ni nada) y NO manda nada a Paco: inactiva o reactiva solo una persona de
+PRICE_REVIEW_DECIDERS, desde `price_review_actions`. `pm_mode = 2` (automático) todavía no existe: se comporta como 1 y lo
+loguea. Lo único que se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas
+por noche.
 
 Rojo firme (sección 3.3 del diseño), TODAS tienen que cumplirse:
 
@@ -62,13 +65,18 @@ ACTOR_AUTO = "hugo:auto"
 PROPUESTO = "propuesto"
 EN_REVISION = "en_revision"
 CORRIGIENDO = "corrigiendo"
-BUSCANDO_PROVEEDOR = "buscando_proveedor"
+BUSCANDO_PROV = "buscando_prov"           # entra en VARCHAR(16); «buscando_proveedor» (18) Postgres lo rechaza
 MANTENIDO = "mantenido"
 DESPUBLICADO = "despublicado"
 CORREGIDO = "corregido"
 CERRADO_AUTO = "cerrado_auto"
-OPEN_STATES = (PROPUESTO, EN_REVISION, CORRIGIENDO, BUSCANDO_PROVEEDOR)
+# Abiertas: esperan a una persona. `mantenido` no está abierta pero conserva `open_key` (se sigue vigilando).
+OPEN_STATES = (PROPUESTO, EN_REVISION, CORRIGIENDO, BUSCANDO_PROV)
 CLOSED_STATES = (DESPUBLICADO, CORREGIDO, CERRADO_AUTO)
+STATE_LABEL = {
+    PROPUESTO: "Propuesto", EN_REVISION: "En revisión", CORRIGIENDO: "Corrigiendo", BUSCANDO_PROV: "Buscando proveedor",
+    MANTENIDO: "Mantenido", DESPUBLICADO: "Despublicado", CORREGIDO: "Corregido", CERRADO_AUTO: "Cerrado solo",
+}
 
 # Veredicto de un snapshot.
 NO_ROJO = "no_rojo"
@@ -116,6 +124,7 @@ class ReviewParams:
     min_sellers: int = 2
     max_price_ratio: float = 3.0
     confirm_nights: int = 2
+    worse_pct: float = 10.0
 
     @classmethod
     def from_runtime(cls) -> "ReviewParams":
@@ -124,7 +133,7 @@ class ReviewParams:
             green_min=float(g("pm_green_min_pct")), yellow_min=float(g("pm_yellow_min_pct")),
             data_max_age_h=float(g("pm_review_data_max_age_h")), min_listings=int(g("pm_review_min_listings")),
             min_sellers=int(g("pm_review_min_sellers")), max_price_ratio=float(g("pm_review_max_price_ratio")),
-            confirm_nights=int(g("pm_review_confirm_nights")),
+            confirm_nights=int(g("pm_review_confirm_nights")), worse_pct=float(g("pm_review_worse_pct")),
         )
 
     def reason_text(self, reason: str) -> str:
@@ -289,41 +298,75 @@ def _loads(raw: str | None) -> Any:
 def add_event(session: Session, item: PriceReviewItem, kind: str, *, actor: str = ACTOR_AUTO,
               from_state: str | None = None, to_state: str | None = None, motive_code: str | None = None,
               motive_text: str | None = None, run_id: int | None = None, snapshot_id: int | None = None,
-              payload: dict[str, Any] | None = None, now: datetime | None = None) -> PriceReviewEvent:
+              payload: dict[str, Any] | None = None, now: datetime | None = None,
+              enabled_before: bool | None = None, enabled_after: bool | None = None) -> PriceReviewEvent:
     """Agrega un evento al registro (no hace commit). Todo evento lleva quién lo hizo: un email o `hugo:auto`."""
     ev = PriceReviewEvent(
         item_id=int(item.id), product_id=item.product_id, at=now or utcnow(), actor=(actor or ACTOR_AUTO)[:120],
         kind=kind[:24], from_state=from_state, to_state=to_state,
         motive_code=(motive_code or None) and motive_code[:24], motive_text=(motive_text or None) and motive_text[:500],
-        run_id=run_id, snapshot_id=snapshot_id,
+        enabled_before=enabled_before, enabled_after=enabled_after, run_id=run_id, snapshot_id=snapshot_id,
         payload=_cap_json(payload, EVENT_JSON_LIMIT) if payload else None,
     )
     session.add(ev)
     return ev
 
 
-def close_item(session: Session, item: PriceReviewItem, *, note: str, actor: str = ACTOR_AUTO,
-               code: str = "ya_no_es_rojo", run_id: int | None = None, snapshot_id: int | None = None,
-               now: datetime | None = None) -> bool:
-    """Cierra una ficha abierta como `cerrado_auto` con un cambio de estado atómico
-    (UPDATE … WHERE id AND state AND version). True si lo hizo ESTA llamada; False si otra ya la había movido.
-    No hace commit. No toca Vendure."""
+def move_item(session: Session, item: PriceReviewItem, to_state: str, *, now: datetime | None = None,
+              **values: Any) -> bool:
+    """Cambio de estado atómico (UPDATE … WHERE id AND state AND version): `state`, `state_since`, `version` + 1 y los
+    `values` que se pasen, en UNA sentencia. True si lo hizo ESTA llamada; False si otra ya había movido la ficha (dos
+    pestañas, dos clics, la pasada de la noche). No hace commit. No toca Vendure."""
     now = now or utcnow()
-    old_state, old_version = item.state, item.version
+    values = {"state": to_state, "state_since": now, "version": item.version + 1, **values}
     result = session.execute(
         update(PriceReviewItem)
-        .where(PriceReviewItem.id == item.id, PriceReviewItem.state == old_state,  # type: ignore[arg-type]
-               PriceReviewItem.version == old_version)
-        .values(state=CERRADO_AUTO, state_since=now, closed_at=now, open_key=None, version=old_version + 1)
+        .where(PriceReviewItem.id == item.id, PriceReviewItem.state == item.state,  # type: ignore[arg-type]
+               PriceReviewItem.version == item.version)
+        .values(**values)
     )
     if (result.rowcount or 0) != 1:
         return False
-    for attr, value in (("state", CERRADO_AUTO), ("state_since", now), ("closed_at", now), ("open_key", None),
-                        ("version", old_version + 1)):
+    for attr, value in values.items():
         set_committed_value(item, attr, value)       # el UPDATE de arriba ya lo escribió: que no lo repita
+    return True
+
+
+def close_item(session: Session, item: PriceReviewItem, *, note: str, actor: str = ACTOR_AUTO,
+               code: str = "ya_no_es_rojo", run_id: int | None = None, snapshot_id: int | None = None,
+               now: datetime | None = None, **values: Any) -> bool:
+    """Cierra una ficha viva como `cerrado_auto` (cambio de estado atómico, ver `move_item`). True si lo hizo ESTA
+    llamada. No hace commit. No toca Vendure."""
+    now = now or utcnow()
+    old_state = item.state
+    if not move_item(session, item, CERRADO_AUTO, now=now, closed_at=now, open_key=None, **values):
+        return False
     add_event(session, item, "cerrado_auto", actor=actor, from_state=old_state, to_state=CERRADO_AUTO,
               motive_code=code, motive_text=note, run_id=run_id, snapshot_id=snapshot_id, now=now)
     return True
+
+
+# Escrituras en Vendure desde la bandeja (price_review_actions): un evento `intent` queda abierto hasta que lo cierra uno
+# de estos. Mientras está abierto la escritura está en curso (o quedó a medias): la ficha no la toca nadie más, ni otra
+# acción ni la pasada de la noche, hasta que se termina o se concilia.
+INTENT_END_KINDS = ("inactivado", "reactivado", "ya_activo", "ya_apagado", "vendure_error", "reactivar_a_mano",
+                    "intent_descartado", "sin_vuelta_atras", "cerrado_auto")
+
+
+def pending_intent(session: Session, item_id: int) -> PriceReviewEvent | None:
+    """El `intent` sin cerrar de la ficha, o None."""
+    ev = session.exec(select(PriceReviewEvent).where(
+        PriceReviewEvent.item_id == item_id, PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS)))  # type: ignore[attr-defined]
+        .order_by(PriceReviewEvent.id.desc()).limit(1)).first()  # type: ignore[union-attr]
+    return ev if ev is not None and ev.kind == "intent" else None
+
+
+def pending_intents(session: Session) -> list[PriceReviewEvent]:
+    """Los `intent` sin cerrar de todas las fichas (son pocos: una escritura en curso o a medias por ficha)."""
+    last = select(func.max(PriceReviewEvent.id)).where(
+        PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS))).group_by(PriceReviewEvent.item_id)  # type: ignore[attr-defined]
+    return list(session.exec(select(PriceReviewEvent).where(
+        PriceReviewEvent.id.in_(last), PriceReviewEvent.kind == "intent")).all())  # type: ignore[union-attr]
 
 
 def open_item_for(session: Session, product_id: str) -> PriceReviewItem | None:
@@ -469,23 +512,38 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                     MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.product_id.in_(extra_pids))).all():  # type: ignore[attr-defined]
                 snaps_open[sn.product_id] = sn
         streak_map = streaks(s, run_id, [pid for pid, v in verdicts.items() if v.firm])
-        touched = closed = 0
+        intents = pending_intents(s)                               # escrituras en Vendure en curso o a medias
+        writing = {ev.item_id for ev in intents}
+        touched = closed = reopened = 0
         for item in open_items:
             sn = snaps_open.get(item.product_id)
-            if sn is None:
+            if sn is None or item.id in writing:
                 continue
             outcome = _refresh_open_item(s, item, sn, verdicts.get(sn.product_id), streak_map.get(sn.product_id, 0),
                                          params, run_id, now)
             touched += outcome == "updated"
             closed += outcome == "closed"
-            if outcome != "closed" and item.diag_status == "pendiente":
+            reopened += outcome == "reopened"
+            if item.state in OPEN_STATES and item.diag_status == "pendiente":
                 plan.pending_diag.append(int(item.id))   # type: ignore[arg-type]
         s.commit()
 
-        # Fichas nuevas: rojo firme, sin ficha abierta, con la racha cumplida.
-        waiting = 0
+        # Fichas nuevas: rojo firme, sin ficha abierta, con la racha cumplida. Tampoco con un dato anterior a la decisión
+        # que cerró la última ficha del producto (Despublicar a la mañana sobre la corrida de la madrugada), ni con una
+        # escritura en Vendure en curso.
+        waiting = after_decision = 0
+        new_pids = [sn.product_id for sn in firm if sn.product_id not in open_pids]
+        last_closed = dict(s.exec(
+            select(PriceReviewItem.product_id, func.max(PriceReviewItem.closed_at))  # type: ignore[arg-type]
+            .where(PriceReviewItem.product_id.in_(new_pids), PriceReviewItem.closed_at.is_not(None))  # type: ignore[attr-defined,union-attr]
+            .group_by(PriceReviewItem.product_id)).all()) if new_pids else {}
+        writing_pids = {ev.product_id for ev in intents}
         for sn in firm:
             if sn.product_id in open_pids:
+                continue
+            closed_at = last_closed.get(sn.product_id)
+            if sn.product_id in writing_pids or (closed_at is not None and closed_at > sn.captured_at):
+                after_decision += 1
                 continue
             n = streak_map.get(sn.product_id, 1)
             if n >= params.confirm_nights:
@@ -493,7 +551,8 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
             else:
                 waiting += 1
         plan.to_create.sort(key=lambda c: (-c.streak, -c.verdict.firm_listings, c.snap.est_margin_pct or 0.0, c.snap.product_id))
-        plan.summary.update({"esperando_racha": waiting, "actualizadas": touched, "cerradas_solas": closed})
+        plan.summary.update({"esperando_racha": waiting, "actualizadas": touched, "cerradas_solas": closed,
+                             "reabiertas": reopened, "dato_anterior_a_una_decision": after_decision})
         if plan.to_create or plan.pending_diag:
             plan.specs_by_product = {
                 pid: ds.parse_specs(raw) for pid, raw in s.exec(
@@ -519,16 +578,32 @@ def _flags_for(snap: MarketPriceSnapshot, verdict: FirmVerdict | None, params: R
 
 def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnapshot, verdict: FirmVerdict | None,
                        streak: int, params: ReviewParams, run_id: int, now: datetime) -> str:
-    """Pone al día una ficha abierta con el snapshot de esta corrida, o la cierra sola si dejó de ser rojo.
-    Devuelve «updated», «closed» o «unchanged»."""
-    if item.state != PROPUESTO:                          # las demás etapas llegan después
-        return "unchanged"
+    """Pone al día una ficha viva con el snapshot de esta corrida. Todas guardan el último dato (`last_*`).
+
+      * un snapshot medido antes del último cambio de estado (`state_since`) solo deja el último dato: no cierra ni reabre;
+      * producto apagado y NO lo apagó Hugo (`hugo_disabled` distinto de true) → `cerrado_auto` «ya_inactivo». Si lo
+        apagó Hugo (`en_revision`, `corrigiendo`…), apagado es lo esperado: no se cierra;
+      * `mantenido` → regla del 10 % (`_watch_kept`);
+      * `propuesto` → se cierra sola si dejó de ser rojo; si no, actualiza racha y marcas;
+      * las demás (en manos de una persona) solo guardan el último dato.
+
+    Devuelve «updated», «closed» o «reopened»."""
     item.last_run_id, item.last_snapshot_id = run_id, snap.id
     item.last_color, item.last_margin_pct = snap.color, snap.est_margin_pct
-    if snap.product_enabled is False:
+    if snap.captured_at is not None and snap.captured_at < item.state_since:
+        # Lo midió ANTES del último cambio de estado (la corrida de la madrugada y una decisión de la mañana): ese dato no
+        # alcanza para cerrar ni para reabrir la ficha.
+        s.add(item)
+        return "updated"
+    if snap.product_enabled is False and item.hugo_disabled is not True:
         close_item(s, item, note="El producto ya estaba inactivo por otra razón.", code="ya_inactivo",
                    run_id=run_id, snapshot_id=snap.id, now=now)
         return "closed"
+    if item.state == MANTENIDO:
+        return _watch_kept(s, item, snap, verdict, streak, params, run_id, now)
+    if item.state != PROPUESTO:
+        s.add(item)
+        return "updated"
     if snap.ml_status == price_monitor.OK and snap.color != semaforo.ROJO:
         close_item(s, item, note=f"Dejó de ser rojo: hoy está en {snap.color}.", code="ya_no_es_rojo",
                    run_id=run_id, snapshot_id=snap.id, now=now)
@@ -538,6 +613,41 @@ def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnaps
     item.flags = json.dumps(_flags_for(snap, verdict, params, item.diag_status))
     s.add(item)
     return "updated"
+
+
+def _firm_figures(snap: MarketPriceSnapshot, v: FirmVerdict) -> dict[str, Any]:
+    """Las cifras firmes de la tarjeta (con las que se abre o se reabre una ficha)."""
+    return {
+        "our_price_cents": snap.our_price_cents, "ml_median_cents": v.firm_median,
+        "firm_listing_count": v.firm_listings, "firm_seller_count": v.firm_sellers,
+        "price_ratio": None if v.price_ratio is None else round(v.price_ratio, 3),
+        "reff_ratio": None if v.reff_ratio is None else round(v.reff_ratio, 3),
+    }
+
+
+def _watch_kept(s: Session, item: PriceReviewItem, snap: MarketPriceSnapshot, verdict: FirmVerdict | None,
+                streak: int, params: ReviewParams, run_id: int, now: datetime) -> str:
+    """Regla del 10 % (diseño 3.6). Una ficha `mantenido` se reabre (vuelve a `propuesto`) solo si esta noche es un rojo
+    firme con la racha cumplida y `reff_ratio >= kept_ratio × (1 + pm_review_worse_pct / 100)`. La línea base
+    (`kept_*`) queda fija: una mejora no la corre; la cambia recién una decisión nueva. Sin línea base no se reabre."""
+    s.add(item)
+    v = verdict
+    if v is None or not v.firm or streak < params.confirm_nights or item.kept_ratio is None or v.reff_ratio is None:
+        return "updated"
+    # El borde es `>=`: con 6 decimales, para que 1,0 × 1,10 contra 1,1 no dependa del redondeo binario.
+    if round(v.reff_ratio, 6) < round(item.kept_ratio * (1 + params.worse_pct / 100.0), 6):
+        return "updated"
+    worse = round((v.reff_ratio / item.kept_ratio - 1) * 100, 1)
+    pct = f"{worse:g}".replace(".", ",")
+    old_state = item.state
+    if not move_item(s, item, PROPUESTO, now=now, reopen_count=item.reopen_count + 1, streak_nights=streak,
+                     flags=json.dumps(_flags_for(snap, v, params, item.diag_status)), **_firm_figures(snap, v)):
+        return "updated"
+    add_event(s, item, "reabierto", from_state=old_state, to_state=PROPUESTO, motive_code="empeoro",
+              motive_text=f"Empeoró {pct} % desde que se decidió mantenerlo.",
+              run_id=run_id, snapshot_id=snap.id, now=now,
+              payload={"kept_ratio": item.kept_ratio, "ratio_hoy": round(v.reff_ratio, 3), "empeoro_pct": worse})
+    return "reopened"
 
 
 def _variant_of(catalog: Mapping[str, VendureProduct] | None, snap: MarketPriceSnapshot):
@@ -623,11 +733,7 @@ def _create_item(plan: _Plan, cand: _Candidate, diag: _Diag) -> bool:
         state=PROPUESTO, state_since=plan.now, opened_at=plan.now, mode_at_open=plan.mode,
         opened_run_id=plan.run_id, opened_snapshot_id=snap.id, last_run_id=plan.run_id, last_snapshot_id=snap.id,
         last_color=snap.color, last_margin_pct=snap.est_margin_pct, streak_nights=cand.streak,
-        our_price_cents=snap.our_price_cents, ml_median_cents=v.firm_median,
-        firm_listing_count=v.firm_listings, firm_seller_count=v.firm_sellers,
-        price_ratio=None if v.price_ratio is None else round(v.price_ratio, 3),
-        reff_ratio=None if v.reff_ratio is None else round(v.reff_ratio, 3),
-        flags=json.dumps(_flags_for(snap, v, plan.params, fields["diag_status"])), **fields,
+        **_firm_figures(snap, v), flags=json.dumps(_flags_for(snap, v, plan.params, fields["diag_status"])), **fields,
     )
     with Session(engine, expire_on_commit=False) as s:
         s.add(item)
@@ -659,10 +765,8 @@ def _retry_diag(plan: _Plan, item_id: int, diag: _Diag, verdict: FirmVerdict | N
         if verdict is not None and verdict.firm:
             snap = s.get(MarketPriceSnapshot, item.last_snapshot_id) if item.last_snapshot_id else None
             if snap is not None:
-                item.our_price_cents, item.ml_median_cents = snap.our_price_cents, verdict.firm_median
-                item.firm_listing_count, item.firm_seller_count = verdict.firm_listings, verdict.firm_sellers
-                item.price_ratio = None if verdict.price_ratio is None else round(verdict.price_ratio, 3)
-                item.reff_ratio = None if verdict.reff_ratio is None else round(verdict.reff_ratio, 3)
+                for k, val in _firm_figures(snap, verdict).items():
+                    setattr(item, k, val)
         flags = [f for f in (_loads(item.flags) or []) if not str(f).startswith("diag_")]
         if item.diag_status != "completo":
             flags.append("diag_pendiente" if item.diag_status == "pendiente" else "diag_parcial")
@@ -696,16 +800,19 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
                       source: ds.ReadSource | None = None, now: datetime | None = None,
                       max_calls: int = ds.MAX_VENDURE_CALLS, deadline_s: float = PASS_DEADLINE_S) -> dict[str, Any] | None:
     """La pasada de la bandeja sobre una corrida del semáforo. Devuelve el resumen, o None si la corrida no
-    existe o ya fue procesada (`review_at`). NO escribe en Vendure.
+    existe o ya fue procesada (`review_at`). NO escribe en Vendure (la conciliación del paso 0 solo lee).
 
     `catalog`: los productos que acaba de leer la corrida (para no volver a pedir los tramos). `source`: de dónde leer
     Vendure (por defecto el cliente real). Las lecturas tienen DOS topes: `max_calls` REQUESTS HTTP reales por día (ART), contados
     en la base (sobreviven a reinicios y a una segunda pasada del mismo día) y `deadline_s` segundos para leer. Lo que no entra
     queda «diagnóstico pendiente» y no gasta un intento: se completa en las próximas noches."""
     t0 = time.monotonic()
+    reconcile_error = await _reconcile_safely()
     plan = await asyncio.to_thread(_plan, run_id, now)
     if plan is None:
         return None
+    if reconcile_error:
+        plan.summary.setdefault("errores", []).append(f"conciliación: {reconcile_error}")
     if not plan.done and (plan.to_create or plan.pending_diag):
         budgeted = ds.BudgetedSource(source or VendureClient(), max_calls,           # type: ignore[arg-type]
                                      day=daily_budget.today_art(plan.now))
@@ -757,6 +864,19 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
     return plan.summary
 
 
+async def _reconcile_safely() -> str | None:
+    """Paso 0: las escrituras que quedaron a medias (el proceso murió entre la intención y la confirmación) se
+    concilian contra el `enabled` real. Corre en cualquier modo y nunca tira la pasada: devuelve el código del error."""
+    try:
+        from app.pricing import price_review_actions   # lazy: price_review_actions importa este módulo
+
+        await price_review_actions.reconcile()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("price_review: la conciliación de escrituras pendientes falló")
+        return error_code(exc)
+    return None
+
+
 # ─── "No es el mismo": la ficha se cierra sola en la misma respuesta ─
 
 
@@ -773,7 +893,8 @@ def after_correction(session: Session, snap: MarketPriceSnapshot, actor: str | N
     verdict = evaluate_firm(snap, p)
     snap.review_flag = verdict.flag
     item = open_item_for(session, snap.product_id)
-    if item is None or item.state != PROPUESTO or item.last_run_id != snap.run_id:
+    if (item is None or item.state != PROPUESTO or item.last_run_id != snap.run_id
+            or pending_intent(session, int(item.id)) is not None):  # type: ignore[arg-type]
         return None
     item.last_snapshot_id, item.last_color, item.last_margin_pct = snap.id, snap.color, snap.est_margin_pct
     closed = False

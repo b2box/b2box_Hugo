@@ -89,7 +89,8 @@ async def test_three_new_and_two_old_make_one_mail_with_five_lines(smtp):
     body = msg.get_content()
     assert "NUEVOS (3)" in body and "ESPERANDO DECISIÓN HACE MÁS DE 7 DÍAS (2)" in body and "hace 9 días" in body
     assert "BXn1 · Producto n1 · -21 % · caja fuera de rango" in body
-    assert "no modificó nada en Vendure" in body
+    assert "Hugo propone; solo inactiva o reactiva lo que decide una persona de la lista." in body     # M-1
+    assert "no modificó nada en Vendure" not in body
     assert kw["hostname"] and kw["username"] == "alertas@b2box.pro"
 
 
@@ -163,7 +164,7 @@ async def test_a_ficha_that_closed_itself_before_the_mail_is_counted_not_listed(
 
 
 async def test_text_from_vendure_cannot_break_the_mail(smtp):
-    add_item("n1", name="Taza\r\nBcc: atacante@mala.com\x00   térmica " + "x" * 200)
+    add_item("n1", name="Taza\r\nBcc: atacante@mala.com\x00 \u2028 térmica " + "x" * 200)
     await digest.send_digest(NOW)
     [(msg, _)] = smtp.sent
     [line] = item_lines(msg)
@@ -280,3 +281,64 @@ async def test_a_ficha_that_becomes_overdue_later_still_comes_out_once_as_waitin
     await digest.send_digest(NOW + timedelta(days=8))
     assert len(smtp.sent) == 2 and "ESPERANDO DECISIÓN HACE MÁS DE 7 DÍAS (1)" in smtp.sent[1][0].get_content()
     assert (await digest.send_digest(NOW + timedelta(days=9)))["sent"] is False
+
+
+# ─── PR3: reabiertos, lo que hay que mirar a mano y fichas en revisión (M-1, M-3, M-4, F-7) ─
+
+
+def add_event(item_id: int, kind: str, **kw) -> None:
+    with Session(engine) as s:
+        item = s.get(PriceReviewItem, item_id)
+        s.add(PriceReviewEvent(item_id=item_id, product_id=item.product_id, at=NOW, actor="pao@b2box.pro", kind=kind, **kw))
+        s.commit()
+
+
+async def test_m3_f7_reopened_and_hand_work_come_out_once_even_without_new_ones(smtp):
+    import json
+
+    reopened = add_item("r1", notified=True)
+    add_event(reopened, "reabierto", payload=json.dumps({"kept_ratio": 0.958, "ratio_hoy": 1.06, "empeoro_pct": 10.6}))
+    for pid, kind in (("e1", "vendure_error"), ("e2", "reactivar_a_mano"), ("e3", "intent_descartado")):
+        item_id = add_item(pid, notified=True)
+        add_event(item_id, kind, motive_code="escritura", payload=json.dumps({"error": "TransportServerError 502"}))
+    result = await digest.send_digest(NOW)
+    assert result["sent"] is True and result["new"] == 0
+    [(msg, _)] = smtp.sent
+    body = msg.get_content()
+    assert "REABIERTOS POR EMPEORAR (1)" in body and "BXr1 · Producto r1 · -21 % · caja fuera de rango · empeoró 10,6 %" in body
+    assert "PARA MIRAR A MANO (3)" in body
+    assert "BXe1 · Producto e1 · -21 % · caja fuera de rango · Vendure no aceptó el cambio" in body
+    assert "hay que reactivarlo a mano en Vendure" in body and "quedó a medias y se descartó" in body
+    assert len(item_lines(msg)) == 4
+    assert "TransportServerError" not in body and "@" not in body.replace(msg["To"], "")    # ni el código ni el actor
+    assert (await digest.send_digest(NOW + timedelta(hours=1)))["reason"] == "sin novedades" and len(smtp.sent) == 1
+
+
+async def test_m4_a_ficha_in_review_waiting_too_long_comes_out_once_and_again_after_a_new_state(smtp):
+    item_id = add_item("v1", age_days=9, notified=True, state="en_revision")
+    await digest.send_digest(NOW)
+    [(msg, _)] = smtp.sent
+    assert "ESPERANDO DECISIÓN HACE MÁS DE 7 DÍAS (1)" in msg.get_content() and len(item_lines(msg)) == 1
+    assert msg["Subject"].endswith("0 nuevos, 1 esperando decisión")
+    assert (await digest.send_digest(NOW + timedelta(hours=1)))["reason"] == "sin novedades"
+    with Session(engine) as s:                                   # pasó a otro estado y volvió a esperar 8 días
+        item = s.get(PriceReviewItem, item_id)
+        item.state_since = NOW + timedelta(days=1)
+        s.add(item)
+        s.commit()
+    await digest.send_digest(NOW + timedelta(days=9))
+    assert len(smtp.sent) == 2 and len(item_lines(smtp.sent[1][0])) == 1
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("factura\u202egpj.exe", "factura gpj.exe"),                     # RLO: se mostraría «exe.jpg»
+    ("a\u202ab\u202bc\u202cd\u202de", "a b c d e"),
+    ("x\u2066y\u2067z\u2068w\u2069", "x y z w"),
+    ("línea\u2028otra\u2029fin", "línea otra fin"),
+    ("tab\tNUL\x00del\x7fc1\x85", "tab NUL del c1"),
+    ("izq\u200ed\u200fer\u061cal", "izq d er al"),                # LRM, RLM, ALM
+    ("cero\u200bancho\u200c\u200dy\ufeffbom", "cero ancho y bom"),    # ancho cero y BOM
+    ("ñandú — «ok»", "ñandú — «ok»"),                                 # lo demás no se toca
+])
+def test_clean_takes_out_control_and_bidi_characters(raw, expected):
+    assert digest.clean(raw, limit=200) == expected

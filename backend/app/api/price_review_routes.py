@@ -1,13 +1,21 @@
-"""Endpoints de la bandeja de revisión de precios (dashboard, sesión por cookie). SOLO LECTURA en esta etapa.
+"""Endpoints de la bandeja de revisión de precios (dashboard, sesión por cookie).
 
-GET /api/price-review/summary            → modo, conteos por estado, pendientes, antigüedad y última pasada
-GET /api/price-review/items              → listado paginado (state, cause, q, page)
-GET /api/price-review/items/{id}         → detalle: ficha, diagnóstico a-e, desglose del precio, publicaciones
-                                           de ML y de las tiendas, historia (eventos) y links
+GET  /api/price-review/summary              → modo, conteos por estado, pendientes, antigüedad y última pasada
+GET  /api/price-review/items                → listado paginado (state, cause, q, page)
+GET  /api/price-review/items/{id}           → detalle: ficha, diagnóstico a-e, desglose del precio, publicaciones
+                                              de ML y de las tiendas, historia (eventos), links y `actions` (los
+                                              botones que permite el estado, habilitados o no con el motivo)
+POST /api/price-review/items/{id}/approve   → «Inactivar y revisar»            {expected_state, motive_text?}
+POST /api/price-review/items/{id}/decision  → corregir | mantener | despublicar | reactivar
+                                              {decision, expected_state, motive_code?, motive_text?}
+POST /api/price-review/items/{id}/undo      → Deshacer la última acción humana  {expected_state, motive_text?}
 
-Nada de acá escribe: ni en Vendure ni en las tablas. Las decisiones de Pao (aprobar, corregir, mantener,
-despublicar, deshacer) llegan en la etapa siguiente. Los botones «No es el mismo» / «Es el mismo» siguen siendo
-los del semáforo (`/api/price-monitor/snapshots/{id}/not-same`), que cierran la ficha si el producto deja de ser rojo.
+Los POST solo aceptan JSON validado y solo los puede hacer una persona de PRICE_REVIEW_DECIDERS (fail-closed). Todo lo
+que hacen (y lo único de la bandeja que escribe en Vendure) vive en `pricing/price_review_actions.py`. Errores: 400
+validación, 403 sin permiso, 404, 409 (el estado cambió, la acción no va desde ese estado, modo sombra, reactivar a mano,
+plazo vencido; trae el estado actual), 502 si Vendure falla (la ficha queda como estaba). Los botones «No es el mismo» /
+«Es el mismo» siguen siendo los del semáforo (`/api/price-monitor/snapshots/{id}/not-same`), que cierran la ficha si el
+producto deja de ser rojo.
 
 Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 """
@@ -16,10 +24,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
@@ -29,7 +38,7 @@ from app.config import get_settings
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
 from app.db.session import get_session
 from app.notifier.email import parse_recipients
-from app.pricing import price_monitor, price_review, store_match
+from app.pricing import price_monitor, price_review, price_review_actions, store_match
 
 router = APIRouter(prefix="/api/price-review", tags=["price-review"])
 
@@ -41,7 +50,7 @@ DB_INT_MAX = 2**31 - 1
 # Las pestañas de la pantalla → estados.
 GROUPS: dict[str, tuple[str, ...]] = {
     "para_decidir": (price_review.PROPUESTO,),
-    "en_proceso": (price_review.EN_REVISION, price_review.CORRIGIENDO, price_review.BUSCANDO_PROVEEDOR),
+    "en_proceso": (price_review.EN_REVISION, price_review.CORRIGIENDO, price_review.BUSCANDO_PROV),
     "mantenidos": (price_review.MANTENIDO,),
     "cerrados": (price_review.DESPUBLICADO, price_review.CORREGIDO, price_review.CERRADO_AUTO),
 }
@@ -53,11 +62,7 @@ CAUSE_LABEL = {
     "d": "Valor bajo por m³", "e": "ML bajo el costo de fábrica", "ninguna": "Sin causa clara",
     "sin_dato": "Diagnóstico incompleto",
 }
-STATE_LABEL = {
-    "propuesto": "Propuesto", "en_revision": "En revisión", "corrigiendo": "Corrigiendo",
-    "buscando_proveedor": "Buscando proveedor", "mantenido": "Mantenido", "despublicado": "Despublicado",
-    "corregido": "Corregido", "cerrado_auto": "Cerrado solo",
-}
+STATE_LABEL = price_review.STATE_LABEL
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -204,7 +209,7 @@ def event_to_dict(ev: PriceReviewEvent) -> dict[str, Any]:
 
 
 @router.get("/summary")
-async def summary(session: Session = Depends(get_session)) -> dict[str, Any]:
+async def summary(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     now = utcnow()
     by_state = dict(session.exec(
         select(PriceReviewItem.state, func.count(PriceReviewItem.id)).group_by(PriceReviewItem.state)  # type: ignore[arg-type]
@@ -237,7 +242,8 @@ async def summary(session: Session = Depends(get_session)) -> dict[str, Any]:
         failure = (_loads(latest.review_summary) or {}).get("error")
     return {
         "mode": mode, "mode_label": price_review.mode_label(mode), "mode_effective": min(mode, 1),
-        "read_only": True,                          # en esta etapa la bandeja no decide ni escribe en Vendure
+        # Solo lectura para esta sesión: no está en PRICE_REVIEW_DECIDERS o la bandeja está en sombra.
+        "read_only": not (auth.review_decider(request) and mode >= 1),
         "counts": {s: int(by_state.get(s, 0)) for s in ALL_STATES},
         "groups": groups, "pending": groups["para_decidir"],
         "oldest_pending_days": None if oldest is None else round((now - oldest).total_seconds() / 86400.0, 1),
@@ -335,6 +341,9 @@ async def item_detail(
                           .order_by(PriceReviewEvent.at.desc(), PriceReviewEvent.id.desc())).all()  # type: ignore[union-attr]
     params = price_review.ReviewParams.from_runtime()
     flags = out["flags"]
+    decider = auth.review_decider(request) is not None
+    mode = int(runtime.get("pm_mode") or 0)
+    pending = price_review_actions.in_flight(session, int(item.id))  # type: ignore[arg-type]
     tiers = breakdown.get("tiers") or diag.get("tiers") or []
     out.update({
         "costs_visible": costs,
@@ -347,6 +356,59 @@ async def item_detail(
             "via": snap.web_via, "run_id": snap.run_id, "captured_at": _iso(snap.captured_at)},
         "doubtful_today": next((params.reason_text(f.split(":", 1)[1]) for f in flags if str(f).startswith("dudoso:")), None),
         "events": [event_to_dict(e) for e in events],
-        "decisions_enabled": False,                   # las decisiones de Pao llegan en la etapa siguiente
+        "decision": None if item.decision is None else {
+            "code": item.decision, "by": item.decision_by, "at": _iso(item.decision_at),
+            "motive_code": item.decision_motive_code, "motive_text": item.decision_motive_text},
+        "hugo_disabled": item.hugo_disabled,
+        "actions": price_review_actions.available_actions(item, list(events), decider=decider, mode=mode, pending=pending),
+        "decisions_enabled": decider and mode != 0,
     })
     return out
+
+
+# ─── Decisiones (solo PRICE_REVIEW_DECIDERS) ──────────────────────
+
+
+class ActionIn(BaseModel):
+    """Body de approve y undo (y base de decision)."""
+    model_config = ConfigDict(extra="forbid")
+
+    expected_state: str = Field(..., min_length=1, max_length=16)
+    # El tope real (500, después de sanear) lo valida price_review_actions con un 400; esto solo frena un body enorme.
+    motive_text: str | None = Field(None, max_length=10_000)
+
+
+class DecisionIn(ActionIn):
+    decision: Literal["corregir", "mantener", "despublicar", "reactivar"]
+    motive_code: str | None = Field(None, max_length=24)
+
+
+async def _act(item_id: int, action: str, actor: str, body: ActionIn, motive_code: str | None = None) -> dict[str, Any]:
+    try:
+        out = await price_review_actions.act(item_id, action, actor, expected_state=body.expected_state,
+                                             motive_code=motive_code, motive_text=body.motive_text)
+    except price_review_actions.ActionError as exc:
+        raise HTTPException(exc.status, exc.detail()) from None
+    out["state_label"] = STATE_LABEL.get(out["state"], out["state"])
+    return out
+
+
+@router.post("/items/{item_id}/approve")
+async def approve(body: ActionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                  actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """«Inactivar y revisar»: apaga el producto en Vendure y la ficha pasa a `en_revision`."""
+    return await _act(item_id, price_review_actions.INACTIVAR, actor, body)
+
+
+@router.post("/items/{item_id}/decision")
+async def decision(body: DecisionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                   actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """Corregir, Mantener, Despublicar o «Ya lo corregí: reactivar» (tabla de transiciones en price_review_actions)."""
+    return await _act(item_id, body.decision, actor, body, body.motive_code)
+
+
+@router.post("/items/{item_id}/undo")
+async def undo(body: ActionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
+               actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """Vuelve al estado y al `enabled` de antes de la última acción humana (hasta 30 días). Sigue con `pm_mode = 0`."""
+    return await _act(item_id, price_review_actions.DESHACER, actor, body)

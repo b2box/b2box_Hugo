@@ -15,7 +15,9 @@ borra al final.
   * es idempotente (3 arranques = mismo esquema), no reescribe la tabla grande y conserva todas las filas;
   * el código anterior sigue insertando sobre el esquema nuevo;
   * el SQL de rollback del README, copiado tal cual, deja el esquema EXACTAMENTE como estaba y volver a subir da lo mismo;
-  * la pasada, el índice único de la ficha abierta, el registro de solo agregar, la API y el mail funcionan sobre Postgres.
+  * la pasada, el índice único de la ficha abierta, el registro de solo agregar, la API y el mail funcionan sobre Postgres;
+  * (PR3) todos los estados entran en VARCHAR(16) (el viejo «buscando_proveedor» no entraba), y las decisiones, el
+    cambio de estado atómico, Deshacer y la conciliación funcionan sobre Postgres.
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ from app import main as main_mod  # noqa: E402
 from app.db import session  # noqa: E402
 from app.db.models import EventLogIsAppendOnly, PriceReviewEvent, PriceReviewItem  # noqa: E402
 from app.pricing import price_review as pr  # noqa: E402
+from app.pricing import price_review_actions as actions  # noqa: E402
+from tests import review_decide as k  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests.review_fixtures import FakeReviewVendure, engine_variant, install  # noqa: E402
 from tests.test_price_monitor_routes import _use_settings  # noqa: E402
@@ -54,10 +58,11 @@ NEW_TABLES = {"price_review_item", "price_review_event"}
 NEW_COLS = {"market_price_snapshot": {"data_at", "review_flag"},
             "price_monitor_run": {"review_at", "review_summary", "n_flipped"}}
 # Lo que agregan los PRs que entran antes que la bandeja y no está en el esquema de partida: las tablas del estimado por
-# foto y de reservas de la cola de la búsqueda con Apify (las prueban test_qa_estimate_migracion.py y
-# test_qa_apify_ml_search_pg.py) y las columnas de «No medible» y del juez de fix/semaforo-sin-dato (#25, las prueban
-# test_qa_postgres_migration.py y compañía). Las crea el mismo arranque; acá no se miran.
-OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim"}
+# foto, de reservas de la cola y del gasto de la búsqueda con Apify y el caché del radar de ML (las prueban
+# test_qa_estimate_migracion.py, test_qa_apify_ml_search_pg.py y compañía) y las columnas de «No medible» y del juez de
+# fix/semaforo-sin-dato (#25, las prueban test_qa_postgres_migration.py y compañía). Las crea el mismo arranque; acá no se
+# miran.
+OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim", "apify_spend", "radar_ml_supply_cache"}
 OTHER_PRS_COLS = {"market_price_snapshot": {"unmeasurable"},
                   "price_monitor_run": {"llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
                                         "llm_skipped_cut", "llm_status", "n_no_medible"}}
@@ -332,3 +337,59 @@ async def test_the_digest_marks_events_after_sending_on_postgres(pg, monkeypatch
     assert (await digest.send_digest(NOW))["sent"] is True
     assert (await digest.send_digest(NOW))["reason"] == "sin novedades" and len(sent) == 1
     assert all(e.notified_at is not None for e in w.events())
+
+
+# ─── PR3: estados y decisiones sobre Postgres ─────────────────────
+
+
+def test_every_review_state_fits_in_postgres_and_the_old_name_did_not(pg):
+    from sqlalchemy.exc import DataError
+
+    from app.db.models import REVIEW_STATES
+
+    assert "buscando_prov" in REVIEW_STATES and "buscando_proveedor" not in REVIEW_STATES
+    with Session(pg) as s:
+        for state in REVIEW_STATES:
+            item = PriceReviewItem(product_id=f"s-{state}", state=state)
+            s.add(item)
+            s.flush()
+            s.add(PriceReviewEvent(item_id=item.id, product_id=item.product_id, actor="hugo:auto", kind="propuesto",
+                                   from_state=state, to_state=state))
+        s.commit()
+        assert sorted(s.exec(select(PriceReviewItem.state)).all()) == sorted(REVIEW_STATES)
+        s.add(PriceReviewItem(product_id="viejo", state="buscando_proveedor"))
+        with pytest.raises(DataError):
+            s.commit()
+
+
+async def test_decisions_undo_and_reconcile_work_on_postgres(pg, monkeypatch):
+    fake = k.setup(monkeypatch)
+    c = k.client()
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    stale, _ = actions._load(item_id)                       # otra pestaña la leyó antes del clic
+    assert k.post(c, item_id, "approve", expected_state="propuesto").json()["state"] == "en_revision"
+    r = k.decide(c, item_id, "despublicar", "propuesto", "calidad")
+    assert r.status_code == 409 and r.json()["detail"]["state"] == "en_revision"
+    with Session(pg) as s:                                   # el UPDATE … WHERE version de una lectura vieja no pasa
+        assert pr.move_item(s, stale, "despublicado") is False
+    assert k.decide(c, item_id, "mantener", "en_revision", "nicho", "Se vende poco pero sirve").json()["state"] == "mantenido"
+    assert k.post(c, item_id, "undo", expected_state="mantenido").json()["state"] == "en_revision"
+    assert fake.writes() == [False, True, False] and w.item(item_id).hugo_disabled is True
+    assert len(k.audit("rv1")) == 3
+    # una intención a medias se concilia (la consulta con GROUP BY de la conciliación corre en Postgres)
+    with Session(pg) as s:
+        it = s.get(PriceReviewItem, item_id)
+        ev = pr.add_event(s, it, "decision_corregir", actor=k.PAO, from_state="en_revision", to_state="corrigiendo",
+                          payload={"antes": {"state_since": it.state_since.isoformat()}})
+        pr.move_item(s, it, "corrigiendo")
+        s.flush()
+        pr.add_event(s, it, "intent", actor=k.PAO, from_state="en_revision", to_state="corrigiendo", enabled_before=True,
+                     enabled_after=False, payload={"accion": "corregir", "evento": ev.id,
+                                                   "antes": {"state_since": it.state_since.isoformat()}})
+        s.commit()
+    from app.clock import utcnow
+
+    assert await actions.reconcile(now=utcnow() + timedelta(minutes=11)) == 1
+    assert w.item(item_id).state == "corrigiendo"
+    k.clean_audit()

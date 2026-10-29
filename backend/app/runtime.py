@@ -398,8 +398,9 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         key="pm_mode",
         label="Modo de la bandeja (0 sombra / 1 propuesta / 2 automático)",
         description=(
-            "0 = sombra: mide y guarda, no llena la bandeja. 1 = propuesta: los rojos firmes entran a la "
-            "bandeja de Pao y se manda el resumen diario; Hugo NO toca Vendure. 2 = automático: TODAVÍA NO "
+            "0 = sombra: mide y guarda, no llena la bandeja y frena las decisiones (Deshacer sigue). 1 = propuesta: "
+            "los rojos firmes entran a la bandeja de Pao y se manda el resumen diario; Hugo inactiva o reactiva en "
+            "Vendure SOLO lo que decide una persona de PRICE_REVIEW_DECIDERS. 2 = automático: TODAVÍA NO "
             "IMPLEMENTADO; se comporta como 1."
         ),
         type="int", parser=int,
@@ -821,6 +822,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="int", parser=int,
         default_attr="pm_review_sla_days",
         min=1, max=60, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_review_worse_pct",
+        label="Bandeja: empeora para reabrir un «mantenido» (%)",
+        description=(
+            "Una ficha que se decidió mantener se reabre sola si el producto sigue en rojo firme y el cociente "
+            "nuestro precio / lo que le queda neto al revendedor en ML subió este % o más desde la decisión."
+        ),
+        type="float", parser=float,
+        default_attr="pm_review_worse_pct",
+        min=1.0, max=100.0, step=1.0, group="monitor",
     ),
     SettingMeta(
         key="pm_diag_cert_share_pct",

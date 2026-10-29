@@ -127,6 +127,17 @@ _ACTION_LABELS: dict[str, dict[str, str]] = {
         "title": "Producto 'BX…' sin imagen deshabilitado en Vendure",
         "tone": "warning",
     },
+    # Bandeja de revisión de precios (pricing/price_review_actions.py)
+    "price_review_disabled": {
+        "icon": "price",
+        "title": "Bandeja de precios · inactivado en Vendure por decisión de una persona",
+        "tone": "warning",
+    },
+    "price_review_enabled": {
+        "icon": "price",
+        "title": "Bandeja de precios · reactivado en Vendure por decisión de una persona",
+        "tone": "info",
+    },
     # b2box app → /app/lookup
     "app_lookup_match": {
         "icon": "check",
@@ -971,10 +982,14 @@ _COSTLY_SETTINGS = frozenset({
     "audit_interval_hours",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
-    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas y manda el resumen
-    # diario por mail, y el 2 (automático, todavía no implementado) es el que va a tocar Vendure.
-    # Los umbrales de la bandeja (pm_review_*, pm_diag_*) solo deciden qué entra: siguen abiertos.
+    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas, manda el resumen diario por mail y
+    # habilita que una persona de PRICE_REVIEW_DECIDERS inactive o reactive productos en Vendure; con 0 esas
+    # decisiones se frenan. El 2 (automático, todavía no implementado) es el que va a tocar Vendure solo.
     "pm_mode",
+    # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la
+    # vigilancia de lo que se decidió mantener. Los demás umbrales de la bandeja (pm_review_*, pm_diag_*) solo deciden
+    # qué entra: siguen abiertos.
+    "pm_review_worse_pct",
 })
 
 
@@ -1420,6 +1435,17 @@ def _duplicate_confirmed_row(entry: AuditLog, canonical: str | None, detail: str
     )
 
 
+def _already_off_row(entry: AuditLog, target: str, canonical: str | None, how: str) -> AuditLog:
+    """Fila `duplicate_confirmed` cuando el duplicado YA estaba apagado: no se tocó Vendure, pero queda dicho que `target`
+    es un duplicado confirmado (`disable_target_id`), así la bandeja de precios no lo vuelve a prender. No es un
+    `duplicate_disabled`: esas las cuentan las estadísticas y las restaura /api/restore-duplicates."""
+    row = _duplicate_confirmed_row(entry, canonical, detail=(
+        f"{how} como duplicado de #{canonical or '?'}. #{target} ya estaba deshabilitado en Vendure: no se tocó."))
+    row.product_id = row.disable_target_id = target
+    row.before = row.after = json.dumps({"enabled": False})
+    return row
+
+
 def _confirm_without_vendure(session: Session, entry: AuditLog, *, how: str) -> str | None:
     """Confirma un flag de /verify: el candidato nunca entró a Vendure, así que
     solo se registra y se archiva. Devuelve el id del original (informativo)."""
@@ -1504,6 +1530,7 @@ async def bulk_confirm_duplicates(
             failed.append({"product_id": target, "error": "No existe en Vendure"})
             continue
         if previous is False:
+            session.add(_already_off_row(entry, target, canonical, how))
             _dismiss(entry)
             session.add(entry)
             skipped_already_disabled.append(target)
@@ -1581,7 +1608,8 @@ async def confirm_duplicate(
     if previous_enabled is None:
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
-        # Ya estaba disabled, no hacemos nada (pero descartamos el flag)
+        # Ya estaba disabled: no se toca Vendure, pero queda la confirmación (y se descarta el flag)
+        session.add(_already_off_row(entry, target, canonical, "Confirmado manualmente"))
         _dismiss(entry)
         session.add(entry)
         session.commit()
@@ -1641,6 +1669,15 @@ async def confirm_disable_bx(
     if previous_enabled is None:
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
+        # No se toca Vendure, pero queda la confirmación: así la bandeja de precios no lo vuelve a prender.
+        session.add(AuditLog(
+            action="bx_no_image_disabled", source="manual", product_id=entry.product_id,
+            detail=(f"Confirmado manualmente: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
+                    "Ya estaba deshabilitado en Vendure: no se tocó."),
+            before=json.dumps({"enabled": False}), after=json.dumps({"enabled": False}),
+            product_name=entry.product_name, product_code=entry.product_code,
+            product_image_url=entry.product_image_url, product_source_url=entry.product_source_url,
+        ))
         entry.dismissed = True
         entry.dismissed_at = utcnow()
         session.add(entry)

@@ -188,6 +188,15 @@ class ChannelPricing:
     container_cbm: float | None
 
 
+@dataclass(slots=True)
+class ReviewGuard:
+    """Lo que la bandeja lee de un producto antes de reactivarlo (`get_review_guard`)."""
+
+    enabled: bool
+    approval_status: str | None       # portal de proveedores: None/approved, pending o rejected
+    has_supplier_contact: bool        # con contacto, reactivar encola la publicación en los otros canales
+
+
 def read_only_document(text: str) -> str:
     """Valida con el parser de GraphQL (graphql-core, que ya viene con gql) que el documento sea SOLO lectura: todas sus
     definiciones son operaciones `query`. Un `startswith("query ")` no alcanza: un documento con una query y una mutation
@@ -980,6 +989,49 @@ class VendureClient:
     async def enable_product(self, product_id: str) -> None:
         await self._set_enabled(product_id, True)
 
+    async def get_review_guard(self, product_id: str) -> ReviewGuard | None:
+        """`enabled`, el estado de aprobación del portal de proveedores y si tiene contacto del proveedor: lo que la
+        bandeja mira antes de reactivar. None si el producto no existe. Si el schema no tiene los custom fields, la
+        query falla (TransportQueryError) y quien llama no reactiva: no se adivina."""
+        query = self._read_query(
+            "query ReviewGuard($id: ID!) { product(id: $id) { id enabled customFields { approvalStatus supplierContact } } }")
+        data = await self._execute_with_retry(query, {"id": str(product_id)}, what=f"get_review_guard({product_id})")
+        prod = data.get("product")
+        if not isinstance(prod, dict):
+            return None
+        custom = prod.get("customFields") if isinstance(prod.get("customFields"), dict) else {}
+        status = custom.get("approvalStatus")
+        contact = custom.get("supplierContact")
+        return ReviewGuard(
+            enabled=bool(prod.get("enabled")),
+            approval_status=(status.strip().lower() or None) if isinstance(status, str) else None,
+            has_supplier_contact=isinstance(contact, str) and bool(contact.strip()),
+        )
+
+    async def set_enabled(self, product_id: str, enabled: bool) -> bool | None:
+        """`updateProduct(enabled)` para la bandeja de revisión. Devuelve el `enabled` que respondió Vendure (None si
+        no vino): quien llama lo compara con lo pedido. UN solo intento en las dos direcciones (más el re-login si el bearer
+        venció): con contacto del proveedor la reactivación encola la publicación en los otros canales y un reintento a
+        ciegas puede repetirla; y al apagar, con reintentos, un 504 temprano que igual llega a Vendure quedaba tapado por
+        el error del último intento. Un error ambiguo lo resuelve la conciliación de la bandeja. Los flujos de duplicados
+        siguen con `_set_enabled`."""
+        mutation = gql(
+            """
+            mutation SetEnabled($input: UpdateProductInput!) {
+              updateProduct(input: $input) { id enabled }
+            }
+            """
+        )
+        data = await self._execute_with_retry(
+            mutation,
+            {"input": {"id": product_id, "enabled": enabled}},
+            what=f"set_enabled({product_id}, {enabled})",
+            max_attempts=2,
+            retry=False,
+        )
+        got = (data.get("updateProduct") or {}).get("enabled") if isinstance(data, dict) else None
+        return got if isinstance(got, bool) else None
+
     async def _set_enabled(self, product_id: str, enabled: bool) -> None:
         mutation = gql(
             """
@@ -1002,8 +1054,10 @@ class VendureClient:
         variables: dict[str, Any],
         what: str,
         max_attempts: int = 3,
+        retry: bool = True,
     ) -> dict[str, Any]:
-        """Ejecuta la query con retry exponencial + auto-renovación del bearer."""
+        """Ejecuta la query con retry exponencial + auto-renovación del bearer. `retry=False`: un error que no es de
+        auth no se reintenta (el re-login sí, si queda un intento)."""
         # Si arrancamos sin bearer, hacemos login proactivo antes del primer call
         if not self._bearer:
             await self._login()
@@ -1026,6 +1080,8 @@ class VendureClient:
                     relogged_in = True
                     if await self._login():
                         continue  # retry inmediato con bearer nuevo
+                if not retry:
+                    break
                 if attempt < max_attempts:
                     backoff = 2 ** (attempt - 1)
                     log.warning(
