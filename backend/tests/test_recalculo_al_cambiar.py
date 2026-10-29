@@ -302,10 +302,15 @@ async def test_r5_a_failing_product_does_not_stop_the_others(fake):
     run = w.make_run()
     for pid in ("rv1", "rv2"):
         night(pid, run=run)
-    in_vendure(fake, "rv2", FIXED)
-    fake.script["PricedProduct"] = [(500, {"errors": [{"message": "boom"}]})] * 3   # rv1: Vendure falla (3 intentos)
-    out = await recalc("rv1", "rv2")
-    assert out == {"error": 1, "recalculado": 1} or out == {"recalculado": 1, "error": 1}
+
+    class Flaky:
+        async def get_product_priced(self, pid):
+            if pid == "rv1":
+                raise RuntimeError("Vendure no respondió")
+            return VendureClient()._map_page([product(pid, FIXED)], with_variants=False, pricing=True)[0]
+
+    price_recalc.enqueue(["rv1", "rv2"])
+    assert await price_recalc.run_pending(client=Flaky(), now=LATER) == {"error": 1, "recalculado": 1}
 
 
 # ─── S: semáforo ──────────────────────────────────────────────────
