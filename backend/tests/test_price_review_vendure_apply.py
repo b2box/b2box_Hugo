@@ -15,6 +15,7 @@ from datetime import timedelta
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 from sqlmodel import Session  # noqa: E402
 
@@ -59,7 +60,8 @@ def relogins(monkeypatch):
     return calls
 
 
-def later(minutes: float = 3):
+def later(minutes: float = 11):
+    """Pasado `INTENT_STALE` (10 min): una intención así de vieja quedó a medias."""
     return utcnow() + timedelta(minutes=minutes)
 
 
@@ -243,7 +245,8 @@ async def test_v6_a_half_done_write_is_reconciled_against_vendure(fake, monkeypa
     await _crash(actions.act(item_id, "inactivar", k.PAO, expected_state="propuesto"))
     restart()
     assert w.item(item_id).state == "en_revision" and k.kinds(item_id)[-1] == "intent"
-    assert await actions.reconcile() == 0                          # todavía no pasaron 2 minutos
+    assert await actions.reconcile() == 0                          # recién empezó
+    assert await actions.reconcile(now=later(5)) == 0              # 5 min: puede seguir viajando (tope de 4 + relectura)
     assert await actions.reconcile(now=later()) == 1
     item = w.item(item_id)
     assert (item.state, item.hugo_disabled) == (final, hugo) and k.kinds(item_id)[-1] == kind
@@ -251,7 +254,7 @@ async def test_v6_a_half_done_write_is_reconciled_against_vendure(fake, monkeypa
     assert fake.enabled["rv1"] is (final != "en_revision")
     assert fake.writes() == ([False] if scenario.startswith("b") else [])     # la conciliación nunca escribe
     events = k.kinds(item_id)
-    assert await actions.reconcile(now=later(10)) == 0 and k.kinds(item_id) == events      # sin duplicados
+    assert await actions.reconcile(now=later(20)) == 0 and k.kinds(item_id) == events      # sin duplicados
     assert len(k.audit("rv1")) == (1 if kind == "inactivado" else 0)
     if kind == "inactivado":
         assert json.loads(w.events("inactivado")[0].payload)["conciliado"] is True
@@ -268,7 +271,7 @@ async def test_v6_d_a_half_done_undo_is_reconciled_too(c, fake, monkeypatch, app
     assert await actions.reconcile(now=later()) == 1
     item = w.item(item_id)
     assert (item.state, item.hugo_disabled) == (final, hugo) and fake.enabled["rv1"] is applied
-    assert await actions.reconcile(now=later(10)) == 0
+    assert await actions.reconcile(now=later(20)) == 0
 
 
 async def test_v6_the_nightly_pass_reconciles_in_any_mode_and_survives_a_failure(fake, monkeypatch):
@@ -299,7 +302,10 @@ async def test_v6_acting_on_a_ficha_with_a_write_in_flight(c, fake, monkeypatch)
     restart()
     r = k.decide(c, item_id, "corregir", "en_revision", "caja")        # recién empezó: puede estar en curso
     assert r.status_code == 409 and r.json()["detail"]["code"] == "en_curso"
-    monkeypatch.setattr(actions, "utcnow", later)                     # quedó a medias: se concilia y sigue
+    monkeypatch.setattr(actions, "utcnow", lambda: later(5))          # 5 min: todavía puede estar viajando
+    r = k.decide(c, item_id, "corregir", "en_revision", "caja")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "en_curso" and k.kinds(item_id)[-1] == "intent"
+    monkeypatch.setattr(actions, "utcnow", later)                     # pasado INTENT_STALE: se concilia y sigue
     r = k.decide(c, item_id, "despublicar", "propuesto", "calidad")
     assert r.status_code == 200 and r.json()["state"] == "despublicado"
     assert k.kinds(item_id)[-4:] == ["intent_descartado", "decision_despublicar", "intent", "inactivado"]
@@ -337,8 +343,8 @@ async def test_v8_shadow_mode_stops_decisions_but_not_undo(c, fake):
 
 
 def test_v6_at_startup_a_one_shot_job_reconciles_three_minutes_later(monkeypatch):
-    """«Cuando arranca de nuevo»: un job de una sola vez, a los 3 minutos (las intenciones del proceso anterior ya tienen
-    más de 2) y solo en el líder (lo registra `register_jobs`)."""
+    """«Cuando arranca de nuevo»: un job de una sola vez, pasado `INTENT_STALE` (las intenciones del proceso anterior ya
+    vencieron) y solo en el líder (lo registra `register_jobs`)."""
     from datetime import datetime, timezone
 
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -351,7 +357,7 @@ def test_v6_at_startup_a_one_shot_job_reconciles_three_minutes_later(monkeypatch
     jobs.register_jobs()
     job = jobs.scheduler.get_job("price_review_reconcile")
     assert job is not None and isinstance(job.trigger, DateTrigger)
-    assert timedelta(minutes=2) < job.trigger.run_date - t0 < timedelta(minutes=4)
+    assert actions.INTENT_STALE < job.trigger.run_date - t0 < actions.INTENT_STALE + timedelta(minutes=2)
 
 
 async def test_v6_the_startup_job_never_raises(monkeypatch):
@@ -362,3 +368,128 @@ async def test_v6_the_startup_job_never_raises(monkeypatch):
 
     monkeypatch.setattr(actions, "reconcile", boom)
     await jobs.price_review_reconcile()                      # se loguea; no tira
+
+
+# ─── Escrituras lentas o ambiguas (QA PR3 #1, seguridad M2) ──────
+
+
+def test_the_write_deadline_stays_well_below_the_stale_intent():
+    budget = actions.APPLY_DEADLINE_S + actions.REREAD_DEADLINE_S
+    assert budget * 1.5 < actions.INTENT_STALE.total_seconds()
+
+
+async def test_a_write_that_never_answers_is_cut_at_the_deadline_and_reread(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    monkeypatch.setattr(actions, "APPLY_DEADLINE_S", 0.05)
+
+    async def hangs(self, product_id, enabled):
+        await asyncio.Event().wait()                               # Vendure no contesta nunca
+
+    monkeypatch.setattr(VendureClient, "set_enabled", hangs)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert r.status_code == 502 and r.json()["detail"]["error"] == "TimeoutError"
+    assert w.item(item_id).state == "propuesto" and fake.count("GetEnabled") == 2       # leyó, y releyó tras el corte
+
+
+async def test_an_ambiguous_error_that_cannot_be_reread_leaves_the_intent_open_for_reconcile(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    real_read = VendureClient.get_enabled_status
+    reads: list[int] = []
+
+    async def read(self, product_id):
+        reads.append(1)
+        if len(reads) > 1:
+            raise httpx.ConnectError("Vendure caído")
+        return await real_read(self, product_id)
+
+    async def lands_but_fails(self, product_id, enabled):
+        fake.enabled[product_id] = enabled                         # llegó...
+        raise httpx.ReadTimeout("timeout")                         # ...pero no se sabe
+
+    monkeypatch.setattr(VendureClient, "get_enabled_status", read)
+    monkeypatch.setattr(VendureClient, "set_enabled", lands_but_fails)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert r.status_code == 502 and r.json()["detail"]["code"] == "vendure_incierto"
+    item = w.item(item_id)
+    assert item.state == "en_revision" and k.kinds(item_id)[-1] == "intent"          # no vuelve atrás a ciegas
+    assert "vendure_error" not in k.kinds(item_id)
+    monkeypatch.setattr(VendureClient, "get_enabled_status", real_read)
+    assert await actions.reconcile(now=later()) == 1
+    assert w.item(item_id).hugo_disabled is True and [a.action for a in k.audit("rv1")] == ["price_review_disabled"]
+
+
+async def test_if_the_intent_was_resolved_before_writing_nothing_is_written(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    real_read = VendureClient.get_enabled_status
+
+    async def read_then_someone_reconciles(self, product_id):
+        value = await real_read(self, product_id)
+        await actions.reconcile(now=later(), client=VendureClient())   # la descarta mientras esta acción leía
+        return value
+
+    monkeypatch.setattr(VendureClient, "get_enabled_status", read_then_someone_reconciles)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "estado_cambio"
+    assert fake.mutations == [] and w.item(item_id).state == "propuesto" and k.kinds(item_id)[-1] == "intent_descartado"
+
+
+async def test_a_write_that_lands_after_the_ficha_moved_still_leaves_an_audit_row_and_a_mail_line(c, fake, monkeypatch):
+    from app.pricing import price_review_digest as digest
+
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    real = VendureClient.set_enabled
+
+    async def late(self, product_id, enabled):
+        await actions.reconcile(now=later(), client=VendureClient())   # la intención se descarta (no debería pasar)...
+        return await real(self, product_id, enabled)               # ...y la escritura llega igual
+
+    monkeypatch.setattr(VendureClient, "set_enabled", late)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert r.status_code == 409 and fake.enabled["rv1"] is False
+    [row] = k.audit("rv1")
+    assert row.action == "price_review_disabled" and k.PAO in row.detail and "revisar a mano" in row.detail
+    ev = w.events("escritura_huerfana")[0]
+    assert (ev.actor, ev.enabled_after) == (k.PAO, False)
+    with Session(engine) as s:
+        data = digest.collect(s)
+    assert [e.kind for e, _ in data.attention] == ["intent_descartado", "escritura_huerfana"]
+
+
+async def test_a_write_that_reconcile_already_recorded_is_not_recorded_twice(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    real = VendureClient.set_enabled
+
+    async def late(self, product_id, enabled):
+        got = await real(self, product_id, enabled)
+        await actions.reconcile(now=later(), client=VendureClient())   # la conciliación la completa primero
+        return got
+
+    monkeypatch.setattr(VendureClient, "set_enabled", late)
+    assert k.post(c, item_id, "approve", expected_state="propuesto").status_code == 409
+    assert [a.action for a in k.audit("rv1")] == ["price_review_disabled"] and w.events("escritura_huerfana") == []
+    assert w.item(item_id).hugo_disabled is True
+
+
+async def test_the_night_and_not_the_same_skip_a_ficha_with_a_write_in_flight(c, fake, monkeypatch):
+    from app.db.models import MarketPriceSnapshot
+
+    run = w.make_run()
+    item_id = w.make_item("rv1", last_run_id=run)
+    fake.enabled["rv1"] = True
+    assert k.post(c, item_id, "approve", expected_state="propuesto").status_code == 200
+    restart = _die(monkeypatch, "set_enabled")                     # Deshacer a medias: vuelve a propuesto con el intent
+    await _crash(actions.act(item_id, "deshacer", k.PAO, expected_state="en_revision"))
+    restart()
+    assert w.item(item_id).state == "propuesto" and k.kinds(item_id)[-1] == "intent"
+    sid = w.add_snap(run, "rv1", color="verde", our=500_000)       # dejó de ser rojo: sin el intent la cerraría
+    with Session(engine) as s:
+        assert pr.after_correction(s, s.get(MarketPriceSnapshot, sid), k.PAO) is None
+        s.commit()
+    await pr.process_run(run, now=w.NOW)                           # la conciliación no la toca: no venció
+    item = w.item(item_id)
+    assert item.state == "propuesto" and item.open_key == "rv1" and k.kinds(item_id)[-1] == "intent"

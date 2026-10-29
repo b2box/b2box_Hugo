@@ -346,6 +346,29 @@ def close_item(session: Session, item: PriceReviewItem, *, note: str, actor: str
     return True
 
 
+# Escrituras en Vendure desde la bandeja (price_review_actions): un evento `intent` queda abierto hasta que lo cierra uno
+# de estos. Mientras está abierto la escritura está en curso (o quedó a medias): la ficha no la toca nadie más, ni otra
+# acción ni la pasada de la noche, hasta que se termina o se concilia.
+INTENT_END_KINDS = ("inactivado", "reactivado", "ya_activo", "vendure_error", "reactivar_a_mano", "intent_descartado",
+                    "cerrado_auto")
+
+
+def pending_intent(session: Session, item_id: int) -> PriceReviewEvent | None:
+    """El `intent` sin cerrar de la ficha, o None."""
+    ev = session.exec(select(PriceReviewEvent).where(
+        PriceReviewEvent.item_id == item_id, PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS)))  # type: ignore[attr-defined]
+        .order_by(PriceReviewEvent.id.desc()).limit(1)).first()  # type: ignore[union-attr]
+    return ev if ev is not None and ev.kind == "intent" else None
+
+
+def pending_intents(session: Session) -> list[PriceReviewEvent]:
+    """Los `intent` sin cerrar de todas las fichas (son pocos: una escritura en curso o a medias por ficha)."""
+    last = select(func.max(PriceReviewEvent.id)).where(
+        PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS))).group_by(PriceReviewEvent.item_id)  # type: ignore[attr-defined]
+    return list(session.exec(select(PriceReviewEvent).where(
+        PriceReviewEvent.id.in_(last), PriceReviewEvent.kind == "intent")).all())  # type: ignore[union-attr]
+
+
 def open_item_for(session: Session, product_id: str) -> PriceReviewItem | None:
     return session.exec(select(PriceReviewItem).where(PriceReviewItem.open_key == product_id)).first()
 
@@ -489,10 +512,11 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                     MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.product_id.in_(extra_pids))).all():  # type: ignore[attr-defined]
                 snaps_open[sn.product_id] = sn
         streak_map = streaks(s, run_id, [pid for pid, v in verdicts.items() if v.firm])
+        writing = {ev.item_id for ev in pending_intents(s)}       # una escritura en Vendure en curso o a medias
         touched = closed = reopened = 0
         for item in open_items:
             sn = snaps_open.get(item.product_id)
-            if sn is None:
+            if sn is None or item.id in writing:
                 continue
             outcome = _refresh_open_item(s, item, sn, verdicts.get(sn.product_id), streak_map.get(sn.product_id, 0),
                                          params, run_id, now)
@@ -850,7 +874,8 @@ def after_correction(session: Session, snap: MarketPriceSnapshot, actor: str | N
     verdict = evaluate_firm(snap, p)
     snap.review_flag = verdict.flag
     item = open_item_for(session, snap.product_id)
-    if item is None or item.state != PROPUESTO or item.last_run_id != snap.run_id:
+    if (item is None or item.state != PROPUESTO or item.last_run_id != snap.run_id
+            or pending_intent(session, int(item.id)) is not None):  # type: ignore[arg-type]
         return None
     item.last_snapshot_id, item.last_color, item.last_margin_pct = snap.id, snap.color, snap.est_margin_pct
     closed = False

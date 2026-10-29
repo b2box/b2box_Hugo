@@ -863,8 +863,9 @@ async def price_review_digest() -> dict | None:
 
 
 PRICE_REVIEW_RECONCILE_JOB_ID = "price_review_reconcile"
-# Corre una vez, un rato después de arrancar: así las intenciones que dejó el proceso anterior ya tienen más de 2 minutos.
-_RECONCILE_AFTER_START = timedelta(minutes=3)
+# Corre una vez, un rato después de arrancar: así las intenciones que dejó el proceso anterior ya pasaron
+# `price_review_actions.INTENT_STALE` (10 min) y se concilian; antes no se tocan (podrían estar viajando).
+_RECONCILE_AFTER_START = timedelta(minutes=11)
 
 
 async def price_review_reconcile() -> None:

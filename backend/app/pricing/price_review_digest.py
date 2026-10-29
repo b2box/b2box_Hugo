@@ -40,6 +40,7 @@ ATTENTION = {
     "vendure_error": "Vendure no aceptó el cambio: la ficha quedó como estaba",
     "reactivar_a_mano": "hay que reactivarlo a mano en Vendure",
     "intent_descartado": "un cambio en Vendure quedó a medias y se descartó",
+    "escritura_huerfana": "Vendure tomó un cambio cuando la ficha ya había cambiado: revisalo a mano",
 }
 CAUSE_TEXT = {
     "a": "caja fuera de rango", "b": "tramos mal armados", "c": "certificado alto",

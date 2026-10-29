@@ -1496,8 +1496,13 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   `AuditLog` (`price_review_disabled` / `price_review_enabled`, sale en la historia del producto) → se invalida el
   catálogo. Si Vendure falla o devuelve otra cosa, la ficha vuelve atrás, queda un evento `vendure_error` con el código
   (nunca el mensaje) y la respuesta es 502. Dos clics a la vez: una sola escritura; el segundo recibe 409 con el estado
-  actual. Si el proceso muere a mitad, la intención se concilia contra Vendure a los 2 minutos: al arrancar, en la
-  pasada de la noche o al tocar la ficha. Las escrituras no gastan el tope de 150 lecturas de la noche.
+  actual. Leer y escribir tienen un tope de 4 minutos; justo antes de escribir se vuelve a mirar que la intención siga
+  abierta. Si la escritura da un error ambiguo (timeout, 5xx, red), Hugo relee Vendure: si tomó el cambio lo confirma, si
+  no vuelve atrás, y si tampoco puede leer deja la ficha en espera (502 «no se sabe si tomó el cambio»). Mientras hay
+  una escritura en curso la ficha no la toca nadie (otra acción recibe 409, la pasada de la noche la saltea). Una
+  intención de más de 10 minutos quedó a medias y se concilia contra Vendure: al arrancar (a los 11 minutos), en la
+  pasada de la noche o al tocar la ficha. Si una escritura llega cuando la ficha ya cambió, igual queda en `AuditLog` y
+  sale en el mail en «PARA MIRAR A MANO». Las escrituras no gastan el tope de 150 lecturas de la noche.
 - **Registro.** Cada acción deja su evento con quién (email), cuándo (UTC) y por qué, y la ficha guarda `decision`,
   `decision_by`, `decision_at` y el motivo. `AuditLog` no tiene actor: el email va en el evento y en el `detail` de la
   fila (que también sale en el resumen diario de `ALERT_EMAIL_TO`, como el resto de `AuditLog`).

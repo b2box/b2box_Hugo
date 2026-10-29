@@ -216,13 +216,12 @@ def _night_sees_it_off() -> int:
     return run
 
 
-@pytest.mark.xfail(strict=True, reason="QA PR3 #1: la conciliación descarta una escritura en curso; Vendure queda "
-                                       "apagado y la noche cierra la ficha como «ya inactivo por otra razón»")
 @pytest.mark.parametrize("who", ["conciliacion", "otra_decision"])
 async def test_qa_a_reconcile_while_the_turn_off_is_in_flight_must_not_hide_that_hugo_turned_it_off(fake, monkeypatch, who):
-    """Apagar con 3 reintentos tarda hasta ~4,5 min (60-90 s por intento) y la intención se da por muerta a los 2 min.
+    """Apagar con 3 reintentos tardaba hasta ~4,5 min (60-90 s por intento) y la intención se daba por muerta a los 2 min.
     Mientras la escritura viaja, corre la conciliación (la pasada, el job de arranque o el clic de otra persona con una
-    pestaña vieja) y la descarta; después la escritura llega."""
+    pestaña vieja): ahora la escritura tiene un tope de 4 min y la intención recién vence a los 10, así que nadie la
+    descarta (la otra persona recibe 409 «en curso») y la escritura que llega queda anotada."""
     item_id = _ficha(fake, "propuesto")
     real = VendureClient.set_enabled
 
@@ -231,7 +230,9 @@ async def test_qa_a_reconcile_while_the_turn_off_is_in_flight_must_not_hide_that
             await actions.reconcile(item_ids=[item_id], now=later())
         else:
             monkeypatch.setattr(actions, "utcnow", later)
-            await actions.act(item_id, "mantener", GABRIEL, expected_state="propuesto", **KEEP)
+            with pytest.raises(actions.ActionError) as exc:
+                await actions.act(item_id, "mantener", GABRIEL, expected_state="propuesto", **KEEP)
+            assert (exc.value.status, exc.value.code) == (409, "en_curso")
             monkeypatch.setattr(actions, "utcnow", utcnow)
         return await real(self, pid, enabled)
 
@@ -261,7 +262,6 @@ def _landed_but_timed_out(fake) -> None:
     fake.handler = h
 
 
-@pytest.mark.xfail(strict=True, reason="QA PR3 #1: ante un error ambiguo la ficha vuelve atrás sin releer Vendure")
 async def test_qa_a_turn_off_that_landed_but_timed_out_must_not_leave_the_ficha_saying_otherwise(c, fake):
     item_id = _ficha(fake, "propuesto")
     _landed_but_timed_out(fake)
@@ -273,7 +273,6 @@ async def test_qa_a_turn_off_that_landed_but_timed_out_must_not_leave_the_ficha_
     assert item.hugo_disabled is True and item.state != "cerrado_auto", trail
 
 
-@pytest.mark.xfail(strict=True, reason="QA PR3 #1: reactivación que llegó pero dio timeout; después Despublicar no apaga")
 async def test_qa_a_reactivation_that_landed_but_timed_out_then_unpublish_leaves_it_published(c, fake):
     item_id = _ficha(fake, "en_revision")
     _landed_but_timed_out(fake)

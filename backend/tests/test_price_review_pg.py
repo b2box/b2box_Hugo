@@ -390,6 +390,6 @@ async def test_decisions_undo_and_reconcile_work_on_postgres(pg, monkeypatch):
         s.commit()
     from app.clock import utcnow
 
-    assert await actions.reconcile(now=utcnow() + timedelta(minutes=3)) == 1
+    assert await actions.reconcile(now=utcnow() + timedelta(minutes=11)) == 1
     assert w.item(item_id).state == "corrigiendo"
     k.clean_audit()

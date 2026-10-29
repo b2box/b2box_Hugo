@@ -22,9 +22,12 @@ Escribir `enabled` (protocolo 3.7):
     5. en otra transacción: `hugo_disabled` y sus fechas, el evento `inactivado` / `reactivado` y una fila de AuditLog;
     6. `vendure_catalog.invalidate()`.
 
-Si Vendure falla o devuelve otra cosa, la ficha vuelve atómicamente al estado anterior con un evento `vendure_error`
-(solo el código de `safe_error.error_code`, nunca el mensaje) y la respuesta es 502. Si el proceso muere a mitad,
-`reconcile()` completa o descarta la intención contra el `enabled` real: lo llaman la pasada de la noche, un job al
+Leer y escribir tiene un tope duro (`APPLY_DEADLINE_S`) y, justo antes de escribir, se vuelve a mirar que la intención
+siga abierta. Si Vendure rechaza la escritura o devuelve otra cosa, la ficha vuelve atómicamente al estado anterior con
+un evento `vendure_error` (solo el código de `safe_error.error_code`, nunca el mensaje) y la respuesta es 502. Si la
+escritura da un error ambiguo (timeout, 5xx, red), se relee Vendure: si tomó el cambio se confirma; si no, se vuelve
+atrás; si tampoco se puede leer, la intención queda abierta. Una intención abierta de más de `INTENT_STALE` (el proceso
+murió, o Vendure no respondió) la concilia `reconcile()` contra el `enabled` real: la pasada de la noche, un job al
 arrancar y la próxima acción sobre la misma ficha.
 
 Reglas fijas:
@@ -37,6 +40,7 @@ Reglas fijas:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -45,7 +49,7 @@ from typing import Any, Iterable
 
 from gql.transport.exceptions import TransportQueryError
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, func, select
+from sqlmodel import Session, select
 
 from app import runtime
 from app.clock import utcnow
@@ -99,10 +103,15 @@ TEXT_MIN, TEXT_MAX = 10, 500
 HUMAN_KINDS = {"aprobado", *(f"decision_{d}" for d in DECISIONS)}
 STATE_KINDS = HUMAN_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto", "vendure_error", "reactivar_a_mano",
                              "intent_descartado"}
-# Lo que cierra un `intent`: mientras el último de estos sea el `intent`, la escritura está en curso o quedó a medias.
-INTENT_END_KINDS = ("inactivado", "reactivado", "ya_activo", "vendure_error", "reactivar_a_mano", "intent_descartado",
-                    "cerrado_auto")
-INTENT_STALE = timedelta(minutes=2)      # una intención más vieja que esto quedó a medias: se concilia
+# Tope para leer y escribir en Vendure (pasos 2 a 4). Apagar reintenta 3 veces y cada intento puede tardar 60 s (httpx)
+# o 90 s (gql): sin tope, una escritura podía llegar a Vendure 4 a 9 minutos después del clic.
+APPLY_DEADLINE_S = 240.0
+# La relectura después de un error ambiguo al escribir (¿Vendure tomó el cambio o no?).
+REREAD_DEADLINE_S = 60.0
+# Una intención más vieja que esto quedó a medias (el proceso murió, o Vendure no respondió ni a la relectura): se
+# concilia. Tiene que quedar MUY por encima de APPLY_DEADLINE_S + REREAD_DEADLINE_S (5 min): si no, la conciliación
+# descarta una escritura que todavía está viajando y que después llega igual.
+INTENT_STALE = timedelta(minutes=10)
 UNDO_WINDOW = timedelta(days=30)
 APPROVAL_BLOCKED = {"pending": "está pendiente de aprobación en el portal de proveedores",
                     "rejected": "está rechazado en el portal de proveedores"}
@@ -138,6 +147,7 @@ class _Move:
     write: bool | None
     values: dict[str, Any]                                   # columnas que cambia (además de state / version)
     before: dict[str, Any] = field(default_factory=dict)     # cómo estaban, con `state_since`: para volver atrás
+    intent_id: int | None = None                             # el evento `intent` de esta escritura
 
 
 # ─── Validación ───────────────────────────────────────────────────
@@ -168,20 +178,12 @@ def _mode() -> int:
     return int(runtime.get("pm_mode") or 0)
 
 
-def pending_intent(s: Session, item_id: int) -> PriceReviewEvent | None:
-    """El `intent` sin cerrar de la ficha, o None."""
-    ev = s.exec(select(PriceReviewEvent).where(
-        PriceReviewEvent.item_id == item_id, PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS)))  # type: ignore[attr-defined]
-        .order_by(PriceReviewEvent.id.desc()).limit(1)).first()  # type: ignore[union-attr]
-    return ev if ev is not None and ev.kind == "intent" else None
-
-
 def _load(item_id: int) -> tuple[PriceReviewItem, PriceReviewEvent | None]:
     with Session(engine, expire_on_commit=False) as s:
         item = s.get(PriceReviewItem, item_id)
         if item is None:
             raise ActionError(404, "no_existe", "Ficha no encontrada.")
-        return item, pending_intent(s, item_id)
+        return item, pr.pending_intent(s, item_id)
 
 
 def _events(item_id: int) -> list[PriceReviewEvent]:
@@ -343,12 +345,14 @@ def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text:
             if moved:
                 ev = pr.add_event(s, item, kind, actor=actor, from_state=mv.from_state, to_state=mv.to_state,
                                   motive_code=code, motive_text=text, payload=payload or None, now=now)
+                intent = None
                 if mv.write is not None:
                     s.flush()
-                    pr.add_event(s, item, "intent", actor=actor, from_state=mv.from_state, to_state=mv.to_state,
-                                 enabled_before=not mv.write, enabled_after=mv.write, now=now,
-                                 payload={"accion": mv.action, "evento": ev.id, "antes": _dump(mv.before)})
+                    intent = pr.add_event(s, item, "intent", actor=actor, from_state=mv.from_state, to_state=mv.to_state,
+                                          enabled_before=not mv.write, enabled_after=mv.write, now=now,
+                                          payload={"accion": mv.action, "evento": ev.id, "antes": _dump(mv.before)})
                 s.commit()
+                mv.intent_id = None if intent is None else intent.id
         except IntegrityError:
             s.rollback()
             raise ActionError(409, "otra_ficha_abierta", "El producto ya tiene otra ficha abierta.") from None
@@ -365,15 +369,18 @@ def _result(item: PriceReviewItem, *, wrote: bool, note: str | None = None) -> d
 
 
 async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureClient) -> dict[str, Any]:
-    """Pasos 2 a 6 del protocolo. La ficha ya está en `mv.to_state` con su `intent`."""
+    """Pasos 2 a 6 del protocolo. La ficha ya está en `mv.to_state` con su `intent`. Leer y escribir comparten un tope
+    duro (`APPLY_DEADLINE_S`), muy por debajo de `INTENT_STALE`: la conciliación nunca corre con la escritura en viaje."""
     target = bool(mv.write)
     guard: ReviewGuard | None = None
+    deadline = asyncio.get_running_loop().time() + APPLY_DEADLINE_S
     try:
-        if target:
-            guard = await client.get_review_guard(item.product_id)
-            enabled = None if guard is None else guard.enabled
-        else:
-            enabled = await client.get_enabled_status(item.product_id)
+        async with asyncio.timeout_at(deadline):
+            if target:
+                guard = await client.get_review_guard(item.product_id)
+                enabled = None if guard is None else guard.enabled
+            else:
+                enabled = await client.get_enabled_status(item.product_id)
     except TransportQueryError as exc:
         if not target:
             _undo_move(item, mv, actor, "vendure_error", "lectura", error=error_code(exc))
@@ -381,7 +388,7 @@ async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureCl
         # Vendure contestó pero no deja leer el estado de aprobación: no se adivina, se reactiva a mano.
         log.warning("price_review: no se pudo leer el guardia de %s: %s", item.product_id, error_code(exc))
         raise _manual(item, mv, actor, "aprobacion_ilegible", "no se pudo leer el estado de aprobación en Vendure")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  (todavía no se escribió nada: volver atrás es seguro)
         log.warning("price_review: no se pudo leer %s en Vendure: %s", item.product_id, error_code(exc))
         _undo_move(item, mv, actor, "vendure_error", "lectura", error=error_code(exc))
         raise _vendure_failed(item) from None
@@ -394,19 +401,46 @@ async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureCl
         blocker = _reactivation_blocker(item, guard)
         if blocker is not None:
             raise _manual(item, mv, actor, *blocker)
+    if not _still_pending(item, mv):
+        raise _state_changed(_load(int(item.id))[0])  # type: ignore[arg-type]
     try:
-        got = await client.set_enabled(item.product_id, target)
-    except Exception as exc:  # noqa: BLE001
+        async with asyncio.timeout_at(deadline):
+            got = await client.set_enabled(item.product_id, target)
+        failure = None if got is target else "valor_no_coincide"
+    except Exception as exc:  # noqa: BLE001  (timeout, 5xx, red: no se sabe si llegó)
         log.warning("price_review: set_enabled(%s, %s) falló: %s", item.product_id, target, error_code(exc))
-        _undo_move(item, mv, actor, "vendure_error", "escritura", error=error_code(exc))
-        raise _vendure_failed(item) from None
+        failure = error_code(exc)
+        got = await _reread(item, client, failure)
     if got is not target:
-        _undo_move(item, mv, actor, "vendure_error", "valor_no_coincide", error="valor_no_coincide")
+        _undo_move(item, mv, actor, "vendure_error", "escritura" if failure != "valor_no_coincide" else failure,
+                   error=failure)
         raise _vendure_failed(item)
     if not _confirm(item, mv, actor, target, guard):
         raise _state_changed(_load(int(item.id))[0])  # type: ignore[arg-type]
     vendure_catalog.invalidate()
     return _result(item, wrote=True)
+
+
+def _still_pending(item: PriceReviewItem, mv: _Move) -> bool:
+    """Justo antes de escribir: ¿la intención sigue abierta y la ficha no se movió? Si otro la resolvió (la conciliación,
+    otro proceso), no se escribe."""
+    with Session(engine) as s:
+        current = s.get(PriceReviewItem, item.id)
+        intent = pr.pending_intent(s, int(item.id))  # type: ignore[arg-type]
+    return (current is not None and current.version == item.version and intent is not None
+            and intent.id == mv.intent_id)
+
+
+async def _reread(item: PriceReviewItem, client: VendureClient, error: str) -> bool | None:
+    """Después de un error al escribir: ¿Vendure tomó el cambio? Si tampoco se puede leer, NO se vuelve atrás a ciegas:
+    la intención queda abierta (la concilia la noche, o la próxima acción pasado `INTENT_STALE`) y la respuesta lo dice."""
+    try:
+        async with asyncio.timeout(REREAD_DEADLINE_S):
+            return await client.get_enabled_status(item.product_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("price_review: no se pudo releer %s después del error: %s", item.product_id, error_code(exc))
+        raise ActionError(502, "vendure_incierto", "Vendure no respondió y no se sabe si tomó el cambio: la ficha queda en "
+                          "espera y Hugo lo verifica solo en unos minutos.", item, error=error) from None
 
 
 def _vendure_failed(item: PriceReviewItem) -> ActionError:
@@ -488,6 +522,9 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
     with Session(engine, expire_on_commit=False) as s:
         s.add(item)
         if not pr.move_item(s, item, item.state, now=now, state_since=item.state_since, vendure_error=None, **values):
+            if not _recorded_after(s, item, mv):
+                _orphan_write(s, item, mv, actor, target, now)
+                s.commit()
             log.warning("price_review: la ficha #%s ya estaba resuelta; no se anota dos veces", item.id)
             return False
         payload: dict[str, Any] = {"accion": mv.action}
@@ -497,16 +534,38 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
             payload["conciliado"] = True
         pr.add_event(s, item, "reactivado" if target else "inactivado", actor=actor, from_state=mv.from_state,
                      to_state=mv.to_state, enabled_before=not target, enabled_after=target, now=now, payload=payload)
-        s.add(AuditLog(
-            action="price_review_enabled" if target else "price_review_disabled", source="price_review",
-            product_id=item.product_id, created_at=now,
-            detail=(f"Bandeja de precios, ficha #{item.id}: «{ACTION_LABEL.get(mv.action, mv.action)}» de {actor}. "
-                    f"{'Reactivado' if target else 'Inactivado'} en Vendure."),
-            before=json.dumps({"enabled": not target}), after=json.dumps({"enabled": target}),
-            product_name=item.product_name, product_code=item.product_code, product_image_url=item.image_url,
-        ))
+        s.add(_audit_row(item, mv, actor, target, now))
         s.commit()
     return True
+
+
+def _audit_row(item: PriceReviewItem, mv: _Move, actor: str, target: bool, now: datetime, extra: str = "") -> AuditLog:
+    """La fila de AuditLog de una escritura (sale en la historia del producto). AuditLog no tiene actor: va en `detail`."""
+    return AuditLog(
+        action="price_review_enabled" if target else "price_review_disabled", source="price_review",
+        product_id=item.product_id, created_at=now,
+        detail=(f"Bandeja de precios, ficha #{item.id}: «{ACTION_LABEL.get(mv.action, mv.action)}» de {actor}. "
+                f"{'Reactivado' if target else 'Inactivado'} en Vendure.{extra}"),
+        before=json.dumps({"enabled": not target}), after=json.dumps({"enabled": target}),
+        product_name=item.product_name, product_code=item.product_code, product_image_url=item.image_url,
+    )
+
+
+def _recorded_after(s: Session, item: PriceReviewItem, mv: _Move) -> bool:
+    """¿La conciliación ya anotó esta misma escritura (un `inactivado` / `reactivado` posterior a la intención)?"""
+    return s.exec(select(PriceReviewEvent.id).where(
+        PriceReviewEvent.item_id == item.id, PriceReviewEvent.id > (mv.intent_id or 0),
+        PriceReviewEvent.kind == ("reactivado" if mv.write else "inactivado"))).first() is not None
+
+
+def _orphan_write(s: Session, item: PriceReviewItem, mv: _Move, actor: str, target: bool, now: datetime) -> None:
+    """Vendure tomó el cambio pero la ficha ya se había movido (no debería pasar con `INTENT_STALE` muy por encima del tope
+    de la escritura). Igual queda en AuditLog con el actor y en un evento que sale en «PARA MIRAR A MANO» del mail: un
+    producto apagado o prendido por Hugo nunca queda sin rastro."""
+    s.add(_audit_row(item, mv, actor, target, now, " La ficha ya había cambiado: revisar a mano."))
+    pr.add_event(s, item, "escritura_huerfana", actor=actor, enabled_before=not target, enabled_after=target, now=now,
+                 motive_text="Vendure tomó el cambio cuando la ficha ya había cambiado: revisalo a mano.",
+                 payload={"accion": mv.action, "intent": mv.intent_id})
 
 
 # ─── Conciliación (el proceso murió a mitad de una escritura) ─────
@@ -514,18 +573,13 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
 
 async def reconcile(*, item_ids: list[int] | None = None, client: VendureClient | None = None,
                     now: datetime | None = None) -> int:
-    """Cada `intent` sin cerrar de más de 2 minutos se concilia contra el `enabled` real: si Vendure ya tiene el valor
-    pedido se completa (paso 5); si no, la ficha vuelve a como estaba con un evento `intent_descartado`. Solo LEE Vendure.
-    Si no se puede leer, la intención queda para la próxima. Devuelve cuántas resolvió."""
+    """Cada `intent` sin cerrar de más de `INTENT_STALE` se concilia contra el `enabled` real: si Vendure ya tiene el
+    valor pedido se completa (paso 5); si no, la ficha vuelve a como estaba con un evento `intent_descartado`. Solo LEE
+    Vendure. Si no se puede leer, la intención queda para la próxima. Devuelve cuántas resolvió."""
     cutoff = (now or utcnow()) - INTENT_STALE
     with Session(engine) as s:
-        last = select(func.max(PriceReviewEvent.id)).where(
-            PriceReviewEvent.kind.in_(("intent", *INTENT_END_KINDS))).group_by(PriceReviewEvent.item_id)  # type: ignore[attr-defined]
-        stmt = select(PriceReviewEvent).where(PriceReviewEvent.id.in_(last), PriceReviewEvent.kind == "intent",  # type: ignore[union-attr]
-                                              PriceReviewEvent.at <= cutoff)
-        if item_ids is not None:
-            stmt = stmt.where(PriceReviewEvent.item_id.in_(item_ids))  # type: ignore[attr-defined]
-        intents = list(s.exec(stmt).all())
+        intents = [ev for ev in pr.pending_intents(s)
+                   if ev.at <= cutoff and (item_ids is None or ev.item_id in item_ids)]
     if not intents:
         return 0
     client = client or VendureClient()
@@ -544,11 +598,11 @@ async def _reconcile_one(intent: PriceReviewEvent, client: VendureClient) -> boo
     enabled = await client.get_enabled_status(intent.product_id)
     with Session(engine, expire_on_commit=False) as s:
         item = s.get(PriceReviewItem, intent.item_id)
-        still = pending_intent(s, intent.item_id) if item is not None else None
+        still = pr.pending_intent(s, intent.item_id) if item is not None else None
     if item is None or still is None or still.id != intent.id:
         return False                                   # otro proceso ya la resolvió
     mv = _Move(str(data.get("accion") or ""), intent.from_state or item.state, intent.to_state or item.state, target,
-               {}, _parse(data.get("antes") or {}))
+               {}, _parse(data.get("antes") or {}), intent_id=intent.id)
     if enabled is target:
         return _confirm(item, mv, intent.actor, target, None, reconciled=True)
     return _undo_move(item, mv, intent.actor, "intent_descartado", "conciliacion",
