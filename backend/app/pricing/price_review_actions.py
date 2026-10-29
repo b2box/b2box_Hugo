@@ -68,21 +68,23 @@ INACTIVAR, CORREGIR, MANTENER, DESPUBLICAR, REACTIVAR, DESHACER = (
     "inactivar", "corregir", "mantener", "despublicar", "reactivar", "deshacer")
 DECISIONS = (CORREGIR, MANTENER, DESPUBLICAR, REACTIVAR)
 
-# (estado, acción) → (estado nuevo, qué se escribe en Vendure: False apaga, True reactiva, None nada).
+# (estado, acción) → (estado nuevo, qué tiene que quedar en Vendure: False apagado, True activo, None no se mira). Corregir
+# y Despublicar desde un estado «apagado por Hugo» también piden apagado: si alguien lo reactivó a mano, se vuelve a
+# apagar (con evento y AuditLog); si sigue apagado por Hugo, no se escribe nada.
 TRANSITIONS: dict[tuple[str, str], tuple[str, bool | None]] = {
     (pr.PROPUESTO, INACTIVAR): (pr.EN_REVISION, False),
     (pr.PROPUESTO, CORREGIR): (pr.CORRIGIENDO, False),
     (pr.PROPUESTO, MANTENER): (pr.MANTENIDO, None),
     (pr.PROPUESTO, DESPUBLICAR): (pr.DESPUBLICADO, False),
-    (pr.EN_REVISION, CORREGIR): (pr.CORRIGIENDO, None),
+    (pr.EN_REVISION, CORREGIR): (pr.CORRIGIENDO, False),
     (pr.EN_REVISION, MANTENER): (pr.MANTENIDO, True),
-    (pr.EN_REVISION, DESPUBLICAR): (pr.DESPUBLICADO, None),
+    (pr.EN_REVISION, DESPUBLICAR): (pr.DESPUBLICADO, False),
     (pr.CORRIGIENDO, MANTENER): (pr.MANTENIDO, True),
-    (pr.CORRIGIENDO, DESPUBLICAR): (pr.DESPUBLICADO, None),
+    (pr.CORRIGIENDO, DESPUBLICAR): (pr.DESPUBLICADO, False),
     (pr.CORRIGIENDO, REACTIVAR): (pr.CORREGIDO, True),
-    (pr.BUSCANDO_PROV, CORREGIR): (pr.CORRIGIENDO, None),
+    (pr.BUSCANDO_PROV, CORREGIR): (pr.CORRIGIENDO, False),
     (pr.BUSCANDO_PROV, MANTENER): (pr.MANTENIDO, True),
-    (pr.BUSCANDO_PROV, DESPUBLICAR): (pr.DESPUBLICADO, None),
+    (pr.BUSCANDO_PROV, DESPUBLICAR): (pr.DESPUBLICADO, False),
 }
 ACTION_LABEL = {
     INACTIVAR: "Inactivar y revisar", CORREGIR: "Corregir", MANTENER: "Mantener activo", DESPUBLICAR: "Despublicar",
@@ -509,23 +511,28 @@ def _undo_move(item: PriceReviewItem, mv: _Move, actor: str, kind: str, code: st
 
 
 def _already(item: PriceReviewItem, mv: _Move, actor: str, target: bool) -> dict[str, Any]:
-    """El producto ya está como se quería: no se escribe. Apagar algo apagado por otra razón cierra la ficha (regla
-    única de 3.1); reactivar algo que otra persona ya reactivó termina la acción sin error."""
+    """El producto ya está como se quería: no se escribe.
+
+      * apagado y lo había apagado Hugo (Corregir o Despublicar desde «en revisión»): sigue la acción, sin escribir;
+      * apagado por otra razón: la ficha se cierra (regla única de 3.1);
+      * activo y había que reactivar (otra persona ya lo reactivó): termina la acción sin error."""
     now = utcnow()
+    note = "ya_activo" if target else "ya_apagado" if item.hugo_disabled is True else "ya_inactivo"
     with Session(engine, expire_on_commit=False) as s:
         s.add(item)
-        if not target:
+        if note == "ya_inactivo":
             done = pr.close_item(s, item, note="El producto ya estaba inactivo por otra razón: Hugo no lo tocó.",
                                  actor=actor, code="ya_inactivo", now=now, hugo_disabled=False)
         else:
-            done = pr.move_item(s, item, item.state, now=now, state_since=item.state_since, hugo_disabled=False)
+            done = pr.move_item(s, item, item.state, now=now, state_since=item.state_since, hugo_disabled=not target)
             if done:
-                pr.add_event(s, item, "ya_activo", actor=actor, enabled_before=True, enabled_after=True, now=now,
-                             motive_text="Ya estaba activo: otra persona lo reactivó; Hugo no escribió nada.")
+                pr.add_event(s, item, note, actor=actor, enabled_before=target, enabled_after=target, now=now,
+                             motive_text="Ya estaba activo: otra persona lo reactivó; Hugo no escribió nada." if target
+                             else "Sigue apagado (lo había apagado Hugo): no hizo falta escribir.")
         s.commit()
     if not done:
         raise _state_changed(_load(int(item.id))[0])  # type: ignore[arg-type]
-    return _result(item, wrote=False, note="ya_inactivo" if not target else "ya_activo")
+    return _result(item, wrote=False, note=note)
 
 
 def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: ReviewGuard | None,

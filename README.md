@@ -1471,9 +1471,9 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
 | Desde ↓ / acción → | Inactivar y revisar | Corregir | Mantener activo | Despublicar | Ya lo corregí: reactivar |
 |---|---|---|---|---|---|
 | `propuesto` (activo) | apaga → `en_revision` | apaga → `corrigiendo` | sin escribir → `mantenido` | apaga → `despublicado` | no |
-| `en_revision` (lo apagó Hugo) | no | → `corrigiendo` | reactiva → `mantenido` | → `despublicado` | no |
-| `corrigiendo` | no | no | reactiva → `mantenido` | → `despublicado` | reactiva → `corregido` |
-| `buscando_prov` | no | → `corrigiendo` | reactiva → `mantenido` | → `despublicado` | no |
+| `en_revision` (lo apagó Hugo) | no | verifica apagado → `corrigiendo` | reactiva → `mantenido` | verifica apagado → `despublicado` | no |
+| `corrigiendo` | no | no | reactiva → `mantenido` | verifica apagado → `despublicado` | reactiva → `corregido` |
+| `buscando_prov` | no | verifica apagado → `corrigiendo` | reactiva → `mantenido` | verifica apagado → `despublicado` | no |
 | `mantenido`, `despublicado`, `corregido`, `cerrado_auto` | no | no | no | no | no (solo Deshacer) |
 
 - **Motivos.** Corregir: caja, tramos, cantidad, certificado, otro. Mantener: nicho, volumen, margen aceptado, el match de
@@ -1481,7 +1481,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   duplicado, otro. «Otro» pide un texto de 10 caracteres o más. Los textos se guardan sin caracteres de control y con
   500 como máximo; la pantalla los muestra como texto.
 - **Apagar algo ya apagado por otra razón** no escribe nada: la ficha se cierra (`cerrado_auto`, «ya estaba inactivo por
-  otra razón»).
+  otra razón»). «Verifica apagado»: si sigue apagado por Hugo no se escribe nada; si alguien lo prendió a mano, se vuelve
+  a apagar (con su evento y su fila de `AuditLog`).
 - **Reactivar** escribe solo si: lo apagó Hugo (`hugo_disabled`), sigue apagado, el portal de proveedores no lo tiene
   `pending` ni `rejected` (`approvalStatus`; si no se puede leer, no se reactiva) y nadie lo apagó ni lo confirmó
   después como duplicado o como BX sin foto. Confirmar un duplicado o un BX con el producto ya apagado no toca Vendure

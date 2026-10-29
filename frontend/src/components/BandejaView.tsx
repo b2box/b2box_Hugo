@@ -78,6 +78,7 @@ const EVENT_LABEL: Record<string, string> = {
   inactivado: "Inactivado en Vendure",
   reactivado: "Reactivado en Vendure",
   ya_activo: "No hizo falta reactivar",
+  ya_apagado: "Seguía apagado: no hizo falta escribir",
   vendure_error: "Vendure no aceptó el cambio",
   reactivar_a_mano: "Hay que reactivarlo a mano",
   intent_descartado: "Cambio a medias descartado",
@@ -620,7 +621,7 @@ function EventLine({ e }: { e: ReviewEvent }) {
 
 const VENDURE_EFFECT: Record<"apagar" | "reactivar" | "nada", string> = {
   apagar:
-    "Hugo va a INACTIVAR el producto en Vendure: deja de verse en la tienda. Si ya estaba inactivo por otra razón, no lo toca y la ficha se cierra.",
+    "El producto queda INACTIVO en Vendure (no se ve en la tienda): si está activo, Hugo lo apaga. Si ya lo había apagado Hugo, no hace falta escribir; si lo apagó otra persona u otro proceso, Hugo no lo toca y la ficha se cierra.",
   reactivar:
     "Hugo va a REACTIVAR el producto en Vendure, solo si lo había apagado Hugo y nadie lo apagó después. Si el producto tiene contacto del proveedor, Vendure lo vuelve a publicar en los otros canales; si eso falla, no se reactiva.",
   nada: "No cambia nada en Vendure.",

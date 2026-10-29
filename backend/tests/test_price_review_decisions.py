@@ -197,7 +197,22 @@ async def test_d2_fix_from_proposed_turns_it_off_and_from_in_review_writes_nothi
     fake.enabled["rv2"] = False
     r = k.decide(c, b, "corregir", "en_revision", "caja", None)
     assert r.status_code == 200 and r.json()["state"] == "corrigiendo" and r.json()["wrote"] is False
-    assert fake.writes() == [False] and fake.count("GetEnabled") == 1           # la segunda no lee ni escribe
+    assert r.json()["note"] == "ya_apagado" and w.item(b).hugo_disabled is True
+    assert fake.writes() == [False] and fake.count("GetEnabled") == 2           # la segunda verifica, pero no escribe
+
+
+@pytest.mark.parametrize("decision,code,to_state", [("corregir", "caja", "corrigiendo"), ("despublicar", "calidad", "despublicado")])
+@pytest.mark.parametrize("state", ["en_revision", "corrigiendo", "buscando_prov"])
+async def test_fix_or_unpublish_turn_it_off_again_if_someone_turned_it_on_by_hand(c, fake, state, decision, code, to_state):
+    """Seguridad B1: desde un estado «apagado por Hugo», Corregir y Despublicar verifican que siga apagado."""
+    if (state, decision) not in actions.TRANSITIONS:
+        pytest.skip("la tabla 3.1 no lo permite")
+    item_id = k.disabled_by_hugo("rv1", state)
+    fake.enabled["rv1"] = True                                         # alguien lo prendió a mano en Vendure
+    r = k.decide(c, item_id, decision, state, code)
+    assert r.status_code == 200 and r.json()["state"] == to_state and r.json()["wrote"] is True
+    assert fake.writes() == [False] and fake.enabled["rv1"] is False
+    assert "inactivado" in k.kinds(item_id) and [a.action for a in k.audit("rv1")] == ["price_review_disabled"]
 
 
 async def test_d3_keep_from_proposed_writes_nothing_and_keeps_the_baseline(c, fake):
@@ -493,7 +508,7 @@ async def test_ui1_the_detail_says_which_buttons_there_are_and_why_they_are_off(
     w.set_setting("pm_mode", 1)
     d = k.client().get(f"{k.BASE}/items/{corr}").json()
     assert [a["code"] for a in d["actions"]] == ["mantener", "despublicar", "reactivar"]
-    assert {a["code"]: a["vendure"] for a in d["actions"]} == {"mantener": "reactivar", "despublicar": None, "reactivar": "reactivar"}
+    assert {a["code"]: a["vendure"] for a in d["actions"]} == {"mantener": "reactivar", "despublicar": "apagar", "reactivar": "reactivar"}
 
 
 async def test_ui4_undo_shows_up_only_for_the_last_human_action_with_its_deadline(c, fake):

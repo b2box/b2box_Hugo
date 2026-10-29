@@ -807,7 +807,7 @@ export interface ReviewActionResult {
   state_label: string;
   version: number;
   wrote: boolean;
-  note: "ya_inactivo" | "ya_activo" | null;
+  note: "ya_inactivo" | "ya_activo" | "ya_apagado" | null;
 }
 
 export interface PriceReviewDetail extends PriceReviewItemRow {
