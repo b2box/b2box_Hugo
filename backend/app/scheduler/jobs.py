@@ -10,6 +10,7 @@ Jobs:
   7. apify_ml_search     → busca en la web de ML con Apify la cola de la oficina (antes del semáforo).
   8. price_review_digest → resumen diario de la bandeja de revisión para Pao (08:30 ART).
   9. price_review_reconcile → una vez, al arrancar: concilia las escrituras de la bandeja que quedaron a medias.
+ 10. refresh_catalog     → cada pocos minutos: cache del catálogo y recálculo del semáforo de lo que cambió en Vendure.
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -697,13 +698,23 @@ async def refresh_catalog() -> None:
     frío (cold-start). Mantiene el cache caliente entre auditorías.
 
     Es un refresh INCREMENTAL (solo productos con updatedAt nuevo); el full se
-    hace solo cada `catalog_full_refresh_seconds`. Ver app/vendure/catalog.py."""
+    hace solo cada `catalog_full_refresh_seconds`. Ver app/vendure/catalog.py.
+
+    Después recalcula el semáforo y la bandeja de los productos que cambiaron en
+    Vendure (app/pricing/price_recalc.py). Un error ahí queda en el log: no tira
+    este job."""
+    from app.pricing import price_recalc
     from app.vendure import catalog as vendure_catalog
 
     try:
         await vendure_catalog.get_catalog(force=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("refresh_catalog falló: %s", exc)
+    try:
+        price_recalc.enqueue(vendure_catalog.pop_changed())
+        await price_recalc.run_pending()
+    except Exception:  # noqa: BLE001
+        log.exception("refresh_catalog: el recálculo de los productos cambiados falló")
 
 
 def _prune_ml_embed_cache() -> int:

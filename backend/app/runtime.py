@@ -413,7 +413,8 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         description=(
             "0 = sombra: mide y guarda, no llena la bandeja y frena las decisiones (Deshacer sigue). 1 = propuesta: "
             "los rojos firmes entran a la bandeja de Pao y se manda el resumen diario; Hugo inactiva o reactiva en "
-            "Vendure SOLO lo que decide una persona de PRICE_REVIEW_DECIDERS. 2 = automático: TODAVÍA NO "
+            "Vendure SOLO lo que decide una persona de PRICE_REVIEW_DECIDERS, salvo una cosa: reactiva solo lo que "
+            "apagó él cuando se corrige en Vendure y deja de ser rojo firme (con tope diario). 2 = automático: TODAVÍA NO "
             "IMPLEMENTADO; se comporta como 1."
         ),
         type="int", parser=int,
@@ -846,6 +847,30 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="float", parser=float,
         default_attr="pm_review_worse_pct",
         min=1.0, max=100.0, step=1.0, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_recalc_daily_max",
+        label="Recálculo al cambiar en Vendure: productos por día",
+        description=(
+            "Cuando un producto cambia en Vendure, Hugo lee su precio nuevo (una lectura por producto) y recalcula el "
+            "semáforo con los precios de ML de la última medición. Tope de productos por día (hora de Argentina): lo que "
+            "pase del tope queda para la corrida de la noche. 0 = no se recalcula durante el día."
+        ),
+        type="int", parser=int,
+        default_attr="pm_recalc_daily_max",
+        min=0, max=2000, step=50, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_recalc_reactivations_daily_max",
+        label="Recálculo: reactivaciones automáticas por día",
+        description=(
+            "Con la bandeja en modo 1, si un producto que apagó Hugo deja de ser rojo firme después de un cambio en "
+            "Vendure, Hugo lo reactiva solo (con las mismas guardas que «Ya lo corregí»). Tope por día (hora de "
+            "Argentina): pasado el tope la ficha queda con el aviso para reactivarla a mano. 0 = nunca reactiva solo."
+        ),
+        type="int", parser=int,
+        default_attr="pm_recalc_reactivations_daily_max",
+        min=0, max=500, step=5, group="monitor",
     ),
     SettingMeta(
         key="pm_diag_cert_share_pct",

@@ -519,7 +519,8 @@ class Settings(EnvSettings):
     # Bandeja de revisión de Pao (pricing/price_review.py). 0 = sombra (mide y guarda; solo marca los rojos en
     # los snapshots; las decisiones quedan frenadas, Deshacer no). 1 = propuesta: llena la bandeja con los rojos
     # firmes y manda el resumen diario a Pao; Hugo inactiva o reactiva SOLO lo que decide una persona de
-    # PRICE_REVIEW_DECIDERS. 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
+    # PRICE_REVIEW_DECIDERS, salvo la reactivación automática del recálculo (lo que apagó Hugo, se corrigió en Vendure y
+    # ya no es rojo firme). 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
     pm_mode: int = 0
     # Cortes del semáforo, en % de ganancia estimada del revendedor.
     pm_green_min_pct: float = 30.0
@@ -668,6 +669,10 @@ class Settings(EnvSettings):
     pm_review_sla_days: int = 7
     # Regla del 10 %: una ficha «mantenido» se reabre si el cociente nuestro precio / neto de ML empeora este %.
     pm_review_worse_pct: float = 10.0
+    # Recálculo al cambiar un producto en Vendure (pricing/price_recalc.py): lecturas de Vendure por día (ART, un producto
+    # = una lectura) y reactivaciones automáticas por día de lo que apagó Hugo y ya no es rojo firme.
+    pm_recalc_daily_max: int = 300
+    pm_recalc_reactivations_daily_max: int = 20
     # Umbrales del diagnóstico a-e.
     pm_diag_cert_share_pct: float = 10.0
     pm_diag_logistics_ratio: float = 1.0

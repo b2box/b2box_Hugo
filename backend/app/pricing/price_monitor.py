@@ -2002,6 +2002,9 @@ def snapshot_to_dict(snap: MarketPriceSnapshot) -> dict[str, Any]:
         # De cuándo es el dato de los idénticos, y lo que decidió la bandeja: firme | dudoso:<motivo> | None.
         "data_at": snap.data_at.isoformat() + "Z" if snap.data_at else None,
         "review_flag": snap.review_flag,
+        # Recalculado durante el día porque el producto cambió en Vendure: la hora y lo que había medido la corrida.
+        "recalc": None if snap.recalc_at is None else {
+            "at": snap.recalc_at.isoformat() + "Z", "before": _json_dict(snap.recalc_before) or None},
     }
 
 
