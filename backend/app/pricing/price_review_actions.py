@@ -156,6 +156,7 @@ class _Move:
     values: dict[str, Any]                                   # columnas que cambia (además de state / version)
     before: dict[str, Any] = field(default_factory=dict)     # cómo estaban, con `state_since`: para volver atrás
     intent_id: int | None = None                             # el evento `intent` de esta escritura
+    intent_at: datetime | None = None                        # y su hora: desde ahí vale «Hugo lo apagó»
 
 
 # ─── Validación ───────────────────────────────────────────────────
@@ -376,7 +377,7 @@ def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text:
                                           enabled_before=not mv.write, enabled_after=mv.write, now=now,
                                           payload={"accion": mv.action, "evento": ev.id, "antes": _dump(mv.before)})
                 s.commit()
-                mv.intent_id = None if intent is None else intent.id
+                mv.intent_id, mv.intent_at = (None, None) if intent is None else (intent.id, intent.at)
         except IntegrityError:
             s.rollback()
             raise ActionError(409, "otra_ficha_abierta", "El producto ya tiene otra ficha abierta.") from None
@@ -574,8 +575,10 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
     """Paso 5: deja anotado lo que se escribió (la ficha, el evento y la fila de AuditLog para la historia del producto).
     Atómico: si otro proceso ya lo anotó (la conciliación), no se repite."""
     now = utcnow()
+    # `disabled_at` es la hora de la INTENCIÓN, no la de confirmar: un duplicado que otro flujo apagó o confirmó mientras
+    # la escritura viajaba (hasta el tope, o hasta la conciliación) queda después y la guarda de reactivar lo ve.
     values = ({"hugo_disabled": False, "reactivated_at": now} if target
-              else {"hugo_disabled": True, "disabled_at": now, "enabled_before": True})
+              else {"hugo_disabled": True, "disabled_at": mv.intent_at or now, "enabled_before": True})
     with Session(engine, expire_on_commit=False) as s:
         s.add(item)
         if not pr.move_item(s, item, item.state, now=now, state_since=item.state_since, vendure_error=None, **values):
@@ -659,7 +662,7 @@ async def _reconcile_one(intent: PriceReviewEvent, client: VendureClient) -> boo
     if item is None or still is None or still.id != intent.id:
         return False                                   # otro proceso ya la resolvió
     mv = _Move(str(data.get("accion") or ""), intent.from_state or item.state, intent.to_state or item.state, target,
-               {}, _parse(data.get("antes") or {}), intent_id=intent.id)
+               {}, _parse(data.get("antes") or {}), intent_id=intent.id, intent_at=intent.at)
     if enabled is target:
         return _confirm(item, mv, intent.actor, target, None, reconciled=True)
     return _undo_move(item, mv, intent.actor, "intent_descartado", "conciliacion",

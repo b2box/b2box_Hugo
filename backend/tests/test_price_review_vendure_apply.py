@@ -227,6 +227,29 @@ async def test_v4_a_duplicate_or_bx_confirmed_while_already_off_is_not_turned_on
     assert r.json()["detail"]["reason"] == reason and fake.writes() == [False] and w.item(item_id).state == "en_revision"
 
 
+async def test_v4_a_duplicate_confirmed_while_the_turn_off_was_in_flight_still_blocks_reactivation(c, fake, monkeypatch):
+    """Seguridad R2: `disabled_at` es la hora de la intención. Un `duplicate_confirmed` que cae entre la intención y la
+    confirmación queda después de `disabled_at` y la guarda lo ve."""
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    real = VendureClient.set_enabled
+
+    async def someone_confirms_meanwhile(self, product_id, enabled):
+        with Session(engine) as s:
+            s.add(AuditLog(action="duplicate_confirmed", source="manual", product_id="rv1", disable_target_id="rv1",
+                           canonical_product_id="rv0"))
+            s.commit()
+        return await real(self, product_id, enabled)
+
+    monkeypatch.setattr(VendureClient, "set_enabled", someone_confirms_meanwhile)
+    assert k.post(c, item_id, "approve", expected_state="propuesto").status_code == 200
+    monkeypatch.setattr(VendureClient, "set_enabled", real)
+    assert w.item(item_id).disabled_at == w.events("intent")[0].at
+    r = k.decide(c, item_id, "mantener", "en_revision", **KEEP)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "reactivar_a_mano"
+    assert r.json()["detail"]["reason"] == "duplicado" and fake.writes() == [False]
+
+
 def test_m1_a_confirmation_of_an_already_off_duplicate_is_not_counted_as_disabled_nor_restored():
     """La fila nueva es un `duplicate_confirmed`, no un `duplicate_disabled`: no entra en /api/restore-duplicates."""
     from app.api import routes as api_routes
@@ -295,6 +318,7 @@ async def test_v6_a_half_done_write_is_reconciled_against_vendure(fake, monkeypa
     assert len(k.audit("rv1")) == (1 if kind == "inactivado" else 0)
     if kind == "inactivado":
         assert json.loads(w.events("inactivado")[0].payload)["conciliado"] is True
+        assert item.disabled_at == w.events("intent")[0].at          # la hora de la intención, no la de conciliar
 
 
 @pytest.mark.parametrize("applied,final,hugo", [(True, "propuesto", False), (False, "en_revision", True)])
