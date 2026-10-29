@@ -7,7 +7,9 @@ Vendure, reactivaciones frenadas, cambios que quedaron a medias) y, una sola vez
 `notified_at`, así que un reintento (o un segundo disparo el mismo día) no repite nada: los eventos se marcan recién
 DESPUÉS de que el SMTP aceptó el mail.
 
-Hugo propone; inactiva o reactiva en Vendure solo lo que decide una persona de la lista (PRICE_REVIEW_DECIDERS).
+Hugo propone; inactiva o reactiva en Vendure solo lo que decide una persona de la lista (PRICE_REVIEW_DECIDERS). La única
+excepción es la reactivación automática del recálculo (pricing/price_recalc.py): lo que apagó Hugo, se corrigió en Vendure y
+ya no es rojo firme. Esas salen una vez en «REACTIVADOS SOLOS».
 """
 
 from __future__ import annotations
@@ -70,13 +72,14 @@ class DigestData:
     closed_events: list[PriceReviewEvent] = field(default_factory=list)
     reopened: list[tuple[PriceReviewEvent, PriceReviewItem]] = field(default_factory=list)
     attention: list[tuple[PriceReviewEvent, PriceReviewItem]] = field(default_factory=list)
+    reactivated: list[tuple[PriceReviewEvent, PriceReviewItem]] = field(default_factory=list)   # las que reactivó Hugo solo
     pending_total: int = 0
     sla_days: int = 7
     now: datetime = field(default_factory=utcnow)
 
     @property
     def empty(self) -> bool:
-        return not (self.new or self.waiting or self.reopened or self.attention)
+        return not (self.new or self.waiting or self.reopened or self.attention or self.reactivated)
 
 
 def collect(session: Session, now: datetime | None = None) -> DigestData:
@@ -94,12 +97,17 @@ def collect(session: Session, now: datetime | None = None) -> DigestData:
         select(PriceReviewEvent).where(PriceReviewEvent.kind.in_(("reabierto", *ATTENTION)),  # type: ignore[attr-defined]
                                        PriceReviewEvent.notified_at.is_(None))  # type: ignore[union-attr]
         .order_by(PriceReviewEvent.at, PriceReviewEvent.id)).all())
-    item_ids = [e.item_id for e in (*data.new_events, *others)]
+    auto = list(session.exec(
+        select(PriceReviewEvent).where(PriceReviewEvent.kind == "reactivado", PriceReviewEvent.actor == price_review.ACTOR_AUTO,
+                                       PriceReviewEvent.notified_at.is_(None))  # type: ignore[union-attr]
+        .order_by(PriceReviewEvent.at, PriceReviewEvent.id)).all())
+    item_ids = [e.item_id for e in (*data.new_events, *others, *auto)]
     items = {i.id: i for i in session.exec(select(PriceReviewItem).where(PriceReviewItem.id.in_(item_ids))).all()} if item_ids else {}  # type: ignore[attr-defined]
     # Una ficha nueva que ya se cerró sola antes del mail no se lista (queda contada en «cerradas solas»).
     data.new = [items[e.item_id] for e in data.new_events if e.item_id in items and items[e.item_id].state == price_review.PROPUESTO]
     data.reopened = [(e, items[e.item_id]) for e in others if e.kind == "reabierto" and e.item_id in items]
     data.attention = [(e, items[e.item_id]) for e in others if e.kind in ATTENTION and e.item_id in items]
+    data.reactivated = [(e, items[e.item_id]) for e in auto if e.item_id in items]
     open_items = list(session.exec(
         select(PriceReviewItem).where(PriceReviewItem.state.in_(WAITING_STATES))  # type: ignore[attr-defined]
         .order_by(PriceReviewItem.state_since, PriceReviewItem.id)).all())
@@ -138,6 +146,8 @@ def render(data: DigestData) -> tuple[str, str]:
         "Hugo propone; solo inactiva o reactiva lo que decide una persona de la lista.",
         "",
     ]
+    if data.reactivated:
+        lines[-1:-1] = ["La excepción: reactiva solo lo que había apagado él cuando se corrigió en Vendure y ya no está en rojo."]
     if data.new:
         lines.append(f"NUEVOS ({n_new})")
         lines += [_line(i) for i in data.new[:MAX_NEW_LISTED]]
@@ -163,6 +173,10 @@ def render(data: DigestData) -> tuple[str, str]:
         lines.append(f"PARA MIRAR A MANO ({len(data.attention)})")
         lines += [_line(item, f" · {ATTENTION[ev.kind]}") for ev, item in data.attention]
         lines.append("")
+    if data.reactivated:
+        lines.append(f"REACTIVADOS SOLOS ({len(data.reactivated)})")
+        lines += [_line(item, " · se corrigió en Vendure y ya no es rojo: Hugo lo reactivó") for _, item in data.reactivated]
+        lines.append("")
     if data.closed_events:
         lines.append(f"Se cerraron solas desde el último mail: {len(data.closed_events)} (el producto dejó de ser rojo).")
     lines.append(f"Total esperando decisión: {data.pending_total}.")
@@ -178,7 +192,7 @@ def mark_sent(session: Session, data: DigestData, now: datetime | None = None) -
     primera vez como «nueva» (p. ej. se cargó PM_REVIEW_EMAILS tarde): no tiene que volver a salir como «esperando» en el
     próximo mail. No hace commit."""
     now = now or utcnow()
-    for ev in (*data.new_events, *data.closed_events, *(e for e, _ in (*data.reopened, *data.attention))):
+    for ev in (*data.new_events, *data.closed_events, *(e for e, _ in (*data.reopened, *data.attention, *data.reactivated))):
         ev.notified_at = now
         session.add(ev)
     overdue_new = [i for i in data.new if i.state_since <= now - timedelta(days=data.sla_days)]

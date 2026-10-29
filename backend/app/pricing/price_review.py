@@ -211,14 +211,23 @@ def _seller_key(seller: Any) -> str:
     return " ".join(text.split()).casefold()
 
 
-def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | None = None) -> FirmVerdict:
+# Lo contrario de un rojo firme, para la reactivación automática (pricing/price_recalc.py): un «no rojo» firme.
+NOT_RED = (semaforo.VERDE, semaforo.AMARILLO)
+
+
+def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | None = None,
+                  colors: tuple[str, ...] = (semaforo.ROJO,)) -> FirmVerdict:
     """R1 y R3-R7 sobre un snapshot. (R2 y R8 dependen de otras fichas y de otras noches: las mira `process_run`.)
 
     No rojo → `no_rojo`. Rojo al que le falla algo → `dudoso` con el primer motivo en el orden del diseño.
-    Todo cumplido → `firme`."""
+    Todo cumplido → `firme`.
+
+    Con `colors=NOT_RED` es la misma puerta para un «no rojo» (verde o amarillo) con la misma calidad de dato: así se
+    decide que un producto que apagó Hugo ya se puede reactivar solo. Ahí el producto apagado es lo esperado: R1 no mira
+    `enabled`. Un rojo devuelve `no_rojo`."""
     now = now or utcnow()
     v = FirmVerdict(NO_ROJO)
-    if snap.color != semaforo.ROJO:
+    if snap.color not in colors:
         return v                                      # el color ESTIMADO nunca cuenta: solo `color`
 
     def doubt(reason: str) -> FirmVerdict:
@@ -227,21 +236,21 @@ def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | No
 
     if snap.ml_status != price_monitor.OK:
         return doubt("solo_tiendas")                  # rojo sin dato de ML: sale de las tiendas
-    if snap.product_enabled is False:
+    if snap.product_enabled is False and semaforo.ROJO in colors:
         return doubt("deshabilitado")
     if not snap.our_price_cents or snap.our_price_cents <= 0:
         return doubt("recalculo")
 
     entries = price_monitor._json_list(snap.matched_listings)
     all_prices = [x for m in entries for x in price_monitor._entry_prices(m)]
-    # R4: solo con ML (todas las fuentes de ML) tiene que seguir en rojo
-    if _color_with(all_prices, snap, p)[0] != semaforo.ROJO:
+    # R4: solo con ML (todas las fuentes de ML) tiene que seguir en el color
+    if _color_with(all_prices, snap, p)[0] not in colors:
         return doubt("tiendas" if (snap.price_basis or "ml") != "ml" else "recalculo")
     # R3: solo con los idénticos confirmados por foto + nombre o por una persona
     firm_entries = [m for m in entries if m.get("source") in FIRM_SOURCES]
     v.firm_prices = [x for m in firm_entries for x in price_monitor._entry_prices(m)]
     v.firm_sellers = len({name for m in firm_entries for s in (m.get("sellers") or []) if (name := _seller_key(s))})
-    if not v.firm_prices or _color_with(v.firm_prices, snap, p)[0] != semaforo.ROJO:
+    if not v.firm_prices or _color_with(v.firm_prices, snap, p)[0] not in colors:
         return doubt("fuentes")
     v.firm_median = semaforo.median_cents(v.firm_prices)
     # R5: dato fresco
@@ -259,12 +268,28 @@ def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | No
     # R7: precio creíble
     if v.firm_median and v.firm_median > 0:
         v.price_ratio = snap.our_price_cents / v.firm_median
-        resale = v.firm_median * (1 - (snap.commission_pct or 0.0) / 100.0) - (snap.shipping_cents or 0)
-        v.reff_ratio = snap.our_price_cents / resale if resale > 0 else None
+        v.reff_ratio = _reff(snap.our_price_cents, v.firm_median, snap)
         if v.price_ratio > p.max_price_ratio:
             return doubt("precio_extremo")
     v.status = FIRME
     return v
+
+
+def _reff(our_cents: int, median_cents: int, snap: MarketPriceSnapshot) -> float | None:
+    """Nuestro precio / lo que le queda neto al revendedor con esa mediana (comisión y envío del snapshot)."""
+    resale = median_cents * (1 - (snap.commission_pct or 0.0) / 100.0) - (snap.shipping_cents or 0)
+    return our_cents / resale if resale > 0 else None
+
+
+def resale_ratio(snap: MarketPriceSnapshot, our_cents: int | None) -> float | None:
+    """`reff_ratio` de un precio nuestro contra los idénticos del snapshot, sea del color que sea: con la mediana de los
+    firmes (la de la tarjeta de la ficha) o, si no hay firmes, con la de ML. Lo usa el evento `recalculado` para
+    comparar el antes y el después con la MISMA mediana. Redondeado a 3 decimales; None si falta un lado."""
+    entries = price_monitor._json_list(snap.matched_listings)
+    firm = [x for m in entries if m.get("source") in FIRM_SOURCES for x in price_monitor._entry_prices(m)]
+    median = semaforo.median_cents(firm) or snap.ml_median_cents
+    ratio = _reff(our_cents, median, snap) if our_cents and median else None
+    return None if ratio is None else round(ratio, 3)
 
 
 # ─── JSON acotado ─────────────────────────────────────────────────
@@ -814,22 +839,7 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
     if reconcile_error:
         plan.summary.setdefault("errores", []).append(f"conciliación: {reconcile_error}")
     if not plan.done and (plan.to_create or plan.pending_diag):
-        budgeted = ds.BudgetedSource(source or VendureClient(), max_calls,           # type: ignore[arg-type]
-                                     day=daily_budget.today_art(plan.now))
-        gate = _Gate(budgeted, time.monotonic() + deadline_s)
-        if await asyncio.to_thread(budgeted.budget.used) >= budgeted.max_calls:      # el día ya gastó todo (otra pasada)
-            budgeted.refused = True
-        channel = None
-        if not gate.closed:
-            try:
-                channel = await asyncio.wait_for(budgeted.get_channel_pricing(), timeout=gate.remaining())
-            except ds.ReadBudgetExhausted:
-                pass                                       # ya quedó anotado en `budgeted.refused`
-            except (asyncio.TimeoutError, TimeoutError):
-                gate.deadline_hit = True
-            except Exception as exc:  # noqa: BLE001
-                plan.summary.setdefault("errores", []).append(f"canal: {error_code(exc)}")
-                log.warning("price_review: no se pudieron leer los datos del canal: %s: %s", type(exc).__name__, str(exc)[:200])
+        budgeted, gate, channel = await _open_gate(plan, source, max_calls, deadline_s)
         retried = 0
         for item_id in plan.pending_diag:           # primero las que quedaron sin desglose (las más viejas)
             if gate.closed:
@@ -862,6 +872,80 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
     log.info("price_review #%s (modo %s): %s%s", run_id, mode_label(plan.requested_mode), plan.summary,
              "" if wrote else " (otro proceso ya había cerrado la pasada)")
     return plan.summary
+
+
+async def _open_gate(plan: _Plan, source: ds.ReadSource | None, max_calls: int,
+                     deadline_s: float) -> tuple[ds.BudgetedSource, _Gate, Any]:
+    """Lo que necesita cualquier tanda de diagnósticos: el tope de lecturas del DÍA (la fila es una sola: la noche y el
+    recálculo la comparten), el tiempo máximo y los datos del canal (dos lecturas). Un error del canal queda en el resumen."""
+    budgeted = ds.BudgetedSource(source or VendureClient(), max_calls,           # type: ignore[arg-type]
+                                 day=daily_budget.today_art(plan.now))
+    gate = _Gate(budgeted, time.monotonic() + deadline_s)
+    if await asyncio.to_thread(budgeted.budget.used) >= budgeted.max_calls:      # el día ya gastó todo (otra pasada)
+        budgeted.refused = True
+    channel = None
+    if not gate.closed:
+        try:
+            channel = await asyncio.wait_for(budgeted.get_channel_pricing(), timeout=gate.remaining())
+        except ds.ReadBudgetExhausted:
+            pass                                       # ya quedó anotado en `budgeted.refused`
+        except (asyncio.TimeoutError, TimeoutError):
+            gate.deadline_hit = True
+        except Exception as exc:  # noqa: BLE001
+            plan.summary.setdefault("errores", []).append(f"canal: {error_code(exc)}")
+            log.warning("price_review: no se pudieron leer los datos del canal: %s: %s", type(exc).__name__, str(exc)[:200])
+    return budgeted, gate, channel
+
+
+# ─── Recálculo al cambiar en Vendure: el diagnóstico de nuevo ─────
+
+
+REDIAG_DEADLINE_S = 120.0
+
+
+def _open_with_snapshot(item_ids: list[int]) -> list[tuple[int, MarketPriceSnapshot]]:
+    """Las fichas que siguen abiertas, con su último snapshot."""
+    with Session(engine, expire_on_commit=False) as s:
+        out = []
+        for item in s.exec(select(PriceReviewItem).where(PriceReviewItem.id.in_(item_ids))).all():  # type: ignore[union-attr]
+            snap = s.get(MarketPriceSnapshot, item.last_snapshot_id) if item.last_snapshot_id else None
+            if item.state in OPEN_STATES and snap is not None:
+                out.append((int(item.id), snap))  # type: ignore[arg-type]
+        return out
+
+
+def _specs_of_runs(run_ids: set[int]) -> dict[str, dict[str, float]]:
+    with Session(engine) as s:
+        return {pid: ds.parse_specs(raw) for pid, raw in s.exec(
+            select(MarketPriceSnapshot.product_id, MarketPriceSnapshot.our_specs)
+            .where(MarketPriceSnapshot.run_id.in_(run_ids), MarketPriceSnapshot.our_specs.is_not(None))  # type: ignore[union-attr]
+        ).all()}
+
+
+async def rediagnose(item_ids: list[int], *, catalog: Mapping[str, VendureProduct] | None = None,
+                     source: ds.ReadSource | None = None, now: datetime | None = None,
+                     deadline_s: float = REDIAG_DEADLINE_S) -> int:
+    """Rehace el diagnóstico a-e de fichas abiertas con el desglose que tiene HOY Vendure: el producto cambió y el
+    recálculo (pricing/price_recalc.py) ya dejó su snapshot al día. Mismo tope de lecturas del día que la pasada de la noche
+    (comparten la fila), mismas reglas de intentos y de cifras firmes (`_retry_diag`). Lo que no entra queda como estaba y
+    lo completa la noche. Devuelve cuántas rehizo. No escribe en Vendure."""
+    work = await asyncio.to_thread(_open_with_snapshot, item_ids) if item_ids else []
+    if not work:
+        return 0
+    mode = int(runtime.get("pm_mode") or 0)
+    plan = _Plan(run_id=0, requested_mode=mode, mode=min(mode, 1), params=ReviewParams.from_runtime(),
+                 now=now or utcnow(), summary={})
+    plan.specs_by_product = await asyncio.to_thread(_specs_of_runs, {sn.run_id for _, sn in work})
+    _, gate, channel = await _open_gate(plan, source, ds.MAX_VENDURE_CALLS, deadline_s)
+    done = 0
+    for item_id, snap in work:
+        if gate.closed:
+            break
+        verdict = evaluate_firm(snap, plan.params, plan.now)
+        diag = await _diagnose(snap, gate, channel, plan, catalog, verdict.firm_median if verdict.firm else None)
+        await asyncio.to_thread(_retry_diag, plan, item_id, diag, verdict)
+        done += not diag.blocked
+    return done
 
 
 async def _reconcile_safely() -> str | None:
