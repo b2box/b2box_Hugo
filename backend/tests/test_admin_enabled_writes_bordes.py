@@ -30,6 +30,7 @@ from app.db.session import engine, get_session, init_db  # noqa: E402
 
 ADMIN = "nico@b2box.pro"
 FORBIDDEN = "Solo un administrador del dashboard puede hacer esto."
+CROSS_SITE = "Solo se puede hacer desde el dashboard de Hugo."
 SECRET = "s" * 32
 PATHS = [
     "/api/restore-duplicates",
@@ -124,10 +125,10 @@ def _client(cookie: str | None = None) -> TestClient:
     return c
 
 
-def _assert_untouched(r, status: int) -> None:
+def _assert_untouched(r, status: int, detail: str = FORBIDDEN) -> None:
     assert r.status_code == status, r.text
     if status == 403:
-        assert r.json()["detail"] == FORBIDDEN
+        assert r.json()["detail"] == detail
     assert SpyVendure.calls == []
     assert SpySession.calls == [], "el 403 tiene que salir antes de leer la base"
 
@@ -199,12 +200,15 @@ def test_evento_inexistente_sin_admin_da_403_no_404(monkeypatch, _env, flow):
     _assert_untouched(_client(cookie).post(f"/api/audit-log/999999/{flow}"), 403)
 
 
-@pytest.mark.parametrize("path,write", [
+WRITES = [
     ("/api/restore-duplicates?confirm=true", ("enable", "bd1")),
     ("/api/duplicates/bulk-confirm?confirm=true&min_confidence=0.99", ("disable", "bd2")),
     ("/api/audit-log/{dup}/confirm-duplicate", ("disable", "bd2")),
     ("/api/audit-log/{bx}/confirm-disable-bx", ("disable", "bd3")),
-])
+]
+
+
+@pytest.mark.parametrize("path,write", WRITES)
 @pytest.mark.parametrize("admins,user", [
     ("  OTRO@b2box.pro ,  Nico@B2BOX.pro  ", ADMIN),   # la lista con mayúsculas y espacios
     (ADMIN, "NICO@B2BOX.PRO"),                          # la sesión con mayúsculas
@@ -216,3 +220,23 @@ def test_admin_con_otras_mayusculas_o_espacios_pasa(monkeypatch, _env, path, wri
     assert r.status_code == 200, r.text
     assert [c for c in SpyVendure.calls if c[0] != "read"] == [write]
     assert "get" in SpySession.calls or "exec" in SpySession.calls   # el espía de la base anda
+
+
+@pytest.mark.parametrize("path", [w[0] for w in WRITES])
+@pytest.mark.parametrize("site", ["same-site", "cross-site"])
+def test_admin_desde_otro_sitio_403_sin_leer_nada(monkeypatch, _env, path, site):
+    """CSRF, como en la bandeja: la cookie del admin viaja sola en un POST que armó otra página."""
+    cookie = _token(monkeypatch, ADMIN)
+    r = _client(cookie).post(path.format(**_env), headers={"Sec-Fetch-Site": site})
+    _assert_untouched(r, 403, CROSS_SITE)
+
+
+@pytest.mark.parametrize("path,write", WRITES)
+@pytest.mark.parametrize("site", ["same-origin", None])   # el dashboard, o un cliente que no es un navegador
+def test_admin_desde_el_dashboard_o_sin_header_escribe(monkeypatch, _env, path, write, site):
+    cookie = _token(monkeypatch, ADMIN)
+    headers = {} if site is None else {"Sec-Fetch-Site": site}
+    r = _client(cookie).post(path.format(**_env), headers=headers)
+    assert r.status_code == 200, r.text
+    assert [c for c in SpyVendure.calls if c[0] != "read"] == [write]
+

@@ -240,6 +240,8 @@ También es de admin todo lo que prende o apaga productos en Vendure fuera de la
 (`/api/audit-log/{id}/confirm-disable-bx`) y `/api/restore-duplicates` (sin botón), dry-runs incluidos.
 Con otra sesión responde 403, el botón avisa «Error: Solo un administrador del dashboard puede hacer
 esto.» y no se lee ni se toca nada; con un admin queda su usuario en el `detail` de la fila del audit log.
+Como las decisiones de la bandeja, todo lo de admin (estos, los settings caros y `/api/estimate-test`)
+rechaza con 403 los pedidos que arma otra página (`Sec-Fetch-Site` distinto de `same-origin`).
 
 - Setear `DASHBOARD_ADMINS` con los usuarios separados por coma: el **mail** con login por Supabase
   (`nico@b2box.pro,gabriel@b2box.pro`), o el `DASHBOARD_USER` con login local.
