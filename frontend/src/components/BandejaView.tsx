@@ -460,7 +460,8 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
         : d.decision?.code === "reactivar_auto"
           ? "se corrigió en Vendure, dejó de ser rojo y Hugo lo reactivó solo"
           : "se corrigió y se reactivó";
-  const lastRecalc = d.events.find((e) => e.kind === "recalculado");    // los eventos vienen del más nuevo al más viejo
+  // El último recálculo, mientras el snapshot de la ficha siga siendo el recalculado (la corrida de la noche lo reemplaza).
+  const lastRecalc = snap?.recalc ? d.events.find((e) => e.kind === "recalculado") : undefined;    // del más nuevo al más viejo
   const notRedAnymore = !closed && d.flags.includes(FLAG_NOT_RED)
     ? d.events.find((e) => e.kind === "aviso_reactivar")?.motive_text ?? "Ya no está en rojo: reactivala con «Ya lo corregí»."
     : null;
