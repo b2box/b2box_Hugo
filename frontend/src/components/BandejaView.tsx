@@ -1,12 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getReviewItem, getReviewItems, getReviewSummary } from "../api";
+import { ApiError, approveReview, decideReview, getReviewItem, getReviewItems, getReviewSummary, undoReview } from "../api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { IconExternalLink, IconInbox, IconRefresh, IconSearch } from "../icons";
+import { IconExternalLink, IconInbox, IconRefresh, IconSearch, IconX } from "../icons";
 import { fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format";
 import { SECTION_META } from "../sections";
 import { StoresPanel, safeHttpsUrl } from "./SourceCells";
@@ -16,6 +16,7 @@ import type {
   MatchOrigin,
   PriceReviewDetail,
   PriceReviewItemRow,
+  ReviewAction,
   ReviewBreakdown,
   ReviewCause,
   ReviewEvent,
@@ -23,10 +24,10 @@ import type {
   ReviewTab,
 } from "../types";
 
-// Bandeja de revisión de precios (Pao). SOLO LECTURA en esta etapa: Hugo propone los rojos firmes
-// con su diagnóstico, no toca Vendure y las decisiones (corregir, buscar otro proveedor, mantener,
-// despublicar) llegan en la etapa siguiente. Todo lo que viene de Mercado Libre pasa saneado por el
-// servidor y acá se muestra como texto: nada se renderiza como HTML.
+// Bandeja de revisión de precios (Pao). Hugo propone los rojos firmes con su diagnóstico; inactiva o
+// reactiva en Vendure solo lo que decide una persona de PRICE_REVIEW_DECIDERS. Los botones de decisión
+// salen de `actions` (los arma el backend según el estado, la sesión y el modo). Todo lo que viene de
+// Mercado Libre, y los textos que escribe Pao, se muestran como texto: nada se renderiza como HTML.
 
 const PAGE_SIZE = 25;
 
@@ -67,13 +68,35 @@ const EVENT_LABEL: Record<string, string> = {
   propuesto: "Hugo lo propuso",
   cerrado_auto: "Se cerró sola",
   aviso_sla: "Aviso por demora",
+  aprobado: "Inactivar y revisar",
+  decision_corregir: "Decidió corregir",
+  decision_mantener: "Decidió mantenerlo activo",
+  decision_despublicar: "Decidió despublicar",
+  decision_reactivar: "Lo corrigió y pidió reactivar",
+  deshacer: "Deshizo la última acción",
+  intent: "Pedido a Vendure",
+  inactivado: "Inactivado en Vendure",
+  reactivado: "Reactivado en Vendure",
+  ya_activo: "No hizo falta reactivar",
+  vendure_error: "Vendure no aceptó el cambio",
+  reactivar_a_mano: "Hay que reactivarlo a mano",
+  intent_descartado: "Cambio a medias descartado",
+  reabierto: "Se reabrió",
+};
+
+// Una frase fija por código de error: el detalle técnico no se muestra.
+const VENDURE_ERROR_TEXT: Record<string, string> = {
+  lectura: "no se pudo leer el producto",
+  escritura: "no aceptó la escritura",
+  valor_no_coincide: "respondió otro valor",
+  no_existe: "el producto no existe",
 };
 
 const STATE_BADGE: Record<string, BadgeProps["variant"]> = {
   propuesto: "warning",
   en_revision: "warning",
   corrigiendo: "default",
-  buscando_proveedor: "default",
+  buscando_prov: "default",
   mantenido: "outline",
   despublicado: "destructive",
   corregido: "success",
@@ -173,7 +196,7 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
           {summary && (
             <Badge variant={summary.mode === 0 ? "outline" : "warning"}>modo {summary.mode_label}</Badge>
           )}
-          <Badge variant="outline">solo lectura</Badge>
+          {summary?.read_only && <Badge variant="outline">solo lectura</Badge>}
         </h2>
         <button
           onClick={refresh}
@@ -188,8 +211,9 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
 
       {summary?.mode === 0 && (
         <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
-          El modo está en sombra: Hugo marca los rojos pero no llena la bandeja ni manda el resumen diario. Para que
-          empiece a proponer, pasá «Modo de la bandeja» a 1 en Configuración.
+          El modo está en sombra: Hugo marca los rojos pero no llena la bandeja ni manda el resumen diario, y las
+          decisiones están frenadas (Deshacer sigue). Para que empiece a proponer, pasá «Modo de la bandeja» a 1 en
+          Configuración.
         </p>
       )}
       {summary && summary.mode === 2 && (
@@ -405,6 +429,12 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
   const snap = d.snapshot;
   const diag = d.diagnosis;
   const closed = d.state === "cerrado_auto" || d.state === "corregido" || d.state === "despublicado";
+  const closedWhy =
+    d.state === "cerrado_auto"
+      ? d.events.find((e) => e.kind === "cerrado_auto")?.motive_text ?? "dejó de ser rojo"
+      : d.state === "despublicado"
+        ? "se decidió despublicar el producto"
+        : "se corrigió y se reactivó";
   return (
     <>
       <div className="flex items-center gap-2 flex-wrap">
@@ -424,7 +454,7 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
 
       {closed && (
         <p className="p-2 rounded-md text-xs border bg-success/10 border-success/40 text-success">
-          Esta ficha ya está cerrada{d.closed_at ? ` (${fmtTime(d.closed_at)})` : ""}: {d.events.find((e) => e.kind === "cerrado_auto")?.motive_text ?? "dejó de ser rojo"}
+          Esta ficha ya está cerrada{d.closed_at ? ` (${fmtTime(d.closed_at)})` : ""}: {closedWhy}
         </p>
       )}
       {d.doubtful_today && (
@@ -525,21 +555,7 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
         )}
       </Card>
 
-      <Card className="p-4 space-y-2">
-        <SectionTitle>Decisión</SectionTitle>
-        <div className="flex gap-2 flex-wrap">
-          {["Corregir", "Buscar otro proveedor", "Mantener activo", "Despublicar"].map((label) => (
-            <Button key={label} variant="secondary" size="sm" disabled title="Llega en la próxima etapa">
-              {label}
-            </Button>
-          ))}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Por ahora Hugo solo propone: no inactiva ni cambia nada en Vendure. Las decisiones se habilitan en la próxima
-          etapa. Si una publicación de Mercado Libre no es el mismo producto, marcala arriba con «No es el mismo»: si
-          el producto deja de ser rojo, esta ficha se cierra sola.
-        </p>
-      </Card>
+      <DecisionBlock d={d} onChanged={onChanged} />
 
       <Card className="p-4 space-y-2">
         <SectionTitle>Historia</SectionTitle>
@@ -577,7 +593,15 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
 function EventLine({ e }: { e: ReviewEvent }) {
   const payload = e.payload ?? {};
   const extra =
-    e.kind === "propuesto" && typeof payload.racha === "number" ? ` (${payload.racha} noches seguidas en rojo)` : "";
+    e.kind === "propuesto" && typeof payload.racha === "number"
+      ? ` (${payload.racha} noches seguidas en rojo)`
+      : e.kind === "vendure_error"
+        ? `: ${VENDURE_ERROR_TEXT[e.motive_code ?? ""] ?? "falló"}`
+        : e.kind.startsWith("decision_") && e.motive_code
+          ? ` (${e.motive_code.replace(/_/g, " ")})`
+          : typeof payload.sin_linea_base === "string"
+            ? ` (${payload.sin_linea_base})`
+            : "";
   return (
     <li className="flex gap-2">
       <span className="text-muted-foreground whitespace-nowrap">{fmtTime(e.at)}</span>
@@ -588,6 +612,234 @@ function EventLine({ e }: { e: ReviewEvent }) {
         {e.motive_text ? `: ${e.motive_text}` : ""}
       </span>
     </li>
+  );
+}
+
+// ─── Decisión ───────────────────────────────────────────────────
+
+const VENDURE_EFFECT: Record<"apagar" | "reactivar" | "nada", string> = {
+  apagar:
+    "Hugo va a INACTIVAR el producto en Vendure: deja de verse en la tienda. Si ya estaba inactivo por otra razón, no lo toca y la ficha se cierra.",
+  reactivar:
+    "Hugo va a REACTIVAR el producto en Vendure, solo si lo había apagado Hugo y nadie lo apagó después. Si el producto tiene contacto del proveedor, Vendure lo vuelve a publicar en los otros canales; si eso falla, no se reactiva.",
+  nada: "No cambia nada en Vendure.",
+};
+
+function DecisionBlock({ d, onChanged }: { d: PriceReviewDetail; onChanged: () => void }) {
+  const [open, setOpen] = useState<ReviewAction | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const main = d.actions.filter((a) => a.code !== "deshacer");
+  const undo = d.actions.find((a) => a.code === "deshacer");
+  const reasons = Array.from(new Set(d.actions.filter((a) => !a.enabled && a.reason).map((a) => a.reason)));
+
+  function finished(ok: boolean, text: string) {
+    setOpen(null);
+    setNotice({ ok, text });
+    onChanged();
+  }
+
+  return (
+    <Card className="p-4 space-y-2">
+      <SectionTitle>Decisión</SectionTitle>
+      {d.decision && (
+        <p className="text-xs text-muted-foreground">
+          Última decisión: {EVENT_LABEL[`decision_${d.decision.code}`] ?? d.decision.code}
+          {d.decision.by ? ` · ${d.decision.by}` : ""}
+          {d.decision.at ? ` · ${fmtTime(d.decision.at)}` : ""}
+          {d.decision.motive_text ? `: ${d.decision.motive_text}` : ""}
+        </p>
+      )}
+      {main.length === 0 && !undo ? (
+        <p className="text-xs text-muted-foreground">Esta ficha no espera ninguna decisión.</p>
+      ) : (
+        <div className="flex gap-2 flex-wrap items-center">
+          {main.map((a) => (
+            <Button
+              key={a.code}
+              variant={a.code === "despublicar" ? "destructive" : "secondary"}
+              size="sm"
+              disabled={!a.enabled}
+              title={a.reason ?? undefined}
+              onClick={() => {
+                setNotice(null);
+                setOpen(a);
+              }}
+            >
+              {a.label}
+            </Button>
+          ))}
+          {undo && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!undo.enabled}
+                title={undo.reason ?? undefined}
+                onClick={() => {
+                  setNotice(null);
+                  setOpen(undo);
+                }}
+              >
+                Deshacer
+              </Button>
+              {undo.deadline && (
+                <span className="text-[11px] text-muted-foreground">
+                  la última acción, hasta el {fmtTime(undo.deadline)}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {reasons.length > 0 && <p className="text-xs text-muted-foreground">{reasons.join(" · ")}.</p>}
+      {notice && (
+        <p
+          className={cn(
+            "p-2 rounded-md text-xs border",
+            notice.ok
+              ? "bg-success/10 border-success/40 text-success"
+              : "bg-warning/10 border-warning/40 text-warning",
+          )}
+        >
+          {notice.text}
+        </p>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Si una publicación de Mercado Libre no es el mismo producto, marcala arriba con «No es el mismo»: si el producto
+        deja de ser rojo, esta ficha se cierra sola.
+      </p>
+      {open && <ActionModal d={d} action={open} onClose={() => setOpen(null)} onFinished={finished} />}
+    </Card>
+  );
+}
+
+function ActionModal({
+  d,
+  action,
+  onClose,
+  onFinished,
+}: {
+  d: PriceReviewDetail;
+  action: ReviewAction;
+  onClose: () => void;
+  onFinished: (ok: boolean, text: string) => void;
+}) {
+  const [motive, setMotive] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const len = text.trim().length;
+  const needsText = action.text === "siempre" || (action.text === "otro" && motive === "otro");
+  const valid = (action.motives.length === 0 || motive !== "") && (!needsText || len >= 10) && len <= 500;
+  const isUndo = action.code === "deshacer";
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    const input = { expectedState: d.state, motiveCode: motive || null, motiveText: text.trim() || null };
+    try {
+      const r =
+        action.code === "inactivar"
+          ? await approveReview(d.id, input)
+          : isUndo
+            ? await undoReview(d.id, input)
+            : await decideReview(d.id, action.code as "corregir" | "mantener" | "despublicar" | "reactivar", input);
+      const extra =
+        r.note === "ya_inactivo"
+          ? " El producto ya estaba inactivo por otra razón: Hugo no lo tocó y la ficha se cerró."
+          : r.note === "ya_activo"
+            ? " El producto ya estaba activo: Hugo no escribió nada."
+            : "";
+      onFinished(true, `Listo: la ficha está en «${r.state_label}».${extra}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "No se pudo hacer.";
+      // 409: la ficha cambió (u otra regla lo frena): se recarga y se avisa. 400, 429, 502: la frase del backend.
+      if (e instanceof ApiError && e.status === 409) onFinished(false, msg);
+      else setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-foreground/40 z-50 flex items-center justify-center p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div className="bg-card rounded-lg border border-border max-w-lg w-full shadow-lg" role="dialog" aria-modal="true">
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="font-semibold text-foreground">
+            {action.label} · {d.product.code || `#${d.product.id}`}
+          </h3>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            aria-label="Cerrar"
+            className="w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted flex items-center justify-center transition-colors"
+          >
+            <IconX className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="p-5 space-y-3 text-sm">
+          {action.motives.length > 0 && (
+            <label className="block space-y-1">
+              <span className="text-xs text-muted-foreground">Motivo</span>
+              <select
+                value={motive}
+                onChange={(e) => setMotive(e.target.value)}
+                className="w-full h-9 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">Elegí un motivo…</option>
+                {action.motives.map((m) => (
+                  <option key={m.code} value={m.code}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="block space-y-1">
+            <span className="text-xs text-muted-foreground">
+              {needsText ? "Contá el motivo (obligatorio, al menos 10 caracteres)" : "Nota (opcional)"}
+            </span>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              maxLength={500}
+              rows={3}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            />
+            <span className={cn("block text-right text-[11px]", needsText && len < 10 ? "text-warning" : "text-muted-foreground")}>
+              {len}/500
+            </span>
+          </label>
+          <div className="p-2 rounded-md text-xs border bg-muted/40 border-border text-foreground space-y-1">
+            <p>
+              {isUndo ? "Vuelve" : "La ficha pasa"} a «{action.to_state_label ?? action.to_state}».
+            </p>
+            <p>{VENDURE_EFFECT[action.vendure ?? "nada"]}</p>
+          </div>
+          {error && (
+            <p className="p-2 rounded-md text-xs border bg-destructive/10 border-destructive/40 text-destructive">{error}</p>
+          )}
+        </div>
+        <div className="px-5 py-3 border-t border-border flex justify-end gap-2">
+          <Button variant="secondary" size="sm" onClick={onClose} disabled={busy}>
+            Cancelar
+          </Button>
+          <Button
+            variant={action.code === "despublicar" ? "destructive" : "default"}
+            size="sm"
+            onClick={submit}
+            disabled={!valid || busy}
+          >
+            {busy ? "Guardando…" : `Confirmar: ${action.label}`}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

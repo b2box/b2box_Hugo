@@ -616,13 +616,13 @@ export interface SeoListsResponse {
 
 
 // ─── Bandeja de revisión de precios (Pao) ──────────────────────────
-// Solo lectura en esta etapa: Hugo propone, no toca Vendure.
+// Hugo propone; inactiva o reactiva en Vendure solo lo que decide una persona de PRICE_REVIEW_DECIDERS.
 
 export type ReviewState =
   | "propuesto"
   | "en_revision"
   | "corrigiendo"
-  | "buscando_proveedor"
+  | "buscando_prov"
   | "mantenido"
   | "despublicado"
   | "corregido"
@@ -784,6 +784,32 @@ export interface ReviewEvent {
   payload: Record<string, unknown> | null;
 }
 
+export type ReviewActionCode = "inactivar" | "corregir" | "mantener" | "despublicar" | "reactivar" | "deshacer";
+
+// Un botón de la ficha. Lo arma el backend según el estado, la sesión y el modo: la pantalla no decide qué se puede.
+export interface ReviewAction {
+  code: ReviewActionCode;
+  label: string;
+  enabled: boolean;
+  reason: string | null;
+  vendure: "apagar" | "reactivar" | null; // qué pasa en Vendure si se confirma
+  motives: { code: string; label: string }[];
+  text: "siempre" | "otro" | "opcional"; // cuándo el texto es obligatorio (10 a 500 caracteres)
+  to_state: ReviewState | null;
+  to_state_label: string | null;
+  deadline?: string; // solo Deshacer: hasta cuándo se puede
+  undoes?: string;
+}
+
+export interface ReviewActionResult {
+  item_id: number;
+  state: ReviewState;
+  state_label: string;
+  version: number;
+  wrote: boolean;
+  note: "ya_inactivo" | "ya_activo" | null;
+}
+
 export interface PriceReviewDetail extends PriceReviewItemRow {
   diagnosis: ReviewDiagnosis | null;
   breakdown: ReviewBreakdown | null;
@@ -792,6 +818,9 @@ export interface PriceReviewDetail extends PriceReviewItemRow {
   data: { at: string | null; origin: MatchOrigin | null; via: "oficina" | null; run_id: number; captured_at: string | null } | null;
   doubtful_today: string | null;
   events: ReviewEvent[];
+  decision: { code: string; by: string | null; at: string | null; motive_code: string | null; motive_text: string | null } | null;
+  hugo_disabled: boolean | null;
+  actions: ReviewAction[];
   decisions_enabled: boolean;
   // false: el costo de fábrica y el fee no vienen (solo los ve quien está en PRICE_REVIEW_VIEWERS).
   costs_visible: boolean;

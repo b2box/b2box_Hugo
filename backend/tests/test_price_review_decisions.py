@@ -511,3 +511,9 @@ async def test_ui4_undo_shows_up_only_for_the_last_human_action_with_its_deadlin
     assert k.post(c, item_id, "undo", expected_state="mantenido").status_code == 200
     assert [a["code"] for a in c.get(f"{k.BASE}/items/{item_id}").json()["actions"]] == [
         "inactivar", "corregir", "mantener", "despublicar"]                       # un Deshacer no se deshace
+
+
+def test_ui6_the_screen_no_longer_says_hugo_only_proposes():
+    view = (Path(__file__).resolve().parents[2] / "frontend/src/components/BandejaView.tsx").read_text()
+    assert "Por ahora Hugo solo propone" not in view and "Llega en la próxima etapa" not in view
+    assert "Solo deciden" not in view                                       # el motivo lo manda el backend

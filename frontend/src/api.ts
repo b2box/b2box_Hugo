@@ -19,6 +19,9 @@ import type {
   PriceReviewDetail,
   PriceReviewItemsResponse,
   PriceReviewSummary,
+  ReviewActionCode,
+  ReviewActionResult,
+  ReviewState,
   SectionsResponse,
   ColorFilter,
   SeoItemsResponse,
@@ -34,9 +37,11 @@ import type {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -491,4 +496,54 @@ export async function getReviewItems(query: ReviewItemsQuery): Promise<PriceRevi
 
 export async function getReviewItem(id: number): Promise<PriceReviewDetail> {
   return asJson<PriceReviewDetail>(await apiFetch(`/api/price-review/items/${id}`));
+}
+
+// Decisiones (solo PRICE_REVIEW_DECIDERS). Los errores vienen como {detail: {code, message, state…}}: `message` es una
+// frase fija para mostrar tal cual y `code` dice qué pasó (estado_cambio, reactivar_a_mano, vendure_error…).
+export interface ReviewActionInput {
+  expectedState: ReviewState;
+  motiveCode?: string | null;
+  motiveText?: string | null;
+}
+
+async function postReviewAction(
+  id: number,
+  path: "approve" | "decision" | "undo",
+  body: Record<string, unknown>,
+): Promise<ReviewActionResult> {
+  const r = await apiFetch(`/api/price-review/items/${id}/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = ((await r.json().catch(() => ({}))) as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+      const d = detail as { message: unknown; code?: unknown };
+      throw new ApiError(String(d.message), r.status, typeof d.code === "string" ? d.code : undefined);
+    }
+    throw new ApiError(detailText(detail, r.statusText), r.status);
+  }
+  return r.json() as Promise<ReviewActionResult>;
+}
+
+export function approveReview(id: number, input: ReviewActionInput): Promise<ReviewActionResult> {
+  return postReviewAction(id, "approve", { expected_state: input.expectedState, motive_text: input.motiveText ?? null });
+}
+
+export function decideReview(
+  id: number,
+  decision: Exclude<ReviewActionCode, "inactivar" | "deshacer">,
+  input: ReviewActionInput,
+): Promise<ReviewActionResult> {
+  return postReviewAction(id, "decision", {
+    decision,
+    expected_state: input.expectedState,
+    motive_code: input.motiveCode ?? null,
+    motive_text: input.motiveText ?? null,
+  });
+}
+
+export function undoReview(id: number, input: ReviewActionInput): Promise<ReviewActionResult> {
+  return postReviewAction(id, "undo", { expected_state: input.expectedState, motive_text: input.motiveText ?? null });
 }
