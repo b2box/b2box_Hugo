@@ -162,6 +162,21 @@ async def test_s8_vendure_errors_are_stored_and_answered_only_as_a_code(c, fake)
     assert "fábrica" not in everything and "1688" not in everything and "USD" not in everything
 
 
+@pytest.mark.parametrize("site,ok", [("cross-site", False), ("same-site", False), ("none", False),
+                                     ("same-origin", True), (None, True)])
+async def test_s12_a_decision_from_another_site_is_403(fake, site, ok):
+    """CSRF: el navegador manda Sec-Fetch-Site; un POST armado por otra página no pasa. Sin el header (no es un
+    navegador), pasa."""
+    item_id = w.make_item("rv1")
+    headers = {} if site is None else {"Sec-Fetch-Site": site}
+    r = k.client().post(f"{k.BASE}/items/{item_id}/decision", headers=headers,
+                        json=dict(decision="mantener", expected_state="propuesto", **{"motive_code": "nicho",
+                                  "motive_text": "Se vende poco pero nos interesa tenerlo"}))
+    assert (r.status_code == 200) is ok, r.text
+    if not ok:
+        assert r.status_code == 403 and w.item(item_id).state == "propuesto"
+
+
 async def test_s12_only_json_with_a_session(fake):
     item_id = w.make_item("rv1")
     c = k.client()

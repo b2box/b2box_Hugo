@@ -358,9 +358,17 @@ def review_decider(request: Request) -> str | None:
 
 
 def require_decider(request: Request) -> str:
-    """403 si la sesión no puede decidir en la bandeja. Devuelve el email (el actor de los eventos)."""
+    """403 si la sesión no puede decidir en la bandeja. Devuelve el email (el actor de los eventos).
+
+    CSRF explícito: un navegador manda `Sec-Fetch-Site`; si no es `same-origin`, el pedido lo armó otra página y no
+    pasa (la cookie de sesión iría sola). Sin el header (un cliente que no es un navegador) se deja pasar."""
     from fastapi import HTTPException
 
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site != "same-origin":
+        log.warning("decisión de la bandeja desde otro sitio (Sec-Fetch-Site=%s): %s rechazado",
+                    site[:20], request.url.path)
+        raise HTTPException(status_code=403, detail="Las decisiones solo se toman desde el dashboard de Hugo.")
     user = review_decider(request)
     if user is not None:
         return user
