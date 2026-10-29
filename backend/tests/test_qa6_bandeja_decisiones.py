@@ -9,6 +9,7 @@ Los `xfail(strict=True)` documentan bugs abiertos: cuando se arreglen, el test p
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import timedelta
@@ -19,7 +20,10 @@ import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 from app.clock import utcnow  # noqa: E402
-from app.db.models import REVIEW_STATES  # noqa: E402
+from sqlmodel import Session  # noqa: E402
+
+from app.db.models import REVIEW_STATES, AuditLog  # noqa: E402
+from app.db.session import engine  # noqa: E402
 from app.pricing import price_review as pr  # noqa: E402
 from app.pricing import price_review_actions as actions  # noqa: E402
 from app.vendure.client import VendureClient  # noqa: E402
@@ -217,8 +221,10 @@ def _night_sees_it_off() -> int:
     return run
 
 
+@pytest.mark.parametrize("minutes", [3, 9.9])                     # 9,9: lo más tarde que la intención todavía no venció
 @pytest.mark.parametrize("who", ["conciliacion", "otra_decision"])
-async def test_qa_a_reconcile_while_the_turn_off_is_in_flight_must_not_hide_that_hugo_turned_it_off(fake, monkeypatch, who):
+async def test_qa_a_reconcile_while_the_turn_off_is_in_flight_must_not_hide_that_hugo_turned_it_off(fake, monkeypatch, who,
+                                                                                                    minutes):
     """Apagar con 3 reintentos tardaba hasta ~4,5 min (60-90 s por intento) y la intención se daba por muerta a los 2 min.
     Mientras la escritura viaja, corre la conciliación (la pasada, el job de arranque o el clic de otra persona con una
     pestaña vieja): ahora la escritura tiene un tope de 4 min y la intención recién vence a los 10, así que nadie la
@@ -228,9 +234,9 @@ async def test_qa_a_reconcile_while_the_turn_off_is_in_flight_must_not_hide_that
 
     async def slow(self, pid, enabled):
         if who == "conciliacion":
-            await actions.reconcile(item_ids=[item_id], now=later())
+            await actions.reconcile(item_ids=[item_id], now=later(minutes))
         else:
-            monkeypatch.setattr(actions, "utcnow", later)
+            monkeypatch.setattr(actions, "utcnow", lambda: later(minutes))
             with pytest.raises(actions.ActionError) as exc:
                 await actions.act(item_id, "mantener", GABRIEL, expected_state="propuesto", **KEEP)
             assert (exc.value.status, exc.value.code) == (409, "en_curso")
@@ -305,3 +311,150 @@ async def test_qa_a_snapshot_taken_before_the_decision_does_not_close_the_ficha(
     await pr.process_run(run, now=w.NOW + timedelta(hours=2))
     item = w.item(item_id)
     assert (item.state, item.open_key) == (state, "rv1"), k.kinds(item_id)
+
+
+# ─── Re-QA de los arreglos (12 commits sobre 3ec27d0) ────────────
+
+
+def _write_lands_after_the_reread(fake, monkeypatch, how: str) -> None:
+    """La escritura NO vuelve (504 del proxy, o el tope de `APPLY_DEADLINE_S` la corta), pero en Vendure queda esperando
+    (p. ej. un lock de la fila) y se aplica recién DESPUÉS de la relectura: la relectura ve el valor de antes."""
+    pending: list[dict] = []
+    handler = fake.handler
+
+    def h(request):
+        body = json.loads(request.content)
+        if how == "504" and "SetEnabled" in body["query"]:
+            pending.append(body["variables"]["input"])
+            return httpx.Response(504, text="Gateway Timeout")
+        out = handler(request)
+        if "GetEnabled" in body["query"] and pending:            # la relectura ya leyó lo de antes...
+            for inp in pending:                                 # ...y recién ahora Vendure aplica la escritura
+                fake.enabled[inp["id"]] = bool(inp["enabled"])
+            pending.clear()
+        return out
+
+    fake.handler = h
+    if how == "deadline":
+        monkeypatch.setattr(actions, "APPLY_DEADLINE_S", 0.05)
+
+        async def sent_and_hangs(self, product_id, enabled):
+            pending.append({"id": product_id, "enabled": enabled})  # el pedido salió; la respuesta no vuelve
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(VendureClient, "set_enabled", sent_and_hangs)
+
+
+@pytest.mark.xfail(strict=True, reason="Re-QA #1: ante un error ambiguo, una relectura con el valor viejo no prueba que la "
+                                       "escritura no vaya a llegar; la ficha vuelve atrás y la noche la cierra «ya inactivo»")
+@pytest.mark.parametrize("how", ["504", "deadline"])
+async def test_reqa_a_turn_off_that_lands_after_the_reread_is_not_hidden(c, fake, monkeypatch, how):
+    item_id = _ficha(fake, "propuesto")
+    _write_lands_after_the_reread(fake, monkeypatch, how)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert fake.enabled["rv1"] is False                            # Vendure lo apagó, tarde
+    await pr.process_run(_night_sees_it_off(), now=w.NOW)
+    await actions.reconcile(now=later(11))
+    item = w.item(item_id)
+    trail = (r.status_code, r.json()["detail"].get("code"), item.state, item.hugo_disabled, k.kinds(item_id),
+             [a.action for a in k.audit("rv1")])
+    assert item.hugo_disabled is True and item.state != "cerrado_auto", trail
+    assert [a.action for a in k.audit("rv1")] == ["price_review_disabled"], trail
+
+
+@pytest.mark.xfail(strict=True, reason="Re-QA #2: la pasada abre una ficha nueva con un snapshot anterior al Despublicar")
+async def test_reqa_a_snapshot_from_before_unpublishing_does_not_open_a_new_ficha(fake, monkeypatch):
+    item_id = _ficha(fake, "propuesto")
+    prev, run = w.make_run(started=w.NOW - timedelta(days=1)), w.make_run()
+    w.add_snap(prev, "rv1", flag="firme", data_at=w.NOW - timedelta(days=1), captured_at=w.NOW - timedelta(days=1))
+    w.add_snap(run, "rv1")                                         # la madrugada: activo y rojo firme, racha cumplida
+    monkeypatch.setattr(actions, "utcnow", lambda: w.NOW + timedelta(hours=1))
+    await actions.act(item_id, "despublicar", k.PAO, expected_state="propuesto", motive_code="calidad")
+    assert fake.enabled["rv1"] is False and w.item(item_id).open_key is None
+    await pr.process_run(run, now=w.NOW + timedelta(hours=2))      # la pasada corre después de la decisión
+    assert [(i.id, i.state) for i in w.items()] == [(item_id, "despublicado")], [(i.id, i.state) for i in w.items()]
+
+
+@pytest.mark.xfail(strict=True, reason="Re-QA #3: volver atrás choca con el open_key de una ficha nueva: 500 y la "
+                                       "intención queda abierta para siempre")
+async def test_reqa_a_failed_unpublish_after_the_night_opened_another_ficha_is_not_left_stuck(c, fake, monkeypatch):
+    item_id = _ficha(fake, "propuesto")
+    fake.script["SetEnabled"] = [(500, {"errors": [{"message": "Internal error"}]})] * 3
+    real = VendureClient.set_enabled
+
+    async def night_opens_another(self, product_id, enabled):
+        w.make_item("rv1")                                         # la vieja ya no tenía open_key: la pasada abrió otra
+        return await real(self, product_id, enabled)
+
+    monkeypatch.setattr(VendureClient, "set_enabled", night_opens_another)
+    r = k.decide(c, item_id, "despublicar", "propuesto", "calidad")
+    monkeypatch.setattr(VendureClient, "set_enabled", real)
+    await actions.reconcile(now=later(11))
+    with Session(engine) as s:
+        stuck = pr.pending_intent(s, item_id) is not None
+    assert r.status_code != 500 and not stuck, (r.status_code, stuck, w.item(item_id).state, k.kinds(item_id))
+
+
+@pytest.mark.parametrize("landed", [True, False])
+async def test_reqa_an_uncertain_write_then_the_night_then_undo(c, fake, monkeypatch, landed):
+    """Relectura que falla → la intención queda abierta; la noche no la toca; Deshacer espera a que venza y concilia."""
+    item_id = _ficha(fake, "propuesto")
+    real_read, real_write = VendureClient.get_enabled_status, VendureClient.set_enabled
+    reads: list[int] = []
+
+    async def read(self, product_id):
+        reads.append(1)
+        if len(reads) == 2:
+            raise httpx.ConnectError("Vendure caído")
+        return await real_read(self, product_id)
+
+    async def fails(self, product_id, enabled):
+        if landed:
+            fake.enabled[product_id] = enabled
+        raise httpx.ReadTimeout("timeout")
+
+    monkeypatch.setattr(VendureClient, "get_enabled_status", read)
+    monkeypatch.setattr(VendureClient, "set_enabled", fails)
+    r = k.post(c, item_id, "approve", expected_state="propuesto")
+    assert r.status_code == 502 and r.json()["detail"]["code"] == "vendure_incierto"
+    monkeypatch.setattr(VendureClient, "get_enabled_status", real_read)
+    monkeypatch.setattr(VendureClient, "set_enabled", real_write)
+    run = w.make_run()
+    w.add_snap(run, "rv1", color="verde", our=500_000, enabled=not landed, captured_at=utcnow() + timedelta(minutes=1))
+    await pr.process_run(run, now=utcnow() + timedelta(minutes=2))
+    assert (w.item(item_id).state, k.kinds(item_id)[-1]) == ("en_revision", "intent")   # la noche no la tocó
+    r = k.post(c, item_id, "undo", expected_state="en_revision")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "en_curso"
+    monkeypatch.setattr(actions, "utcnow", lambda: later(11))
+    r = k.post(c, item_id, "undo", expected_state="en_revision")
+    if landed:
+        assert r.status_code == 200 and r.json()["state"] == "propuesto"
+        assert [a.action for a in k.audit("rv1")] == ["price_review_disabled", "price_review_enabled"]
+    else:                                                          # no llegó: la conciliación la volvió a propuesto
+        assert r.status_code == 409 and r.json()["detail"]["state"] == "propuesto" and k.audit("rv1") == []
+    assert w.item(item_id).state == "propuesto" and fake.enabled["rv1"] is True
+
+
+async def test_reqa_confirming_an_already_off_duplicate_or_bx_is_not_restored_nor_counted(c, fake):
+    """Seguridad M1: las filas nuevas de routes.py (producto ya apagado) no entran en /api/restore-duplicates ni en
+    `disabled_total`, y no tocan Vendure."""
+    fake.enabled.update({"rv1": False, "rv2": False})
+    total0 = c.get("/api/health-metrics").json()["duplicates"]["disabled_total"]
+    dry0 = c.post("/api/restore-duplicates").json()
+    with Session(engine) as s:
+        dup = AuditLog(action="duplicate_flagged", source="audit", product_id="rv1", related_product_id="rv0",
+                       disable_target_id="rv1", canonical_product_id="rv0", confidence=1.0, product_name="Dup rv1")
+        bx = AuditLog(action="bx_no_image_flagged", source="audit", product_id="rv2", product_name="BXrv2")
+        s.add(dup)
+        s.add(bx)
+        s.commit()
+        ids = (dup.id, bx.id)
+    assert c.post(f"/api/audit-log/{ids[0]}/confirm-duplicate").status_code == 200
+    assert c.post(f"/api/audit-log/{ids[1]}/confirm-disable-bx").status_code == 200
+    assert fake.mutations == []
+    assert [a.action for a in k.audit("rv1")] == ["duplicate_flagged", "duplicate_confirmed"]
+    assert [a.action for a in k.audit("rv2")] == ["bx_no_image_flagged", "bx_no_image_disabled"]
+    dry = c.post("/api/restore-duplicates").json()
+    assert (dry["would_restore_max"], dry["total_disable_events"]) == (dry0["would_restore_max"], dry0["total_disable_events"])
+    assert "rv1" not in dry["preview_ids"]
+    assert c.get("/api/health-metrics").json()["duplicates"]["disabled_total"] == total0
