@@ -17,7 +17,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, func, select
 
@@ -1470,7 +1470,7 @@ def _confirm_without_vendure(session: Session, entry: AuditLog, *, how: str) -> 
 @router.post("/api/duplicates/bulk-confirm")
 async def bulk_confirm_duplicates(
     request: Request,
-    min_confidence: float = 0.99,
+    min_confidence: float = Query(0.99, ge=0.9, le=1.0),
     confirm: bool = False,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:

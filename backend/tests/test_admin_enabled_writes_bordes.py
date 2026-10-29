@@ -36,7 +36,7 @@ PATHS = [
     "/api/restore-duplicates",
     "/api/restore-duplicates?confirm=true&safe=false",
     "/api/duplicates/bulk-confirm",
-    "/api/duplicates/bulk-confirm?confirm=true&min_confidence=0",
+    "/api/duplicates/bulk-confirm?confirm=true&min_confidence=0.9",   # el umbral más bajo que se acepta
     "/api/audit-log/{dup}/confirm-duplicate",
     "/api/audit-log/{bx}/confirm-disable-bx",
 ]
@@ -240,3 +240,12 @@ def test_admin_desde_el_dashboard_o_sin_header_escribe(monkeypatch, _env, path, 
     assert r.status_code == 200, r.text
     assert [c for c in SpyVendure.calls if c[0] != "read"] == [write]
 
+
+@pytest.mark.parametrize("min_confidence", ["0", "1.5"])
+@pytest.mark.parametrize("confirm", ["false", "true"])
+def test_bulk_confirm_con_umbral_fuera_de_rango_422(monkeypatch, _env, min_confidence, confirm):
+    """Con 0 confirmaría (y apagaría) todos los duplicados flaggeados; 1.5 no tiene sentido."""
+    cookie = _token(monkeypatch, ADMIN)
+    r = _client(cookie).post("/api/duplicates/bulk-confirm",
+                             params={"min_confidence": min_confidence, "confirm": confirm})
+    _assert_untouched(r, 422)
