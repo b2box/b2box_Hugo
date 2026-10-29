@@ -451,7 +451,7 @@ async def test_a_write_that_never_answers_is_cut_at_the_deadline_and_reread(c, f
     r = k.post(c, item_id, "approve", expected_state="propuesto")
     d = r.json()["detail"]
     assert r.status_code == 502 and (d["code"], d["error"]) == ("vendure_incierto", "TimeoutError")
-    assert "No sabemos si Vendure tomó el cambio" in d["message"] and "10 minutos" in d["message"]
+    assert "No sabemos si Vendure tomó el cambio" in d["message"] and "10 minutos" in d["message"] and "esta noche" in d["message"]
     assert fake.count("GetEnabled") == 2                           # leyó, y releyó tras el corte
     # La relectura con el valor viejo no prueba que no vaya a llegar: NO se vuelve atrás, decide la conciliación.
     assert w.item(item_id).state == "en_revision" and "vendure_error" not in k.kinds(item_id)

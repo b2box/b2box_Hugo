@@ -41,7 +41,7 @@ ATTENTION = {
     "reactivar_a_mano": "hay que reactivarlo a mano en Vendure",
     "intent_descartado": "un cambio en Vendure quedó a medias y se descartó",
     "escritura_huerfana": "Vendure tomó un cambio cuando la ficha ya había cambiado: revisalo a mano",
-    "vendure_incierto": "no sabemos si Vendure tomó el cambio; Hugo lo revisa solo en 10 minutos",
+    "vendure_incierto": "no sabemos si Vendure tomó el cambio; Hugo lo revisa en la próxima acción o esta noche",
     "sin_vuelta_atras": "no se pudo volver atrás porque el producto ya tiene otra ficha abierta: esta se cerró",
 }
 CAUSE_TEXT = {

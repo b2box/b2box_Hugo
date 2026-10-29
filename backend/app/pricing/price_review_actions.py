@@ -486,8 +486,9 @@ async def _reread(item: PriceReviewItem, client: VendureClient) -> bool | None:
         return None
 
 
-UNCERTAIN = (f"No sabemos si Vendure tomó el cambio; Hugo lo revisa solo en {int(INTENT_STALE.total_seconds() // 60)} "
-             "minutos. Mientras tanto la ficha queda en espera.")
+# No hay job periódico: concilia la próxima acción sobre la ficha (pasados INTENT_STALE) o la pasada de la noche.
+UNCERTAIN = (f"No sabemos si Vendure tomó el cambio. Hugo lo revisa con la próxima acción sobre la ficha (pasados "
+             f"{int(INTENT_STALE.total_seconds() // 60)} minutos) o esta noche. Mientras tanto la ficha queda en espera.")
 
 
 def _uncertain(item: PriceReviewItem, mv: _Move, actor: str, error: str) -> ActionError:

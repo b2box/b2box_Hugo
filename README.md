@@ -1509,8 +1509,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   abierta. Si la escritura da un error ambiguo (timeout, 5xx, red, el tope de 4 minutos), Hugo relee Vendure: si ya tomó
   el cambio lo confirma; si no (o si no puede leer) NO vuelve atrás, porque la escritura todavía puede llegar (un 504 del
   proxy con Vendure procesando): la ficha queda en espera con un evento `vendure_incierto` (502 «No sabemos si Vendure
-  tomó el cambio; Hugo lo revisa solo en 10 minutos») y decide la conciliación. Mientras hay
-  una escritura en curso la ficha no la toca nadie (otra acción recibe 409, la pasada de la noche la saltea). Una
+  tomó el cambio. Hugo lo revisa con la próxima acción sobre la ficha (pasados 10 minutos) o esta noche…») y decide la
+  conciliación. Mientras hay una escritura en curso la ficha no la toca nadie (otra acción recibe 409, la pasada de la noche la saltea). Una
   intención de más de 10 minutos quedó a medias y se concilia contra Vendure: al arrancar (a los 11 minutos), en la
   pasada de la noche o al tocar la ficha. Si una escritura llega cuando la ficha ya cambió, igual queda en `AuditLog` y
   sale en el mail en «PARA MIRAR A MANO». Si volver atrás choca con otra ficha abierta del producto, la vieja se cierra
