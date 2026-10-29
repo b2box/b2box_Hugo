@@ -259,7 +259,7 @@ async def test_the_mail_of_a_real_ficha_has_no_factory_cost_fee_supplier_or_cust
     assert leaks in ([], ["fábrica:"]) or set(leaks) <= {"fábrica:"}, leaks
     assert not re.search(r"\d+[.,]\d{2}\b(?! %)", body.replace("%", "")) or True
     assert "BX77" in body and "Producto 77" in body and "ML bajo el costo de fábrica" in body
-    assert "no modificó nada en Vendure" in body
+    assert "solo inactiva o reactiva lo que decide una persona de la lista" in body
     # no hay números de plata: solo margen en % y conteos
     assert not re.search(r"\$\s?\d", body) and not re.search(r"\b\d{4,}\b", body)
 

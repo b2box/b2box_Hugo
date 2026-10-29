@@ -1,11 +1,13 @@
 """Resumen diario de la bandeja de revisión para Pao (mail de texto plano, 08:30 hora de Argentina).
 
 Sale por el SMTP de siempre (`ALERT_SMTP_*`) a los destinatarios de `PM_REVIEW_EMAILS` (vacío = no se manda).
-Lleva lo NUEVO desde el último envío y, una sola vez por ficha, las que llevan más de `pm_review_sla_days` días
-esperando decisión. Sin novedades no se manda. Cada evento lleva `notified_at`, así que un reintento (o un
-segundo disparo el mismo día) no repite nada: los eventos se marcan recién DESPUÉS de que el SMTP aceptó el mail.
+Lleva lo NUEVO desde el último envío (fichas nuevas, reabiertas por empeorar y lo que hay que mirar a mano: errores de
+Vendure, reactivaciones frenadas, cambios que quedaron a medias) y, una sola vez por ficha, las que llevan más de
+`pm_review_sla_days` días esperando decisión (propuestas y en revisión). Sin novedades no se manda. Cada evento lleva
+`notified_at`, así que un reintento (o un segundo disparo el mismo día) no repite nada: los eventos se marcan recién
+DESPUÉS de que el SMTP aceptó el mail.
 
-En esta etapa Hugo solo propone: el mail lo dice, y no toca Vendure.
+Hugo propone; inactiva o reactiva en Vendure solo lo que decide una persona de la lista (PRICE_REVIEW_DECIDERS).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from app import runtime
 from app.clock import utcnow
@@ -32,6 +34,13 @@ log = logging.getLogger(__name__)
 MAX_NEW_LISTED = 15
 MAX_WAITING_LISTED = 30
 AVISO_SLA = "aviso_sla"
+WAITING_STATES = (price_review.PROPUESTO, price_review.EN_REVISION)
+# Eventos que salen una vez en «PARA MIRAR A MANO», con una frase fija (nunca el código de error ni el actor).
+ATTENTION = {
+    "vendure_error": "Vendure no aceptó el cambio: la ficha quedó como estaba",
+    "reactivar_a_mano": "hay que reactivarlo a mano en Vendure",
+    "intent_descartado": "un cambio en Vendure quedó a medias y se descartó",
+}
 CAUSE_TEXT = {
     "a": "caja fuera de rango", "b": "tramos mal armados", "c": "certificado alto",
     "d": "valor bajo por m³", "e": "ML bajo el costo de fábrica", "ninguna": "sin causa clara",
@@ -53,13 +62,15 @@ class DigestData:
     new_events: list[PriceReviewEvent] = field(default_factory=list)
     waiting: list[PriceReviewItem] = field(default_factory=list)
     closed_events: list[PriceReviewEvent] = field(default_factory=list)
+    reopened: list[tuple[PriceReviewEvent, PriceReviewItem]] = field(default_factory=list)
+    attention: list[tuple[PriceReviewEvent, PriceReviewItem]] = field(default_factory=list)
     pending_total: int = 0
     sla_days: int = 7
     now: datetime = field(default_factory=utcnow)
 
     @property
     def empty(self) -> bool:
-        return not (self.new or self.waiting)
+        return not (self.new or self.waiting or self.reopened or self.attention)
 
 
 def collect(session: Session, now: datetime | None = None) -> DigestData:
@@ -73,18 +84,28 @@ def collect(session: Session, now: datetime | None = None) -> DigestData:
     data.closed_events = list(session.exec(
         select(PriceReviewEvent).where(PriceReviewEvent.kind == "cerrado_auto", PriceReviewEvent.notified_at.is_(None))  # type: ignore[union-attr]
         .order_by(PriceReviewEvent.at, PriceReviewEvent.id)).all())
-    item_ids = [e.item_id for e in data.new_events]
+    others = list(session.exec(
+        select(PriceReviewEvent).where(PriceReviewEvent.kind.in_(("reabierto", *ATTENTION)),  # type: ignore[attr-defined]
+                                       PriceReviewEvent.notified_at.is_(None))  # type: ignore[union-attr]
+        .order_by(PriceReviewEvent.at, PriceReviewEvent.id)).all())
+    item_ids = [e.item_id for e in (*data.new_events, *others)]
     items = {i.id: i for i in session.exec(select(PriceReviewItem).where(PriceReviewItem.id.in_(item_ids))).all()} if item_ids else {}  # type: ignore[attr-defined]
     # Una ficha nueva que ya se cerró sola antes del mail no se lista (queda contada en «cerradas solas»).
     data.new = [items[e.item_id] for e in data.new_events if e.item_id in items and items[e.item_id].state == price_review.PROPUESTO]
+    data.reopened = [(e, items[e.item_id]) for e in others if e.kind == "reabierto" and e.item_id in items]
+    data.attention = [(e, items[e.item_id]) for e in others if e.kind in ATTENTION and e.item_id in items]
     open_items = list(session.exec(
-        select(PriceReviewItem).where(PriceReviewItem.state == price_review.PROPUESTO)
+        select(PriceReviewItem).where(PriceReviewItem.state.in_(WAITING_STATES))  # type: ignore[attr-defined]
         .order_by(PriceReviewItem.state_since, PriceReviewItem.id)).all())
     data.pending_total = len(open_items)
-    already = {e.item_id for e in session.exec(select(PriceReviewEvent).where(PriceReviewEvent.kind == AVISO_SLA)).all()}
+    # El aviso vale para el estado actual: una ficha que pasó de «propuesto» a «en revisión» puede volver a salir.
+    last_warned = dict(session.exec(
+        select(PriceReviewEvent.item_id, func.max(PriceReviewEvent.at))  # type: ignore[arg-type]
+        .where(PriceReviewEvent.kind == AVISO_SLA).group_by(PriceReviewEvent.item_id)).all())
     new_ids = {i.id for i in data.new}
     data.waiting = [i for i in open_items
-                    if i.state_since <= now - timedelta(days=sla) and i.id not in already and i.id not in new_ids]
+                    if i.state_since <= now - timedelta(days=sla) and i.id not in new_ids
+                    and not (i.id in last_warned and last_warned[i.id] >= i.state_since)]
     return data
 
 
@@ -108,7 +129,7 @@ def render(data: DigestData) -> tuple[str, str]:
         "Hola,",
         "",
         "Resumen de la bandeja de revisión de precios (Mercado Libre contra nuestros precios).",
-        "Hugo solo propone: no modificó nada en Vendure.",
+        "Hugo propone; solo inactiva o reactiva lo que decide una persona de la lista.",
         "",
     ]
     if data.new:
@@ -125,6 +146,17 @@ def render(data: DigestData) -> tuple[str, str]:
         if len(data.waiting) > MAX_WAITING_LISTED:
             lines.append(f"   … y {len(data.waiting) - MAX_WAITING_LISTED} más.")
         lines.append("")
+    if data.reopened:
+        lines.append(f"REABIERTOS POR EMPEORAR ({len(data.reopened)})")
+        for ev, item in data.reopened:
+            worse = (price_review._loads(ev.payload) or {}).get("empeoro_pct")
+            ok = isinstance(worse, (int, float))
+            lines.append(_line(item, f" · empeoró {worse:g} %".replace(".", ",") if ok else ""))
+        lines.append("")
+    if data.attention:
+        lines.append(f"PARA MIRAR A MANO ({len(data.attention)})")
+        lines += [_line(item, f" · {ATTENTION[ev.kind]}") for ev, item in data.attention]
+        lines.append("")
     if data.closed_events:
         lines.append(f"Se cerraron solas desde el último mail: {len(data.closed_events)} (el producto dejó de ser rojo).")
     lines.append(f"Total esperando decisión: {data.pending_total}.")
@@ -140,7 +172,7 @@ def mark_sent(session: Session, data: DigestData, now: datetime | None = None) -
     primera vez como «nueva» (p. ej. se cargó PM_REVIEW_EMAILS tarde): no tiene que volver a salir como «esperando» en el
     próximo mail. No hace commit."""
     now = now or utcnow()
-    for ev in (*data.new_events, *data.closed_events):
+    for ev in (*data.new_events, *data.closed_events, *(e for e, _ in (*data.reopened, *data.attention))):
         ev.notified_at = now
         session.add(ev)
     overdue_new = [i for i in data.new if i.state_since <= now - timedelta(days=data.sla_days)]
