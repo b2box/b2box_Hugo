@@ -322,7 +322,7 @@ async def test_sin_token_o_con_actor_fuera_de_lista_no_corre(env, monkeypatch):
 def test_los_settings_nuevos_quedan_auditados_y_apagados_por_defecto():
     from app.api.routes import _COSTLY_SETTINGS
 
-    assert {"apify_meli_search_enabled", "apify_meli_search_daily_max"} <= _COSTLY_SETTINGS
+    assert {"apify_meli_search_enabled", "apify_meli_search_daily_max", "oficina_result_ttl_days"} <= _COSTLY_SETTINGS
     s = get_settings().__class__(vendure_api_url="https://example.invalid/x")
     assert s.apify_meli_search_enabled == 0 and s.apify_meli_search_daily_max == 200
     assert s.apify_meli_search_actor == ACTOR and s.apify_meli_search_build
