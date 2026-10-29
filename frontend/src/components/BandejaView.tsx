@@ -86,7 +86,23 @@ const EVENT_LABEL: Record<string, string> = {
   vendure_incierto: "Vendure no respondió: no se sabe si tomó el cambio (se revisa solo)",
   sin_vuelta_atras: "No se pudo volver atrás (había otra ficha abierta): se cerró",
   reabierto: "Se reabrió",
+  recalculado: "Recalculado por un cambio en Vendure",
+  decision_reactivar_auto: "Hugo lo reactivó solo (se corrigió en Vendure y ya no es rojo)",
+  aviso_reactivar: "No se reactivó solo",
 };
+
+// La marca que deja en la ficha una reactivación automática que no se hizo por el tope del día (price_recalc.FLAG_NOT_RED).
+const FLAG_NOT_RED = "ya_no_rojo";
+
+// El evento `recalculado`: «mejoró: $X → $Y · Rojo → Verde · ratio 1,28 → 0,77».
+function recalcText(p: Record<string, unknown>): string {
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  const color = (v: unknown): string => (typeof v === "string" && v in COLOR_META ? COLOR_META[v as keyof typeof COLOR_META].label : "—");
+  const ratio = (v: unknown): string => (num(v) == null ? "—" : num(v)!.toLocaleString("es-AR", { maximumFractionDigits: 2 }));
+  const way = p.sentido === "mejoro" ? "mejoró" : p.sentido === "empeoro" ? "empeoró" : "cambió el tramo";
+  const price = (v: unknown): string => (num(v) == null ? "—" : ars(num(v)! / 100));
+  return `: ${way}: ${price(p.precio_antes)} → ${price(p.precio_despues)} · ${color(p.color_antes)} → ${color(p.color_despues)} · ratio ${ratio(p.ratio_antes)} → ${ratio(p.ratio_despues)}`;
+}
 
 // Una frase fija por código de error: el detalle técnico no se muestra.
 const VENDURE_ERROR_TEXT: Record<string, string> = {
@@ -390,6 +406,9 @@ export function ItemRow({ it, onOpen }: { it: PriceReviewItemRow; onOpen: () => 
         {it.flags.includes("oficina") && (
           <span className="block text-[11px] text-muted-foreground mt-0.5">dato de la oficina</span>
         )}
+        {it.flags.includes(FLAG_NOT_RED) && (
+          <span className="block text-[11px] text-success mt-0.5">ya no está en rojo: reactivala con «Ya lo corregí»</span>
+        )}
       </td>
       <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{fmtDays(it.waiting_days)}</td>
       <td className="px-3 py-2 text-right">
@@ -438,7 +457,13 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
       ? d.events.find((e) => e.kind === "cerrado_auto")?.motive_text ?? "dejó de ser rojo"
       : d.state === "despublicado"
         ? "se decidió despublicar el producto"
-        : "se corrigió y se reactivó";
+        : d.decision?.code === "reactivar_auto"
+          ? "se corrigió en Vendure, dejó de ser rojo y Hugo lo reactivó solo"
+          : "se corrigió y se reactivó";
+  const lastRecalc = d.events.find((e) => e.kind === "recalculado");    // los eventos vienen del más nuevo al más viejo
+  const notRedAnymore = !closed && d.flags.includes(FLAG_NOT_RED)
+    ? d.events.find((e) => e.kind === "aviso_reactivar")?.motive_text ?? "Ya no está en rojo: reactivala con «Ya lo corregí»."
+    : null;
   return (
     <>
       <div className="flex items-center gap-2 flex-wrap">
@@ -459,6 +484,24 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
       {closed && (
         <p className="p-2 rounded-md text-xs border bg-success/10 border-success/40 text-success">
           Esta ficha ya está cerrada{d.closed_at ? ` (${fmtTime(d.closed_at)})` : ""}: {closedWhy}
+        </p>
+      )}
+      {notRedAnymore && (
+        <p className="p-2 rounded-md text-xs border bg-success/10 border-success/40 text-success">
+          {notRedAnymore} Hugo no la reactivó solo porque llegó al tope de reactivaciones automáticas del día.
+        </p>
+      )}
+      {!closed && lastRecalc && (
+        <p
+          className={cn(
+            "p-2 rounded-md text-xs border",
+            lastRecalc.payload?.sentido === "empeoro"
+              ? "bg-destructive/10 border-destructive/40 text-destructive"
+              : "bg-success/10 border-success/40 text-success",
+          )}
+        >
+          Recalculado {fmtTime(lastRecalc.at)} por un cambio en Vendure, con los precios de ML de la última corrida
+          {recalcText(lastRecalc.payload ?? {})}.
         </p>
       )}
       {d.doubtful_today && (
@@ -599,6 +642,8 @@ function EventLine({ e }: { e: ReviewEvent }) {
   const extra =
     e.kind === "propuesto" && typeof payload.racha === "number"
       ? ` (${payload.racha} noches seguidas en rojo)`
+      : e.kind === "recalculado"
+        ? recalcText(payload)
       : e.kind === "vendure_error"
         ? `: ${VENDURE_ERROR_TEXT[e.motive_code ?? ""] ?? "falló"}`
         : e.kind.startsWith("decision_") && e.motive_code

@@ -212,6 +212,30 @@ export function ColorDot({ color }: { color: SemaforoColor }) {
   );
 }
 
+// "14:05" en la hora local del navegador.
+const hhmm = (iso: string): string => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+
+// La marca de un snapshot recalculado durante el día porque el producto cambió en Vendure: nuestro precio nuevo contra
+// los mismos idénticos de la corrida. El color de cada lado dice si mejoró o empeoró.
+export function RecalcMark({ s }: { s: PriceMonitorSnapshot }) {
+  if (!s.recalc) return null;
+  const before = s.recalc.before;
+  return (
+    <span
+      className="block text-[11px] text-muted-foreground mt-0.5 whitespace-normal max-w-[260px]"
+      title="Nuestro precio cambió en Vendure: se recalculó con los precios de ML de la última corrida (no se buscó de nuevo en ML). La corrida de la noche lo reemplaza."
+    >
+      Recalculado {hhmm(s.recalc.at)} por cambio en Vendure:{" "}
+      {before && (
+        <>
+          antes <ColorDot color={before.color} /> {fmtArs(before.our_price_cents)} →{" "}
+        </>
+      )}
+      ahora <ColorDot color={s.color} /> {fmtArs(s.our_price_cents)}
+    </span>
+  );
+}
+
 function MiniThumb({ url, alt }: { url: string | null; alt: string }) {
   const [failed, setFailed] = useState(false);
   if (!url || failed || isUnreachableImage(url)) {
@@ -799,6 +823,7 @@ function SnapshotRow({
       </td>
       <td className="px-3 py-2 whitespace-nowrap">
         <ColorCell s={s} />
+        <RecalcMark s={s} />
         {s.prev_color && s.prev_color !== s.color && (
           <span className="block text-[11px] text-muted-foreground mt-0.5">antes: {COLOR_META[s.prev_color].label}</span>
         )}
@@ -927,15 +952,31 @@ function ProductHistory({ productId }: { productId: string }) {
       </thead>
       <tbody>
         {rows.map((h) => (
-          <tr key={h.id}>
-            <td className="pr-4 py-0.5 whitespace-nowrap">{fmtTime(h.captured_at)}</td>
-            <td className="pr-4 py-0.5">
-              <ColorDot color={h.color} />
-            </td>
-            <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.ml_median_cents)}</td>
-            <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.our_price_cents)}</td>
-            <td className="py-0.5 text-right num-tabular">{fmtPct(h.est_margin_pct)}</td>
-          </tr>
+          <Fragment key={h.id}>
+            <tr>
+              <td className="pr-4 py-0.5 whitespace-nowrap">
+                {fmtTime(h.captured_at)}
+                {h.recalc && <span className="block text-[11px] text-muted-foreground">recalculado {fmtTime(h.recalc.at)}</span>}
+              </td>
+              <td className="pr-4 py-0.5">
+                <ColorDot color={h.color} />
+              </td>
+              <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.ml_median_cents)}</td>
+              <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.our_price_cents)}</td>
+              <td className="py-0.5 text-right num-tabular">{fmtPct(h.est_margin_pct)}</td>
+            </tr>
+            {h.recalc?.before && (
+              <tr className="text-muted-foreground">
+                <td className="pr-4 py-0.5 pl-3 whitespace-nowrap">antes del cambio en Vendure</td>
+                <td className="pr-4 py-0.5">
+                  <ColorDot color={h.recalc.before.color} />
+                </td>
+                <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.ml_median_cents)}</td>
+                <td className="pr-4 py-0.5 text-right num-tabular">{fmtArs(h.recalc.before.our_price_cents)}</td>
+                <td className="py-0.5 text-right num-tabular">{fmtPct(h.recalc.before.est_margin_pct)}</td>
+              </tr>
+            )}
+          </Fragment>
         ))}
       </tbody>
     </table>

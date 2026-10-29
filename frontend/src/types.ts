@@ -363,6 +363,18 @@ export interface PriceMonitorSnapshot {
   // De cuándo es el dato de los idénticos y lo que decidió la bandeja de Pao: "firme" | "dudoso:<motivo>" | null.
   data_at?: string | null;
   review_flag?: string | null;
+  // Recalculado durante el día porque el producto cambió en Vendure (mismos idénticos, nuestro precio nuevo): cuándo y lo
+  // que había medido la corrida. null = la fila es tal cual la dejó la corrida (faltan en servidores viejos).
+  recalc?: {
+    at: string;
+    before: {
+      our_price_cents: number | null;
+      tier_used: string | null;
+      color: SemaforoColor;
+      est_margin_pct: number | null;
+      review_flag: string | null;
+    } | null;
+  } | null;
 }
 
 export interface PriceMonitorSnapshotsResponse {
