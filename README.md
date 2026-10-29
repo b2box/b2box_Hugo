@@ -1381,8 +1381,9 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
 
 ## Bandeja de revisión de precios (Pao)
 
-Diseño: `bandeja-pao-diseno.md` (PR 1 y PR 2). **En esta etapa Hugo solo propone: no escribe nada en Vendure
-(ni `enabled` ni nada) y no manda nada a Paco PRO.** Pao ve la bandeja en el dashboard → **Bandeja de precios** y
+Diseño: `bandeja-pao-diseno.md` (PR 1 a PR 3) y `bandeja-pao-pr3-pr5-criterios.md`. **Hugo propone; inactiva o
+reactiva un producto en Vendure solo cuando lo decide una persona de `PRICE_REVIEW_DECIDERS`** (la pasada de la noche
+no escribe nada, y la bandeja no le manda nada a Paco). Pao ve la bandeja en el dashboard → **Bandeja de precios** y
 recibe un resumen por mail.
 
 ### Qué es un «rojo firme»
@@ -1410,16 +1411,23 @@ Los números son settings (`pm_review_*`). El motivo queda en `market_price_snap
 Después de cerrar la corrida del semáforo (si falla, la corrida queda `ok` y el error se anota en
 `review_summary`), `price_review.process_run`:
 
+0. concilia las escrituras en Vendure que quedaron a medias (ver «Decisiones»; solo lee Vendure, en cualquier modo);
 1. marca cada snapshot rojo como `firme` / `dudoso:<motivo>` (también con `pm_mode = 0`: así la racha ya está lista
    cuando se prende);
 2. con `pm_mode >= 1`: abre la ficha (`propuesto`) de cada rojo firme con racha, con su **diagnóstico a-e** y el
-   **desglose del precio**; actualiza las fichas abiertas y cierra solas (`cerrado_auto`) las que dejaron de ser
-   rojo o ya estaban inactivas;
+   **desglose del precio**; pone al día las fichas vivas (abiertas y mantenidas: último color y margen), cierra solas
+   (`cerrado_auto`) las propuestas que dejaron de ser rojo y las que están apagadas **sin que las haya apagado Hugo**
+   (`hugo_disabled` distinto de true: si lo apagó Hugo, apagado es lo esperado), y reabre las mantenidas que
+   empeoraron (regla del 10 %);
 3. guarda el resumen y escribe `review_at` **una sola vez**: correrla dos veces, o retomarla después de un reinicio,
    no duplica fichas ni eventos.
 
-`pm_mode`: **0** sombra (solo marca), **1** propuesta, **2** automático: *todavía no existe*, se comporta como 1 y lo
-loguea. Hay **una ficha abierta por producto** (`open_key` único); las cerradas quedan de historial.
+Los productos con una ficha viva **se miden siempre**, aunque `pm_include_disabled` valga 0: si Hugo los apagó hay que
+saber si se arreglaron.
+
+`pm_mode`: **0** sombra (solo marca; las decisiones quedan frenadas, Deshacer no), **1** propuesta, **2** automático:
+*todavía no existe*, se comporta como 1 y lo loguea. Hay **una ficha viva por producto** (`open_key` único: abierta o
+mantenida); las cerradas quedan de historial.
 
 ### Diagnóstico a-e
 
@@ -1449,19 +1457,71 @@ pasada además tiene un tiempo máximo (15 min) para leer Vendure. Lo que no ent
 uno de los 5 intentos** y se completa en las noches siguientes. Los errores que se guardan y se muestran llevan el tipo y un
 código (`TransportServerError 502`), nunca el mensaje; el detalle va al log.
 
+### Decisiones
+
+Solo las personas de **`PRICE_REVIEW_DECIDERS`** (emails de la sesión del dashboard, separados por coma; da igual
+mayúsculas y espacios). **Fail-closed:** vacía = nadie decide, tampoco en desarrollo; hace falta `DASHBOARD_SECRET` y una
+sesión con usuario. Quien no está ve los botones deshabilitados («Solo deciden: ver PRICE_REVIEW_DECIDERS»). Los botones
+salen de `actions` en el detalle: los arma el backend según el estado, la sesión y el modo.
+
+| Desde ↓ / acción → | Inactivar y revisar | Corregir | Mantener activo | Despublicar | Ya lo corregí: reactivar |
+|---|---|---|---|---|---|
+| `propuesto` (activo) | apaga → `en_revision` | apaga → `corrigiendo` | sin escribir → `mantenido` | apaga → `despublicado` | no |
+| `en_revision` (lo apagó Hugo) | no | → `corrigiendo` | reactiva → `mantenido` | → `despublicado` | no |
+| `corrigiendo` | no | no | reactiva → `mantenido` | → `despublicado` | reactiva → `corregido` |
+| `buscando_prov` | no | → `corrigiendo` | reactiva → `mantenido` | → `despublicado` | no |
+| `mantenido`, `despublicado`, `corregido`, `cerrado_auto` | no | no | no | no | no (solo Deshacer) |
+
+- **Motivos.** Corregir: caja, tramos, cantidad, certificado, otro. Mantener: nicho, volumen, margen aceptado, el match de
+  ML está mal, otro, **siempre con un texto de 10 a 500 caracteres**. Despublicar: sin margen, sin proveedor, calidad,
+  duplicado, otro. «Otro» pide un texto de 10 caracteres o más. Los textos se guardan sin caracteres de control y con
+  500 como máximo; la pantalla los muestra como texto.
+- **Apagar algo ya apagado por otra razón** no escribe nada: la ficha se cierra (`cerrado_auto`, «ya estaba inactivo por
+  otra razón»).
+- **Reactivar** escribe solo si: lo apagó Hugo (`hugo_disabled`), sigue apagado, el portal de proveedores no lo tiene
+  `pending` ni `rejected` (`approvalStatus`; si no se puede leer, no se reactiva) y nadie lo apagó después como
+  duplicado o como BX sin foto. Si falta algo: 409 «reactivar a mano» y la ficha queda igual. Si otra persona ya lo
+  reactivó, termina sin escribir. Reactivar hace **un solo intento** (más el re-login): con contacto del proveedor,
+  Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva.
+- **Deshacer** vuelve al estado y al `enabled` de antes de la **última** acción humana, hasta 30 días después. Si la ficha
+  cambió después (otra decisión, la reapertura del 10 %, un cierre solo, un error) responde 409. Un Deshacer no se
+  deshace. Sigue permitido con `pm_mode = 0`.
+- **Regla del 10 %.** «Mantener» guarda la línea base (`kept_ratio` = nuestro precio / lo que le queda neto al revendedor
+  en ML). Si una noche el producto sigue en rojo firme con la racha cumplida y el cociente llegó a `kept_ratio × (1 +
+  pm_review_worse_pct / 100)` (10 % por defecto), la ficha vuelve a `propuesto` y sale en el mail como reabierta. La
+  línea base no se corre si mejora; la cambia recién una decisión nueva. Sin línea base no se reabre sola.
+- **Cómo se escribe** (`pricing/price_review_actions.py`, el único módulo que escribe en Vendure): cambio de estado
+  atómico (`UPDATE … WHERE id AND state AND version`) más un evento `intent` → se lee el `enabled` real → `set_enabled`
+  → se verifica el valor que devolvió Vendure → `hugo_disabled`, evento `inactivado` / `reactivado` y una fila de
+  `AuditLog` (`price_review_disabled` / `price_review_enabled`, sale en la historia del producto) → se invalida el
+  catálogo. Si Vendure falla o devuelve otra cosa, la ficha vuelve atrás, queda un evento `vendure_error` con el código
+  (nunca el mensaje) y la respuesta es 502. Dos clics a la vez: una sola escritura; el segundo recibe 409 con el estado
+  actual. Si el proceso muere a mitad, la intención se concilia contra Vendure a los 2 minutos: al arrancar, en la
+  pasada de la noche o al tocar la ficha. Las escrituras no gastan el tope de 150 lecturas de la noche.
+- **Registro.** Cada acción deja su evento con quién (email), cuándo (UTC) y por qué, y la ficha guarda `decision`,
+  `decision_by`, `decision_at` y el motivo. `AuditLog` no tiene actor: el email va en el evento y en el `detail` de la
+  fila (que también sale en el resumen diario de `ALERT_EMAIL_TO`, como el resto de `AuditLog`).
+- **API** (sesión del dashboard, solo JSON): `POST /api/price-review/items/{id}/approve` `{expected_state, motive_text?}`,
+  `POST …/decision` `{decision: corregir|mantener|despublicar|reactivar, expected_state, motive_code?, motive_text?}` y
+  `POST …/undo` `{expected_state, motive_text?}`. Responden `{item_id, state, state_label, version, wrote, note}`; los
+  errores traen `detail: {code, message, state, version…}`: 400 validación, 403 sin permiso, 404, 409 (el estado cambió,
+  la acción no va desde ese estado, modo sombra, reactivar a mano, plazo vencido) y 502 si falla Vendure.
+
 ### Cómo usarlo
 
 - Prender: dashboard → Configuración → «Modo de la bandeja» = 1. Con 0 (default) solo se marcan los rojos.
 - Dashboard → **Bandeja de precios**: pestañas (Para decidir / En proceso / Mantenidos / Cerrados), filtro por causa y
   búsqueda; el detalle muestra el producto, el desglose del precio (10 partes que suman la factura) y los tramos, el
   diagnóstico, las publicaciones de ML y de las tiendas con **«No es el mismo»** (si el producto deja de ser rojo la
-  ficha se cierra sola en la misma respuesta), y la historia. Los botones de decisión (Corregir, Buscar otro proveedor,
-  Mantener activo, Despublicar) están deshabilitados hasta la etapa siguiente.
-- API (sesión del dashboard, solo lectura): `GET /api/price-review/summary`, `GET /api/price-review/items?state=&cause=&q=&page=`,
+  ficha se cierra sola en la misma respuesta), los botones de decisión (ver «Decisiones»; cada uno abre una
+  confirmación con el motivo y lo que pasa en Vendure) y la historia.
+- API de lectura: `GET /api/price-review/summary`, `GET /api/price-review/items?state=&cause=&q=&page=`,
   `GET /api/price-review/items/{id}`. El Semáforo acepta `review=firme|dudoso|dudoso:<motivo>`.
 - **Mail diario** 08:30 hora de Argentina (11:30 UTC, `PRICE_REVIEW_DIGEST_CRON_UTC`): por el SMTP de siempre
-  (`ALERT_SMTP_*`) a `PM_REVIEW_EMAILS` (separados por coma; **vacío = no se manda**). Lleva lo nuevo y, una vez por
-  ficha, lo que lleva más de 7 días esperando; sin novedades no sale. Los eventos se marcan (`notified_at`) recién
+  (`ALERT_SMTP_*`) a `PM_REVIEW_EMAILS` (separados por coma; **vacío = no se manda**). Lleva lo nuevo, las fichas
+  reabiertas por empeorar, lo que hay que mirar a mano (Vendure no aceptó un cambio, una reactivación frenada, un cambio
+  que quedó a medias) y, una vez por ficha y por estado, las propuestas y las en revisión que llevan más de 7 días
+  esperando; sin novedades no sale. Los eventos se marcan (`notified_at`) recién
   después de que el SMTP aceptó el mail, así que un reintento no duplica.
 - **Quién ve los costos.** `PRICE_REVIEW_VIEWERS` (emails de la sesión del dashboard, separados por coma). **Fail-closed:**
   vacío = nadie. Quien no esté en la lista recibe el detalle **sin** costo de fábrica en yuanes, FOB (el componente
@@ -1475,14 +1535,16 @@ código (`TransportServerError 502`), nunca el mensaje; el detalle va al log.
 **Registro.** `price_review_event` solo se agrega (el ORM rechaza editarlo o borrarlo; lo único que cambia es
 `notified_at`) y cada evento lleva quién lo hizo: un email o `hugo:auto`.
 
-**Qué sigue (no está hecho):** decisiones de Pao con `PRICE_REVIEW_DECIDERS` y escritura de `enabled` con guardas
-(PR 3), modo automático, topes y alertas (PR 4), «Buscar otro proveedor» en Paco PRO (PR 5), volver a medir un
+**Qué sigue (no está hecho):** modo automático, topes, alertas y la salida automática de `corrigiendo` (PR 4), «Buscar
+otro proveedor» en Paco APP (PR 5; el estado `buscando_prov` ya existe pero ninguna ficha llega ahí), volver a medir un
 producto (PR 6).
 
 **Migración y rollback.** Automática en el arranque (`init_db`): crea `price_review_item` y `price_review_event`
 (con sus índices, entre ellos el único `ix_pri_open_key`) y agrega cinco columnas opcionales (`data_at`,
 `review_flag`, `review_at`, `review_summary`, `n_flipped`); no toca nada más (hay un test sobre Postgres 16 desde el
-esquema de `origin/main`). Para volver atrás:
+esquema de `origin/main`). Las decisiones (PR 3) no agregan columnas: usan las que ya tenía la ficha. El estado
+«buscando proveedor» se guarda como `buscando_prov` (entra en `VARCHAR(16)`; el nombre largo nunca pudo guardarse en
+Postgres, así que no hay filas viejas que migrar). Para volver atrás:
 
 ```sql
 DROP TABLE IF EXISTS price_review_event;
