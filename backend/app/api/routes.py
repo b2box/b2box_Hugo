@@ -982,10 +982,14 @@ _COSTLY_SETTINGS = frozenset({
     "audit_interval_hours",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
-    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas y manda el resumen
-    # diario por mail, y el 2 (automático, todavía no implementado) es el que va a tocar Vendure.
-    # Los umbrales de la bandeja (pm_review_*, pm_diag_*) solo deciden qué entra: siguen abiertos.
+    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas, manda el resumen diario por mail y
+    # habilita que una persona de PRICE_REVIEW_DECIDERS inactive o reactive productos en Vendure; con 0 esas
+    # decisiones se frenan. El 2 (automático, todavía no implementado) es el que va a tocar Vendure solo.
     "pm_mode",
+    # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la
+    # vigilancia de lo que se decidió mantener. Los demás umbrales de la bandeja (pm_review_*, pm_diag_*) solo deciden
+    # qué entra: siguen abiertos.
+    "pm_review_worse_pct",
 })
 
 

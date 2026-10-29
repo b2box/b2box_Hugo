@@ -17,7 +17,7 @@ from app.db.session import engine, init_db
 
 KEYS = ("apify_1688_daily_budget", "estimate_price_factor_k", "estimate_margin_pct",
         "estimate_tier_qty_1", "vision_rerank_daily_budget", "pm_green_min_pct",
-        "pm_mode", "pm_review_min_listings")
+        "pm_mode", "pm_review_min_listings", "pm_review_worse_pct")
 
 
 def _wipe():
@@ -212,3 +212,14 @@ def test_el_modo_de_la_bandeja_es_de_admin_y_queda_auditado(monkeypatch):
     assert [r.detail for r in rows] == ["nico@b2box.pro cambió pm_mode: 0 → 1"]
     assert nico.delete("/api/settings/pm_mode").status_code == 200
     assert runtime.get("pm_mode") == 0
+
+
+def test_el_10_por_ciento_de_la_bandeja_es_de_admin_y_queda_auditado(monkeypatch):
+    """pm_review_worse_pct decide si una ficha mantenida vuelve a la bandeja: subirlo apaga esa vigilancia."""
+    pao = _client(monkeypatch, admins="nico@b2box.pro", user="pao@b2box.pro")
+    assert pao.put("/api/settings/pm_review_worse_pct", json={"value": 100}).status_code == 403
+    nico = _client(monkeypatch, admins="nico@b2box.pro", user="nico@b2box.pro")
+    assert nico.put("/api/settings/pm_review_worse_pct", json={"value": 15}).status_code == 200
+    with Session(engine) as s:
+        rows = s.exec(select(AuditLog).where(AuditLog.action == "setting_changed")).all()
+    assert [r.detail for r in rows] == ["nico@b2box.pro cambió pm_review_worse_pct: 10.0 → 15.0"]
