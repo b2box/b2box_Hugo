@@ -454,3 +454,60 @@ async def test_reqa_confirming_an_already_off_duplicate_or_bx_is_not_restored_no
     assert (dry["would_restore_max"], dry["total_disable_events"]) == (dry0["would_restore_max"], dry0["total_disable_events"])
     assert "rv1" not in dry["preview_ids"]
     assert c.get("/api/health-metrics").json()["duplicates"]["disabled_total"] == total0
+
+
+# ─── Verificación final: un solo intento, definitivo vs ambiguo ──
+
+
+@pytest.mark.parametrize("reply,kind,calls", [
+    ((500, {"errors": [{"message": "Internal error"}]}), "rechazo", 1),      # Vendure contestó con error GraphQL
+    ((200, {"errors": [{"message": "No se puede"}], "data": None}), "rechazo", 1),
+    ((504, "<html>Gateway Timeout</html>"), "incierto", 1),                 # el proxy cortó: Vendure pudo seguir
+    ((502, "Bad Gateway"), "incierto", 1),
+    ("read_timeout", "incierto", 1),
+    ("connect_error", "incierto", 1),
+    ("forbidden_then_504", "incierto", 2),                                  # re-login y un solo intento más
+])
+@pytest.mark.parametrize("direction", ["apagar", "reactivar"])
+async def test_final_one_call_and_a_rejection_rolls_back_but_an_ambiguous_error_waits(c, fake, monkeypatch, reply,
+                                                                                      kind, calls, direction):
+    item_id = _ficha(fake, "propuesto" if direction == "apagar" else "en_revision")
+    start, end = ("propuesto", "en_revision") if direction == "apagar" else ("en_revision", "mantenido")
+    sent: list[int] = []
+    handler = fake.handler
+
+    def h(request):
+        if "SetEnabled" not in json.loads(request.content)["query"]:
+            return handler(request)
+        sent.append(1)
+        r = "forbidden" if reply == "forbidden_then_504" and len(sent) == 1 else \
+            (504, "Gateway Timeout") if reply == "forbidden_then_504" else reply
+        if r == "forbidden":
+            return httpx.Response(200, json={"errors": [{"message": "You are not currently authorized",
+                                                         "extensions": {"code": "FORBIDDEN"}}]})
+        if r == "read_timeout":
+            raise httpx.ReadTimeout("timeout", request=request)
+        if r == "connect_error":
+            raise httpx.ConnectError("refused", request=request)
+        status, body = r
+        return httpx.Response(status, json=body) if isinstance(body, dict) else httpx.Response(status, text=body)
+
+    fake.handler = h
+
+    async def login(self) -> bool:
+        return True
+
+    monkeypatch.setattr(VendureClient, "_login", login)
+    r = (k.post(c, item_id, "approve", expected_state="propuesto") if direction == "apagar"
+         else k.decide(c, item_id, "mantener", "en_revision", KEEP["motive_code"], KEEP["motive_text"]))
+    assert r.status_code == 502 and len(sent) == calls, (r.text, len(sent))
+    with Session(engine) as s:
+        open_intent = pr.pending_intent(s, item_id) is not None
+    item = w.item(item_id)
+    if kind == "rechazo":
+        assert r.json()["detail"]["code"] == "vendure_error" and item.state == start and not open_intent
+        return
+    assert r.json()["detail"]["code"] == "vendure_incierto" and item.state == end and open_intent
+    assert "vendure_error" not in k.kinds(item_id) and k.kinds(item_id)[-1] == "vendure_incierto"
+    assert await actions.reconcile(now=later(11)) == 1                          # no llegó: vuelve a como estaba
+    assert w.item(item_id).state == start and k.kinds(item_id)[-1] == "intent_descartado"
