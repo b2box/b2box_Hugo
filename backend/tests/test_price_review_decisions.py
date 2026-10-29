@@ -318,9 +318,10 @@ async def test_d8_every_decision_keeps_who_when_and_why_and_one_event(c, fake, d
     assert [e.kind for e in evs] == [f"decision_{decision}"] and len(evs[0].kind) <= 24
 
 
-async def test_d9_reactivate_from_fixing_ends_fixed_and_a_red_two_nights_later_opens_a_new_ficha(c, fake):
+async def test_d9_reactivate_from_fixing_ends_fixed_and_a_red_two_nights_later_opens_a_new_ficha(c, fake, monkeypatch):
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     fake.enabled["rv1"] = False
+    monkeypatch.setattr(actions, "utcnow", lambda: w.NOW + timedelta(hours=1))     # decide antes de las dos noches
     r = k.decide(c, item_id, "reactivar", "corrigiendo", text="Cargué la caja bien")
     assert r.status_code == 200 and r.json()["state"] == "corregido" and fake.writes() == [True]
     item = w.item(item_id)

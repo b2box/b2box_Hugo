@@ -912,3 +912,28 @@ async def test_a_snapshot_taken_before_the_last_state_change_neither_closes_nor_
     assert (w.item(kept).state == "cerrado_auto") is closes
     assert (w.item(gone).state == "propuesto") is closes                        # 1,2 / 0,958: reabriría
     assert w.item(kept).last_run_id == run and w.item(gone).last_run_id == run    # el último dato sí se guarda
+
+
+@pytest.mark.parametrize("closed_hours,opens", [(+1, False), (-1, True)])
+async def test_a_new_ficha_is_not_opened_with_data_older_than_the_decision_that_closed_the_last_one(closed_hours, opens):
+    """Re-QA 2: la corrida de la madrugada y un Despublicar a la mañana: ese dato no abre otra ficha. Un dato tomado
+    después del cierre, sí."""
+    w.make_item("p1", "despublicado", closed_at=NOW + timedelta(hours=closed_hours))
+    prev, today = two_nights({"p1": {}})
+    summary = await pr.process_run(today, now=NOW + timedelta(hours=2))
+    assert len(w.items()) == (2 if opens else 1)
+    assert summary["dato_anterior_a_una_decision"] == (0 if opens else 1)
+
+
+async def test_a_new_ficha_is_not_opened_while_a_write_on_the_product_is_in_flight():
+    from app.clock import utcnow
+    from app.db.models import PriceReviewEvent
+
+    old = w.make_item("p1", "despublicado", closed_at=NOW - timedelta(days=3))   # Despublicar con la escritura incierta
+    with Session(engine) as s:
+        s.add(PriceReviewEvent(item_id=old, product_id="p1", at=utcnow(), actor="pao@b2box.pro",   # en curso: no venció
+                               kind="intent", from_state="propuesto", to_state="despublicado", enabled_after=False))
+        s.commit()
+    prev, today = two_nights({"p1": {}})
+    await pr.process_run(today, now=NOW)
+    assert [i.id for i in w.items()] == [old]

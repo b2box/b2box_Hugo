@@ -360,7 +360,6 @@ async def test_reqa_a_turn_off_that_lands_after_the_reread_is_not_hidden(c, fake
     assert [a.action for a in k.audit("rv1")] == ["price_review_disabled"], trail
 
 
-@pytest.mark.xfail(strict=True, reason="Re-QA #2: la pasada abre una ficha nueva con un snapshot anterior al Despublicar")
 async def test_reqa_a_snapshot_from_before_unpublishing_does_not_open_a_new_ficha(fake, monkeypatch):
     item_id = _ficha(fake, "propuesto")
     prev, run = w.make_run(started=w.NOW - timedelta(days=1)), w.make_run()

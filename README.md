@@ -1423,8 +1423,9 @@ Después de cerrar la corrida del semáforo (si falla, la corrida queda `ok` y e
    no duplica fichas ni eventos.
 
 Un snapshot medido **antes** del último cambio de estado de la ficha (la corrida de la madrugada y una decisión de la
-mañana) solo actualiza el último dato: no la cierra ni la reabre. Una ficha con una escritura en Vendure en curso no se
-toca.
+mañana) solo actualiza el último dato: no la cierra ni la reabre. Tampoco abre una ficha nueva si es anterior al cierre
+de la última ficha del producto (un Despublicar de la mañana). Una ficha con una escritura en Vendure en curso no se toca,
+ni se abre otra del mismo producto.
 
 Los productos con una ficha viva **se miden siempre**, aunque `pm_include_disabled` valga 0: si Hugo los apagó hay que
 saber si se arreglaron.

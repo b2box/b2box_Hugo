@@ -512,7 +512,8 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                     MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.product_id.in_(extra_pids))).all():  # type: ignore[attr-defined]
                 snaps_open[sn.product_id] = sn
         streak_map = streaks(s, run_id, [pid for pid, v in verdicts.items() if v.firm])
-        writing = {ev.item_id for ev in pending_intents(s)}       # una escritura en Vendure en curso o a medias
+        intents = pending_intents(s)                               # escrituras en Vendure en curso o a medias
+        writing = {ev.item_id for ev in intents}
         touched = closed = reopened = 0
         for item in open_items:
             sn = snaps_open.get(item.product_id)
@@ -527,10 +528,22 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                 plan.pending_diag.append(int(item.id))   # type: ignore[arg-type]
         s.commit()
 
-        # Fichas nuevas: rojo firme, sin ficha abierta, con la racha cumplida.
-        waiting = 0
+        # Fichas nuevas: rojo firme, sin ficha abierta, con la racha cumplida. Tampoco con un dato anterior a la decisión
+        # que cerró la última ficha del producto (Despublicar a la mañana sobre la corrida de la madrugada), ni con una
+        # escritura en Vendure en curso.
+        waiting = after_decision = 0
+        new_pids = [sn.product_id for sn in firm if sn.product_id not in open_pids]
+        last_closed = dict(s.exec(
+            select(PriceReviewItem.product_id, func.max(PriceReviewItem.closed_at))  # type: ignore[arg-type]
+            .where(PriceReviewItem.product_id.in_(new_pids), PriceReviewItem.closed_at.is_not(None))  # type: ignore[attr-defined,union-attr]
+            .group_by(PriceReviewItem.product_id)).all()) if new_pids else {}
+        writing_pids = {ev.product_id for ev in intents}
         for sn in firm:
             if sn.product_id in open_pids:
+                continue
+            closed_at = last_closed.get(sn.product_id)
+            if sn.product_id in writing_pids or (closed_at is not None and closed_at > sn.captured_at):
+                after_decision += 1
                 continue
             n = streak_map.get(sn.product_id, 1)
             if n >= params.confirm_nights:
@@ -539,7 +552,7 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                 waiting += 1
         plan.to_create.sort(key=lambda c: (-c.streak, -c.verdict.firm_listings, c.snap.est_margin_pct or 0.0, c.snap.product_id))
         plan.summary.update({"esperando_racha": waiting, "actualizadas": touched, "cerradas_solas": closed,
-                             "reabiertas": reopened})
+                             "reabiertas": reopened, "dato_anterior_a_una_decision": after_decision})
         if plan.to_create or plan.pending_diag:
             plan.specs_by_product = {
                 pid: ds.parse_specs(raw) for pid, raw in s.exec(
