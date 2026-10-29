@@ -530,3 +530,18 @@ async def test_the_night_and_not_the_same_skip_a_ficha_with_a_write_in_flight(c,
     await pr.process_run(run, now=w.NOW)                           # la conciliación no la toca: no venció
     item = w.item(item_id)
     assert item.state == "propuesto" and item.open_key == "rv1" and k.kinds(item_id)[-1] == "intent"
+
+
+async def test_buttons_are_off_while_a_write_is_in_flight_and_back_on_once_it_is_stale(c, fake, monkeypatch):
+    item_id = w.make_item("rv1")
+    fake.enabled["rv1"] = True
+    restart = _die(monkeypatch, "get_enabled_status")
+    await _crash(actions.act(item_id, "inactivar", k.PAO, expected_state="propuesto"))
+    restart()
+    d = c.get(f"{k.BASE}/items/{item_id}").json()
+    assert d["actions"] and all(not a["enabled"] and a["reason"] == actions.IN_PROGRESS for a in d["actions"])
+    monkeypatch.setattr(actions, "utcnow", later)                     # venció: la acción concilia primero
+    d = c.get(f"{k.BASE}/items/{item_id}").json()
+    assert all(a["enabled"] for a in d["actions"])
+    r = k.decide(c, item_id, "corregir", "propuesto", "caja")           # tras conciliar volvió a propuesto
+    assert r.status_code == 200 and r.json()["state"] == "corrigiendo"

@@ -343,7 +343,7 @@ async def item_detail(
     flags = out["flags"]
     decider = auth.review_decider(request) is not None
     mode = int(runtime.get("pm_mode") or 0)
-    pending = price_review.pending_intent(session, int(item.id)) is not None  # type: ignore[arg-type]
+    pending = price_review_actions.in_flight(session, int(item.id))  # type: ignore[arg-type]
     tiers = breakdown.get("tiers") or diag.get("tiers") or []
     out.update({
         "costs_visible": costs,

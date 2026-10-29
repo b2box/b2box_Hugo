@@ -186,6 +186,13 @@ def _mode() -> int:
     return int(runtime.get("pm_mode") or 0)
 
 
+def in_flight(s: Session, item_id: int, now: datetime | None = None) -> bool:
+    """¿Hay una escritura en Vendure en curso para la ficha? Una intención abierta de más de `INTENT_STALE` ya no frena
+    los botones: la próxima acción la concilia primero (si no, la ficha quedaría trabada hasta la noche)."""
+    ev = pr.pending_intent(s, item_id)
+    return ev is not None and (now or utcnow()) - ev.at < INTENT_STALE
+
+
 def _load(item_id: int) -> tuple[PriceReviewItem, PriceReviewEvent | None]:
     with Session(engine, expire_on_commit=False) as s:
         item = s.get(PriceReviewItem, item_id)
