@@ -52,11 +52,13 @@ RUN_SKIP = {"id", "started_at", "finished_at"}
 # llm_failures, llm_skipped_* y llm_status (y en la API llm.failures / llm.skipped / llm.cut): lo que el juez no
 # contestó o no consultó (fix/semaforo-sin-dato). Aditivas: acá el juez está apagado y quedan en 0 / None.
 # data_at, review_flag, review_at, review_summary y n_flipped: la bandeja de revisión (aditivas).
+# recalc_at y recalc_before: el recálculo al cambiar en Vendure (aditivas; solo las escribe el recálculo de día).
 ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh", "n_oficina_ok", "llm_failures",
                         "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status",
                         "unmeasurable", "n_no_medible",
-                        "data_at", "review_flag", "review_at", "review_summary", "n_flipped"}
-NEW_ITEM_KEYS = {"ml_variant", "web_via", "unmeasurable", "data_at", "review_flag"}
+                        "data_at", "review_flag", "review_at", "review_summary", "n_flipped",
+                        "recalc_at", "recalc_before"}
+NEW_ITEM_KEYS = {"ml_variant", "web_via", "unmeasurable", "data_at", "review_flag", "recalc"}
 NEW_RUN_KEYS = {"variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"oficina"}
 
