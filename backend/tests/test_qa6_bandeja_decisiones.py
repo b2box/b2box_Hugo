@@ -154,7 +154,6 @@ async def test_qa_undo_reactivate_is_409_when_the_night_already_opened_a_new_fic
     assert fake.writes() == [True] and w.item(item_id).state == "corregido"
 
 
-@pytest.mark.xfail(strict=True, reason="QA PR3 #2: un intento fallido (vendure_error / reactivar_a_mano) borra el Deshacer")
 @pytest.mark.parametrize("failure", ["vendure_error_en_el_deshacer", "reactivar_a_mano_en_el_deshacer",
                                      "vendure_error_en_otra_decision"])
 async def test_qa_a_failed_attempt_does_not_take_undo_away(c, fake, failure):

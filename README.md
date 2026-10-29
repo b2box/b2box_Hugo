@@ -1484,7 +1484,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   reactivó, termina sin escribir. Reactivar hace **un solo intento** (más el re-login): con contacto del proveedor,
   Vendure lo vuelve a publicar en los otros canales y, si eso falla, no se reactiva.
 - **Deshacer** vuelve al estado y al `enabled` de antes de la **última** acción humana, hasta 30 días después. Si la ficha
-  cambió después (otra decisión, la reapertura del 10 %, un cierre solo, un error) responde 409. Un Deshacer no se
+  cambió después (otra decisión, la reapertura del 10 %, un cierre solo) responde 409; un intento que falló y volvió
+  atrás no le quita el Deshacer a la acción anterior. Un Deshacer no se
   deshace. Sigue permitido con `pm_mode = 0`.
 - **Regla del 10 %.** «Mantener» guarda la línea base (`kept_ratio` = nuestro precio / lo que le queda neto al revendedor
   en ML). Si una noche el producto sigue en rojo firme con la racha cumplida y el cociente llegó a `kept_ratio × (1 +

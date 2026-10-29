@@ -101,8 +101,10 @@ TEXT_MIN, TEXT_MAX = 10, 500
 
 # Eventos que cambian el estado de la ficha. Deshacer solo vale si el último de estos es la acción de una persona.
 HUMAN_KINDS = {"aprobado", *(f"decision_{d}" for d in DECISIONS)}
-STATE_KINDS = HUMAN_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto", "vendure_error", "reactivar_a_mano",
-                             "intent_descartado"}
+STATE_KINDS = HUMAN_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto"}
+# Vuelven la ficha a como estaba antes de la última acción (Vendure falló, reactivar a mano, conciliación): esa acción
+# no cuenta, y el intento fallido no le quita el Deshacer a la anterior.
+ROLLBACK_KINDS = {"vendure_error", "reactivar_a_mano", "intent_descartado"}
 # Tope para leer y escribir en Vendure (pasos 2 a 4). Apagar reintenta 3 veces y cada intento puede tardar 60 s (httpx)
 # o 90 s (gql): sin tope, una escritura podía llegar a Vendure 4 a 9 minutos después del clic.
 APPLY_DEADLINE_S = 240.0
@@ -211,9 +213,17 @@ def _parse(values: dict[str, Any]) -> dict[str, Any]:
 def last_human_action(events: Iterable[PriceReviewEvent]) -> tuple[PriceReviewEvent, bool | None] | None:
     """La última acción humana si después no cambió el estado, con lo que habría que escribir en Vendure para volver
     atrás (lo contrario de lo que escribió, o None si no escribió). None si después vino otra cosa que cambia el estado
-    (otra decisión, la reapertura del 10 %, un cierre solo, un error) o si la última fue un Deshacer."""
+    (otra decisión, la reapertura del 10 %, un cierre solo) o si la última fue un Deshacer. Un intento que falló y volvió
+    atrás no cuenta."""
     evs = sorted(events, key=lambda e: e.id or 0)
-    last = next((e for e in reversed(evs) if e.kind in STATE_KINDS), None)
+    standing: list[PriceReviewEvent] = []                 # los cambios de estado que siguen en pie
+    for e in evs:
+        if e.kind in ROLLBACK_KINDS:
+            if standing and standing[-1].kind in (*HUMAN_KINDS, "deshacer"):
+                standing.pop()                          # esa acción se volvió atrás: la ficha quedó como estaba
+        elif e.kind in STATE_KINDS:
+            standing.append(e)
+    last = standing[-1] if standing else None
     if last is None or last.kind not in HUMAN_KINDS or not _payload(last).get("antes"):
         return None
     wrote = [e for e in evs if (e.id or 0) > (last.id or 0) and e.kind in ("inactivado", "reactivado")]
