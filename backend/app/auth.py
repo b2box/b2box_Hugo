@@ -318,7 +318,7 @@ def admin_username(request: Request) -> str | None:
     if not admins or not session_secret_configured():
         return None
     user = session_username(request.cookies.get(COOKIE_NAME))
-    return user if user and user.strip().lower() in admins else None
+    return user.strip() if user and user.strip().lower() in admins else None
 
 
 def require_admin(request: Request) -> str:
