@@ -1,7 +1,11 @@
 """Recálculo del semáforo y de la bandeja de Pao cuando un producto cambia en Vendure (decisiones del usuario del 29-oct).
 
-`refresh_catalog` (cada pocos minutos) anota en vendure/catalog.py los productos que volvieron con otro `updatedAt`;
-`enqueue` los encola y `run_pending` los recalcula:
+`refresh_catalog` (cada pocos minutos) anota en vendure/catalog.py los productos que volvieron con otro `updatedAt` o
+que tienen una variante con `updatedAt` nuevo; `enqueue` los encola y `run_pending` los recalcula. Los tramos son otra
+entidad y guardarlos no toca ni la variante ni el producto: por eso `watch_live_items` (job cada 30 min) relee además el
+precio de los productos con ficha viva o `mantenido` (hasta 60 por vuelta, los que se miraron hace más tiempo primero, de
+a 2, sin gastar el cupo diario del punto 3). Un cambio de tramos de un producto sin ficha lo toma la noche. Los dos
+caminos recalculan igual:
 
     1. nunca con la corrida de la noche en curso: si arranca, lo que falta queda en la cola para la próxima vuelta;
     2. solo productos cuyo último snapshot tiene dato de ML `ok` de menos de `pm_review_data_max_age_h` horas (si no, nada:
@@ -55,8 +59,18 @@ REACTIVATIONS_KEY = "pm_recalc_reactivations"
 CONCURRENCY = 2
 # La marca que deja en la ficha una reactivación que no se hizo por el tope del día.
 FLAG_NOT_RED = "ya_no_rojo"
+# El vigía de las fichas vivas (R-1b): cada cuánto y cuántos productos por vuelta.
+WATCH_JOB_ID = "price_recalc_watch"
+WATCH_EVERY_MIN = 30
+WATCH_MAX = 60
 
 _pending: set[str] = set()
+# La cola y el vigía no recalculan a la vez (el mismo producto podría entrar por los dos caminos).
+_busy = asyncio.Lock()
+# Cuándo releyó el vigía el precio de cada producto.
+# shortcut: en memoria; después de un reinicio la primera vuelta va por la ficha más vieja. Si hubiera más de 60 fichas
+# vivas y reinicios seguidos, pasarlo a una columna de la ficha.
+_watched_at: dict[str, datetime] = {}
 
 
 def enqueue(product_ids: Iterable[str]) -> None:
@@ -73,9 +87,12 @@ class _Ctx:
     tier_policy: int
     max_reads: int
     max_reactivations: int
+    # True = la cola de cambios (gasta el cupo diario y lo que frena la noche vuelve a la cola); False = el vigía.
+    from_queue: bool = True
     catalog: dict[str, VendureProduct] = field(default_factory=dict)
     to_diagnose: list[int] = field(default_factory=list)
     capped: bool = False                 # se llegó al tope del día: el resto (un cambio masivo) va directo a la noche
+    outcomes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -85,6 +102,14 @@ class _Change:
     diagnose: int | None = None
 
 
+def _context(client: Any, now: datetime | None, *, from_queue: bool) -> _Ctx:
+    now = now or utcnow()
+    return _Ctx(client=client or VendureClient(), now=now, day=daily_budget.today_art(now),
+                params=pr.ReviewParams.from_runtime(), mode=int(runtime.get("pm_mode") or 0),
+                tier_policy=int(runtime.get("pm_tier_policy")), max_reads=int(runtime.get("pm_recalc_daily_max")),
+                max_reactivations=int(runtime.get("pm_recalc_reactivations_daily_max")), from_queue=from_queue)
+
+
 async def run_pending(client: Any = None, now: datetime | None = None) -> dict[str, int]:
     """Recalcula lo que está en la cola. Devuelve cuántos productos terminaron en cada caso (también va al log). Lo que no
     se pudo por la corrida de la noche queda en la cola; lo demás sale (incluido lo que pasó el tope: eso es de la noche)."""
@@ -92,13 +117,40 @@ async def run_pending(client: Any = None, now: datetime | None = None) -> dict[s
         return {}
     if price_monitor.price_monitor_lock.locked():
         return {"corrida": len(_pending)}
-    ids = sorted(_pending)
-    _pending.clear()
-    now = now or utcnow()
-    ctx = _Ctx(client=client or VendureClient(), now=now, day=daily_budget.today_art(now),
-               params=pr.ReviewParams.from_runtime(), mode=int(runtime.get("pm_mode") or 0),
-               tier_policy=int(runtime.get("pm_tier_policy")), max_reads=int(runtime.get("pm_recalc_daily_max")),
-               max_reactivations=int(runtime.get("pm_recalc_reactivations_daily_max")))
+    async with _busy:
+        ids = sorted(_pending)
+        _pending.clear()
+        return await _run(_context(client, now, from_queue=True), ids, "cambios en Vendure")
+
+
+async def watch_live_items(client: Any = None, now: datetime | None = None, limit: int = WATCH_MAX) -> dict[str, int]:
+    """El vigía (R-1b, cada 30 min): relee el precio de los productos con ficha viva o `mantenido`, hasta `limit` por
+    vuelta, primero los que se miraron hace más tiempo (los nunca mirados, por la ficha más vieja). Mismo camino que la
+    cola: si el precio y el tramo no cambiaron, nada. No gasta el cupo diario de la cola y no corre con la noche."""
+    if price_monitor.price_monitor_lock.locked():
+        return {"corrida": 0}
+    async with _busy:
+        pids = await asyncio.to_thread(_live_products)
+        never = datetime.min
+        pids = sorted(pids, key=lambda pid: _watched_at.get(pid, never))[:max(0, limit)]   # sorted es estable
+        ctx = _context(client, now, from_queue=False)
+        counts = await _run(ctx, pids, "fichas vivas")
+        for pid, outcome in ctx.outcomes.items():
+            if outcome != "corrida":
+                _watched_at[pid] = ctx.now
+        return counts
+
+
+def _live_products() -> list[str]:
+    """Los productos con ficha viva (`open_key`: abiertas y mantenidas), de la ficha más vieja a la más nueva."""
+    with Session(engine) as s:
+        return list(s.exec(select(PriceReviewItem.product_id).where(PriceReviewItem.open_key.is_not(None))  # type: ignore[union-attr]
+                           .order_by(PriceReviewItem.state_since, PriceReviewItem.id)).all())
+
+
+async def _run(ctx: _Ctx, ids: list[str], what: str) -> dict[str, int]:
+    """Los productos de a `CONCURRENCY` y, al final, el diagnóstico de las fichas que siguen abiertas."""
+    now = ctx.now
     counts: dict[str, int] = {}
     sem = asyncio.Semaphore(CONCURRENCY)
 
@@ -109,6 +161,7 @@ async def run_pending(client: Any = None, now: datetime | None = None) -> dict[s
             except Exception as exc:  # noqa: BLE001  (un producto no frena a los demás)
                 log.warning("recálculo de %s falló: %s", pid, error_code(exc))
                 outcome = "error"
+            ctx.outcomes[pid] = outcome
             counts[outcome] = counts.get(outcome, 0) + 1
 
     await asyncio.gather(*(_one(pid) for pid in ids))
@@ -118,22 +171,25 @@ async def run_pending(client: Any = None, now: datetime | None = None) -> dict[s
                 counts["diagnosticos"] = done
         except Exception as exc:  # noqa: BLE001
             log.warning("recálculo: el diagnóstico de las fichas falló: %s", error_code(exc))
-    log.info("recálculo por cambios en Vendure: %d productos → %s", len(ids), counts)
+    if ids:
+        log.info("recálculo (%s): %d productos → %s", what, len(ids), counts)
     return counts
 
 
 async def _recalc_one(ctx: _Ctx, pid: str) -> str:
     if price_monitor.price_monitor_lock.locked():
-        _pending.add(pid)                       # arrancó la corrida de la noche: lo que falta queda en la cola
+        if ctx.from_queue:
+            _pending.add(pid)                   # arrancó la corrida de la noche: lo que falta queda en la cola
         return "corrida"
     if ctx.capped:
         return "tope"
     snap_id, reason = await asyncio.to_thread(_last_measured, pid, ctx)
-    if reason == "corrida":
+    if reason == "corrida" and ctx.from_queue:
         _pending.add(pid)
     if snap_id is None:
         return reason
-    if await asyncio.to_thread(daily_budget.reserve, READS_KEY, ctx.max_reads, None, None, ctx.day) is None:
+    if ctx.from_queue and await asyncio.to_thread(daily_budget.reserve, READS_KEY, ctx.max_reads, None, None,
+                                                  ctx.day) is None:
         ctx.capped = True
         return "tope"
     product = await ctx.client.get_product_priced(pid)

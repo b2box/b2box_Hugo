@@ -11,6 +11,7 @@ Jobs:
   8. price_review_digest → resumen diario de la bandeja de revisión para Pao (08:30 ART).
   9. price_review_reconcile → una vez, al arrancar: concilia las escrituras de la bandeja que quedaron a medias.
  10. refresh_catalog     → cada pocos minutos: cache del catálogo y recálculo del semáforo de lo que cambió en Vendure.
+ 11. price_recalc_watch  → cada 30 min: relee el precio de los productos con ficha viva (cambios de tramos).
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -717,6 +718,17 @@ async def refresh_catalog() -> None:
         log.exception("refresh_catalog: el recálculo de los productos cambiados falló")
 
 
+async def price_recalc_watch() -> None:
+    """El vigía de las fichas vivas (app/pricing/price_recalc.py, R-1b): un cambio de tramos no toca ni la variante ni el
+    producto, así que refresh_catalog no lo ve. No corre con la corrida de la noche; un error queda en el log."""
+    from app.pricing import price_recalc
+
+    try:
+        await price_recalc.watch_live_items()
+    except Exception:  # noqa: BLE001
+        log.exception("price_recalc_watch falló")
+
+
 def _prune_ml_embed_cache() -> int:
     """Poda del cache L2 de CLIP para fotos de Mercado Libre (mlstatic) más
     viejas que `pm_embed_cache_days`. El semáforo embebe miles de fotos de ML
@@ -1096,5 +1108,15 @@ def register_jobs() -> None:
         refresh_catalog,
         IntervalTrigger(seconds=max(60, ttl - 30)),
         id="refresh_catalog",
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # Los tramos no tocan el updatedAt de nada: las fichas vivas se releen cada 30 min (la primera vuelta, 30 min
+    # después de arrancar; sin recuperación: es barato y frecuente).
+    from app.pricing import price_recalc
+
+    scheduler.add_job(
+        price_recalc_watch,
+        IntervalTrigger(minutes=price_recalc.WATCH_EVERY_MIN),
+        id=price_recalc.WATCH_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )
