@@ -278,7 +278,7 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
     banned = {"disable_product", "enable_product", "_set_enabled", "set_enabled", "submit_pro", "submit", "get_status",
               "post", "put", "patch", "delete", "aiosmtplib"}
     for rel in ("pricing/price_review.py", "pricing/diagnosis_source.py", "pricing/price_diagnosis.py", "pricing/price_breakdown.py",
-                "api/price_review_routes.py", "pricing/price_recalc.py"):
+                "api/price_review_routes.py", "pricing/price_recalc.py", "api/vendure_events_routes.py"):
         used, imported = _names_used(ast.parse((root / rel).read_text()))
         assert not (banned & (used | imported)), (rel, banned & (used | imported))
         assert "paco" not in {m.split(".")[-1] for m in imported}, rel
