@@ -1121,7 +1121,7 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    |---|---|
    | el producto (nombre, fotos, `enabled`, custom fields del producto) | **en minutos**: `refresh_catalog` (cada `verify_catalog_ttl_seconds` − 30 s: 4,5 min con el default) ya trae los productos con `updatedAt` nuevo |
    | una variante (caja, medidas, precio) | **en minutos**: el mismo refresh pide las variantes con `updatedAt` nuevo (`productVariants` filtrado por `updatedAt`, solo `id productId updatedAt`, con watermark propio y el mismo margen de 2 min) y encola su producto. Si el schema de Vendure rechaza ese filtro, avisa una vez en el log y sigue solo con productos |
-   | un tramo, de un producto **con ficha viva** (abierta o `mantenido`) | **cada 30 minutos**: el job `price_recalc_watch` relee el precio de esos productos (hasta 60 por vuelta, primero los que se miraron hace más tiempo, de a 2, sin gastar el cupo diario de abajo) |
+   | un tramo, de un producto **con ficha viva** (abierta o `mantenido`) | **cada 30 minutos**: el job `price_recalc_watch` relee el precio de esos productos (hasta 60 por vuelta, primero los que se miraron hace más tiempo, de a 2, con su propio cupo diario `pm_recalc_watch_daily_max`, 600, no el de abajo). No corre con `pm_mode = 0` ni con `pm_recalc_daily_max = 0` |
    | un tramo, de un producto **sin ficha** | **solo la noche** |
 
    Del guardado al dashboard: menos de 10 minutos (30 para los tramos con ficha). Los productos nuevos no cuentan (no
@@ -1134,13 +1134,15 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    con `semaforo.pick_our_price` y la `pm_tier_policy` vigente. Tope propio de la cola: `pm_recalc_daily_max` (300
    productos por día argentino; lo cambia solo un admin y queda auditado) y de a 2 productos a la vez: un cambio masivo
    (una fórmula nueva sobre 2.000 productos) no satura Vendure y lo que pase del tope queda para la noche. Las lecturas
-   del job de 30 minutos no gastan ese cupo: su tope es de 60 por vuelta.
+   del job de 30 minutos no gastan ese cupo: tienen el suyo (60 por vuelta y `pm_recalc_watch_daily_max` por día).
 4. **Si el precio y el tramo son los mismos, nada** (ni snapshot ni evento): un cambio de fotos, de descripción o el
-   propio `enabled` que escribe Hugo no hacen ruido ni bucles.
+   propio `enabled` que escribe Hugo no hacen ruido ni bucles. Tampoco cuenta como cambio un `tier_used` distinto solo
+   porque se cambió `pm_tier_policy` (se compara con las dos políticas): eso es configuración, no un arreglo.
 5. **El snapshot se recalcula en el lugar** contra los MISMOS idénticos (misma mediana, comisión y envío): ganancia,
-   color (con las tiendas si cuentan), marca de la bandeja (`review_flag`) y los contadores de la corrida.
-   `recalc_at` dice cuándo y `recalc_before` guarda lo que había medido la corrida (precio, tramo, color, ganancia y
-   marca; no se pisa con un segundo cambio del mismo día). La tabla muestra el estado recalculado con la marca
+   color (con las tiendas si cuentan) y los contadores de la corrida. `recalc_at` dice cuándo, `recalc_before` guarda lo
+   que había medido la corrida (precio, tramo, color, ganancia y marca; no se pisa con un segundo cambio del mismo día) y
+   `recalc_flag` el veredicto de la bandeja con el precio nuevo. **`review_flag` no se toca**: es la medición de la noche y
+   de ahí sale la racha (R8); la pantalla y el filtro «Bandeja de Pao» muestran el del recálculo. La tabla muestra el estado recalculado con la marca
    «Recalculado HH:MM por cambio en Vendure: antes rojo $X → ahora verde $Y», el filtro y los contadores por color usan
    el color recalculado y la historia del producto muestra el antes. La corrida de la noche siguiente lo reemplaza: vuelve
    a ser la fuente.
@@ -1201,11 +1203,16 @@ la noche. Lo que hace con la bandeja está en [Cuando el producto cambia en Vend
 | `pm_review_sla_days` | 7 | bandeja: días esperando decisión antes de salir como «esperando» en el mail |
 | `pm_recalc_daily_max` | 300 | recálculo al cambiar en Vendure: productos (lecturas) por día argentino; 0 = no se recalcula de día. Solo admin, auditado |
 | `pm_recalc_reactivations_daily_max` | 20 | recálculo: reactivaciones automáticas por día argentino (intentos); 0 = nunca reactiva solo. Solo admin, auditado |
+| `pm_recalc_watch_daily_max` | 600 | recálculo: lecturas por día argentino del vigía de 30 min sobre las fichas vivas (cupo propio); 0 = no relee. Solo admin, auditado |
 | `pm_diag_cert_share_pct` / `pm_diag_logistics_ratio` | 10 / 1,0 | diagnóstico (c): peso del certificado en % del neto; (d): logística / fábrica |
 | `pm_diag_box_z` / `pm_diag_min_neighbors` | 3,0 / 5 | diagnóstico (a): desvío robusto de la caja y parecidos con caja que hacen falta |
 
 Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
 umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
+
+Desde la reactivación automática, `pm_tier_policy`, `pm_green_min_pct`, `pm_yellow_min_pct`, `pm_review_min_listings`,
+`pm_review_min_sellers`, `pm_review_data_max_age_h` y `pm_review_max_price_ratio` también son **solo de admin** y quedan en
+el audit log: moverlos puede hacer que Hugo prenda productos solo.
 
 Cambiar un corte recolorea en la **próxima corrida**, sin redeploy. El horario
 es env: `PRICE_MONITOR_CRON_UTC` (default `0 6 * * *` = 03:00 ART).
@@ -1581,21 +1588,42 @@ vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
 - un `mantenido` que empeora `pm_review_worse_pct` (10 %) o más contra su línea base se reabre con la misma regla del
   10 %: alcanza con que el recálculo sea rojo firme, no se vuelve a pedir la racha;
 - el diagnóstico a-e de las fichas que siguen abiertas se rehace con el desglose nuevo de Vendure, dentro del **mismo**
-  tope de 150 lecturas por día de la bandeja (la variante ya viene con la lectura del recálculo); lo que no entra lo
-  completa la noche;
+  tope de 150 lecturas por día de la bandeja y con un sub-cupo de 30 % (45) para el recálculo, así la noche no se queda
+  sin lecturas; los datos del canal se leen una vez por día y la variante ya viene con la lectura del recálculo; lo que no
+  entra lo completa la noche;
 - una ficha con una escritura en Vendure en curso no se toca;
-- **reactivación automática:** una ficha en `en_revision` o `corrigiendo` que apagó Hugo (`hugo_disabled`) y cuyo
-  recálculo da **no rojo firme** (verde o amarillo con la misma calidad de dato que la entrada: idénticos confirmados por
-  foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones y 2 vendedores, sin precio extremo; R3-R7 con el
-  color al revés) se reactiva sola por `price_review_actions` con actor `hugo:auto`: el MISMO protocolo y las mismas
-  guardas que «Ya lo corregí» (intención, `approvalStatus` vacío o `approved`, sin duplicado ni BX sin foto después, sigue
-  apagado, un solo intento, verificación, conciliación si queda incierto) y termina en `corregido`. Deja el evento, la
-  fila de `AuditLog` `price_review_enabled` y sale en el mail del día siguiente en «REACTIVADOS SOLOS». Si una guarda
-  frena, no escribe: la ficha queda como estaba con `reactivar_a_mano` y sale en «PARA MIRAR A MANO». Un «no rojo» con
-  datos flojos no reactiva. Nunca toca `despublicado` (lo decidió una persona) ni fichas cerradas, y no tiene Deshacer
-  (si a la noche vuelve a ser rojo firme, sigue el camino normal: ficha nueva tras la racha; no se apaga solo). Tope:
-  `pm_recalc_reactivations_daily_max` (20 por día, cuenta intentos); pasado el tope la ficha queda con el aviso «Ya no está
-  en rojo: reactivala con «Ya lo corregí»» (evento `aviso_reactivar` y la marca `ya_no_rojo`).
+- **reactivación automática** (ajustes del 30-oct): solo una ficha en **`corrigiendo`** (una persona ya dijo «Corregir»)
+  que apagó Hugo (`hugo_disabled`), cuando se cumple TODO esto:
+  - el recálculo da **no rojo firme**: verde o amarillo con la misma calidad de dato que la entrada (idénticos
+    confirmados por foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones y 2 vendedores; R3-R7 con el
+    color al revés). Un «no rojo» con datos flojos no reactiva;
+  - **piso de precio**: nuestro precio / mediana firme de ML >= 1 / `pm_review_max_price_ratio` (un precio con ceros de
+    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el de la noche. Si no, no escribe: queda
+    `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer ni escribir Vendure) y sale en «PARA MIRAR
+    A MANO»;
+  - **doble lectura**: el mismo precio visto en dos lecturas de Vendure separadas por 30 minutos o más (la primera es la
+    que trajo ese precio, o la corrida de la noche; la segunda, en general, la del job de 30 minutos). Un precio distinto
+    en el medio vuelve a empezar la cuenta;
+  - un solo intento por precio: lo que terminó en «reactivar a mano» o en un error de Vendure no se repite en cada lectura
+    (vuelve a intentarse con otro precio u otra medición). Lo que no se pudo ni empezar (una escritura en curso, `pm_mode`
+    en 0, un error que no es de la acción) se reintenta en la próxima lectura.
+
+  Entonces se reactiva por `price_review_actions` con actor `hugo:auto` (ningún otro actor puede usar esa acción): el
+  MISMO protocolo y las mismas guardas que «Ya lo corregí» (intención, `approvalStatus` vacío o `approved`, sin duplicado
+  ni BX sin foto después, sigue apagado, un solo intento, verificación, conciliación si queda incierto) y termina en
+  `corregido`. Deja el evento, la fila de `AuditLog` `price_review_enabled` y sale en el mail del día siguiente en
+  «REACTIVADOS SOLOS». Si una guarda frena, no escribe: la ficha queda como estaba con `reactivar_a_mano` y sale en «PARA
+  MIRAR A MANO». Tope: `pm_recalc_reactivations_daily_max` (20 por día, cuenta intentos); pasado el tope la ficha queda con
+  el aviso «Ya no está en rojo: reactivala con «Ya lo corregí»» (evento `aviso_reactivar` y la marca `ya_no_rojo`, una vez;
+  al día siguiente se vuelve a intentar).
+- una ficha en **`en_revision`** que apagó Hugo y deja de ser rojo firme **no se reactiva sola**: queda el aviso «Ya no
+  está en rojo: pasala a «Corregir» y reactivala con «Ya lo corregí»» (una vez). Nunca se toca `despublicado` (lo decidió
+  una persona) ni una ficha cerrada, y la reactivación automática no tiene Deshacer.
+- la marca `ya_no_rojo` se va sola cuando el recálculo deja de verlo no rojo firme y cuando la noche lo mide rojo otra vez.
+- si después de una reactivación automática la noche vuelve a dar rojo firme, sigue el camino normal: la ficha nueva la
+  abre la racha de noches (el recálculo no toca la racha, así que la noche de antes del arreglo cuenta) y, dentro de los 7
+  días siguientes a la reactivación, la ficha reactivada deja un evento `rojo_tras_reactivar` que sale en «PARA MIRAR A
+  MANO» (una vez). No se apaga solo.
 
 Con `pm_mode = 0` el recálculo solo se ve en el semáforo: no toca fichas ni reactiva nada. Nunca abre fichas ni apaga
 productos: eso sigue con las reglas de la noche y la decisión de una persona.
@@ -1652,13 +1680,13 @@ DELETE FROM settings WHERE key LIKE 'pm_review_%' OR key LIKE 'pm_diag_%' OR key
 UPDATE settings SET value = '1' WHERE key = 'pm_mode' AND value = '2';
 ```
 
-El recálculo al cambiar en Vendure agrega dos columnas opcionales a `market_price_snapshot` (`recalc_at`,
-`recalc_before`; test sobre Postgres 16 en `test_recalculo_pg.py`) y no crea tablas. Para volver atrás (antes que lo de
-arriba, si se vuelve atrás también la bandeja):
+El recálculo al cambiar en Vendure agrega tres columnas opcionales a `market_price_snapshot` (`recalc_at`,
+`recalc_before`, `recalc_flag`; test sobre Postgres 16 en `test_recalculo_pg.py`) y no crea tablas. Para volver atrás
+(antes que lo de arriba, si se vuelve atrás también la bandeja):
 
 ```sql
-ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS recalc_at, DROP COLUMN IF EXISTS recalc_before;
-DELETE FROM settings WHERE key IN ('pm_recalc_daily_max', 'pm_recalc_reactivations_daily_max', 'pm_recalc_reads', 'pm_recalc_reactivations');
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS recalc_at, DROP COLUMN IF EXISTS recalc_before, DROP COLUMN IF EXISTS recalc_flag;
+DELETE FROM settings WHERE key IN ('pm_recalc_daily_max', 'pm_recalc_reactivations_daily_max', 'pm_recalc_watch_daily_max', 'pm_recalc_reads', 'pm_recalc_reactivations', 'pm_recalc_watch_reads', 'vendure_review_requests_recalc');
 ```
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
