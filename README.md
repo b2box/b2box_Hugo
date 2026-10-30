@@ -1113,20 +1113,28 @@ Durante el día el semáforo ya no se queda con el precio de la noche: si alguie
 Vendure, Hugo lo refleja **solo y en minutos** (`pricing/price_recalc.py`), con los precios de ML de la **última
 medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
 
-1. **Detección.** `refresh_catalog` (cada `verify_catalog_ttl_seconds` − 30 s: 4,5 min con el default) ya trae los
-   productos con `updatedAt` nuevo; los que ya estaban en el cache y volvieron con otro `updatedAt` quedan en una cola y
-   se recalculan en la misma vuelta. Del guardado en Vendure al dashboard: menos de 10 minutos. Los productos nuevos no
-   cuentan (no tienen nada medido) y el primer refresh después de un reinicio tampoco (no sabe qué cambió: la cola vive
-   en memoria y lo que estaba ahí lo toma la noche). **Ojo:** Vendure no toca el `updatedAt` del producto cuando solo
-   cambia una variante (ver `vendure/catalog.py`): un arreglo que guarda solo la variante (precio, tramos, caja) puede
-   no dispararlo hasta que se guarde el producto o corra la noche.
+1. **Detección.** En b2box la caja, las medidas y el precio viven en la **variante**, y los **tramos** son otra entidad
+   (`BulkPriceTier`): guardar una variante no toca el `updatedAt` del producto, y guardar un tramo no toca ni el de la
+   variante ni el del producto (la API de admin tampoco lista tramos por fecha). Por eso hay tres plazos:
+
+   | Qué se guardó en Vendure | Cuándo lo ve Hugo |
+   |---|---|
+   | el producto (nombre, fotos, `enabled`, custom fields del producto) | **en minutos**: `refresh_catalog` (cada `verify_catalog_ttl_seconds` − 30 s: 4,5 min con el default) ya trae los productos con `updatedAt` nuevo |
+   | una variante (caja, medidas, precio) | **en minutos**: el mismo refresh pide las variantes con `updatedAt` nuevo (`productVariants` filtrado por `updatedAt`, solo `id productId updatedAt`, con watermark propio y el mismo margen de 2 min) y encola su producto. Si el schema de Vendure rechaza ese filtro, avisa una vez en el log y sigue solo con productos |
+   | un tramo, de un producto **con ficha viva** (abierta o `mantenido`) | **cada 30 minutos**: el job `price_recalc_watch` relee el precio de esos productos (hasta 60 por vuelta, primero los que se miraron hace más tiempo, de a 2, sin gastar el cupo diario de abajo) |
+   | un tramo, de un producto **sin ficha** | **solo la noche** |
+
+   Del guardado al dashboard: menos de 10 minutos (30 para los tramos con ficha). Los productos nuevos no cuentan (no
+   tienen nada medido) y el primer refresh después de un reinicio solo toma el punto de partida (la cola vive en memoria:
+   lo que estaba ahí lo toma la noche). La cola y el job de 30 minutos no recalculan a la vez.
 2. **Solo con dato fresco.** Se recalcula si el último snapshot del producto tiene ML `ok` con dato de menos de
    `pm_review_data_max_age_h` horas (48). Si no, no se toca nada: queda para la noche (el motivo va al log). Tampoco
    corre mientras corre la corrida de la noche (lo que falta queda en la cola) ni sobre una corrida sin terminar.
 3. **Una lectura por producto** (`product(id)` con variantes y tramos, la misma consulta que la noche) y nuestro precio
-   con `semaforo.pick_our_price` y la `pm_tier_policy` vigente. Tope propio: `pm_recalc_daily_max` (300 productos por
-   día argentino; lo cambia solo un admin y queda auditado) y de a 2 productos a la vez: un cambio masivo (una
-   fórmula nueva sobre 2.000 productos) no satura Vendure y lo que pase del tope queda para la noche.
+   con `semaforo.pick_our_price` y la `pm_tier_policy` vigente. Tope propio de la cola: `pm_recalc_daily_max` (300
+   productos por día argentino; lo cambia solo un admin y queda auditado) y de a 2 productos a la vez: un cambio masivo
+   (una fórmula nueva sobre 2.000 productos) no satura Vendure y lo que pase del tope queda para la noche. Las lecturas
+   del job de 30 minutos no gastan ese cupo: su tope es de 60 por vuelta.
 4. **Si el precio y el tramo son los mismos, nada** (ni snapshot ni evento): un cambio de fotos, de descripción o el
    propio `enabled` que escribe Hugo no hacen ruido ni bucles.
 5. **El snapshot se recalcula en el lugar** contra los MISMOS idénticos (misma mediana, comisión y envío): ganancia,
@@ -1563,7 +1571,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
 ### Cuando el producto cambia en Vendure
 
 Con `pm_mode >= 1`, el [recálculo del semáforo](#recálculo-cuando-el-producto-cambia-en-vendure) también pone al día la
-ficha viva del producto (abierta o mantenida), en el momento:
+ficha viva del producto (abierta o mantenida), en el momento (o, si lo único que se guardó fue un tramo, en la próxima
+vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
 
 - deja el último dato (`last_*`) y un evento `recalculado` con `{precio_antes, precio_despues, color_antes, color_despues,
   ratio_antes, ratio_despues, sentido}` (el ratio es nuestro precio / lo que le queda neto al revendedor, con la misma
