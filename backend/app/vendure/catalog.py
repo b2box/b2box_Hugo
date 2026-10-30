@@ -218,25 +218,44 @@ async def _refresh(client: VendureClient) -> None:
     await _note_changed_variants(client)
 
 
+# Errores de schema (Vendure no tiene el filtro, el campo o el tipo): esos apagan la detección por variantes. Cualquier
+# otro error de GraphQL (el PG de Vendure saturado, un timeout que vuelve como `errors`) es pasajero.
+_SCHEMA_ERRORS = ("Unknown argument", "Cannot query field", "Unknown type", "is not defined by type")
+
+
+def _not_future(value: str | None) -> str | None:
+    """Un `updatedAt` que no pasa de ahora + el margen: una fecha del futuro (reloj roto, dato cargado a mano) dejaría el
+    watermark ahí y no se vería ningún cambio hasta esa fecha."""
+    ceiling = datetime.now(timezone.utc) + _WATERMARK_MARGIN
+    dt = _parse_iso(value) if value else None
+    if dt is None or dt <= ceiling:
+        return value
+    return ceiling.isoformat().replace("+00:00", "Z")
+
+
 async def _note_changed_variants(client: VendureClient) -> None:
     """Anota los productos (ya en el cache) de las variantes guardadas desde el último pedido. La primera vez solo toma
-    el punto de partida y las variantes del margen (lo de antes no cuenta como cambio). Nunca tira el refresh: un rechazo del schema apaga esto con
-    un aviso; otro error se loguea y el watermark no se mueve (el próximo refresh lo vuelve a pedir)."""
+    el punto de partida y las variantes del margen (lo de antes no cuenta como cambio). Nunca tira el refresh: un error
+    de schema apaga esto con un aviso; cualquier otro se loguea y el watermark no se mueve (el próximo refresh lo vuelve a
+    pedir)."""
     global _variant_watermark, _variant_seen, _variants_supported
     if not _variants_supported:
         return
+    seeding = _variant_watermark is None
     try:
-        seeding = _variant_watermark is None
-        if seeding:
-            _variant_watermark = await client.latest_variant_update() or _watermark
-        since = _since_for_incremental(_variant_watermark or "")
+        mark = _not_future(await client.latest_variant_update() or _watermark) if seeding else _variant_watermark
+        since = _since_for_incremental(mark or "")
         if since is None:
             return
         rows = await client.fetch_variants_updated_since(since)
     except TransportQueryError as exc:
-        _variants_supported = False
-        log.warning("Vendure no acepta pedir variantes por updatedAt (%s): el recálculo sigue solo con productos",
-                    str(exc)[:160])
+        if any(m in str(exc) for m in _SCHEMA_ERRORS):
+            _variants_supported = False
+            log.warning("Vendure no acepta pedir variantes por updatedAt (%s): el recálculo sigue solo con productos",
+                        str(exc)[:160])
+        else:
+            log.warning("Vendure no pudo devolver las variantes cambiadas (%s); se reintenta en el próximo refresh",
+                        str(exc)[:160])
         return
     except Exception as exc:  # noqa: BLE001
         log.warning("No se pudieron pedir las variantes cambiadas (%s); se reintenta en el próximo refresh",
@@ -246,10 +265,11 @@ async def _note_changed_variants(client: VendureClient) -> None:
     if not seeding:                                     # al arrancar solo se anota lo del margen, para no repetirlo
         _changed.update(pid for vid, pid, at in rows if pid in in_cache and _variant_seen.get(vid) != at)
     _variant_seen = {vid: at for vid, _pid, at in rows}
+    _variant_watermark = mark
     for _vid, _pid, at in rows:
-        dt, best = _parse_iso(at), _parse_iso(_variant_watermark or "")
+        dt, best = _parse_iso(_not_future(at) or ""), _parse_iso(_variant_watermark or "")
         if dt and (best is None or dt > best):
-            _variant_watermark = at
+            _variant_watermark = _not_future(at)
 
 
 def enabled_only(products: list[VendureProduct]) -> list[VendureProduct]:
