@@ -409,7 +409,7 @@ class VendureClient:
             custom_block = f" customFields {{ {custom} }}" if custom else ""
             tier_cost = " price" if VendureClient._review_supported else ""
             variant_block = (
-                "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode"
+                "variantList(options: { take: 50 }) { items { id name sku priceWithTax currencyCode updatedAt"
                 f"{custom_block} bulkPriceTiers {{ position enabled minQuantity maxQuantity salePrice{tier_cost} }} }} "
                 "totalItems }"
             )
@@ -497,6 +497,7 @@ class VendureClient:
                 specs=specs.as_dict() if specs else {},
                 sourcing_mode=mode if isinstance(mode, str) and mode else None,
                 min_quantity_override=_safe_int(custom.get("minQuantityOverride")),
+                updated_at=v.get("updatedAt") if isinstance(v.get("updatedAt"), str) else None,
             ))
         return out
 

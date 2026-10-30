@@ -69,6 +69,8 @@ _lock = asyncio.Lock()
 # Productos que ya estaban en el cache y volvieron con otro `updatedAt` (alguien los guardó en Vendure), hasta que
 # alguien los saca con `pop_changed()`: el recálculo del semáforo (pricing/price_recalc.py, vía refresh_catalog).
 _changed: set[str] = set()
+# Con qué `updatedAt` (del producto o de la variante) se vio cada cambio: el recálculo no relee lo que ya leyó igual o después.
+_changed_versions: dict[str, str] = {}
 # Variantes (R-1a del recálculo): el `updatedAt` más nuevo visto, las que trajo el último pedido (el margen las vuelve a
 # traer iguales: no cuentan) y si el schema acepta el filtro (False = se avisó una vez y se sigue solo con productos).
 _variant_watermark: str | None = None
@@ -140,14 +142,36 @@ def _note_changed(previous: list[VendureProduct], fresh: list[VendureProduct]) -
     """Anota los productos de `fresh` que ya estaban en `previous` con otro `updatedAt`. Los nuevos no: todavía no tienen
     nada medido que recalcular. Sin cache previo (el primer full al arrancar) no anota nada: no se sabe qué cambió."""
     seen = {p.id: p.updated_at for p in previous}
-    _changed.update(p.id for p in fresh if p.id in seen and p.updated_at and p.updated_at != seen[p.id])
+    for p in fresh:
+        if p.id in seen and p.updated_at and p.updated_at != seen[p.id]:
+            _mark_changed(p.id, p.updated_at)
+
+
+def _mark_changed(pid: str, version: str) -> None:
+    _changed.add(pid)
+    old = _parse_iso(_changed_versions.get(pid, ""))
+    new = _parse_iso(version)
+    if new is not None and (old is None or new > old):
+        _changed_versions[pid] = version
+
+
+def pop_changed_versions() -> dict[str, str | None]:
+    """Los productos que cambiaron en Vendure desde la última llamada, con el `updatedAt` más nuevo con que se vio el cambio
+    (None si no se sabe), y los olvida."""
+    out = {pid: _changed_versions.get(pid) for pid in sorted(_changed)}
+    _changed.clear()
+    _changed_versions.clear()
+    return out
 
 
 def pop_changed() -> list[str]:
     """Los productos que cambiaron en Vendure desde la última llamada (y los olvida)."""
-    out = sorted(_changed)
-    _changed.clear()
-    return out
+    return list(pop_changed_versions())
+
+
+def known_ids() -> set[str] | None:
+    """Los ids del catálogo en memoria, o None si todavía no se cargó (recién arrancado)."""
+    return {p.id for p in _cache} if _cache else None
 
 
 async def _do_full(client: VendureClient) -> None:
@@ -263,7 +287,9 @@ async def _note_changed_variants(client: VendureClient) -> None:
         return
     in_cache = {p.id for p in _cache}
     if not seeding:                                     # al arrancar solo se anota lo del margen, para no repetirlo
-        _changed.update(pid for vid, pid, at in rows if pid in in_cache and _variant_seen.get(vid) != at)
+        for vid, pid, at in rows:
+            if pid in in_cache and _variant_seen.get(vid) != at:
+                _mark_changed(pid, at)
     _variant_seen = {vid: at for vid, _pid, at in rows}
     _variant_watermark = mark
     for _vid, _pid, at in rows:
