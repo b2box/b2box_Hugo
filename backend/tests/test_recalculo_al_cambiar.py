@@ -35,14 +35,27 @@ LATER = w.NOW + timedelta(hours=2)        # el cambio en Vendure, dos horas desp
 FIXED, CHEAPER, WORSE = 600_000, 700_000, 1_200_000      # contra la mediana 900.000: verde, amarillo, rojo peor
 
 
+def _clean_policy_audit() -> None:
+    """Los cambios auditados de `pm_tier_policy` (los usa R-2 para saber si un tramo cambió por configuración)."""
+    from sqlalchemy import delete
+
+    with Session(engine) as s:
+        s.execute(delete(AuditLog).where(AuditLog.action == "setting_changed",  # type: ignore[arg-type]
+                                         AuditLog.before.like('{"pm_tier_policy"%')))  # type: ignore[union-attr]
+        s.commit()
+
+
 @pytest.fixture(autouse=True)
 def fake(monkeypatch):
     f = k.setup(monkeypatch)
+    _clean_policy_audit()
     price_recalc._pending.clear()
     monkeypatch.setattr(price_recalc, "_watched_at", {})
+    monkeypatch.setattr(price_recalc, "_read_marks", {})
     yield f
     price_recalc._pending.clear()
     k.clean_audit()
+    _clean_policy_audit()
 
 
 def product(pid: str, price: int, *, enabled: bool = True, currency: str = "ARS", name: str | None = None) -> dict:
@@ -871,12 +884,18 @@ def _tiered(pid: str, *, enabled: bool = True) -> dict:
 
 async def test_adj4_changing_the_tier_policy_is_configuration_not_a_fix(fake):
     """QA-5: cambiar `pm_tier_policy` cambia `tier_used` sin que nadie haya tocado Vendure: no cuenta como cambio (ni
-    snapshot, ni evento, ni reactivación). Un cambio de verdad en Vendure se sigue viendo."""
+    snapshot, ni evento, ni reactivación). Solo si el cambio de política quedó en el audit log después de la medición
+    (ajustes 30-oct (2), QA-11). Un cambio de verdad en Vendure se sigue viendo."""
     sid = w.add_snap(w.make_run(), "rv1", our=1_125_000, tier="tier:min_qty=10", flag="firme")
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     fake.products.append(_tiered("rv1", enabled=False))
     fake.enabled["rv1"] = False
     w.set_setting("pm_tier_policy", 1)                                           # con la 1 daría 1.000.000
+    with Session(engine) as s:                                                   # lo que deja el PUT de un admin
+        s.add(AuditLog(action="setting_changed", source="manual", product_id="(settings)", created_at=w.NOW + timedelta(hours=1),
+                       detail="nico@b2box.pro cambió pm_tier_policy: 0 → 1", before='{"pm_tier_policy": 0}',
+                       after='{"pm_tier_policy": 1}'))
+        s.commit()
     before = snap(sid).model_dump()
     assert await recalc("rv1") == {"sin_cambio": 1}
     await confirm()
@@ -995,6 +1014,126 @@ async def test_adj10_only_hugo_can_use_the_automatic_reactivation(fake):
     with pytest.raises(actions.ActionError) as err:
         await actions.act(item_id, actions.REACTIVAR_AUTO, k.PAO, expected_state="corrigiendo")
     assert err.value.status == 400 and w.item(item_id).state == "corrigiendo" and fake.mutations == []
+
+
+# ─── Ajustes 30-oct (2) ─────────────────────────────────────────────
+
+
+async def test_adj2_1_the_50_percent_floor_is_measured_against_the_lower_of_the_night_and_the_item_price(fake):
+    """Si el precio subió entre que se abrió la ficha y la noche, la caída se mide contra el de la ficha (el menor)."""
+    night("rv1", our=2_000_000)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo", our_price_cents=1_000_000)
+    in_vendure(fake, "rv1", FIXED, enabled=False)                                # -70 % contra la noche, -40 % contra la ficha
+    await recalc("rv1")
+    await confirm()
+    assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+async def test_adj2_2_a_price_held_for_a_person_stays_held_until_a_person_decides(monkeypatch, fake):
+    clock = {"now": LATER}
+    monkeypatch.setattr(actions, "utcnow", lambda: clock["now"])                # el protocolo, con el reloj del test
+
+    async def at(minutes: int) -> None:
+        clock["now"] = LATER + timedelta(minutes=minutes)
+        await confirm(minutes)
+
+    night("rv1", our=1_000_000)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", 10_000, enabled=False)                               # con dos ceros de menos
+    await recalc("rv1")
+    await at(30)
+    assert item_events(item_id, "reactivar_a_mano")[0].motive_code == "precio_bajo"
+    fake.products[0] = product("rv1", FIXED, enabled=False)                     # lo arreglan bien después
+    await recalc("rv1", now=LATER + timedelta(minutes=40))
+    await at(80)
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == []        # sigue esperando a una persona
+    with Session(engine) as s:                                                   # una persona decide algo sobre la ficha
+        s.add(PriceReviewEvent(item_id=item_id, product_id="rv1", actor=k.PAO, kind="decision_corregir",
+                               at=LATER + timedelta(minutes=90)))
+        s.commit()
+    await at(120)
+    assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+async def test_adj2_3_the_polling_reads_again_only_what_changed_after_the_last_read(monkeypatch, fake):
+    """Un aviso leyó el producto con su `updatedAt`: el sondeo no lo relee con ese mismo (o uno anterior), sí con uno nuevo."""
+    monkeypatch.setattr(price_recalc, "_notices", {})
+    monkeypatch.setattr(price_recalc, "_is_leader", lambda: True)
+    monkeypatch.setattr(price_recalc, "_start_notice_worker", lambda: None)
+    night("rv1")
+    in_vendure(fake, "rv1", FIXED)                                               # updatedAt 2026-10-14T11:00:00Z
+    price_recalc.notify({"rv1": False}, now=LATER)
+    await price_recalc.process_notices(now=LATER + timedelta(seconds=20))
+    assert price_recalc.enqueue_polled({"rv1": "2026-10-14T11:00:00Z"}) == 0
+    assert price_recalc.enqueue_polled({"rv1": "2026-10-14T10:00:00Z"}) == 0
+    assert price_recalc.enqueue_polled({"rv1": "2026-10-14T11:30:00Z"}) == 1 and price_recalc._pending == {"rv1"}
+
+
+async def test_adj2_3_a_variant_saved_after_the_read_is_read_again(fake):
+    """La marca de lectura incluye el `updatedAt` de las variantes: un guardado de variante posterior se vuelve a leer."""
+    night("rv1")
+    raw = product("rv1", FIXED)
+    raw["variantList"]["items"][0]["updatedAt"] = "2026-10-14T11:20:00Z"
+    fake.products.append(raw)
+    await recalc("rv1")
+    assert price_recalc._read_marks["rv1"] == "2026-10-14T11:20:00Z"
+    assert price_recalc.enqueue_polled({"rv1": "2026-10-14T11:20:00Z"}) == 0
+    assert price_recalc.enqueue_polled({"rv1": "2026-10-14T11:25:00Z"}) == 1
+
+
+async def test_adj2_4_notices_keep_only_catalog_ids_and_never_pass_the_hard_cap(monkeypatch, fake):
+    from app.vendure import catalog as vendure_catalog
+
+    monkeypatch.setattr(price_recalc, "_notices", {})
+    monkeypatch.setattr(price_recalc, "_is_leader", lambda: True)
+    monkeypatch.setattr(price_recalc, "_start_notice_worker", lambda: None)
+    invented = {str(10**12 + i): False for i in range(60_000)}
+    # Con el catálogo en memoria, solo sus ids.
+    monkeypatch.setattr(vendure_catalog, "_cache", [_vp(str(10**12 + i), "2026-10-14T10:00:00Z") for i in range(3)])
+    assert price_recalc.notify(invented, now=LATER) == 3 and len(price_recalc._notices) == 3
+    # Sin catálogo cargado (recién arrancado), el tope duro: cola + avisos <= 20.000; lo demás queda para la noche.
+    monkeypatch.setattr(vendure_catalog, "_cache", [])
+    price_recalc._notices.clear()
+    price_recalc.enqueue([f"q{i}" for i in range(5_000)])
+    assert price_recalc.notify(invented, now=LATER) == price_recalc.MAX_QUEUED - 5_000
+    assert len(price_recalc._notices) + len(price_recalc._pending) == price_recalc.MAX_QUEUED
+    assert price_recalc.enqueue([f"r{i}" for i in range(10)]) == 0
+    assert price_recalc.notify({str(10**12): True}, now=LATER) == 1               # uno ya anotado se actualiza igual
+
+
+def test_adj2_7_only_post_api_vendure_events_skips_the_dashboard_session(monkeypatch):
+    from app.api import vendure_events_routes as routes
+    from app.config import Settings
+
+    s = Settings(vendure_api_url="https://example.invalid/admin-api", hugo_env="development",
+                 vendure_events_key="k3y-de-prueba-0123456789abcdefghijKLMNOP")
+    monkeypatch.setattr(routes, "get_settings", lambda: s)
+    routes.reset_limits()
+    c = k.client(None)                                                           # sin cookie, login prendido
+    assert c.post("/api/vendure/events", json={"events": []}).status_code == 401           # llega a su key
+    assert c.post("/api/vendure/events", json={"events": []},
+                  headers={"X-Hugo-Events-Key": s.vendure_events_key}).status_code == 202
+    assert c.get("/api/vendure/events").json() == {"detail": "No autenticado"}               # otro método: dashboard
+    assert c.post("/api/vendure/otra", json={}).json() == {"detail": "No autenticado"}       # otra ruta: dashboard
+    assert c.post("/api/vendure/events/", json={}).json() == {"detail": "No autenticado"}
+    routes.reset_limits()
+
+
+async def test_adj2_8_red_firm_again_during_the_day_after_an_automatic_reactivation_is_flagged_once(fake):
+    night("rv1")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", FIXED, enabled=False)
+    await recalc("rv1")
+    await confirm()
+    assert w.item(item_id).state == "corregido"
+    fake.products[0] = product("rv1", WORSE)                                     # empeora de día, ya prendido
+    await recalc("rv1", now=LATER + timedelta(minutes=45))
+    fake.products[0] = product("rv1", WORSE + 50_000)
+    await recalc("rv1", now=LATER + timedelta(minutes=50))
+    [ev] = item_events(item_id, "rojo_tras_reactivar")
+    data = price_review_digest.collect(Session(engine), LATER + timedelta(hours=1))
+    assert ("rojo_tras_reactivar", item_id) in [(e.kind, i.id) for e, i in data.attention]
+    assert fake.writes() == [True]                                               # no se apaga solo
 
 
 # ─── K: regresión y seguridad ─────────────────────────────────────

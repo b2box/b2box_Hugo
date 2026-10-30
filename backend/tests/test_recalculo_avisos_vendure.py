@@ -62,10 +62,11 @@ def test_a_missing_empty_or_wrong_key_is_401_and_queues_nothing(key):
 
 
 @pytest.mark.parametrize("configured", ["", "corta", "changeme" * 5])
-def test_without_a_real_key_configured_it_fails_closed_with_503(monkeypatch, configured):
+def test_without_a_real_key_configured_it_fails_closed_with_404(monkeypatch, configured):
+    """Como /api/oficina: sin una key de verdad el endpoint no existe (404) y no nombra qué falta."""
     use_key(monkeypatch, configured)
     r = post({"events": [ev("1")]}, key=configured or KEY)
-    assert r.status_code == 503 and price_recalc._notices == {}
+    assert r.status_code == 404 and price_recalc._notices == {} and "VENDURE" not in r.text
 
 
 def test_too_many_wrong_keys_lock_the_ip_but_never_the_right_key():
