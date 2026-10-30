@@ -45,6 +45,7 @@ ATTENTION = {
     "escritura_huerfana": "Vendure tomó un cambio cuando la ficha ya había cambiado: revisalo a mano",
     "vendure_incierto": "no sabemos si Vendure tomó el cambio; Hugo lo revisa en la próxima acción o esta noche",
     "sin_vuelta_atras": "no se pudo volver atrás porque el producto ya tiene otra ficha abierta: esta se cerró",
+    "rojo_tras_reactivar": "Hugo lo había reactivado solo y esta noche volvió a dar rojo firme",
 }
 CAUSE_TEXT = {
     "a": "caja fuera de rango", "b": "tramos mal armados", "c": "certificado alto",

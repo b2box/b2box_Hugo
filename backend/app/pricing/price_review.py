@@ -37,7 +37,7 @@ import logging
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import update
@@ -82,6 +82,10 @@ STATE_LABEL = {
 NO_ROJO = "no_rojo"
 FIRME = "firme"
 DUDOSO = "dudoso"
+
+# La marca de una ficha que Hugo apagó y que ya no está en rojo (la deja el recálculo de día: «reactivala a mano»). La
+# saca el recálculo cuando deja de valer y la noche cuando mide rojo otra vez.
+FLAG_NOT_RED = "ya_no_rojo"
 
 # R3: de dónde puede venir un idéntico para sostener un rojo que lleve a una ficha.
 FIRM_SOURCES = frozenset({"clip", "clip+nombre", "manual"})
@@ -337,6 +341,13 @@ def add_event(session: Session, item: PriceReviewItem, kind: str, *, actor: str 
     return ev
 
 
+def drop_flag(item: PriceReviewItem, flag: str) -> None:
+    """Saca una marca de la ficha, si la tiene (no hace commit)."""
+    flags = _loads(item.flags) or []
+    if flag in flags:
+        item.flags = json.dumps([f for f in flags if f != flag])
+
+
 def move_item(session: Session, item: PriceReviewItem, to_state: str, *, now: datetime | None = None,
               **values: Any) -> bool:
     """Cambio de estado atómico (UPDATE … WHERE id AND state AND version): `state`, `state_since`, `version` + 1 y los
@@ -575,6 +586,8 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                 plan.to_create.append(_Candidate(sn, verdicts[sn.product_id], n))
             else:
                 waiting += 1
+        plan.summary["rojo_tras_reactivar"] = _red_after_auto_reactivation(s, [sn for sn in firm], now)
+        s.commit()
         plan.to_create.sort(key=lambda c: (-c.streak, -c.verdict.firm_listings, c.snap.est_margin_pct or 0.0, c.snap.product_id))
         plan.summary.update({"esperando_racha": waiting, "actualizadas": touched, "cerradas_solas": closed,
                              "reabiertas": reopened, "dato_anterior_a_una_decision": after_decision})
@@ -585,6 +598,34 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                     .where(MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.our_specs.is_not(None))  # type: ignore[union-attr]
                 ).all()}
     return plan
+
+
+# Cuánto tiempo después de una reactivación automática un rojo firme de la noche se avisa aparte.
+RED_AFTER_AUTO = timedelta(days=7)
+
+
+def _red_after_auto_reactivation(s: Session, firm: list[MarketPriceSnapshot], now: datetime) -> int:
+    """Un rojo firme de la noche dentro de los 7 días siguientes a una reactivación automática: la ficha reactivada deja un
+    evento `rojo_tras_reactivar` (una vez por ficha) que sale en «PARA MIRAR A MANO». La ficha nueva, si corresponde, la
+    abre la racha normal de noches. No hace commit."""
+    pids = [sn.product_id for sn in firm]
+    if not pids:
+        return 0
+    items = s.exec(select(PriceReviewItem).where(
+        PriceReviewItem.product_id.in_(pids), PriceReviewItem.decision == "reactivar_auto",  # type: ignore[attr-defined]
+        PriceReviewItem.reactivated_at >= now - RED_AFTER_AUTO)).all()  # type: ignore[operator]
+    snaps = {sn.product_id: sn for sn in firm}
+    done = 0
+    for item in items:
+        if s.exec(select(PriceReviewEvent.id).where(PriceReviewEvent.item_id == item.id,
+                                                    PriceReviewEvent.kind == "rojo_tras_reactivar")).first() is not None:
+            continue
+        sn = snaps[item.product_id]
+        add_event(s, item, "rojo_tras_reactivar", run_id=sn.run_id, snapshot_id=sn.id, now=now,
+                  motive_text="Hugo lo había reactivado solo y esta noche volvió a dar rojo firme.",
+                  payload={"precio": sn.our_price_cents, "margen_pct": sn.est_margin_pct})
+        done += 1
+    return done
 
 
 def _flags_for(snap: MarketPriceSnapshot, verdict: FirmVerdict | None, params: ReviewParams,
@@ -610,11 +651,14 @@ def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnaps
         apagó Hugo (`en_revision`, `corrigiendo`…), apagado es lo esperado: no se cierra;
       * `mantenido` → regla del 10 % (`_watch_kept`);
       * `propuesto` → se cierra sola si dejó de ser rojo; si no, actualiza racha y marcas;
-      * las demás (en manos de una persona) solo guardan el último dato.
+      * las demás (en manos de una persona) solo guardan el último dato;
+      * en todas, un rojo con dato saca el aviso «ya no está en rojo» que pudo dejar el recálculo de día.
 
     Devuelve «updated», «closed» o «reopened»."""
     item.last_run_id, item.last_snapshot_id = run_id, snap.id
     item.last_color, item.last_margin_pct = snap.color, snap.est_margin_pct
+    if snap.ml_status == price_monitor.OK and snap.color == semaforo.ROJO:
+        drop_flag(item, FLAG_NOT_RED)             # la noche lo midió rojo otra vez: el «ya no está en rojo» ya no vale
     if snap.captured_at is not None and snap.captured_at < item.state_since:
         # Lo midió ANTES del último cambio de estado (la corrida de la madrugada y una decisión de la mañana): ese dato no
         # alcanza para cerrar ni para reabrir la ficha.
@@ -874,17 +918,17 @@ async def process_run(run_id: int, *, catalog: Mapping[str, VendureProduct] | No
     return plan.summary
 
 
-async def _open_gate(plan: _Plan, source: ds.ReadSource | None, max_calls: int,
-                     deadline_s: float) -> tuple[ds.BudgetedSource, _Gate, Any]:
+async def _open_gate(plan: _Plan, source: ds.ReadSource | None, max_calls: int, deadline_s: float, *,
+                     budget: ds.RequestBudget | None = None, channel: Any = None) -> tuple[ds.BudgetedSource, _Gate, Any]:
     """Lo que necesita cualquier tanda de diagnósticos: el tope de lecturas del DÍA (la fila es una sola: la noche y el
-    recálculo la comparten), el tiempo máximo y los datos del canal (dos lecturas). Un error del canal queda en el resumen."""
+    recálculo la comparten; el recálculo además con su sub-cupo, `budget`), el tiempo máximo y los datos del canal (dos
+    lecturas, salvo que vengan en `channel`). Un error del canal queda en el resumen."""
     budgeted = ds.BudgetedSource(source or VendureClient(), max_calls,           # type: ignore[arg-type]
-                                 day=daily_budget.today_art(plan.now))
+                                 day=daily_budget.today_art(plan.now), budget=budget)
     gate = _Gate(budgeted, time.monotonic() + deadline_s)
     if await asyncio.to_thread(budgeted.budget.used) >= budgeted.max_calls:      # el día ya gastó todo (otra pasada)
         budgeted.refused = True
-    channel = None
-    if not gate.closed:
+    if channel is None and not gate.closed:
         try:
             channel = await asyncio.wait_for(budgeted.get_channel_pricing(), timeout=gate.remaining())
         except ds.ReadBudgetExhausted:
@@ -901,6 +945,28 @@ async def _open_gate(plan: _Plan, source: ds.ReadSource | None, max_calls: int,
 
 
 REDIAG_DEADLINE_S = 120.0
+# Parte de las 150 lecturas del día que puede usar el recálculo de día: el resto queda para la noche.
+REDIAG_SHARE = 0.3
+# Los datos del canal (compra mínima, tope del certificado) del día, para no leerlos en cada tanda del recálculo.
+_day_channel: dict[str, Any] = {}
+
+
+class _RecalcBudget(ds.RequestBudget):
+    """El sub-cupo del recálculo de día: hasta `REDIAG_SHARE` de las lecturas del día de la bandeja, y siempre dentro del
+    total (cada lectura cuenta en las dos filas)."""
+
+    KEY = "vendure_review_requests_recalc"
+
+    def __init__(self, day: str) -> None:
+        super().__init__(int(ds.MAX_VENDURE_CALLS * REDIAG_SHARE), day)
+        self.total = ds.RequestBudget(ds.MAX_VENDURE_CALLS, day)
+
+    def used(self) -> int:
+        return self.cap if self.total.used() >= self.total.cap else super().used()
+
+    def reserve(self) -> int:
+        super().reserve()
+        return self.total.reserve()
 
 
 def _open_with_snapshot(item_ids: list[int]) -> list[tuple[int, MarketPriceSnapshot]]:
@@ -926,8 +992,9 @@ async def rediagnose(item_ids: list[int], *, catalog: Mapping[str, VendureProduc
                      source: ds.ReadSource | None = None, now: datetime | None = None,
                      deadline_s: float = REDIAG_DEADLINE_S) -> int:
     """Rehace el diagnóstico a-e de fichas abiertas con el desglose que tiene HOY Vendure: el producto cambió y el
-    recálculo (pricing/price_recalc.py) ya dejó su snapshot al día. Mismo tope de lecturas del día que la pasada de la noche
-    (comparten la fila), mismas reglas de intentos y de cifras firmes (`_retry_diag`). Lo que no entra queda como estaba y
+    recálculo (pricing/price_recalc.py) ya dejó su snapshot al día. Dentro del tope de lecturas del día de la bandeja (la
+    misma fila que la noche) y con un sub-cupo propio del 30 % (la noche no se queda sin lecturas); los datos del canal se
+    leen una vez por día. Mismas reglas de intentos y de cifras firmes (`_retry_diag`). Lo que no entra queda como estaba y
     lo completa la noche. Devuelve cuántas rehizo. No escribe en Vendure."""
     work = await asyncio.to_thread(_open_with_snapshot, item_ids) if item_ids else []
     if not work:
@@ -936,7 +1003,13 @@ async def rediagnose(item_ids: list[int], *, catalog: Mapping[str, VendureProduc
     plan = _Plan(run_id=0, requested_mode=mode, mode=min(mode, 1), params=ReviewParams.from_runtime(),
                  now=now or utcnow(), summary={})
     plan.specs_by_product = await asyncio.to_thread(_specs_of_runs, {sn.run_id for _, sn in work})
-    _, gate, channel = await _open_gate(plan, source, ds.MAX_VENDURE_CALLS, deadline_s)
+    day = daily_budget.today_art(plan.now)
+    budget = _RecalcBudget(day)
+    _, gate, channel = await _open_gate(plan, source, budget.cap, deadline_s, budget=budget,
+                                        channel=_day_channel.get(day))
+    if channel is not None and day not in _day_channel:
+        _day_channel.clear()
+        _day_channel[day] = channel
     done = 0
     for item_id, snap in work:
         if gate.closed:
