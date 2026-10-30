@@ -712,7 +712,7 @@ async def refresh_catalog() -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("refresh_catalog falló: %s", exc)
     try:
-        price_recalc.enqueue(vendure_catalog.pop_changed())
+        price_recalc.enqueue_polled(vendure_catalog.pop_changed_versions())
         await price_recalc.run_pending()
     except Exception:  # noqa: BLE001
         log.exception("refresh_catalog: el recálculo de los productos cambiados falló")

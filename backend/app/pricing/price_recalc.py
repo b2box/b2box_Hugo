@@ -47,11 +47,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from app import runtime
 from app.clock import utcnow
-from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
+from app.db.models import AuditLog, MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
 from app.db.session import engine
 from app.pricing import daily_budget, price_monitor, semaforo, store_match
 from app.pricing import price_review as pr
@@ -89,8 +89,54 @@ _busy = asyncio.Lock()
 _watched_at: dict[str, datetime] = {}
 
 
-def enqueue(product_ids: Iterable[str]) -> None:
-    _pending.update(product_ids)
+# Tope duro de lo que espera en memoria (cola + avisos): lo que sobra se descarta con un aviso y lo toma la noche.
+MAX_QUEUED = 20_000
+# Un lote de más de esto es un cambio masivo (una fórmula nueva, una importación): se leen solo las fichas vivas.
+MASSIVE = 200
+# Con qué `updatedAt` (el más nuevo, del producto o de sus variantes) se leyó cada producto la última vez: el sondeo no
+# relee lo que un aviso ya leyó igual o después.
+_read_marks: dict[str, str] = {}
+
+
+def _room() -> int:
+    return max(0, MAX_QUEUED - len(_pending) - len(_notices))
+
+
+def enqueue(product_ids: Iterable[str]) -> int:
+    """Encola productos para recalcular, sin pasar del tope duro. Devuelve cuántos entraron (los ya encolados cuentan)."""
+    new = [pid for pid in dict.fromkeys(product_ids) if pid not in _pending]
+    room = _room()
+    if len(new) > room:
+        log.warning("recálculo: la cola llegó al tope (%d): %d productos quedan para la noche", MAX_QUEUED, len(new) - room)
+        new = new[:room]
+    _pending.update(new)
+    return len(new)
+
+
+def enqueue_polled(changes: dict[str, str | None]) -> int:
+    """Lo que vio el sondeo (producto → `updatedAt` del cambio, o None). No se encola lo que ya se leyó con ese `updatedAt`
+    o uno posterior (un aviso de Vendure llegó antes): así un guardado no gasta dos o tres lecturas."""
+    def already_read(pid: str, version: str | None) -> bool:
+        mark = _read_marks.get(pid)
+        if mark is None:
+            return False
+        seen, polled = _parse_ts(mark), _parse_ts(version)
+        return polled is None or (seen is not None and polled <= seen)
+
+    return enqueue(pid for pid, version in changes.items() if not already_read(pid, version))
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    from app.vendure.catalog import _parse_iso   # el mismo parser del watermark del catálogo
+
+    return _parse_iso(value) if value else None
+
+
+def _newest_update(product: VendureProduct) -> str | None:
+    """El `updatedAt` más nuevo del producto y de sus variantes, tal como lo devolvió Vendure."""
+    stamps = [(at, x) for x in (product.updated_at, *(v.updated_at for v in product.priced_variants or []))
+              if (at := _parse_ts(x)) is not None]
+    return max(stamps)[1] if stamps else None
 
 
 # ─── Avisos de Vendure ────────────────────────────────────────────
@@ -124,12 +170,27 @@ def notify(changes: dict[str, bool], now: datetime | None = None) -> int:
         # shortcut: con más de una réplica el aviso se pierde y lo toma el sondeo del líder; si se escala, pasarlo a la base.
         log.warning("aviso de Vendure en una instancia que no es la líder: lo toma el sondeo")
         return 0
+    from app.vendure import catalog as vendure_catalog
+
     now = now or utcnow()
+    known = vendure_catalog.known_ids()
+    if known is not None:                         # solo productos del catálogo (sin catálogo cargado, el tope alcanza)
+        changes = {pid: recheck for pid, recheck in changes.items() if pid in known}
+    room = _room()
+    taken = 0
     for pid, recheck in changes.items():
         old = _notices.get(pid)
+        if old is None:
+            if taken >= room:
+                continue
+            taken += 1
         _notices[pid] = _Notice(now + NOTICE_READ_AFTER, recheck or (old is not None and old.recheck))
-    _start_notice_worker()
-    return len(changes)
+    dropped = sum(1 for pid in changes if pid not in _notices)
+    if dropped:
+        log.warning("recálculo: los avisos llegaron al tope (%d): %d productos quedan para la noche", MAX_QUEUED, dropped)
+    if _notices:
+        _start_notice_worker()
+    return len(changes) - dropped
 
 
 def _start_notice_worker() -> None:
@@ -160,7 +221,7 @@ async def process_notices(client: Any = None, now: datetime | None = None) -> di
     if price_monitor.price_monitor_lock.locked():
         for pid in due:
             _notices.pop(pid, None)
-        enqueue(due)
+        enqueue(list(due))
         return {"corrida": len(due)}
     if _busy.locked():
         return {"ocupado": len(due)}
@@ -266,9 +327,18 @@ def _live_products() -> list[str]:
 
 
 async def _run(ctx: _Ctx, ids: list[str], what: str) -> dict[str, int]:
-    """Los productos de a `CONCURRENCY` y, al final, el diagnóstico de las fichas que siguen abiertas."""
+    """Los productos de a `CONCURRENCY` (primero los que tienen ficha viva) y, al final, el diagnóstico de las fichas que
+    siguen abiertas. Un lote de más de `MASSIVE` productos es un cambio masivo: se leen solo las fichas vivas y el resto
+    queda para la noche."""
     now = ctx.now
     counts: dict[str, int] = {}
+    live = set(await asyncio.to_thread(_live_products)) if ids else set()
+    ids = sorted(ids, key=lambda pid: pid not in live)                          # sorted es estable
+    if len(ids) > MASSIVE:
+        rest = [pid for pid in ids if pid not in live]
+        ids = [pid for pid in ids if pid in live]
+        counts["masivo"] = len(rest)
+        log.warning("recálculo (%s): cambio masivo, %d productos sin ficha quedan para la noche", what, len(rest))
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def _one(pid: str) -> None:
@@ -288,8 +358,8 @@ async def _run(ctx: _Ctx, ids: list[str], what: str) -> dict[str, int]:
                 counts["diagnosticos"] = done
         except Exception as exc:  # noqa: BLE001
             log.warning("recálculo: el diagnóstico de las fichas falló: %s", error_code(exc))
-    if ids:
-        log.info("recálculo (%s): %d productos → %s", what, len(ids), counts)
+    if counts:
+        log.info("recálculo (%s): %d productos → %s", what, len(ids) + counts.get("masivo", 0), counts)
     return counts
 
 
@@ -312,6 +382,8 @@ async def _recalc_one(ctx: _Ctx, pid: str) -> str:
     product = await ctx.client.get_product_priced(pid)
     if product is None:
         return "no_existe"
+    if (mark := _newest_update(product)) is not None:
+        _read_marks[pid] = mark
     variants = product.priced_variants or []
     our = semaforo.pick_our_price(variants, ctx.tier_policy)
     if our is None:
@@ -360,7 +432,9 @@ def _apply(ctx: _Ctx, snap_id: int, product: VendureProduct, our: semaforo.OurPr
         snap = s.get(MarketPriceSnapshot, snap_id)
         if snap is None:
             return change
-        seen = {(o.price_cents, o.tier_used) for o in (our, other) if o is not None}
+        seen = {(our.price_cents, our.tier_used)}
+        if other is not None and _tier_policy_changed_since(s, snap.captured_at):
+            seen.add((other.price_cents, other.tier_used))      # el tramo cambió por configuración, no en Vendure
         if (snap.our_price_cents, snap.tier_used) in seen:
             if ctx.mode >= 1:
                 item = _live_item(s, snap.product_id)
@@ -395,8 +469,18 @@ def _apply(ctx: _Ctx, snap_id: int, product: VendureProduct, our: semaforo.OurPr
         price_monitor.recount_run(s, snap.run_id)
         if ctx.mode >= 1:
             _update_item(s, ctx, snap, verdict, change, old_price, old_color, ratio_before)
+            if verdict.firm:                     # rojo firme de nuevo tras una reactivación automática (como la noche)
+                pr._red_after_auto_reactivation(s, [snap], ctx.now)
         s.commit()
     return change
+
+
+def _tier_policy_changed_since(s: Session, since: datetime) -> bool:
+    """¿Alguien cambió `pm_tier_policy` después de esta medición? Es un setting de admin y cada cambio queda en el audit
+    log: sin una fila así, un `tier_used` distinto es un cambio de tramos en Vendure, no de configuración."""
+    return s.exec(select(AuditLog.id).where(
+        AuditLog.action == "setting_changed", AuditLog.before.like('{"pm_tier_policy":%'),  # type: ignore[union-attr]
+        AuditLog.created_at > since).limit(1)).first() is not None
 
 
 def _live_item(s: Session, product_id: str) -> PriceReviewItem | None:
@@ -462,7 +546,9 @@ def _decide(s: Session, ctx: _Ctx, item: PriceReviewItem, snap: MarketPriceSnaps
     if not ok.firm:
         pr.drop_flag(item, FLAG_NOT_RED)
         return None
-    hold = _too_low(snap, ok, ctx.params)
+    hold = _too_low(snap, ok, ctx.params, item)
+    if hold is None and _held_for_a_person(s, int(item.id)):  # type: ignore[arg-type]
+        return None                              # «precio bajo» una vez: hasta que una persona decida, no se prende solo
     if hold is not None:
         pr.drop_flag(item, FLAG_NOT_RED)             # con un precio sospechoso no se invita a reactivar
     if item.state == pr.EN_REVISION:
@@ -475,15 +561,33 @@ def _decide(s: Session, ctx: _Ctx, item: PriceReviewItem, snap: MarketPriceSnaps
     return _Attempt(int(item.id), item.state, hold)  # type: ignore[arg-type]
 
 
-def _too_low(snap: MarketPriceSnapshot, ok: pr.FirmVerdict, p: pr.ReviewParams) -> tuple[str, str] | None:
-    """El piso de precio: un precio con ceros de menos es «verde firme» y no se puede prender solo."""
+def _too_low(snap: MarketPriceSnapshot, ok: pr.FirmVerdict, p: pr.ReviewParams,
+             item: PriceReviewItem) -> tuple[str, str] | None:
+    """El piso de precio: un precio con ceros de menos es «verde firme» y no se puede prender solo. La caída se mide contra
+    el menor entre el precio de la noche y el precio con que se abrió la ficha."""
     night = (pr._loads(snap.recalc_before) or {}).get("our_price_cents") if snap.recalc_before else snap.our_price_cents
+    refs = [x for x in (night, item.our_price_cents) if isinstance(x, (int, float)) and x > 0]
     now_price = snap.our_price_cents or 0
     if ok.price_ratio is None or ok.price_ratio < 1.0 / p.max_price_ratio:
         return "precio_bajo", PRECIO_BAJO
-    if isinstance(night, (int, float)) and night > 0 and now_price < night * (1 - MAX_DROP):
+    if refs and now_price < min(refs) * (1 - MAX_DROP):
         return "precio_bajo", PRECIO_BAJO
     return None
+
+
+def _held_for_a_person(s: Session, item_id: int) -> bool:
+    """¿La ficha quedó «reactivar a mano: precio_bajo» y después nadie decidió nada? (una decisión, Deshacer o
+    «Inactivar» de una persona la libera)."""
+    from app.pricing import price_review_actions as actions   # lazy: actions importa price_review y el cliente
+
+    held = s.exec(select(func.max(PriceReviewEvent.id)).where(
+        PriceReviewEvent.item_id == item_id, PriceReviewEvent.kind == "reactivar_a_mano",
+        PriceReviewEvent.motive_code == "precio_bajo")).one()
+    if held is None:
+        return False
+    return s.exec(select(PriceReviewEvent.id).where(
+        PriceReviewEvent.item_id == item_id, PriceReviewEvent.id > held, PriceReviewEvent.actor != pr.ACTOR_AUTO,
+        PriceReviewEvent.kind.in_((*actions.HUMAN_KINDS, "deshacer"))).limit(1)).first() is None  # type: ignore[attr-defined]
 
 
 def _attempted_since(s: Session, item_id: int, since: datetime) -> bool:
