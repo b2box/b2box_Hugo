@@ -46,13 +46,13 @@ GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77
 # llm_failures, llm_skipped_* y llm_status: lo que el juez no contestó o no consultó y su corte por fallas seguidas
 # (fix/semaforo-sin-dato, aditivas; en este mundo el juez nunca falla, así que quedan en 0 / None).
 # data_at, review_flag, review_at, review_summary y n_flipped: la bandeja de revisión (aditivos; no cambian ML).
-# recalc_at y recalc_before: el recálculo al cambiar en Vendure (aditivas; solo las escribe el recálculo de día).
+# recalc_at, recalc_before y recalc_flag: el recálculo al cambiar en Vendure (aditivas; solo las escribe el recálculo de día).
 ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_stats", "web_via", "oficina_fresh",
                         "n_oficina_ok", "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
                         "llm_skipped_cut", "llm_status",
                         "unmeasurable", "n_no_medible",
                         "data_at", "review_flag", "review_at", "review_summary", "n_flipped",
-                        "recalc_at", "recalc_before"}
+                        "recalc_at", "recalc_before", "recalc_flag"}
 CP_IMG = "https://acdn-us.mitiendanube.com/stores/001/133/924/products/{}.webp"
 GD_IMG = "https://static.bidcom.com.ar/publicacionesML/productos/{}.jpg"
 

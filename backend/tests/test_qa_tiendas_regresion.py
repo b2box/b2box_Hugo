@@ -42,7 +42,7 @@ ADDED_BY_THIS_BRANCH = {"price_basis", "source_stats", "ml_variant", "variant_st
                         "llm_skipped_cut", "llm_status",
                         "unmeasurable", "n_no_medible",
                         "data_at", "review_flag", "review_at", "review_summary", "n_flipped",
-                        "recalc_at", "recalc_before"}
+                        "recalc_at", "recalc_before", "recalc_flag"}
 
 
 def _mixed_world(w) -> None:
