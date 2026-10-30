@@ -1142,7 +1142,9 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    del job de 30 minutos no gastan ese cupo: tienen el suyo (60 por vuelta y `pm_recalc_watch_daily_max` por día).
 4. **Si el precio y el tramo son los mismos, nada** (ni snapshot ni evento): un cambio de fotos, de descripción o el
    propio `enabled` que escribe Hugo no hacen ruido ni bucles. Tampoco cuenta como cambio un `tier_used` distinto solo
-   porque se cambió `pm_tier_policy` (se compara con las dos políticas): eso es configuración, no un arreglo.
+   porque se cambió `pm_tier_policy`: si el audit log tiene un cambio de esa política posterior a la medición, se compara
+   también con la otra política (eso es configuración, no un arreglo); si no, vale solo la política vigente (un tramo
+   mínimo más caro guardado en Vendure es un cambio de verdad).
 5. **El snapshot se recalcula en el lugar** contra los MISMOS idénticos (misma mediana, comisión y envío): ganancia,
    color (con las tiendas si cuentan) y los contadores de la corrida. `recalc_at` dice cuándo, `recalc_before` guarda lo
    que había medido la corrida (precio, tramo, color, ganancia y marca; no se pisa con un segundo cambio del mismo día) y
@@ -1153,18 +1155,27 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    a ser la fuente.
 
 **Aviso de Vendure al guardar** (`POST /api/vendure/events`, contrato en `vendure-hugo-eventos-contrato.md`). Vendure
-(el plugin del repo `b2box`, con `HUGO_EVENTS_URL` y `HUGO_EVENTS_KEY`) junta unos segundos lo que se guardó y manda un
-lote: `{"events": [{"type": "product|variant|tier|price", "productId": "123", "variantId": "456", "at": "…"}]}`.
+(el plugin del repo `b2box`) junta unos segundos lo que se guardó y manda un lote:
+`{"events": [{"type": "product|variant|tier|price", "productId": "123", "variantId": "456", "at": "…"}]}`.
+- En Vendure: `HUGO_EVENTS_URL` = la URL **exacta** `https://<hugo>/api/vendure/events`, **sin `/` al final** (con la
+  barra final cae en la sesión del dashboard y da 401), y `HUGO_EVENTS_KEY` = la misma key que `VENDURE_EVENTS_KEY` en
+  Hugo: **32 caracteres o más y al menos 12 distintos** (por ejemplo `openssl rand -hex 32`).
 - Auth propia: header `X-Hugo-Events-Key` contra `VENDURE_EVENTS_KEY` (tiempo constante). Sin la variable, o con una key
-  floja (menos de 32 caracteres, pocos distintos, un placeholder), contesta **503**: falla cerrado. Key ausente, vacía o
-  mala: **401**, y tras 10 intentos en 5 min la IP queda bloqueada 5 min (nunca a quien trae la key buena). Rate limit
-  de 120 por minuto por IP. No usa la sesión del dashboard (está entre las rutas públicas, como `/api/oficina/*`).
+  floja (menos de 32 caracteres, menos de 12 distintos, un placeholder), contesta **404**, como si no existiera (igual que
+  `/api/oficina`): falla cerrado y no nombra qué falta. Key ausente, vacía o mala: **401**, y tras 10 intentos en 5 min la
+  IP queda bloqueada 5 min (nunca a quien trae la key buena). Rate limit de 120 por minuto por IP. Solo `POST
+  /api/vendure/events` (ese método y esa ruta exacta) pasa sin la sesión del dashboard; nada más bajo `/api/vendure`.
 - Body estricto: campos de más, un tipo desconocido, ids que no son solo dígitos (hasta 20) o más de 500 avisos por lote
   dan **422**; body de hasta 256 KB.
-- Responde **202** `{"queued": N}` (productos sin repetir) y procesa solo: mismos topes (`pm_recalc_daily_max`), locks y
-  reglas que el sondeo. Un producto que Hugo no mide se ignora. Lo que llega durante la corrida de la noche se procesa
-  cuando termina. Solo procesa la instancia líder (la del scheduler); los avisos viven en memoria y, si se pierden (un
-  reinicio), los toma el sondeo.
+- Responde **202** `{"queued": N}` (productos sin repetir que quedaron anotados) y procesa solo: mismos topes
+  (`pm_recalc_daily_max`), locks y reglas que el sondeo. Solo se anotan productos del catálogo que Hugo tiene en memoria
+  (recién arrancado, sin catálogo cargado, se anotan todos); un producto que Hugo no mide se ignora sin leerlo. Lo que
+  llega durante la corrida de la noche se procesa cuando termina. Solo procesa la instancia líder (la del scheduler).
+- Topes: lo que espera en memoria (avisos + cola del sondeo) no pasa de **20.000** productos; lo que sobra se descarta con
+  un aviso en el log y lo toma la noche. Un lote de **más de 200 productos distintos** es un cambio masivo (una fórmula
+  nueva): se leen solo los que tienen ficha viva y el resto queda para la noche. Con menos, las fichas vivas van primero.
+- Un guardado se lee una vez: si el aviso ya leyó el producto con un `updatedAt` (del producto o de una variante) igual o
+  posterior al que ve el sondeo, el sondeo no lo vuelve a leer.
 
 Un producto que empeora sin ficha (verde → rojo) se ve en el semáforo, pero **no abre ficha**: eso sigue con la racha de
 la noche. Lo que hace con la bandeja está en [Cuando el producto cambia en Vendure](#cuando-el-producto-cambia-en-vendure).
@@ -1617,9 +1628,10 @@ vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
     confirmados por foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones y 2 vendedores; R3-R7 con el
     color al revés). Un «no rojo» con datos flojos no reactiva;
   - **piso de precio**: nuestro precio / mediana firme de ML >= 1 / `pm_review_max_price_ratio` (un precio con ceros de
-    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el de la noche. Si no, no escribe: queda
-    `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer ni escribir Vendure) y sale en «PARA MIRAR
-    A MANO»;
+    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el menor entre el de la noche y el precio con que
+    se abrió la ficha. Si no, no escribe: queda `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer
+    ni escribir Vendure) y sale en «PARA MIRAR A MANO». Y queda **pegado**: esa ficha no se reactiva sola nunca más hasta
+    que una persona decida algo sobre ella (una decisión, Deshacer o «Inactivar»);
   - **doble lectura**: el mismo precio visto en dos lecturas de Vendure separadas por 30 minutos o más (la primera es la
     que trajo ese precio, o la corrida de la noche; la segunda, en general, la del job de 30 minutos). Un precio distinto
     en el medio vuelve a empezar la cuenta;
@@ -1642,7 +1654,7 @@ vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
 - si después de una reactivación automática la noche vuelve a dar rojo firme, sigue el camino normal: la ficha nueva la
   abre la racha de noches (el recálculo no toca la racha, así que la noche de antes del arreglo cuenta) y, dentro de los 7
   días siguientes a la reactivación, la ficha reactivada deja un evento `rojo_tras_reactivar` que sale en «PARA MIRAR A
-  MANO» (una vez). No se apaga solo.
+  MANO» (una vez; lo deja también el recálculo de día si el precio nuevo da rojo firme). No se apaga solo.
 
 Con `pm_mode = 0` el recálculo solo se ve en el semáforo: no toca fichas ni reactiva nada. Nunca abre fichas ni apaga
 productos: eso sigue con las reglas de la noche y la decisión de una persona.
@@ -2244,8 +2256,9 @@ Ver `.env.example`. Las críticas:
 - `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 32 caracteres; usá la que genera `tools/oficina_ml_search.py --init`). Sin ella
   los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
 - `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
-  >= 32 caracteres, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como `HUGO_EVENTS_KEY`. Vacía = 503 y el
-  recálculo queda con el sondeo (minutos).
+  32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
+  `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el
+  sondeo (minutos).
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
