@@ -30,10 +30,21 @@ del producto, así que `first_variant_price_cents` puede quedar hasta 12 h viejo
 Para dedup/"lo tenemos" el precio es secundario; las auditorías de precio
 bajan su propio listado.
 
-Los productos que vuelven con otro `updatedAt` quedan anotados (`pop_changed`)
-para el recálculo del semáforo durante el día (pricing/price_recalc.py). Por lo
-mismo de arriba, un cambio que guarda SOLO la variante no lo dispara: lo toma la
-corrida de la noche.
+Qué ve el recálculo del semáforo durante el día (pricing/price_recalc.py)
+-----------------------------------------------------------------------
+Cada refresh anota (`pop_changed`) los productos que hay que recalcular:
+
+* **en minutos** (cada refresh): los productos que volvieron con otro
+  `updatedAt` y los de las VARIANTES con `updatedAt` nuevo (la caja, las
+  medidas y el precio viven en la variante, y guardarla no toca el `updatedAt`
+  del producto). Las variantes llevan su propio watermark, con el mismo margen,
+  y piden solo `id productId updatedAt`. Si el schema rechaza ese filtro se
+  avisa una vez y se sigue solo con productos;
+* **cada 30 minutos**: los TRAMOS (`BulkPriceTier`) son otra entidad, guardarlos
+  no toca ni la variante ni el producto, y la API no los lista por fecha. Los
+  productos con ficha viva en la bandeja se releen igual cada 30 min
+  (`price_recalc.watch_live_items`);
+* **solo la noche**: un cambio de tramos de un producto sin ficha.
 """
 
 from __future__ import annotations
@@ -58,6 +69,11 @@ _lock = asyncio.Lock()
 # Productos que ya estaban en el cache y volvieron con otro `updatedAt` (alguien los guardó en Vendure), hasta que
 # alguien los saca con `pop_changed()`: el recálculo del semáforo (pricing/price_recalc.py, vía refresh_catalog).
 _changed: set[str] = set()
+# Variantes (R-1a del recálculo): el `updatedAt` más nuevo visto, las que trajo el último pedido (el margen las vuelve a
+# traer iguales: no cuentan) y si el schema acepta el filtro (False = se avisó una vez y se sigue solo con productos).
+_variant_watermark: str | None = None
+_variant_seen: dict[str, str] = {}
+_variants_supported = True
 
 # Tras un refresh fallido, cuánto esperar antes de volver a intentar contra
 # Vendure. Sin esto, cada request pagaría el timeout completo (60s) mientras
@@ -190,15 +206,50 @@ async def _do_incremental(client: VendureClient) -> None:
 async def _refresh(client: VendureClient) -> None:
     if _needs_full():
         await _do_full(client)
+    else:
+        try:
+            await _do_incremental(client)
+        except TransportQueryError as exc:
+            # Vendure respondió pero rechazó la query (schema distinto, filtro no
+            # soportado…). No es un problema de red: el full sigue funcionando y
+            # es mejor pagarlo que quedarse con un cache viejo para siempre.
+            log.warning("Refresh incremental rechazado por Vendure (%s); hago full", exc)
+            await _do_full(client)
+    await _note_changed_variants(client)
+
+
+async def _note_changed_variants(client: VendureClient) -> None:
+    """Anota los productos (ya en el cache) de las variantes guardadas desde el último pedido. La primera vez solo toma
+    el punto de partida y las variantes del margen (lo de antes no cuenta como cambio). Nunca tira el refresh: un rechazo del schema apaga esto con
+    un aviso; otro error se loguea y el watermark no se mueve (el próximo refresh lo vuelve a pedir)."""
+    global _variant_watermark, _variant_seen, _variants_supported
+    if not _variants_supported:
         return
     try:
-        await _do_incremental(client)
+        seeding = _variant_watermark is None
+        if seeding:
+            _variant_watermark = await client.latest_variant_update() or _watermark
+        since = _since_for_incremental(_variant_watermark or "")
+        if since is None:
+            return
+        rows = await client.fetch_variants_updated_since(since)
     except TransportQueryError as exc:
-        # Vendure respondió pero rechazó la query (schema distinto, filtro no
-        # soportado…). No es un problema de red: el full sigue funcionando y
-        # es mejor pagarlo que quedarse con un cache viejo para siempre.
-        log.warning("Refresh incremental rechazado por Vendure (%s); hago full", exc)
-        await _do_full(client)
+        _variants_supported = False
+        log.warning("Vendure no acepta pedir variantes por updatedAt (%s): el recálculo sigue solo con productos",
+                    str(exc)[:160])
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudieron pedir las variantes cambiadas (%s); se reintenta en el próximo refresh",
+                    type(exc).__name__)
+        return
+    in_cache = {p.id for p in _cache}
+    if not seeding:                                     # al arrancar solo se anota lo del margen, para no repetirlo
+        _changed.update(pid for vid, pid, at in rows if pid in in_cache and _variant_seen.get(vid) != at)
+    _variant_seen = {vid: at for vid, _pid, at in rows}
+    for _vid, _pid, at in rows:
+        dt, best = _parse_iso(at), _parse_iso(_variant_watermark or "")
+        if dt and (best is None or dt > best):
+            _variant_watermark = at
 
 
 def enabled_only(products: list[VendureProduct]) -> list[VendureProduct]:

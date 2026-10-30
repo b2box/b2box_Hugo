@@ -49,6 +49,13 @@ class FakeClient:
         FakeClient.count_calls += 1
         return len(FakeClient.remote)
 
+    # Variantes cambiadas (recálculo del semáforo): estos tests no tienen ninguna.
+    async def latest_variant_update(self):
+        return None
+
+    async def fetch_variants_updated_since(self, since_iso, page_size=None):
+        return []
+
 
 @pytest.fixture
 def fake_vendure(monkeypatch):
@@ -68,6 +75,9 @@ def fake_vendure(monkeypatch):
     monkeypatch.setattr(catalog, "_loaded_at", 0.0)
     monkeypatch.setattr(catalog, "_full_at", None)
     monkeypatch.setattr(catalog, "_watermark", None)
+    monkeypatch.setattr(catalog, "_variant_watermark", None)
+    monkeypatch.setattr(catalog, "_variant_seen", {})
+    monkeypatch.setattr(catalog, "_variants_supported", True)
     return FakeClient
 
 

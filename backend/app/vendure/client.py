@@ -581,6 +581,41 @@ class VendureClient:
                 return out
             skip += take
 
+    async def fetch_variants_updated_since(
+        self, since_iso: str, page_size: int | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """(id, productId, updatedAt) de las variantes con `updatedAt` posterior a `since_iso`. Guardar una variante (caja,
+        medidas, precio) no toca el `updatedAt` del producto: esto es lo que lo ve. Solo esos tres campos y filtrado en SQL
+        por Vendure; secuencial como el de productos. Un schema que no acepta el filtro levanta `TransportQueryError`."""
+        take = page_size or self.BULK_PAGE_SIZE
+        query = self._read_query(
+            "query VariantsUpdatedSince($since: DateTime!, $skip: Int!, $take: Int!) { productVariants(options: { "
+            "skip: $skip, take: $take, filter: { updatedAt: { after: $since } }, sort: { updatedAt: ASC } }) "
+            "{ items { id productId updatedAt } totalItems } }")
+        out: list[tuple[str, str, str]] = []
+        skip = 0
+        while True:
+            data = await self._execute_with_retry(
+                query, {"since": since_iso, "skip": skip, "take": take},
+                what=f"productVariants(updatedAt>{since_iso}, skip={skip})", retry=False)
+            block = data.get("productVariants") or {}
+            items = [i for i in block.get("items") or [] if isinstance(i, dict)]
+            out.extend((str(i.get("id")), str(i.get("productId")), str(i.get("updatedAt") or "")) for i in items)
+            total = int(block.get("totalItems") or len(out))
+            if not items or len(items) < take or len(out) >= total:
+                return out
+            skip += take
+
+    async def latest_variant_update(self) -> str | None:
+        """El `updatedAt` más nuevo de todas las variantes: el punto de partida, para no tomar como cambio lo de antes."""
+        query = self._read_query(
+            "query LatestVariantUpdate { productVariants(options: { take: 1, sort: { updatedAt: DESC } }) "
+            "{ items { updatedAt } } }")
+        data = await self._execute_with_retry(query, {}, what="latest_variant_update", retry=False)
+        items = (data.get("productVariants") or {}).get("items") or []
+        value = items[0].get("updatedAt") if items and isinstance(items[0], dict) else None
+        return value if isinstance(value, str) and value else None
+
     async def fetch_all_products(
         self,
         with_variants: bool = False,

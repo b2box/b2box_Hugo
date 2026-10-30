@@ -38,6 +38,7 @@ class FakeReviewVendure:
 
     def __init__(self) -> None:
         self.products: list[dict[str, Any]] = []
+        self.variant_updates: list[dict[str, Any]] = []     # {id, productId, updatedAt}: lo que lee el refresh del catálogo
         self.breakdowns: dict[str, list[dict[str, Any]]] = {}
         self.variants: dict[str, dict[str, Any]] = {}
         self.certifications: dict[str, dict[str, Any] | None] = {}
@@ -89,6 +90,17 @@ class FakeReviewVendure:
             return {"products": {"items": self.products[skip:skip + take], "totalItems": len(self.products)}}
         if op == "PricedProduct":                # el recálculo: UN producto de `products`, con sus variantes y tramos
             return {"product": next((p for p in self.products if str(p["id"]) == str(v["id"])), None)}
+        if op == "ProductsUpdatedSince":         # el refresh incremental del catálogo
+            rows = sorted((p for p in self.products if p.get("updatedAt", "") > v["since"]), key=lambda p: p["updatedAt"])
+            return {"products": {"items": rows[v["skip"]:v["skip"] + v["take"]], "totalItems": len(rows)}}
+        if op == "ProductCount":
+            return {"products": {"totalItems": len(self.products)}}
+        if op == "VariantsUpdatedSince":
+            rows = sorted((r for r in self.variant_updates if r["updatedAt"] > v["since"]), key=lambda r: r["updatedAt"])
+            return {"productVariants": {"items": rows[v["skip"]:v["skip"] + v["take"]], "totalItems": len(rows)}}
+        if op == "LatestVariantUpdate":
+            rows = sorted(self.variant_updates, key=lambda r: r["updatedAt"], reverse=True)[:1]
+            return {"productVariants": {"items": [{"updatedAt": r["updatedAt"]} for r in rows]}}
         if op == "TierBreakdowns":
             return {"bulkPriceTierBreakdowns": self.breakdowns.get(str(v["id"]), [])}
         if op == "PricedVariant":
