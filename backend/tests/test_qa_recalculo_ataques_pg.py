@@ -16,7 +16,7 @@ from tests import review_decide as k  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests.test_price_review_pg import old_schema  # noqa: E402,F401
 from tests.test_qa_tiendas_pg import PG_URL  # noqa: E402
-from tests.test_recalculo_al_cambiar import FIXED, in_vendure, night, recalc  # noqa: E402
+from tests.test_recalculo_al_cambiar import FIXED, confirm, in_vendure, night, recalc  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Postgres descartable)")
 
@@ -25,6 +25,7 @@ async def test_qa_k4_a_mass_change_keeps_the_run_counters_exact_and_the_reactiva
     session.init_db()
     fake = k.setup(monkeypatch)
     price_recalc._pending.clear()
+    monkeypatch.setattr(price_recalc, "_watched_at", {})
     w.set_setting("pm_recalc_reactivations_daily_max", 5)
     run = w.make_run()
     pids = [f"rv{i:03d}" for i in range(120)]
@@ -36,6 +37,8 @@ async def test_qa_k4_a_mass_change_keeps_the_run_counters_exact_and_the_reactiva
         else:
             in_vendure(fake, pid, FIXED if i % 2 else 1_000_000)
     out = await recalc(*pids)
+    assert out.get("error", 0) == 0, out
+    out = await confirm()                                   # la segunda lectura (ajustes 30-oct): recién ahí reactiva
     assert out.get("error", 0) == 0, out
     with old_schema.connect() as c:
         colors = dict(c.execute(text("SELECT color, count(*) FROM market_price_snapshot WHERE run_id = :r GROUP BY color"),

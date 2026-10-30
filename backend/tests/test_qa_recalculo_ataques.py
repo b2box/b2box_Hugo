@@ -1,8 +1,8 @@
 """QA del recálculo al cambiar en Vendure: intentos de romper la reactivación automática y la detección.
 
 Mismo mundo que test_recalculo_al_cambiar (Vendure falso que acepta escrituras, SQLite de la suite, `pm_mode = 1`). Los
-que llevan `xfail(strict=True)` son hallazgos abiertos: describen lo que pide el criterio y hoy no pasa. Cuando se arregle,
-el xfail estricto falla y hay que sacarlo.
+que llevaban `xfail(strict=True)` (QA-1 a QA-4) se arreglaron en los ajustes del 30-oct y pasan. Desde esos ajustes Hugo
+reactiva solo con dos lecturas del mismo precio separadas por 30 min (`confirm`: la del vigía) y solo desde `corrigiendo`.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from datetime import timedelta
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
-import pytest  # noqa: E402
 
 from app.pricing import price_monitor, price_recalc  # noqa: E402
 from app.pricing import price_review_actions as actions  # noqa: E402
@@ -24,7 +23,8 @@ from tests import review_decide as k  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests import test_recalculo_al_cambiar as base  # noqa: E402
 from tests.test_recalculo_al_cambiar import (  # noqa: E402
-    FIXED, LATER, WORSE, _clean_catalog, _refresh, _variant, in_vendure, item_events, night, product, reads, recalc, snap)
+    FIXED, LATER, WORSE, _clean_catalog, _refresh, _variant, confirm, in_vendure, item_events, night, product, reads, recalc,
+    snap)
 
 fake = base.fake                     # la fixture autouse del módulo de los criterios (Vendure falso, base limpia, pm_mode 1)
 
@@ -32,14 +32,16 @@ fake = base.fake                     # la fixture autouse del módulo de los cri
 # ─── A: la reactivación automática ────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="QA-1: A-2 pide «sin precio extremo» y R7 solo mira para arriba: un precio con "
-                                       "dos ceros de menos es verde firme y Hugo lo prende solo")
 async def test_qa_a2_a_price_typo_far_below_ml_is_not_reactivated_alone(fake):
+    """QA-1 (arreglado): A-2 pide «sin precio extremo» y R7 solo miraba para arriba. Ahora hay piso de precio."""
     night("rv1")
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", 10_000, enabled=False)          # $100 contra la mediana de $9.000: le faltan dos ceros
     await recalc("rv1")
+    await confirm()
     assert fake.writes() == [] and w.item(item_id).state == "corrigiendo"
+    [ev] = item_events(item_id, "reactivar_a_mano")
+    assert ev.motive_code == "precio_bajo"
 
 
 async def test_qa_a3_a_person_who_unpublishes_between_the_recalc_and_the_write_wins(monkeypatch, fake):
@@ -55,6 +57,7 @@ async def test_qa_a3_a_person_who_unpublishes_between_the_recalc_and_the_write_w
 
     monkeypatch.setattr(actions, "auto_reactivate", pao_first)
     await recalc("rv1")
+    await confirm()
     it = w.item(item_id)
     assert it.state == "despublicado" and True not in fake.writes() and fake.enabled["rv1"] is False
     assert item_events(item_id, "decision_reactivar_auto") == []
@@ -76,6 +79,7 @@ async def test_qa_a3_a_person_and_hugo_reactivating_at_once_write_once(monkeypat
 
     monkeypatch.setattr(actions, "auto_reactivate", both)
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == "corregido" and fake.writes() == [True]
     assert len([a for a in k.audit("rv1") if a.action == "price_review_enabled"]) == 1
 
@@ -85,24 +89,28 @@ async def test_qa_a3_after_an_automatic_reactivation_there_is_no_undo_of_the_pre
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
+    assert w.item(item_id).state == "corregido"
     evs = sorted(w.events(), key=lambda e: e.id)
     assert actions.last_human_action([e for e in evs if e.item_id == item_id]) is None
 
 
 async def test_qa_a3_a_transient_vendure_error_rolls_back_and_is_not_retried_in_a_loop(fake):
-    """El guardia no se puede leer (HTTP 500): la ficha vuelve a como estaba, sale en PARA MIRAR A MANO y el próximo
-    refresh no lo reintenta (mismo precio = sin cambio), ni lee de más."""
+    """El guardia no se puede leer (HTTP 500): la ficha vuelve a como estaba, sale en PARA MIRAR A MANO y las lecturas
+    siguientes con el mismo precio no lo reintentan (un intento por precio), ni leen de más."""
     night("rv1")
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     fake.http_fail.add("ReviewGuard")
     await recalc("rv1")
+    await confirm()
     it = w.item(item_id)
     assert it.state == "corrigiendo" and it.hugo_disabled is True and fake.writes() == []
     assert item_events(item_id, "vendure_error")
     fake.http_fail.clear()
-    assert await recalc("rv1", now=LATER + timedelta(minutes=5)) == {"sin_cambio": 1}
-    assert fake.writes() == [] and reads(fake) == 2
+    assert await recalc("rv1", now=LATER + timedelta(minutes=35)) == {"sin_cambio": 1}
+    assert await confirm(60) == {"sin_cambio": 1}
+    assert fake.writes() == [] and reads(fake) == 4 and len(item_events(item_id, "vendure_error")) == 1
 
 
 async def test_qa_a5_the_mode_switched_off_mid_run_stops_the_write(monkeypatch, fake):
@@ -118,6 +126,7 @@ async def test_qa_a5_the_mode_switched_off_mid_run_stops_the_write(monkeypatch, 
 
     monkeypatch.setattr(actions, "auto_reactivate", switch_off)
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == "corrigiendo" and fake.writes() == []
 
 
@@ -134,9 +143,8 @@ async def test_qa_a5_the_daily_cap_holds_across_the_queue_and_the_watch(fake):
     assert fake.writes() == [True]
 
 
-@pytest.mark.xfail(strict=True, reason="QA-3: la marca «ya_no_rojo» del tope sobrevive a una noche que lo mide rojo "
-                                       "firme otra vez: la bandeja sigue diciendo «reactivala con Ya lo corregí»")
 async def test_qa_a5_the_not_red_warning_goes_away_when_the_next_night_measures_it_red_again(fake):
+    """QA-3 (arreglado): la marca «ya_no_rojo» del tope ya no sobrevive a una noche que lo mide rojo otra vez."""
     from app.pricing import price_review as pr
 
     w.set_setting("pm_recalc_reactivations_daily_max", 0)
@@ -144,6 +152,7 @@ async def test_qa_a5_the_not_red_warning_goes_away_when_the_next_night_measures_
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     assert price_recalc.FLAG_NOT_RED in json.loads(w.item(item_id).flags)
     tomorrow = w.make_run(started=w.NOW + timedelta(days=1))
     w.add_snap(tomorrow, "rv1", our=FIXED, prices=(500_000, 505_000, 495_000), tier="priceWithTax",   # ML bajó: rojo
@@ -153,18 +162,17 @@ async def test_qa_a5_the_not_red_warning_goes_away_when_the_next_night_measures_
     assert it.last_color == "rojo" and price_recalc.FLAG_NOT_RED not in json.loads(it.flags)
 
 
-@pytest.mark.xfail(strict=True, reason="QA-4: lo que el recálculo no pudo aplicar a la ficha (intención abierta, B-6) no "
-                                       "se reintenta: el snapshot ya tiene el precio nuevo y el vigía da sin_cambio para siempre")
 async def test_qa_b6_what_was_skipped_for_a_write_in_flight_is_applied_once_the_write_ends(fake):
-    """Hugo está apagando el producto («Inactivar y revisar», intención abierta) y justo lo corrigen en Vendure: la ficha no
-    se toca (B-6). Cuando la escritura termina, el vigía de 30 min tendría que ver que ya no es rojo."""
+    """QA-4 (arreglado). Hugo está en medio de una escritura (intención abierta) y justo lo corrigen en Vendure: la ficha no
+    se toca (B-6). Cuando la escritura termina, el vigía de 30 min ve que ya no es rojo y, con el mismo precio que leyó el
+    recálculo, lo reactiva. Desde los ajustes del 30-oct eso es solo desde `corrigiendo` (antes el test usaba `en_revision`)."""
     from sqlmodel import Session
 
     from app.db.models import PriceReviewEvent
     from app.db.session import engine
 
     night("rv1")
-    item_id = k.disabled_by_hugo("rv1", "en_revision")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     with Session(engine) as s:
         s.add(PriceReviewEvent(item_id=item_id, product_id="rv1", actor=k.PAO, kind="intent", at=LATER,
                                enabled_before=True, enabled_after=False))
@@ -194,6 +202,7 @@ async def test_qa_a4_a_bx_without_photo_disabled_after_hugo_stops_the_automatic_
                        created_at=w.NOW + timedelta(hours=1), before=json.dumps({"enabled": False})))
         s.commit()
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == "corrigiendo" and fake.writes() == []
     [ev] = item_events(item_id, "reactivar_a_mano")
     assert ev.motive_code == "bx_sin_imagen"
@@ -215,9 +224,10 @@ async def test_qa_a_hugo_own_write_does_not_loop(monkeypatch, fake):
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     n_events = len(item_events(item_id))
     fake.products[0] = {**product("rv1", FIXED), "updatedAt": "2026-10-14T11:30:00Z", "enabled": True}
-    for minutes in (5, 10, 15):
+    for minutes in (35, 40, 45):
         assert await recalc("rv1", now=LATER + timedelta(minutes=minutes)) == {"sin_cambio": 1}
     assert fake.writes() == [True] and len(item_events(item_id)) == n_events
 
@@ -227,8 +237,9 @@ async def test_qa_a7_red_again_after_the_automatic_reactivation_never_turns_it_o
     k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     fake.products[0] = product("rv1", WORSE)
-    await recalc("rv1", now=LATER + timedelta(minutes=10))
+    await recalc("rv1", now=LATER + timedelta(minutes=40))
     assert fake.writes() == [True] and [i.state for i in w.items()] == ["corregido"]
 
 
@@ -285,9 +296,8 @@ async def test_qa_r1a_a_variant_committed_late_inside_the_margin_is_still_seen(m
     assert snap(sid).our_price_cents == FIXED
 
 
-@pytest.mark.xfail(strict=True, reason="QA-2: un error GraphQL pasajero (HTTP 200 con `errors`, p. ej. el PG de Vendure "
-                                       "saturado) apaga para siempre la detección por variantes (R-1a) hasta reiniciar")
 async def test_qa_r1a_a_transient_graphql_error_does_not_switch_variants_off_forever(monkeypatch, fake):
+    """QA-2 (arreglado): solo un error de schema apaga la detección por variantes; uno pasajero se reintenta."""
     _clean_catalog(monkeypatch)
     _, sid = night("rv1")
     in_vendure(fake, "rv1", 1_000_000)
