@@ -873,6 +873,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=500, step=5, group="monitor",
     ),
     SettingMeta(
+        key="pm_recalc_watch_daily_max",
+        label="Recálculo: lecturas por día del vigía de fichas vivas",
+        description=(
+            "Cada 30 minutos Hugo relee el precio de los productos con ficha viva en la bandeja (hasta 60 por vuelta): "
+            "así ve los cambios de tramos, que en Vendure no dejan rastro por fecha, y confirma lo que ya no es rojo antes "
+            "de reactivarlo. Tope de esas lecturas por día (hora de Argentina), aparte del de los cambios. 0 = no relee."
+        ),
+        type="int", parser=int,
+        default_attr="pm_recalc_watch_daily_max",
+        min=0, max=3000, step=60, group="monitor",
+    ),
+    SettingMeta(
         key="pm_diag_cert_share_pct",
         label="Diagnóstico (c): peso del certificado (% del neto)",
         description="El recargo de certificado dispara la causa (c) cuando pesa al menos este % del precio neto (el tope del canal es 20 %).",

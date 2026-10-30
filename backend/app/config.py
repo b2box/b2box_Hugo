@@ -673,6 +673,8 @@ class Settings(EnvSettings):
     # = una lectura) y reactivaciones automáticas por día de lo que apagó Hugo y ya no es rojo firme.
     pm_recalc_daily_max: int = 300
     pm_recalc_reactivations_daily_max: int = 20
+    # Lecturas por día (ART) del vigía de 30 min sobre las fichas vivas: contador propio, aparte del de la cola.
+    pm_recalc_watch_daily_max: int = 600
     # Umbrales del diagnóstico a-e.
     pm_diag_cert_share_pct: float = 10.0
     pm_diag_logistics_ratio: float = 1.0

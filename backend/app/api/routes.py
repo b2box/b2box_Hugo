@@ -984,17 +984,28 @@ _COSTLY_SETTINGS = frozenset({
     "audit_interval_hours",
     "pm_vision_max_calls",
     "pm_stores_vision_max_calls",
-    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas, manda el resumen diario por mail y
-    # habilita que una persona de PRICE_REVIEW_DECIDERS inactive o reactive productos en Vendure (y que Hugo reactive
-    # solo lo que apagó él cuando se corrige en Vendure); con 0 esas decisiones se frenan. El 2 (automático, todavía no implementado) es el que va a tocar Vendure solo.
+    # No gasta, pero es el interruptor de la bandeja de Pao: con 1 abre fichas, manda el resumen diario por mail,
+    # habilita que una persona de PRICE_REVIEW_DECIDERS inactive o reactive productos en Vendure y que Hugo reactive solo
+    # lo que apagó él cuando se corrigió en Vendure (eso ya toca Vendure sin una persona); con 0 todo eso se frena. El 2
+    # (automático, todavía no implementado) sería el que apaga solo.
     "pm_mode",
     # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la
-    # vigilancia de lo que se decidió mantener. Los demás umbrales de la bandeja (pm_review_*, pm_diag_*) solo deciden
-    # qué entra: siguen abiertos.
+    # vigilancia de lo que se decidió mantener.
     "pm_review_worse_pct",
-    # Recálculo al cambiar en Vendure: el primero son lecturas a Vendure por día (el admin de Vendure las paga); el
-    # segundo, cuántos productos reactiva Hugo solo en Vendure por día.
+    # Deciden el color y qué es un rojo / «no rojo» firme. Con la reactivación automática ya no «solo deciden qué
+    # entra»: bajar el verde, cambiar la política de tramos o aflojar la calidad del dato puede hacer que Hugo prenda
+    # productos solo. Los del diagnóstico (pm_diag_*) y los días de espera del mail siguen abiertos.
+    "pm_tier_policy",
+    "pm_green_min_pct",
+    "pm_yellow_min_pct",
+    "pm_review_min_listings",
+    "pm_review_min_sellers",
+    "pm_review_data_max_age_h",
+    "pm_review_max_price_ratio",
+    # Recálculo al cambiar en Vendure: lecturas a Vendure por día (el admin de Vendure las paga) de la cola y del vigía de
+    # 30 min, y cuántos productos reactiva Hugo solo en Vendure por día.
     "pm_recalc_daily_max",
+    "pm_recalc_watch_daily_max",
     "pm_recalc_reactivations_daily_max",
 })
 

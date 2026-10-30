@@ -68,8 +68,11 @@ def test_no_admin_recibe_403_y_no_cambia_nada(monkeypatch):
     assert http.delete("/api/settings/estimate_margin_pct").status_code == 403
     runtime.invalidate()
     assert runtime.get("apify_1688_daily_budget") == before
-    # Un setting que no gasta sigue siendo de cualquiera con sesión.
-    assert http.put("/api/settings/pm_green_min_pct", json={"value": 35}).status_code == 200
+    # Los cortes del color también son de admin desde la reactivación automática (ajustes 30-oct del recálculo)...
+    assert http.put("/api/settings/pm_green_min_pct", json={"value": 35}).status_code == 403
+    # ... y un setting que no gasta ni decide qué se prende sigue siendo de cualquiera con sesión.
+    assert http.put("/api/settings/pm_review_sla_days", json={"value": 9}).status_code == 200
+    assert http.delete("/api/settings/pm_review_sla_days").status_code == 200
 
 
 def test_sin_admins_configurados_nadie_puede(monkeypatch):
@@ -201,8 +204,11 @@ def test_el_modo_de_la_bandeja_es_de_admin_y_queda_auditado(monkeypatch):
     assert pao.delete("/api/settings/pm_mode").status_code == 403
     runtime.invalidate()
     assert runtime.get("pm_mode") == 0
-    # Los umbrales de la bandeja solo deciden qué entra: los cambia cualquiera con sesión y no ensucian el log.
-    assert pao.put("/api/settings/pm_review_min_listings", json={"value": 4}).status_code == 200
+    # Los umbrales de la calidad del dato deciden también qué reactiva Hugo solo: son de admin (ajustes 30-oct). Los del
+    # diagnóstico siguen siendo de cualquiera con sesión y no ensucian el log.
+    assert pao.put("/api/settings/pm_review_min_listings", json={"value": 4}).status_code == 403
+    assert pao.put("/api/settings/pm_diag_box_z", json={"value": 4}).status_code == 200
+    assert pao.delete("/api/settings/pm_diag_box_z").status_code == 200
 
     nico = _client(monkeypatch, admins="nico@b2box.pro", user="nico@b2box.pro")
     assert nico.put("/api/settings/pm_mode", json={"value": 3}).status_code == 400   # fuera de rango
