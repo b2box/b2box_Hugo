@@ -9,9 +9,10 @@ Las expone api/price_review_routes.py y solo las puede usar una persona de PRICE
     reactivar    «Ya lo corregí: reactivar»: corrigiendo → corregido (reactiva)
     deshacer     vuelve al estado y al `enabled` de antes de la última acción humana (hasta 30 días)
 
-y la reactivación automática (`auto_reactivate`, actor `hugo:auto`): cuando el producto que apagó Hugo cambió en Vendure y
-ya no es rojo firme (pricing/price_recalc.py), en_revision / corrigiendo → corregido con el MISMO protocolo y las mismas
-guardas que «Ya lo corregí». No es un botón: la API no la expone y no tiene Deshacer.
+y la reactivación automática (`auto_reactivate`, actor `hugo:auto`, ningún otro): cuando el producto que apagó Hugo se
+corrigió en Vendure y ya no es rojo firme (pricing/price_recalc.py), corrigiendo → corregido con el MISMO protocolo y las
+mismas guardas que «Ya lo corregí». Solo desde `corrigiendo` (una persona ya dijo «Corregir»). No es un botón: la API no
+la expone y no tiene Deshacer.
 
 Qué se puede desde cada estado lo manda `TRANSITIONS` (tabla 3.1 de los criterios); la pantalla muestra los botones que
 devuelve `available_actions`.
@@ -92,7 +93,6 @@ TRANSITIONS: dict[tuple[str, str], tuple[str, bool | None]] = {
     (pr.BUSCANDO_PROV, CORREGIR): (pr.CORRIGIENDO, False),
     (pr.BUSCANDO_PROV, MANTENER): (pr.MANTENIDO, True),
     (pr.BUSCANDO_PROV, DESPUBLICAR): (pr.DESPUBLICADO, False),
-    (pr.EN_REVISION, REACTIVAR_AUTO): (pr.CORREGIDO, True),
     (pr.CORRIGIENDO, REACTIVAR_AUTO): (pr.CORREGIDO, True),
 }
 ACTION_LABEL = {
@@ -347,10 +347,12 @@ def _plan_undo(item: PriceReviewItem, now: datetime) -> _Move:
 
 
 async def act(item_id: int, action: str, actor: str, *, expected_state: str, motive_code: str | None = None,
-              motive_text: str | None = None, client: VendureClient | None = None) -> dict[str, Any]:
+              motive_text: str | None = None, client: VendureClient | None = None,
+              hold: tuple[str, str] | None = None) -> dict[str, Any]:
     """Hace una acción sobre una ficha y devuelve `{item_id, state, version, wrote}`. Levanta `ActionError` (400, 404,
-    409, 502) si no se hizo: la ficha queda como estaba."""
-    if action not in ACTION_LABEL:
+    409, 502) si no se hizo: la ficha queda como estaba. `hold` = (código, por qué): una reactivación que no se puede hacer
+    sola (el piso de precio del recálculo) y queda «reactivar a mano» por el mismo camino que una guarda."""
+    if action not in ACTION_LABEL or (action == REACTIVAR_AUTO and actor != pr.ACTOR_AUTO):
         raise ActionError(400, "accion_invalida", "Acción desconocida.")
     code, text = validate(action, motive_code, motive_text)
     item, pending = _load(item_id)
@@ -376,15 +378,19 @@ async def act(item_id: int, action: str, actor: str, *, expected_state: str, mot
     _start(item, mv, actor, code, text, now)
     if mv.write is None:
         return _result(item, wrote=False)
+    if hold is not None and mv.write:
+        raise _manual(item, mv, actor, *hold)     # sin leer ni escribir Vendure
     return await _apply(item, mv, actor, client or VendureClient())
 
 
-async def auto_reactivate(item_id: int, expected_state: str, client: VendureClient | None = None) -> dict[str, Any]:
-    """La reactivación automática del recálculo (pricing/price_recalc.py): en_revision / corrigiendo → corregido, con actor
-    `hugo:auto`. Es `act` tal cual: intención, guardas (`approvalStatus`, duplicado o BX sin foto posterior, sigue apagado),
-    un solo intento, verificación, conciliación si queda incierto, evento y AuditLog. Si una guarda frena, la ficha vuelve
-    a como estaba con `reactivar_a_mano` y levanta `ActionError`, como con una persona. Con `pm_mode = 0` no corre."""
-    return await act(item_id, REACTIVAR_AUTO, pr.ACTOR_AUTO, expected_state=expected_state, client=client)
+async def auto_reactivate(item_id: int, expected_state: str, client: VendureClient | None = None, *,
+                          hold: tuple[str, str] | None = None) -> dict[str, Any]:
+    """La reactivación automática del recálculo (pricing/price_recalc.py): corrigiendo → corregido, con actor `hugo:auto`.
+    Es `act` tal cual: intención, guardas (`approvalStatus`, duplicado o BX sin foto posterior, sigue apagado), un solo
+    intento, verificación, conciliación si queda incierto, evento y AuditLog. Si una guarda frena (o viene `hold`: el
+    precio quedó demasiado bajo), la ficha vuelve a como estaba con `reactivar_a_mano` y levanta `ActionError`, como con
+    una persona. Con `pm_mode = 0` no corre."""
+    return await act(item_id, REACTIVAR_AUTO, pr.ACTOR_AUTO, expected_state=expected_state, client=client, hold=hold)
 
 
 def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text: str | None, now: datetime) -> None:
