@@ -33,6 +33,7 @@ from app.vendure.client import VendureProduct  # noqa: E402
 ORIGINAL = "42"               # ya está en Vendure; contra él matcheó el candidato
 NEWER, OLDER = "1001", "999"  # par de la auditoría de catálogo: ambos en Vendure
 SOURCE_URL = "https://detail.1688.com/offer/777.html"
+ADMIN = "nico@b2box.pro"
 
 
 def _prod(pid: str, enabled: bool = True) -> VendureProduct:
@@ -59,7 +60,8 @@ class FakeVendure:
 
 
 def _settings(**over) -> Settings:
-    base = dict(vendure_api_url="https://example.invalid/admin-api", hugo_env="development")
+    base = dict(vendure_api_url="https://example.invalid/admin-api", hugo_env="development",
+                dashboard_admins=ADMIN, dashboard_secret="s" * 32)
     base.update(over)
     return Settings(**base)
 
@@ -95,6 +97,12 @@ def _env(monkeypatch):
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(main_mod.app)  # sin lifespan: ni scheduler ni warm-ups
+
+
+@pytest.fixture
+def as_admin(client: TestClient) -> None:
+    """Sesión de un admin del dashboard en `client`: confirmar duplicados la exige."""
+    client.cookies.set(auth.COOKIE_NAME, auth.issue_session_token(ADMIN))
 
 
 def _verify(client: TestClient, **over) -> dict:
@@ -140,6 +148,7 @@ def _event(client: TestClient, event_id: int) -> dict:
 # ─── Criterio 1 ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("as_admin")
 def test_verify_flag_confirmed_from_the_dashboard_never_disables_the_original(client):
     out = _verify(client)
     assert out["is_duplicate"] is True and out["candidate_id"] == ORIGINAL
@@ -164,6 +173,7 @@ def test_verify_flag_confirmed_from_the_dashboard_never_disables_the_original(cl
         assert list(s.exec(select(AuditLog).where(AuditLog.action == "duplicate_disabled"))) == []
 
 
+@pytest.mark.usefixtures("as_admin")
 def test_catalog_audit_flag_confirmed_from_the_dashboard_disables_the_newest(client):
     (event_id,) = _save(_audit_flag())
     assert _event(client, event_id)["duplicate"] == {
@@ -178,6 +188,7 @@ def test_catalog_audit_flag_confirmed_from_the_dashboard_disables_the_newest(cli
     assert OLDER not in FakeVendure.disabled
 
 
+@pytest.mark.usefixtures("as_admin")
 def test_bulk_confirm_over_http_mixing_verify_and_audit_flags(client):
     _verify(client)  # flag de /verify contra el original #42 (Luis)
     _verify(client, source="orders-pro", callback_ctx={"quotation_item_id": "q-1"})  # otro cliente
@@ -195,6 +206,7 @@ def test_bulk_confirm_over_http_mixing_verify_and_audit_flags(client):
     assert _pending_flag_ids() == []
 
 
+@pytest.mark.usefixtures("as_admin")
 def test_rows_written_before_the_new_columns_fall_back_by_source(client):
     """Filas de producción anteriores a disable_target_id / canonical_product_id."""
     verify_old, audit_old = _save(

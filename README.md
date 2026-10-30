@@ -234,10 +234,19 @@ cambia un admin (PUT/DELETE de `/api/settings/{key}` → 403 si no), y quedan en
 `pm_mode`, el modo de la bandeja de Pao: con 1 manda el resumen diario por mail y el 2 (automático) va a
 tocar Vendure; sus umbrales (`pm_review_*`, `pm_diag_*`) los cambia cualquiera con sesión.
 
+También es de admin todo lo que prende o apaga productos en Vendure fuera de la bandeja de Pao:
+«Confirmar duplicado» (`/api/audit-log/{id}/confirm-duplicate`), «Confirmar ≥99%»
+(`/api/duplicates/bulk-confirm`), «Confirmar deshabilitar» de los BX sin foto
+(`/api/audit-log/{id}/confirm-disable-bx`) y `/api/restore-duplicates` (sin botón), dry-runs incluidos.
+Con otra sesión responde 403, el botón avisa «Error: Solo un administrador del dashboard puede hacer
+esto.» y no se lee ni se toca nada; con un admin queda su usuario en el `detail` de la fila del audit log.
+Como las decisiones de la bandeja, todo lo de admin (estos, los settings caros y `/api/estimate-test`)
+rechaza con 403 los pedidos que arma otra página (`Sec-Fetch-Site` distinto de `same-origin`).
+
 - Setear `DASHBOARD_ADMINS` con los usuarios separados por coma: el **mail** con login por Supabase
   (`nico@b2box.pro,gabriel@b2box.pro`), o el `DASHBOARD_USER` con login local.
-- **Fail-closed**: vacía = nadie puede cambiarlos ni correr `/api/estimate-test`, tampoco en
-  desarrollo con el login abierto. Los demás settings siguen como siempre.
+- **Fail-closed**: vacía = nadie puede cambiarlos, correr `/api/estimate-test` ni confirmar o restaurar
+  duplicados y BX, tampoco en desarrollo con el login abierto. Los demás settings siguen como siempre.
 
 #### Límites del lookup público
 
@@ -271,8 +280,8 @@ Las filas `app_lookup_estimated` del audit log pueden quedar (es texto).
 
 ### 5. Acción
 
-- **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que alguien
-  apriete "Confirmar duplicado" en el dashboard (o `bulk-confirm`). Y confirmar
+- **Duplicados: solo flaguea.** Nada se deshabilita en Vendure sin que un admin
+  (`DASHBOARD_ADMINS`) apriete "Confirmar duplicado" en el dashboard (o `bulk-confirm`). Y confirmar
   solo apaga algo cuando el flag vino de la **auditoría de catálogo** (los dos
   productos están en Vendure: se apaga el más nuevo y se conserva el canónico).
   Un flag de `/verify` no tiene nada que apagar — el candidato de Luis/Cloud

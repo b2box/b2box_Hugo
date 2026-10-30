@@ -17,11 +17,12 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, func, select
 
 from app import runtime
+from app.auth import require_admin
 from app.clock import utcnow
 from app.db.models import AuditLog, PriceHistory
 from app.db.session import engine, get_session
@@ -1284,6 +1285,7 @@ async def duplicates_stats(
 
 @router.post("/api/restore-duplicates")
 async def restore_duplicates(
+    request: Request,
     confirm: bool = False,
     safe: bool = True,
     session: Session = Depends(get_session),
@@ -1296,7 +1298,9 @@ async def restore_duplicates(
                 Si está enabled (porque vos ya lo activaste, o nunca lo deshabilitamos), lo deja.
                 Si tiene before.enabled=False registrado (o sea Hugo NUNCA lo deshabilitó porque
                 ya estaba off), lo respeta y NO lo toca.
+    Solo un admin del dashboard (DASHBOARD_ADMINS), también para el dry-run.
     """
+    user = require_admin(request)
     stmt = select(AuditLog).where(AuditLog.action == "duplicate_disabled")
     rows = list(session.exec(stmt))
     total = len(rows)
@@ -1371,7 +1375,7 @@ async def restore_duplicates(
         source="manual",
         product_id="(bulk)",
         detail=(
-            f"Restauración masiva (safe={safe}): "
+            f"Restauración masiva por {user} (safe={safe}): "
             f"{len(restored)} restaurados, "
             f"{len(skipped_was_disabled)} respetados (estaban disabled antes), "
             f"{len(skipped_already_enabled)} ya estaban enabled, "
@@ -1467,7 +1471,8 @@ def _confirm_without_vendure(session: Session, entry: AuditLog, *, how: str) -> 
 
 @router.post("/api/duplicates/bulk-confirm")
 async def bulk_confirm_duplicates(
-    min_confidence: float = 0.99,
+    request: Request,
+    min_confidence: float = Query(0.99, ge=0.9, le=1.0),
     confirm: bool = False,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
@@ -1481,7 +1486,9 @@ async def bulk_confirm_duplicates(
         confirmación y archiva. El único id que traen es el del producto ORIGINAL,
         y apagarlo era justo el bug.
     Sirve para limpiar el backlog de duplicados de alta confianza rápido.
+    Solo un admin del dashboard (DASHBOARD_ADMINS), también para el dry-run.
     """
+    user = require_admin(request)
     stmt = select(AuditLog).where(
         AuditLog.action == "duplicate_flagged",
         AuditLog.dismissed.is_not(True),  # type: ignore[union-attr]
@@ -1515,7 +1522,7 @@ async def bulk_confirm_duplicates(
     confirmed_only: list[str] = []
     skipped_already_disabled: list[str] = []
     failed: list[dict[str, str]] = []
-    how = f"Confirmado en bloque (confianza >= {min_confidence:.0%})"
+    how = f"Confirmado en bloque por {user} (confianza >= {min_confidence:.0%})"
 
     for entry in confirm_only:
         _confirm_without_vendure(session, entry, how=how)
@@ -1568,6 +1575,7 @@ async def bulk_confirm_duplicates(
 @router.post("/api/audit-log/{event_id}/confirm-duplicate")
 async def confirm_duplicate(
     event_id: int,
+    request: Request,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Confirma un duplicado flagged.
@@ -1579,7 +1587,9 @@ async def confirm_duplicate(
       · /verify → el candidato nunca entró a Vendure; el único id de la fila es el
         del producto ORIGINAL. Se registra la confirmación y se archiva el evento,
         sin tocar Vendure.
+    Solo un admin del dashboard (DASHBOARD_ADMINS).
     """
+    how = f"Confirmado manualmente por {require_admin(request)}"
     entry = session.get(AuditLog, event_id)
     if not entry:
         raise HTTPException(404, "Evento no encontrado")
@@ -1590,7 +1600,7 @@ async def confirm_duplicate(
 
     target = disable_target_for(entry)
     if target is None:
-        canonical = _confirm_without_vendure(session, entry, how="Confirmado manualmente")
+        canonical = _confirm_without_vendure(session, entry, how=how)
         session.commit()
         return {
             "ok": True,
@@ -1611,7 +1621,7 @@ async def confirm_duplicate(
         raise HTTPException(404, "Producto no existe en Vendure")
     if previous_enabled is False:
         # Ya estaba disabled: no se toca Vendure, pero queda la confirmación (y se descarta el flag)
-        session.add(_already_off_row(entry, target, canonical, "Confirmado manualmente"))
+        session.add(_already_off_row(entry, target, canonical, how))
         _dismiss(entry)
         session.add(entry)
         session.commit()
@@ -1626,7 +1636,7 @@ async def confirm_duplicate(
     session.add(_duplicate_disabled_row(
         entry, target, canonical,
         detail=(
-            f"Confirmado manualmente como duplicado de #{canonical}. "
+            f"{how} como duplicado de #{canonical}. "
             f"Deshabilitado #{target} en Vendure; #{canonical} se conserva."
         ),
     ))
@@ -1648,12 +1658,15 @@ async def confirm_duplicate(
 @router.post("/api/audit-log/{event_id}/confirm-disable-bx")
 async def confirm_disable_bx(
     event_id: int,
+    request: Request,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Confirma un bx_no_image_flagged: deshabilita el producto en Vendure.
 
     Mismo patrón que confirm-duplicate, pero para productos con nombre 'BX…' sin imagen.
+    Solo un admin del dashboard (DASHBOARD_ADMINS).
     """
+    how = f"Confirmado manualmente por {require_admin(request)}"
     entry = session.get(AuditLog, event_id)
     if not entry:
         raise HTTPException(404, "Evento no encontrado")
@@ -1674,7 +1687,7 @@ async def confirm_disable_bx(
         # No se toca Vendure, pero queda la confirmación: así la bandeja de precios no lo vuelve a prender.
         session.add(AuditLog(
             action="bx_no_image_disabled", source="manual", product_id=entry.product_id,
-            detail=(f"Confirmado manualmente: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
+            detail=(f"{how}: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
                     "Ya estaba deshabilitado en Vendure: no se tocó."),
             before=json.dumps({"enabled": False}), after=json.dumps({"enabled": False}),
             product_name=entry.product_name, product_code=entry.product_code,
@@ -1696,7 +1709,7 @@ async def confirm_disable_bx(
         source="manual",
         product_id=entry.product_id,
         detail=(
-            f"Confirmado manualmente: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
+            f"{how}: nombre '{entry.product_name}' empezaba por BX y no tenía imagen. "
             "Deshabilitado en Vendure."
         ),
         before=json.dumps({"enabled": True}),

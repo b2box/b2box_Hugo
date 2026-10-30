@@ -18,8 +18,11 @@ os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
 import pytest  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
+from app import auth  # noqa: E402
 from app.api import routes  # noqa: E402
+from app.config import Settings  # noqa: E402
 from app.db.models import AuditLog  # noqa: E402
 from app.db.session import engine, init_db  # noqa: E402
 from app.dedup.confirm_target import canonical_for, disable_target_for  # noqa: E402
@@ -27,6 +30,7 @@ from app.dedup.orchestrator import DedupVerdict  # noqa: E402
 
 ORIGINAL = "42"       # ya está en Vendure; es contra el que matcheó el candidato
 NEWER, OLDER = "1001", "999"   # par de la auditoría de catálogo: ambos en Vendure
+ADMIN = "nico@b2box.pro"
 
 
 class FakeVendure:
@@ -54,7 +58,16 @@ def _db(monkeypatch):
     FakeVendure.status_reads = []
     monkeypatch.setattr(routes, "VendureClient", FakeVendure)
     monkeypatch.setattr(routes.vendure_catalog, "invalidate", lambda: None)
+    s = Settings(vendure_api_url="https://example.invalid/admin-api", hugo_env="development",
+                 dashboard_admins=ADMIN, dashboard_secret="k" * 40)
+    monkeypatch.setattr(auth, "get_settings", lambda: s)
     yield
+
+
+def _admin() -> Request:
+    """Pedido con la sesión de un admin del dashboard: confirmar y restaurar la exigen."""
+    cookie = f"{auth.COOKIE_NAME}={auth.issue_session_token(ADMIN)}".encode()
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": [(b"cookie", cookie)]})
 
 
 def _verify_flag(**over) -> AuditLog:
@@ -133,7 +146,7 @@ async def test_confirming_a_verify_flag_does_not_touch_vendure():
     (event_id,) = _save(_verify_flag())
 
     with Session(engine) as s:
-        out = await routes.confirm_duplicate(event_id, s)
+        out = await routes.confirm_duplicate(event_id, _admin(), s)
 
     assert FakeVendure.disabled == [], "no se apaga nada: el candidato nunca entró a Vendure"
     assert FakeVendure.status_reads == []
@@ -156,7 +169,7 @@ async def test_confirming_a_catalog_audit_flag_disables_the_newest():
     (event_id,) = _save(_audit_flag())
 
     with Session(engine) as s:
-        out = await routes.confirm_duplicate(event_id, s)
+        out = await routes.confirm_duplicate(event_id, _admin(), s)
 
     assert FakeVendure.disabled == [NEWER]
     assert OLDER not in FakeVendure.disabled
@@ -178,7 +191,7 @@ async def test_confirming_uses_the_explicit_target_not_product_id():
     (event_id,) = _save(_audit_flag(product_id=OLDER, related_product_id=NEWER,
                                     disable_target_id=NEWER, canonical_product_id=OLDER))
     with Session(engine) as s:
-        await routes.confirm_duplicate(event_id, s)
+        await routes.confirm_duplicate(event_id, _admin(), s)
     assert FakeVendure.disabled == [NEWER]
 
 
@@ -188,7 +201,7 @@ async def test_confirm_rejects_other_actions():
 
     (event_id,) = _save(_verify_flag(action="verify_passed_to_paco"))
     with Session(engine) as s, pytest.raises(HTTPException) as exc:
-        await routes.confirm_duplicate(event_id, s)
+        await routes.confirm_duplicate(event_id, _admin(), s)
     assert exc.value.status_code == 400
     assert FakeVendure.disabled == []
 
@@ -200,7 +213,7 @@ async def test_confirm_rejects_other_actions():
 async def test_bulk_confirm_dry_run_separates_both_kinds():
     _save(_verify_flag(), _audit_flag())
     with Session(engine) as s:
-        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=False, session=s)
+        out = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=False, session=s)
     assert out["would_disable"] == 1
     assert out["would_confirm_only"] == 1
     assert out["preview_ids"] == [NEWER]
@@ -213,7 +226,7 @@ async def test_bulk_confirm_only_disables_catalog_duplicates():
     _save(_verify_flag(), _verify_flag(product_id="43"), _audit_flag())
 
     with Session(engine) as s:
-        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+        out = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=True, session=s)
 
     assert FakeVendure.disabled == [NEWER]
     assert out["disabled"] == 1
@@ -232,7 +245,7 @@ async def test_bulk_confirm_only_disables_catalog_duplicates():
 async def test_bulk_confirm_respects_min_confidence():
     _save(_audit_flag(confidence=0.90))
     with Session(engine) as s:
-        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+        out = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=True, session=s)
     assert out["disabled"] == 0
     assert FakeVendure.disabled == []
 
@@ -345,7 +358,7 @@ async def test_bulk_confirm_vendure_failure_on_an_audit_event_does_not_block_ver
     verify_id, audit_id = _save(_verify_flag(), _audit_flag())
 
     with Session(engine) as s:
-        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+        out = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=True, session=s)
 
     assert out == {**out, "disabled": 0, "confirmed_only": 1, "failed": 1}
     assert out["failed_details"][0]["product_id"] == NEWER
@@ -373,7 +386,7 @@ async def test_a_client_sending_source_audit_through_verify_cannot_get_the_origi
     assert disable_target_for(row) is None
 
     with Session(engine) as s:
-        out = await routes.confirm_duplicate(row.id, s)
+        out = await routes.confirm_duplicate(row.id, _admin(), s)
     assert out["vendure_action"] == "none"
     assert FakeVendure.disabled == []
 
@@ -400,8 +413,8 @@ async def test_bulk_confirm_with_both_kinds_touches_vendure_exactly_once_for_the
     """Dry-run y confirm cuentan lo mismo; Vendure solo ve lecturas/escrituras del más nuevo."""
     _save(_verify_flag(), _verify_flag(product_id="43"), _audit_flag())
     with Session(engine) as s:
-        dry = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=False, session=s)
-        out = await routes.bulk_confirm_duplicates(min_confidence=0.99, confirm=True, session=s)
+        dry = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=False, session=s)
+        out = await routes.bulk_confirm_duplicates(request=_admin(), min_confidence=0.99, confirm=True, session=s)
     assert (dry["would_disable"], dry["would_confirm_only"]) == (out["disabled"], out["confirmed_only"]) == (1, 2)
     assert FakeVendure.status_reads == [NEWER]
     assert FakeVendure.disabled == [NEWER]
@@ -423,10 +436,10 @@ async def test_restore_re_enables_the_newest_that_was_disabled_not_the_canonical
     monkeypatch.setattr(routes, "VendureClient", RestoringVendure)
     (event_id,) = _save(_audit_flag())
     with Session(engine) as s:
-        await routes.confirm_duplicate(event_id, s)
+        await routes.confirm_duplicate(event_id, _admin(), s)
     assert FakeVendure.disabled == [NEWER]
 
     with Session(engine) as s:
-        await routes.restore_duplicates(confirm=True, safe=True, session=s)
+        await routes.restore_duplicates(request=_admin(), confirm=True, safe=True, session=s)
     assert RestoringVendure.enabled == [NEWER]
     assert OLDER not in RestoringVendure.enabled

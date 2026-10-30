@@ -218,8 +218,9 @@ async def test_v4_a_duplicate_or_bx_confirmed_while_already_off_is_not_turned_on
         s.commit()
         s.refresh(flag)
         flag_id = flag.id
-    r = (c.post("/api/duplicates/bulk-confirm?confirm=true&min_confidence=1.0") if flow == "bulk-confirm"
-         else c.post(f"/api/audit-log/{flag_id}/{flow}"))
+    admin = k.client(k.ADMIN)
+    r = (admin.post("/api/duplicates/bulk-confirm?confirm=true&min_confidence=1.0") if flow == "bulk-confirm"
+         else admin.post(f"/api/audit-log/{flag_id}/{flow}"))
     assert r.status_code == 200, r.text
     assert fake.writes() == [False]                                # el flujo no tocó Vendure: ya estaba apagado
     r = k.decide(c, item_id, "mantener", "en_revision", **KEEP)
