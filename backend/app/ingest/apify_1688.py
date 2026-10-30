@@ -21,7 +21,8 @@ Gasto y abuso, igual que apify_meli:
     y fail-closed;
   * el actor va por lista blanca (cambiarlo cambia el formato de salida);
   * caché LRU por hash de la foto: un hit no gasta cupo;
-  * semáforo propio de 3 búsquedas; si están ocupadas se contesta `busy`.
+  * semáforo propio (`apify_1688_max_concurrent`, 14, editable en Configuración); con todo ocupado se hace
+    fila mientras alcance el deadline y recién ahí se contesta `busy`.
 
 Seguridad: el token viaja SOLO en el header Authorization y nunca se loguea (ni
 la URL de la foto, que puede ser una URL firmada de un bucket: solo su host). A
@@ -99,7 +100,8 @@ DEFAULT_DEADLINE_S = 38.0
 _MIN_RUN_WINDOW_S = 8.0
 # Cuánto se le da a los aborts. Corren en segundo plano: no le suman al deadline.
 _ABORT_WAIT_S = 5.0
-_MAX_CONCURRENT = 3
+# Espera mínima por un lugar; con más deadline se espera hasta que ya no
+# alcance para una corrida (`_MIN_RUN_WINDOW_S`).
 _SLOT_WAIT_S = 2.0
 _CACHE_TTL_S = 24 * 3600
 _CACHE_ERROR_TTL_S = 3600
@@ -574,7 +576,7 @@ _cache: OrderedDict[str, tuple[float, Search1688Result]] = OrderedDict()
 # cliente impaciente que reenvía) comparte la del primero. Una corrida, un cupo.
 _inflight: dict[str, asyncio.Task] = {}
 # Un semáforo por event loop (ver apify_meli._semaphore).
-_slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+_slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore, int] | None = None
 
 
 def _reset_for_tests() -> None:
@@ -584,11 +586,21 @@ def _reset_for_tests() -> None:
     _slots = None
 
 
+def _max_concurrent() -> int:
+    from app import runtime
+
+    raw = runtime.get("apify_1688_max_concurrent")
+    return max(1, int(get_settings().apify_1688_max_concurrent if raw is None else raw))
+
+
 def _semaphore() -> asyncio.Semaphore:
+    """Cambiar el tope en Configuración arma un semáforo nuevo: las búsquedas en
+    curso sueltan el viejo, así que por un rato pueden correr unas de más."""
     global _slots
     loop = asyncio.get_running_loop()
-    if _slots is None or _slots[0] is not loop:
-        _slots = (loop, asyncio.Semaphore(_MAX_CONCURRENT))
+    limit = _max_concurrent()
+    if _slots is None or _slots[0] is not loop or _slots[2] != limit:
+        _slots = (loop, asyncio.Semaphore(limit), limit)
     return _slots[1]
 
 
@@ -731,10 +743,14 @@ async def _search_paid(actor: str, build: str, target: str, key: str, deadline_a
         return Search1688Result(status="over_budget")
 
     slots = _semaphore()
+    # Con todos los lugares ocupados se hace fila mientras quede tiempo para
+    # una corrida: con 100 clientes a la vez, esperar unos segundos le gana a
+    # salir sin precio.
+    wait_s = max(deadline_at - time.monotonic() - _MIN_RUN_WINDOW_S, _SLOT_WAIT_S)
     try:
-        await asyncio.wait_for(slots.acquire(), timeout=_SLOT_WAIT_S)
+        await asyncio.wait_for(slots.acquire(), timeout=wait_s)
     except asyncio.TimeoutError:
-        log.info("Apify 1688: %d búsquedas en curso, salteo", _MAX_CONCURRENT)
+        log.info("Apify 1688: todas las búsquedas en curso tras %.0f s de espera, salteo", wait_s)
         return Search1688Result(status="busy")
     try:
         reserved = await _reserve(budget, deadline_at)

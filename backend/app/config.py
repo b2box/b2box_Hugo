@@ -205,6 +205,11 @@ class Settings(EnvSettings):
     )
     # 0 = apagado. Se prende de a poco desde el dashboard (runtime).
     apify_1688_daily_budget: int = 0
+    # Búsquedas por foto a la vez. Cada una lanza hasta 2 corridas (cobertura) y
+    # el plan de Apify corre 32 a la vez: 14 deja lugar al job de ML.
+    apify_1688_max_concurrent: int = Field(
+        default=14, ge=1, le=16, description="Búsquedas de 1688 por foto en paralelo"
+    )
 
     # ── Cotizador rápido por foto (estimado en /app/lookup) ────
     # Ver app/estimate/. Apagado por defecto: se prende desde el dashboard
@@ -225,8 +230,9 @@ class Settings(EnvSettings):
     estimate_tier_qty_2: int = 200
     estimate_tier_qty_3: int = 1000
     # Deadline global del estimado, contado desde que entra el request.
-    # 80 s: el chat espera con "dame un minuto"; con 50 Apify lento cortaba (28-oct).
-    estimate_deadline_s: float = 80.0
+    # 120 s: el chat espera con "dame un minuto"; con 50 Apify lento cortaba (28-oct)
+    # y con 80 la segunda vuelta de búsqueda no entraba (30-oct). El storefront espera 170.
+    estimate_deadline_s: float = 120.0
     # Tope de la búsqueda de Apify en 1688 dentro de ese deadline. Medido: p50
     # 28 s, p90 52 s; con 38 s ~1 de cada 4 estimados volvía `timeout`.
     estimate_apify_deadline_s: float = 60.0
@@ -241,6 +247,18 @@ class Settings(EnvSettings):
     estimate_valid_hours: int = 24
     # techo/piso por encima de esto no se muestra rango (diseño 2.5).
     estimate_max_range_ratio: float = 2.0
+    # Las reglas que descartan un estimado, editables desde Configuración (30-oct:
+    # con las de antes salían 2 de 5 genéricos; se prefiere un rango a no dar nada).
+    # Con 1 sola oferta buena alcanza si el juez le dio al menos esto (0 = pedir 2).
+    estimate_single_good_min_score: int = 85
+    # Techo/piso de los precios de las ofertas buenas.
+    estimate_max_dispersion: float = 2.5
+    # 1 = con más dispersión se sacan los precios de las puntas hasta entrar.
+    estimate_trim_dispersed: int = 1
+    # 1 = si sacar las carnadas deja menos de 2 precios, se usan los de las ofertas buenas.
+    estimate_bait_fallback: int = 1
+    # 1 = un rango más ancho que `estimate_max_range_ratio` se angosta al centro.
+    estimate_clamp_wide_range: int = 1
     estimate_retention_days: int = 90
     # Fotos subidas que pueden ir a Apify/Qwen: entradas "host/bucket/prefijo/"
     # separadas por coma (S3 path-style: el bucket va en el path). Vacío =
