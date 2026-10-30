@@ -1117,14 +1117,19 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    (`BulkPriceTier`): guardar una variante no toca el `updatedAt` del producto, y guardar un tramo no toca ni el de la
    variante ni el del producto (la API de admin tampoco lista tramos por fecha). Por eso hay tres plazos:
 
-   | Qué se guardó en Vendure | Cuándo lo ve Hugo |
+   Con **aviso de Vendure** (`POST /api/vendure/events`, ver abajo) todo esto se ve en **segundos**: cada producto avisado
+   se lee a los ~20 s y, si el aviso era de un tramo o de una variante y dio «sin cambio» (Vendure todavía estaba
+   recalculando el precio de venta), se relee una vez a los ~2 min. **Sin aviso** (Vendure sin configurar, caído, o un
+   aviso que se perdió) queda el sondeo:
+
+   | Qué se guardó en Vendure | Cuándo lo ve Hugo sin aviso |
    |---|---|
    | el producto (nombre, fotos, `enabled`, custom fields del producto) | **en minutos**: `refresh_catalog` (cada `verify_catalog_ttl_seconds` − 30 s: 4,5 min con el default) ya trae los productos con `updatedAt` nuevo |
    | una variante (caja, medidas, precio) | **en minutos**: el mismo refresh pide las variantes con `updatedAt` nuevo (`productVariants` filtrado por `updatedAt`, solo `id productId updatedAt`, con watermark propio y el mismo margen de 2 min) y encola su producto. Si el schema de Vendure rechaza ese filtro, avisa una vez en el log y sigue solo con productos |
    | un tramo, de un producto **con ficha viva** (abierta o `mantenido`) | **cada 30 minutos**: el job `price_recalc_watch` relee el precio de esos productos (hasta 60 por vuelta, primero los que se miraron hace más tiempo, de a 2, con su propio cupo diario `pm_recalc_watch_daily_max`, 600, no el de abajo). No corre con `pm_mode = 0` ni con `pm_recalc_daily_max = 0` |
    | un tramo, de un producto **sin ficha** | **solo la noche** |
 
-   Del guardado al dashboard: menos de 10 minutos (30 para los tramos con ficha). Los productos nuevos no cuentan (no
+   Del guardado al dashboard: con aviso, menos de 1 minuto; sin aviso, menos de 10 minutos (30 para los tramos con ficha). Los productos nuevos no cuentan (no
    tienen nada medido) y el primer refresh después de un reinicio solo toma el punto de partida (la cola vive en memoria:
    lo que estaba ahí lo toma la noche). La cola y el job de 30 minutos no recalculan a la vez.
 2. **Solo con dato fresco.** Se recalcula si el último snapshot del producto tiene ML `ok` con dato de menos de
@@ -1146,6 +1151,20 @@ medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
    «Recalculado HH:MM por cambio en Vendure: antes rojo $X → ahora verde $Y», el filtro y los contadores por color usan
    el color recalculado y la historia del producto muestra el antes. La corrida de la noche siguiente lo reemplaza: vuelve
    a ser la fuente.
+
+**Aviso de Vendure al guardar** (`POST /api/vendure/events`, contrato en `vendure-hugo-eventos-contrato.md`). Vendure
+(el plugin del repo `b2box`, con `HUGO_EVENTS_URL` y `HUGO_EVENTS_KEY`) junta unos segundos lo que se guardó y manda un
+lote: `{"events": [{"type": "product|variant|tier|price", "productId": "123", "variantId": "456", "at": "…"}]}`.
+- Auth propia: header `X-Hugo-Events-Key` contra `VENDURE_EVENTS_KEY` (tiempo constante). Sin la variable, o con una key
+  floja (menos de 32 caracteres, pocos distintos, un placeholder), contesta **503**: falla cerrado. Key ausente, vacía o
+  mala: **401**, y tras 10 intentos en 5 min la IP queda bloqueada 5 min (nunca a quien trae la key buena). Rate limit
+  de 120 por minuto por IP. No usa la sesión del dashboard (está entre las rutas públicas, como `/api/oficina/*`).
+- Body estricto: campos de más, un tipo desconocido, ids que no son solo dígitos (hasta 20) o más de 500 avisos por lote
+  dan **422**; body de hasta 256 KB.
+- Responde **202** `{"queued": N}` (productos sin repetir) y procesa solo: mismos topes (`pm_recalc_daily_max`), locks y
+  reglas que el sondeo. Un producto que Hugo no mide se ignora. Lo que llega durante la corrida de la noche se procesa
+  cuando termina. Solo procesa la instancia líder (la del scheduler); los avisos viven en memoria y, si se pierden (un
+  reinicio), los toma el sondeo.
 
 Un producto que empeora sin ficha (verde → rojo) se ve en el semáforo, pero **no abre ficha**: eso sigue con la racha de
 la noche. Lo que hace con la bandeja está en [Cuando el producto cambia en Vendure](#cuando-el-producto-cambia-en-vendure).
@@ -2043,6 +2062,8 @@ cuenta fichas de catálogo con techo 10.000.
 - `/api/seo/text-audit/*` — auditoría de textos del catálogo, solo lectura (ver su sección)
 - `GET /api/oficina/ml-queue`, `POST /api/oficina/ml-results` — buscador de la oficina; se autentican con `x-oficina-key`
   (`OFICINA_SEARCH_KEY`), no con la cookie del dashboard; 404 sin la variable (ver su sección)
+- `POST /api/vendure/events` — avisos de Vendure al guardar (recálculo del semáforo en segundos); se autentica con
+  `X-Hugo-Events-Key` (`VENDURE_EVENTS_KEY`), no con la sesión del dashboard.
 
 Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
@@ -2222,6 +2243,9 @@ Ver `.env.example`. Las críticas:
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
 - `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 32 caracteres; usá la que genera `tools/oficina_ml_search.py --init`). Sin ella
   los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
+- `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
+  >= 32 caracteres, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como `HUGO_EVENTS_KEY`. Vacía = 503 y el
+  recálculo queda con el sondeo (minutos).
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
