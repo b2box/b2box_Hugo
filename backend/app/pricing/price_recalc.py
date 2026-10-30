@@ -30,7 +30,12 @@ Lo que NO hace: no busca de nuevo en Mercado Libre, no abre fichas (un producto 
 y sigue con la racha de la noche) y no apaga nada. Lo único que escribe en Vendure es la reactivación, y la escribe
 `price_review_actions`, como siempre.
 
-La cola vive en memoria: si el proceso se reinicia, lo que estaba en la cola lo toma la corrida de la noche.
+Además Vendure puede AVISAR al guardar (api/vendure_events_routes.py, `POST /api/vendure/events`): `notify` anota cada
+producto para leerlo a los ~20 s (Vendure termina de recalcular el precio de venta después de guardar) y, si un aviso de
+tramo o de variante dio «sin cambio», una vez más a los ~2 min. Pasa por la misma cola, con los mismos topes, locks y
+reglas; un aviso que llega durante la corrida de la noche se procesa cuando termina. El sondeo de arriba queda de respaldo.
+
+La cola y los avisos viven en memoria: si el proceso se reinicia, lo que estaba ahí lo toma la corrida de la noche.
 """
 
 from __future__ import annotations
@@ -86,6 +91,88 @@ _watched_at: dict[str, datetime] = {}
 
 def enqueue(product_ids: Iterable[str]) -> None:
     _pending.update(product_ids)
+
+
+# ─── Avisos de Vendure ────────────────────────────────────────────
+
+# Cuándo se lee un producto avisado y cuándo se relee un aviso de tramo o de variante que dio «sin cambio».
+NOTICE_READ_AFTER = timedelta(seconds=20)
+NOTICE_RECHECK_AFTER = timedelta(minutes=2)
+
+
+@dataclass(slots=True)
+class _Notice:
+    due: datetime
+    recheck: bool          # tramo / variante: si da «sin cambio», se relee una vez a los ~2 min
+
+
+_notices: dict[str, _Notice] = {}
+_notice_task: asyncio.Task | None = None
+
+
+def _is_leader() -> bool:
+    """El proceso que corre el scheduler: el único que recalcula (los locks son de este proceso)."""
+    from app.scheduler import jobs   # lazy: jobs arrastra todo el scheduler
+
+    return bool(jobs.scheduler.running)
+
+
+def notify(changes: dict[str, bool], now: datetime | None = None) -> int:
+    """Anota los productos que avisó Vendure (producto → ¿se relee si da «sin cambio»?) y arranca el procesamiento.
+    Devuelve cuántos quedaron anotados. Un producto avisado dos veces se lee una vez, a los ~20 s del último aviso."""
+    if not _is_leader():
+        # shortcut: con más de una réplica el aviso se pierde y lo toma el sondeo del líder; si se escala, pasarlo a la base.
+        log.warning("aviso de Vendure en una instancia que no es la líder: lo toma el sondeo")
+        return 0
+    now = now or utcnow()
+    for pid, recheck in changes.items():
+        old = _notices.get(pid)
+        _notices[pid] = _Notice(now + NOTICE_READ_AFTER, recheck or (old is not None and old.recheck))
+    _start_notice_worker()
+    return len(changes)
+
+
+def _start_notice_worker() -> None:
+    global _notice_task
+    if _notice_task is None or _notice_task.done():
+        _notice_task = asyncio.get_running_loop().create_task(_notice_worker())
+
+
+async def _notice_worker() -> None:
+    """Procesa los avisos a medida que vencen, hasta que no quede ninguno. Uno solo por proceso; nunca levanta."""
+    while _notices:
+        wait = (min(n.due for n in _notices.values()) - utcnow()).total_seconds()
+        await asyncio.sleep(min(30.0, max(1.0, wait)))
+        try:
+            await process_notices()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("recálculo: los avisos de Vendure fallaron (%s); se reintenta en 30 s", error_code(exc))
+            await asyncio.sleep(30.0)
+
+
+async def process_notices(client: Any = None, now: datetime | None = None) -> dict[str, int]:
+    """Los avisos vencidos, por el mismo camino que la cola (con su cupo diario). Durante la noche pasan a la cola, que se
+    procesa cuando la corrida termina; con el vigía trabajando esperan a la próxima vuelta."""
+    now = now or utcnow()
+    due = {pid: n for pid, n in _notices.items() if n.due <= now}
+    if not due:
+        return {}
+    if price_monitor.price_monitor_lock.locked():
+        for pid in due:
+            _notices.pop(pid, None)
+        enqueue(due)
+        return {"corrida": len(due)}
+    if _busy.locked():
+        return {"ocupado": len(due)}
+    async with _busy:
+        ctx = _context(client, now, from_queue=True)
+        for pid in due:
+            _notices.pop(pid, None)
+        counts = await _run(ctx, sorted(due), "avisos de Vendure")
+    for pid, notice in due.items():
+        if notice.recheck and ctx.outcomes.get(pid) == "sin_cambio" and pid not in _notices:
+            _notices[pid] = _Notice(now + NOTICE_RECHECK_AFTER, recheck=False)
+    return counts
 
 
 @dataclass(slots=True)

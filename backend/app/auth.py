@@ -18,6 +18,7 @@ Lo que NO requiere login (allowlist):
 - `/verify`                    → lo consume Luis con su X-API-Key (auth propia)
 - `/radar/*`                   → radar de Luis, mismo X-API-Key que /verify
 - `/api/oficina/*`             → la Mac de la oficina, con su x-oficina-key (auth propia)
+- `/api/vendure/*`             → avisos de Vendure al guardar, con su X-Hugo-Events-Key (auth propia)
 - `/favicon.ico`               → ruido del browser
 """
 
@@ -88,6 +89,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/radar/",      # radar de Luis → /radar/ml-supply (autentica por X-API-Key, no por cookie)
     "/app/",        # b2box app → /app/lookup (autentica por X-API-Key, no por cookie)
     "/api/oficina/",  # buscador de la oficina: autentica por x-oficina-key, no por cookie
+    "/api/vendure/",  # avisos de Vendure al guardar: autentica por X-Hugo-Events-Key, no por cookie
     "/favicon.ico",
 )
 

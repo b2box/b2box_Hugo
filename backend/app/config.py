@@ -675,6 +675,9 @@ class Settings(EnvSettings):
     pm_recalc_reactivations_daily_max: int = 20
     # Lecturas por día (ART) del vigía de 30 min sobre las fichas vivas: contador propio, aparte del de la cola.
     pm_recalc_watch_daily_max: int = 600
+    # Key del header X-Hugo-Events-Key de POST /api/vendure/events (Vendure avisa al guardar un producto, una variante o un
+    # tramo). >= 32 caracteres; vacía o floja = el endpoint contesta 503 (falla cerrado) y queda el sondeo.
+    vendure_events_key: str = Field(default="", description="Key del header X-Hugo-Events-Key. Vacía = avisos apagados")
     # Umbrales del diagnóstico a-e.
     pm_diag_cert_share_pct: float = 10.0
     pm_diag_logistics_ratio: float = 1.0
