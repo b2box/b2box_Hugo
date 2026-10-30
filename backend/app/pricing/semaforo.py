@@ -143,6 +143,8 @@ class PricedVariant:
     sourcing_mode: str | None = None
     # Mínima propia del primer tramo (ProductVariant.customFields.minQuantityOverride), o None.
     min_quantity_override: int | None = None
+    # `updatedAt` de la variante en Vendure (ISO-8601), si vino: el recálculo lo usa para no releer un cambio ya leído.
+    updated_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

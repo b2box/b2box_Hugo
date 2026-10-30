@@ -268,7 +268,7 @@ def _names_used(tree) -> tuple[set[str], set[str]]:
 
 
 def test_no_module_of_the_review_can_reach_a_write_method_statically():
-    """K-2. Defensa en profundidad: la pasada, el diagnóstico, el desglose y las rutas no USAN (nombres, atributos o llamadas)
+    """K-2. Defensa en profundidad: la pasada, el diagnóstico, el desglose, las rutas y el recálculo al cambiar en Vendure no USAN (nombres, atributos o llamadas)
     los métodos que escriben en Vendure o hablan con Paco. Las rutas declaran solo los 3 POST de las decisiones, que delegan
     en `price_review_actions`: el ÚNICO módulo autorizado a escribir (ver el test siguiente)."""
     import ast
@@ -278,7 +278,7 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
     banned = {"disable_product", "enable_product", "_set_enabled", "set_enabled", "submit_pro", "submit", "get_status",
               "post", "put", "patch", "delete", "aiosmtplib"}
     for rel in ("pricing/price_review.py", "pricing/diagnosis_source.py", "pricing/price_diagnosis.py", "pricing/price_breakdown.py",
-                "api/price_review_routes.py"):
+                "api/price_review_routes.py", "pricing/price_recalc.py", "api/vendure_events_routes.py"):
         used, imported = _names_used(ast.parse((root / rel).read_text()))
         assert not (banned & (used | imported)), (rel, banned & (used | imported))
         assert "paco" not in {m.split(".")[-1] for m in imported}, rel

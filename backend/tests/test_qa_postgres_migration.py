@@ -62,7 +62,7 @@ def _old_tables(engine) -> None:
                                                 "llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos", "llm_skipped_cut", "llm_status", "n_no_medible",
                                                 "review_at", "review_summary", "n_flipped"}),
                            ("market_price_snapshot", NEW_SNAPSHOT_COLS | {"price_basis", "ml_variant", "web_via", "unmeasurable",
-                                                                           "data_at", "review_flag"}),
+                                                                           "data_at", "review_flag", "recalc_at", "recalc_before", "recalc_flag"}),
                            ("ml_seller_cache", set()), ("settings", set()),
                            ("market_match_feedback", NEW_FEEDBACK_COLS)):
         src = SQLModel.metadata.tables[name]

@@ -76,10 +76,12 @@ def test_reset_that_would_cross_the_thresholds_is_rejected():
 
 
 def test_api_answers_400_with_the_reason(monkeypatch):
+    # Los cortes del color son de admin desde la reactivación automática del recálculo: la validación se mira como admin.
     s = Settings(vendure_api_url="https://example.invalid/admin-api", dashboard_password="",
-                 supabase_url="", supabase_anon_key="")
+                 supabase_url="", supabase_anon_key="", dashboard_admins="nico@b2box.pro", dashboard_secret="k" * 40)
     for mod in (auth, security, main_mod):
         monkeypatch.setattr(mod, "get_settings", lambda s=s: s)
+    monkeypatch.setattr(auth, "session_username", lambda token: "nico@b2box.pro")
     client = TestClient(main_mod.app)
     for value in ("nan", "1e999"):
         r = client.put("/api/settings/pm_green_min_pct", json={"value": value})

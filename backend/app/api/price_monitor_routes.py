@@ -24,7 +24,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, not_, or_
+from sqlalchemy import and_, case, not_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
@@ -187,12 +187,15 @@ def _scope_conditions(enabled: str, match: str | None, origin: str | None,
                       estimated: str | None = None, review: str | None = None) -> list[Any]:
     """Condiciones SQL de enabled / match / origin / estimated / review."""
     conds: list[Any] = []
+    # La marca que se ve: la del recálculo de día si lo hubo (la de la noche queda para la racha).
+    flag = case((MarketPriceSnapshot.recalc_at.is_not(None), MarketPriceSnapshot.recalc_flag),  # type: ignore[union-attr]
+                else_=MarketPriceSnapshot.review_flag)
     if review == "firme":
-        conds.append(MarketPriceSnapshot.review_flag == "firme")
+        conds.append(flag == "firme")
     elif review == "dudoso":
-        conds.append(MarketPriceSnapshot.review_flag.like("dudoso:%"))  # type: ignore[union-attr]
+        conds.append(flag.like("dudoso:%"))
     elif review:
-        conds.append(MarketPriceSnapshot.review_flag == review)
+        conds.append(flag == review)
     if enabled == "enabled":
         conds.append(MarketPriceSnapshot.product_enabled.is_(True))  # type: ignore[union-attr]
     elif enabled == "disabled":

@@ -381,6 +381,15 @@ class MarketPriceSnapshot(SQLModel, table=True):
     # Resultado de la pasada de la bandeja para los rojos: `firme` o `dudoso:<motivo>`. None = no es rojo
     # (o la pasada no corrió).
     review_flag: str | None = Field(default=None, max_length=40)
+    # Recálculo durante el día porque el producto cambió en Vendure (pricing/price_recalc.py): nuestro precio nuevo contra
+    # los MISMOS idénticos de esta fila, que se actualiza en el lugar. `recalc_at` = la hora del último recálculo;
+    # `recalc_before` = JSON con lo que había medido la corrida (precio, tramo, color, ganancia, marca de la bandeja), que
+    # se guarda en el primer recálculo y no se pisa. None = la fila es tal cual la dejó la corrida.
+    recalc_at: datetime | None = Field(default=None)
+    recalc_before: str | None = Field(default=None)
+    # El veredicto de la bandeja (`firme` / `dudoso:<motivo>`) con el precio recalculado. Va aparte de `review_flag`, que
+    # sigue siendo la medición de la noche: de ahí sale la racha (R8), y un recálculo de día no la mueve.
+    recalc_flag: str | None = Field(default=None, max_length=40)
 
 
 class MarketMatchFeedback(SQLModel, table=True):

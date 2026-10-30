@@ -18,6 +18,8 @@ Lo que NO requiere login (allowlist):
 - `/verify`                    → lo consume Luis con su X-API-Key (auth propia)
 - `/radar/*`                   → radar de Luis, mismo X-API-Key que /verify
 - `/api/oficina/*`             → la Mac de la oficina, con su x-oficina-key (auth propia)
+- `POST /api/vendure/events`   → avisos de Vendure al guardar, con su X-Hugo-Events-Key (auth propia). Solo esa ruta y
+                                  ese método: nada más bajo /api/vendure queda público.
 - `/favicon.ico`               → ruido del browser
 """
 
@@ -404,6 +406,16 @@ def cookie_is_secure(request: Request) -> bool:
     return request.url.scheme == "https" or proto.split(",")[0].strip() == "https"
 
 
+# Rutas públicas EXACTAS (método y ruta): no abren nada más debajo.
+_PUBLIC_EXACT: frozenset[tuple[str, str]] = frozenset({
+    ("POST", "/api/vendure/events"),  # avisos de Vendure al guardar: autentica por X-Hugo-Events-Key, no por cookie
+})
+
+
+def _is_public_request(method: str, path: str) -> bool:
+    return _is_public_path(path) or (method.upper(), path) in _PUBLIC_EXACT
+
+
 def _is_public_path(path: str) -> bool:
     """¿La ruta está en la allowlist pública?
 
@@ -433,14 +445,15 @@ async def auth_middleware(request: Request, call_next):
     /verify/api/settings (pública) mientras el router servía /api/settings.
     """
     path = request.scope["path"]
+    public = _is_public_request(request.method, path)
     if not login_enabled():
-        if not _is_public_path(path):
+        if not public:
             log.warning(
                 "DASHBOARD_PASSWORD vacío — el dashboard queda ABIERTO, no usar en producción"
             )
         return await call_next(request)
 
-    if _is_public_path(path):
+    if public:
         return await call_next(request)
 
     token = request.cookies.get(COOKIE_NAME)

@@ -14,7 +14,7 @@ from app.db.models import AuditLog, Setting
 from app.db.session import engine, init_db
 
 KEYS = ("apify_meli_daily_budget", "apify_1688_daily_budget", "otapi_daily_budget",
-        "pm_green_min_pct")
+        "pm_green_min_pct", "pm_review_sla_days")
 
 
 def _wipe():
@@ -64,8 +64,16 @@ def test_otapi_tambien_y_sin_cambio_no_registra(client):
 
 
 def test_setting_que_no_gasta_no_se_registra(client):
-    assert client.put("/api/settings/pm_green_min_pct", json={"value": 35}).status_code == 200
+    assert client.put("/api/settings/pm_review_sla_days", json={"value": 9}).status_code == 200
     assert _rows() == []
+
+
+def test_los_cortes_del_color_y_la_politica_de_tramos_quedan_en_el_audit_log(client):
+    """Desde la reactivación automática del recálculo, mover el verde o la política de tramos puede hacer que Hugo prenda
+    productos solo: son de admin y quedan auditados (ajustes 30-oct)."""
+    assert client.put("/api/settings/pm_green_min_pct", json={"value": 35}).status_code == 200
+    (row,) = _rows()
+    assert row.detail == "nico@b2box.pro cambió pm_green_min_pct: 30.0 → 35.0"
 
 
 def test_cupo_de_apify_tope_500(client):

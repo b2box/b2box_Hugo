@@ -10,6 +10,8 @@ Jobs:
   7. apify_ml_search     → busca en la web de ML con Apify la cola de la oficina (antes del semáforo).
   8. price_review_digest → resumen diario de la bandeja de revisión para Pao (08:30 ART).
   9. price_review_reconcile → una vez, al arrancar: concilia las escrituras de la bandeja que quedaron a medias.
+ 10. refresh_catalog     → cada pocos minutos: cache del catálogo y recálculo del semáforo de lo que cambió en Vendure.
+ 11. price_recalc_watch  → cada 30 min: relee el precio de los productos con ficha viva (cambios de tramos).
 
 Optimizaciones clave:
   · Streaming  — procesa cada página de Vendure apenas llega.
@@ -697,13 +699,34 @@ async def refresh_catalog() -> None:
     frío (cold-start). Mantiene el cache caliente entre auditorías.
 
     Es un refresh INCREMENTAL (solo productos con updatedAt nuevo); el full se
-    hace solo cada `catalog_full_refresh_seconds`. Ver app/vendure/catalog.py."""
+    hace solo cada `catalog_full_refresh_seconds`. Ver app/vendure/catalog.py.
+
+    Después recalcula el semáforo y la bandeja de los productos que cambiaron en
+    Vendure (app/pricing/price_recalc.py). Un error ahí queda en el log: no tira
+    este job."""
+    from app.pricing import price_recalc
     from app.vendure import catalog as vendure_catalog
 
     try:
         await vendure_catalog.get_catalog(force=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("refresh_catalog falló: %s", exc)
+    try:
+        price_recalc.enqueue_polled(vendure_catalog.pop_changed_versions())
+        await price_recalc.run_pending()
+    except Exception:  # noqa: BLE001
+        log.exception("refresh_catalog: el recálculo de los productos cambiados falló")
+
+
+async def price_recalc_watch() -> None:
+    """El vigía de las fichas vivas (app/pricing/price_recalc.py, R-1b): un cambio de tramos no toca ni la variante ni el
+    producto, así que refresh_catalog no lo ve. No corre con la corrida de la noche; un error queda en el log."""
+    from app.pricing import price_recalc
+
+    try:
+        await price_recalc.watch_live_items()
+    except Exception:  # noqa: BLE001
+        log.exception("price_recalc_watch falló")
 
 
 def _prune_ml_embed_cache() -> int:
@@ -1085,5 +1108,15 @@ def register_jobs() -> None:
         refresh_catalog,
         IntervalTrigger(seconds=max(60, ttl - 30)),
         id="refresh_catalog",
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # Los tramos no tocan el updatedAt de nada: las fichas vivas se releen cada 30 min (la primera vuelta, 30 min
+    # después de arrancar; sin recuperación: es barato y frecuente).
+    from app.pricing import price_recalc
+
+    scheduler.add_job(
+        price_recalc_watch,
+        IntervalTrigger(minutes=price_recalc.WATCH_EVERY_MIN),
+        id=price_recalc.WATCH_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )

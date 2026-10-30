@@ -63,7 +63,8 @@ NEW_COLS = {"market_price_snapshot": {"data_at", "review_flag"},
 # fix/semaforo-sin-dato (#25, las prueban test_qa_postgres_migration.py y compañía). Las crea el mismo arranque; acá no se
 # miran.
 OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim", "apify_spend", "radar_ml_supply_cache"}
-OTHER_PRS_COLS = {"market_price_snapshot": {"unmeasurable"},
+# Lo mismo con las del recálculo al cambiar en Vendure, que entra DESPUÉS (las prueba test_recalculo_pg.py).
+OTHER_PRS_COLS = {"market_price_snapshot": {"unmeasurable", "recalc_at", "recalc_before", "recalc_flag"},
                   "price_monitor_run": {"llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
                                         "llm_skipped_cut", "llm_status", "n_no_medible"}}
 NOW = w.NOW

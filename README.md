@@ -1116,6 +1116,79 @@ las fotos de los candidatos (unas 1,8 por segundo; después quedan en el cache y
 (`pm_stores_vision_max_calls`, 500) y solo corre si el juez de ML está prendido: comparar tiendas no le
 saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 
+### Recálculo cuando el producto cambia en Vendure
+
+Durante el día el semáforo ya no se queda con el precio de la noche: si alguien arregla un producto en el admin de
+Vendure, Hugo lo refleja **solo y en minutos** (`pricing/price_recalc.py`), con los precios de ML de la **última
+medición** (no vuelve a buscar en ML; lo único que cambia es nuestro precio).
+
+1. **Detección.** En b2box la caja, las medidas y el precio viven en la **variante**, y los **tramos** son otra entidad
+   (`BulkPriceTier`): guardar una variante no toca el `updatedAt` del producto, y guardar un tramo no toca ni el de la
+   variante ni el del producto (la API de admin tampoco lista tramos por fecha). Por eso hay tres plazos:
+
+   Con **aviso de Vendure** (`POST /api/vendure/events`, ver abajo) todo esto se ve en **segundos**: cada producto avisado
+   se lee a los ~20 s y, si el aviso era de un tramo o de una variante y dio «sin cambio» (Vendure todavía estaba
+   recalculando el precio de venta), se relee una vez a los ~2 min. **Sin aviso** (Vendure sin configurar, caído, o un
+   aviso que se perdió) queda el sondeo:
+
+   | Qué se guardó en Vendure | Cuándo lo ve Hugo sin aviso |
+   |---|---|
+   | el producto (nombre, fotos, `enabled`, custom fields del producto) | **en minutos**: `refresh_catalog` (cada `verify_catalog_ttl_seconds` − 30 s: 4,5 min con el default) ya trae los productos con `updatedAt` nuevo |
+   | una variante (caja, medidas, precio) | **en minutos**: el mismo refresh pide las variantes con `updatedAt` nuevo (`productVariants` filtrado por `updatedAt`, solo `id productId updatedAt`, con watermark propio y el mismo margen de 2 min) y encola su producto. Si el schema de Vendure rechaza ese filtro, avisa una vez en el log y sigue solo con productos |
+   | un tramo, de un producto **con ficha viva** (abierta o `mantenido`) | **cada 30 minutos**: el job `price_recalc_watch` relee el precio de esos productos (hasta 60 por vuelta, primero los que se miraron hace más tiempo, de a 2, con su propio cupo diario `pm_recalc_watch_daily_max`, 600, no el de abajo). No corre con `pm_mode = 0` ni con `pm_recalc_daily_max = 0` |
+   | un tramo, de un producto **sin ficha** | **solo la noche** |
+
+   Del guardado al dashboard: con aviso, menos de 1 minuto; sin aviso, menos de 10 minutos (30 para los tramos con ficha). Los productos nuevos no cuentan (no
+   tienen nada medido) y el primer refresh después de un reinicio solo toma el punto de partida (la cola vive en memoria:
+   lo que estaba ahí lo toma la noche). La cola y el job de 30 minutos no recalculan a la vez.
+2. **Solo con dato fresco.** Se recalcula si el último snapshot del producto tiene ML `ok` con dato de menos de
+   `pm_review_data_max_age_h` horas (48). Si no, no se toca nada: queda para la noche (el motivo va al log). Tampoco
+   corre mientras corre la corrida de la noche (lo que falta queda en la cola) ni sobre una corrida sin terminar.
+3. **Una lectura por producto** (`product(id)` con variantes y tramos, la misma consulta que la noche) y nuestro precio
+   con `semaforo.pick_our_price` y la `pm_tier_policy` vigente. Tope propio de la cola: `pm_recalc_daily_max` (300
+   productos por día argentino; lo cambia solo un admin y queda auditado) y de a 2 productos a la vez: un cambio masivo
+   (una fórmula nueva sobre 2.000 productos) no satura Vendure y lo que pase del tope queda para la noche. Las lecturas
+   del job de 30 minutos no gastan ese cupo: tienen el suyo (60 por vuelta y `pm_recalc_watch_daily_max` por día).
+4. **Si el precio y el tramo son los mismos, nada** (ni snapshot ni evento): un cambio de fotos, de descripción o el
+   propio `enabled` que escribe Hugo no hacen ruido ni bucles. Tampoco cuenta como cambio un `tier_used` distinto solo
+   porque se cambió `pm_tier_policy`: si el audit log tiene un cambio de esa política posterior a la medición, se compara
+   también con la otra política (eso es configuración, no un arreglo); si no, vale solo la política vigente (un tramo
+   mínimo más caro guardado en Vendure es un cambio de verdad).
+5. **El snapshot se recalcula en el lugar** contra los MISMOS idénticos (misma mediana, comisión y envío): ganancia,
+   color (con las tiendas si cuentan) y los contadores de la corrida. `recalc_at` dice cuándo, `recalc_before` guarda lo
+   que había medido la corrida (precio, tramo, color, ganancia y marca; no se pisa con un segundo cambio del mismo día) y
+   `recalc_flag` el veredicto de la bandeja con el precio nuevo. **`review_flag` no se toca**: es la medición de la noche y
+   de ahí sale la racha (R8); la pantalla y el filtro «Bandeja de Pao» muestran el del recálculo. La tabla muestra el estado recalculado con la marca
+   «Recalculado HH:MM por cambio en Vendure: antes rojo $X → ahora verde $Y», el filtro y los contadores por color usan
+   el color recalculado y la historia del producto muestra el antes. La corrida de la noche siguiente lo reemplaza: vuelve
+   a ser la fuente.
+
+**Aviso de Vendure al guardar** (`POST /api/vendure/events`, contrato en `vendure-hugo-eventos-contrato.md`). Vendure
+(el plugin del repo `b2box`) junta unos segundos lo que se guardó y manda un lote:
+`{"events": [{"type": "product|variant|tier|price", "productId": "123", "variantId": "456", "at": "…"}]}`.
+- En Vendure: `HUGO_EVENTS_URL` = la URL **exacta** `https://<hugo>/api/vendure/events`, **sin `/` al final** (con la
+  barra final cae en la sesión del dashboard y da 401), y `HUGO_EVENTS_KEY` = la misma key que `VENDURE_EVENTS_KEY` en
+  Hugo: **32 caracteres o más y al menos 12 distintos** (por ejemplo `openssl rand -hex 32`).
+- Auth propia: header `X-Hugo-Events-Key` contra `VENDURE_EVENTS_KEY` (tiempo constante). Sin la variable, o con una key
+  floja (menos de 32 caracteres, menos de 12 distintos, un placeholder), contesta **404**, como si no existiera (igual que
+  `/api/oficina`): falla cerrado y no nombra qué falta. Key ausente, vacía o mala: **401**, y tras 10 intentos en 5 min la
+  IP queda bloqueada 5 min (nunca a quien trae la key buena). Rate limit de 120 por minuto por IP. Solo `POST
+  /api/vendure/events` (ese método y esa ruta exacta) pasa sin la sesión del dashboard; nada más bajo `/api/vendure`.
+- Body estricto: campos de más, un tipo desconocido, ids que no son solo dígitos (hasta 20) o más de 500 avisos por lote
+  dan **422**; body de hasta 256 KB.
+- Responde **202** `{"queued": N}` (productos sin repetir que quedaron anotados) y procesa solo: mismos topes
+  (`pm_recalc_daily_max`), locks y reglas que el sondeo. Solo se anotan productos del catálogo que Hugo tiene en memoria
+  (recién arrancado, sin catálogo cargado, se anotan todos); un producto que Hugo no mide se ignora sin leerlo. Lo que
+  llega durante la corrida de la noche se procesa cuando termina. Solo procesa la instancia líder (la del scheduler).
+- Topes: lo que espera en memoria (avisos + cola del sondeo) no pasa de **20.000** productos; lo que sobra se descarta con
+  un aviso en el log y lo toma la noche. Un lote de **más de 200 productos distintos** es un cambio masivo (una fórmula
+  nueva): se leen solo los que tienen ficha viva y el resto queda para la noche. Con menos, las fichas vivas van primero.
+- Un guardado se lee una vez: si el aviso ya leyó el producto con un `updatedAt` (del producto o de una variante) igual o
+  posterior al que ve el sondeo, el sondeo no lo vuelve a leer.
+
+Un producto que empeora sin ficha (verde → rojo) se ve en el semáforo, pero **no abre ficha**: eso sigue con la racha de
+la noche. Lo que hace con la bandeja está en [Cuando el producto cambia en Vendure](#cuando-el-producto-cambia-en-vendure).
+
 ### Qué NO hace todavía
 
 - No pasa los rojos a inactivo ni escribe nada en Vendure. La bandeja de revisión de Pao (ver
@@ -1129,7 +1202,7 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 
 | Setting | Default | Qué hace |
 |---|---|---|
-| `pm_mode` | 0 | 0 sombra (solo marca los rojos); 1 propuesta (llena la bandeja de Pao, no toca Vendure); 2 automático (todavía no existe: se comporta como 1). Solo lo cambia un admin (`DASHBOARD_ADMINS`) y queda en el audit log |
+| `pm_mode` | 0 | 0 sombra (solo marca los rojos; el recálculo de día solo se ve en el semáforo); 1 propuesta (llena la bandeja de Pao; en Vendure escribe solo lo que decide una persona y la reactivación automática del recálculo); 2 automático (todavía no existe: se comporta como 1). Solo lo cambia un admin (`DASHBOARD_ADMINS`) y queda en el audit log |
 | `pm_green_min_pct` | 30 | ganancia mínima para verde |
 | `pm_yellow_min_pct` | 10 | ganancia mínima para amarillo |
 | `pm_ml_commission_pct` | 13 | comisión de ML, % de la mediana (a definir por Gabriel) |
@@ -1167,11 +1240,18 @@ saca llamadas al de ML. Cada producto puede sumar una consulta por tienda.
 | `pm_review_max_price_ratio` | 3 | bandeja: nuestro precio / mediana de ML máximo creíble (R7) |
 | `pm_review_data_max_age_h` | 48 | bandeja: antigüedad máxima del dato de los idénticos, en horas (R5) |
 | `pm_review_sla_days` | 7 | bandeja: días esperando decisión antes de salir como «esperando» en el mail |
+| `pm_recalc_daily_max` | 300 | recálculo al cambiar en Vendure: productos (lecturas) por día argentino; 0 = no se recalcula de día. Solo admin, auditado |
+| `pm_recalc_reactivations_daily_max` | 20 | recálculo: reactivaciones automáticas por día argentino (intentos); 0 = nunca reactiva solo. Solo admin, auditado |
+| `pm_recalc_watch_daily_max` | 600 | recálculo: lecturas por día argentino del vigía de 30 min sobre las fichas vivas (cupo propio); 0 = no relee. Solo admin, auditado |
 | `pm_diag_cert_share_pct` / `pm_diag_logistics_ratio` | 10 / 1,0 | diagnóstico (c): peso del certificado en % del neto; (d): logística / fábrica |
 | `pm_diag_box_z` / `pm_diag_min_neighbors` | 3,0 / 5 | diagnóstico (a): desvío robusto de la caja y parecidos con caja que hacen falta |
 
 Los umbrales se validan al guardar: amarillo ≤ verde, veto de imagen ≤
 umbral de imagen ≤ imagen sola, veto de nombre ≤ umbral de nombre.
+
+Desde la reactivación automática, `pm_tier_policy`, `pm_green_min_pct`, `pm_yellow_min_pct`, `pm_review_min_listings`,
+`pm_review_min_sellers`, `pm_review_data_max_age_h` y `pm_review_max_price_ratio` también son **solo de admin** y quedan en
+el audit log: moverlos puede hacer que Hugo prenda productos solo.
 
 Cambiar un corte recolorea en la **próxima corrida**, sin redeploy. El horario
 es env: `PRICE_MONITOR_CRON_UTC` (default `0 6 * * *` = 03:00 ART).
@@ -1392,7 +1472,8 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
 
 Diseño: `bandeja-pao-diseno.md` (PR 1 a PR 3) y `bandeja-pao-pr3-pr5-criterios.md`. **Hugo propone; inactiva o
 reactiva un producto en Vendure solo cuando lo decide una persona de `PRICE_REVIEW_DECIDERS`** (la pasada de la noche
-no escribe nada, y la bandeja no le manda nada a Paco). Pao ve la bandeja en el dashboard → **Bandeja de precios** y
+no escribe nada, y la bandeja no le manda nada a Paco). La única excepción es la [reactivación
+automática](#cuando-el-producto-cambia-en-vendure): lo que apagó Hugo, se corrigió en Vendure y ya no es rojo firme. Pao ve la bandeja en el dashboard → **Bandeja de precios** y
 recibe un resumen por mail.
 
 ### Qué es un «rojo firme»
@@ -1533,6 +1614,62 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   errores traen `detail: {code, message, state, version…}`: 400 validación, 403 sin permiso, 404, 409 (el estado cambió,
   la acción no va desde ese estado, modo sombra, reactivar a mano, plazo vencido) y 502 si falla Vendure.
 
+### Cuando el producto cambia en Vendure
+
+Con `pm_mode >= 1`, el [recálculo del semáforo](#recálculo-cuando-el-producto-cambia-en-vendure) también pone al día la
+ficha viva del producto (abierta o mantenida), en el momento (o, si lo único que se guardó fue un tramo, en la próxima
+vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
+
+- deja el último dato (`last_*`) y un evento `recalculado` con `{precio_antes, precio_despues, color_antes, color_despues,
+  ratio_antes, ratio_despues, sentido}` (el ratio es nuestro precio / lo que le queda neto al revendedor, con la misma
+  mediana antes y después); la ficha lo muestra como «mejoró» o «empeoró» con esos números;
+- un `propuesto` que deja de ser rojo se cierra (`cerrado_auto`, «Se corrigió en Vendure: ahora está en verde.»);
+- un `mantenido` que empeora `pm_review_worse_pct` (10 %) o más contra su línea base se reabre con la misma regla del
+  10 %: alcanza con que el recálculo sea rojo firme, no se vuelve a pedir la racha;
+- el diagnóstico a-e de las fichas que siguen abiertas se rehace con el desglose nuevo de Vendure, dentro del **mismo**
+  tope de 150 lecturas por día de la bandeja y con un sub-cupo de 30 % (45) para el recálculo, así la noche no se queda
+  sin lecturas; los datos del canal se leen una vez por día y la variante ya viene con la lectura del recálculo; lo que no
+  entra lo completa la noche;
+- una ficha con una escritura en Vendure en curso no se toca;
+- **reactivación automática** (ajustes del 30-oct): solo una ficha en **`corrigiendo`** (una persona ya dijo «Corregir»)
+  que apagó Hugo (`hugo_disabled`), cuando se cumple TODO esto:
+  - el recálculo da **no rojo firme**: verde o amarillo con la misma calidad de dato que la entrada (idénticos
+    confirmados por foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones y 2 vendedores; R3-R7 con el
+    color al revés). Un «no rojo» con datos flojos no reactiva;
+  - **piso de precio**: nuestro precio / mediana firme de ML >= 1 / `pm_review_max_price_ratio` (un precio con ceros de
+    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el **mayor** entre el de la noche y el precio con
+    que se abrió la ficha (un precio malo cargado antes de la corrida pasa a ser «el de la noche»; contra el rojo con que se
+    abrió, la caída se ve). Un arreglo legítimo de más de 50 % contra ese rojo también queda para una persona, a propósito.
+    Si no, no escribe: queda `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer
+    ni escribir Vendure) y sale en «PARA MIRAR A MANO». Y queda **pegado**: esa ficha no se reactiva sola nunca más hasta
+    que una persona decida algo sobre ella (una decisión, Deshacer o «Inactivar»);
+  - **doble lectura**: el mismo precio visto en dos lecturas de Vendure separadas por 30 minutos o más (la primera es la
+    que trajo ese precio, o la corrida de la noche; la segunda, en general, la del job de 30 minutos). Un precio distinto
+    en el medio vuelve a empezar la cuenta;
+  - un solo intento por precio: lo que terminó en «reactivar a mano» o en un error de Vendure no se repite en cada lectura
+    (vuelve a intentarse con otro precio u otra medición). Lo que no se pudo ni empezar (una escritura en curso, `pm_mode`
+    en 0, un error que no es de la acción) se reintenta en la próxima lectura.
+
+  Entonces se reactiva por `price_review_actions` con actor `hugo:auto` (ningún otro actor puede usar esa acción): el
+  MISMO protocolo y las mismas guardas que «Ya lo corregí» (intención, `approvalStatus` vacío o `approved`, sin duplicado
+  ni BX sin foto después, sigue apagado, un solo intento, verificación, conciliación si queda incierto) y termina en
+  `corregido`. Deja el evento, la fila de `AuditLog` `price_review_enabled` y sale en el mail del día siguiente en
+  «REACTIVADOS SOLOS». Si una guarda frena, no escribe: la ficha queda como estaba con `reactivar_a_mano` y sale en «PARA
+  MIRAR A MANO». Tope: `pm_recalc_reactivations_daily_max` (20 por día, cuenta intentos); pasado el tope la ficha queda con
+  el aviso «Ya no está en rojo: reactivala con «Ya lo corregí»» (evento `aviso_reactivar` y la marca `ya_no_rojo`, una vez;
+  al día siguiente se vuelve a intentar).
+- una ficha en **`en_revision`** que apagó Hugo y deja de ser rojo firme **no se reactiva sola**: queda el aviso «Ya no
+  está en rojo: pasala a «Corregir» y reactivala con «Ya lo corregí»» (una vez). Nunca se toca `despublicado` (lo decidió
+  una persona) ni una ficha cerrada, y la reactivación automática no tiene Deshacer.
+- la marca `ya_no_rojo` se va sola cuando el recálculo deja de verlo no rojo firme y cuando la noche lo mide rojo otra vez.
+- si después de una reactivación automática la noche vuelve a dar rojo firme, sigue el camino normal: la ficha nueva la
+  abre la racha de noches (el recálculo no toca la racha, así que la noche de antes del arreglo cuenta) y, dentro de los 7
+  días siguientes a la reactivación, la ficha reactivada deja un evento `rojo_tras_reactivar` que sale en «PARA MIRAR A
+  MANO» (una vez; lo deja también el recálculo de día si el precio nuevo da rojo firme). No se apaga solo.
+
+Con `pm_mode = 0` el recálculo solo se ve en el semáforo: no toca fichas ni reactiva nada. Nunca abre fichas ni apaga
+productos: eso sigue con las reglas de la noche y la decisión de una persona.
+
 ### Cómo usarlo
 
 - Prender: dashboard → Configuración → «Modo de la bandeja» = 1. Con 0 (default) solo se marcan los rojos.
@@ -1545,8 +1682,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
   `GET /api/price-review/items/{id}`. El Semáforo acepta `review=firme|dudoso|dudoso:<motivo>`.
 - **Mail diario** 08:30 hora de Argentina (11:30 UTC, `PRICE_REVIEW_DIGEST_CRON_UTC`): por el SMTP de siempre
   (`ALERT_SMTP_*`) a `PM_REVIEW_EMAILS` (separados por coma; **vacío = no se manda**). Lleva lo nuevo, las fichas
-  reabiertas por empeorar, lo que hay que mirar a mano (Vendure no aceptó un cambio, una reactivación frenada, un cambio
-  que quedó a medias) y, una vez por ficha y por estado, las propuestas y las en revisión que llevan más de 7 días
+  reabiertas por empeorar, las que Hugo reactivó solo («REACTIVADOS SOLOS»), lo que hay que mirar a mano (Vendure no
+  aceptó un cambio, una reactivación frenada, un cambio que quedó a medias) y, una vez por ficha y por estado, las propuestas y las en revisión que llevan más de 7 días
   esperando; sin novedades no sale. Los eventos se marcan (`notified_at`) recién
   después de que el SMTP aceptó el mail, así que un reintento no duplica.
 - **Quién ve los costos.** `PRICE_REVIEW_VIEWERS` (emails de la sesión del dashboard, separados por coma). **Fail-closed:**
@@ -1561,7 +1698,8 @@ salen de `actions` en el detalle: los arma el backend según el estado, la sesi�
 **Registro.** `price_review_event` solo se agrega (el ORM rechaza editarlo o borrarlo; lo único que cambia es
 `notified_at`) y cada evento lleva quién lo hizo: un email o `hugo:auto`.
 
-**Qué sigue (no está hecho):** modo automático, topes, alertas y la salida automática de `corrigiendo` (PR 4), «Buscar
+**Qué sigue (no está hecho):** modo automático, topes y alertas (PR 4; la salida automática de `corrigiendo` ya está:
+la reactivación del recálculo), «Buscar
 otro proveedor» en Paco APP (PR 5; el estado `buscando_prov` ya existe pero ninguna ficha llega ahí), volver a medir un
 producto (PR 6).
 
@@ -1582,6 +1720,15 @@ ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS review_summary;
 ALTER TABLE price_monitor_run DROP COLUMN IF EXISTS n_flipped;
 DELETE FROM settings WHERE key LIKE 'pm_review_%' OR key LIKE 'pm_diag_%' OR key = '_meta:last_run:price_review_digest';
 UPDATE settings SET value = '1' WHERE key = 'pm_mode' AND value = '2';
+```
+
+El recálculo al cambiar en Vendure agrega tres columnas opcionales a `market_price_snapshot` (`recalc_at`,
+`recalc_before`, `recalc_flag`; test sobre Postgres 16 en `test_recalculo_pg.py`) y no crea tablas. Para volver atrás
+(antes que lo de arriba, si se vuelve atrás también la bandeja):
+
+```sql
+ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS recalc_at, DROP COLUMN IF EXISTS recalc_before, DROP COLUMN IF EXISTS recalc_flag;
+DELETE FROM settings WHERE key IN ('pm_recalc_daily_max', 'pm_recalc_reactivations_daily_max', 'pm_recalc_watch_daily_max', 'pm_recalc_reads', 'pm_recalc_reactivations', 'pm_recalc_watch_reads', 'vendure_review_requests_recalc');
 ```
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
@@ -1938,6 +2085,8 @@ cuenta fichas de catálogo con techo 10.000.
 - `/api/seo/text-audit/*` — auditoría de textos del catálogo, solo lectura (ver su sección)
 - `GET /api/oficina/ml-queue`, `POST /api/oficina/ml-results` — buscador de la oficina; se autentican con `x-oficina-key`
   (`OFICINA_SEARCH_KEY`), no con la cookie del dashboard; 404 sin la variable (ver su sección)
+- `POST /api/vendure/events` — avisos de Vendure al guardar (recálculo del semáforo en segundos); se autentica con
+  `X-Hugo-Events-Key` (`VENDURE_EVENTS_KEY`), no con la sesión del dashboard.
 
 Los tres `/app/*` se autentican con `X-API-Key` (igual que `/verify`). Hay una
 key **por cliente** en `HUGO_API_KEYS="luis:xxx,cloud:yyy,b2box-app:zzz"`: Hugo
@@ -2117,6 +2266,10 @@ Ver `.env.example`. Las críticas:
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
 - `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 32 caracteres; usá la que genera `tools/oficina_ml_search.py --init`). Sin ella
   los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
+- `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
+  32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
+  `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el
+  sondeo (minutos).
 - `BROWSER_PROXY` (`http://user:pass@host:port`, residencial), `BROWSER_FETCH_ENABLED=true`
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
