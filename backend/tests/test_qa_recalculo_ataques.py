@@ -131,16 +131,22 @@ async def test_qa_a5_the_mode_switched_off_mid_run_stops_the_write(monkeypatch, 
 
 
 async def test_qa_a5_the_daily_cap_holds_across_the_queue_and_the_watch(fake):
-    """El tope de reactivaciones es uno solo para la cola y el vigía, por día ART."""
+    """El tope de reactivaciones es uno solo para la cola y el vigía, por día ART. (Re-QA: con la doble lectura, la versión
+    anterior pasaba sin probar nada: rv2 nunca llegaba a intentarse. Ahora la cola reactiva rv1 con su segunda lectura y el
+    vigía encuentra el tope gastado para rv2.)"""
     w.set_setting("pm_recalc_reactivations_daily_max", 1)
     run = w.make_run()
+    ids = {}
     for pid in ("rv1", "rv2"):
         night(pid, run=run)
-        k.disabled_by_hugo(pid, "corrigiendo")
+        ids[pid] = k.disabled_by_hugo(pid, "corrigiendo")
         in_vendure(fake, pid, FIXED, enabled=False)
-    await recalc("rv1")
-    await price_recalc.watch_live_items(now=LATER + timedelta(minutes=30))
-    assert fake.writes() == [True]
+    await recalc("rv1", "rv2")                                                   # primera lectura de los dos
+    assert await recalc("rv1", now=LATER + timedelta(minutes=30)) == {"sin_cambio": 1}   # la cola confirma rv1
+    assert w.item(ids["rv1"]).state == "corregido" and fake.writes() == [True]
+    await price_recalc.watch_live_items(now=LATER + timedelta(minutes=31))       # el vigía confirma rv2: tope gastado
+    assert w.item(ids["rv2"]).state == "corrigiendo" and fake.writes() == [True]
+    assert item_events(ids["rv2"], "aviso_reactivar")[0].motive_code == "tope_del_dia"
 
 
 async def test_qa_a5_the_not_red_warning_goes_away_when_the_next_night_measures_it_red_again(fake):
