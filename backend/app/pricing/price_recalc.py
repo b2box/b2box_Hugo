@@ -564,13 +564,15 @@ def _decide(s: Session, ctx: _Ctx, item: PriceReviewItem, snap: MarketPriceSnaps
 def _too_low(snap: MarketPriceSnapshot, ok: pr.FirmVerdict, p: pr.ReviewParams,
              item: PriceReviewItem) -> tuple[str, str] | None:
     """El piso de precio: un precio con ceros de menos es «verde firme» y no se puede prender solo. La caída se mide contra
-    el menor entre el precio de la noche y el precio con que se abrió la ficha."""
+    el MAYOR entre el precio de la noche y el precio con que se abrió la ficha: un precio malo cargado antes de la corrida
+    pasa a ser «el de la noche» y contra eso no cae nada; contra el rojo con que se abrió, sí. Un arreglo legítimo de más de
+    50 % contra ese rojo también queda para una persona: a propósito."""
     night = (pr._loads(snap.recalc_before) or {}).get("our_price_cents") if snap.recalc_before else snap.our_price_cents
     refs = [x for x in (night, item.our_price_cents) if isinstance(x, (int, float)) and x > 0]
     now_price = snap.our_price_cents or 0
     if ok.price_ratio is None or ok.price_ratio < 1.0 / p.max_price_ratio:
         return "precio_bajo", PRECIO_BAJO
-    if refs and now_price < min(refs) * (1 - MAX_DROP):
+    if refs and now_price < max(refs) * (1 - MAX_DROP):
         return "precio_bajo", PRECIO_BAJO
     return None
 

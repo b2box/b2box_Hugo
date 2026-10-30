@@ -1628,8 +1628,10 @@ vuelta del job de 30 minutos, que relee el precio de todas las fichas vivas):
     confirmados por foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones y 2 vendedores; R3-R7 con el
     color al revés). Un «no rojo» con datos flojos no reactiva;
   - **piso de precio**: nuestro precio / mediana firme de ML >= 1 / `pm_review_max_price_ratio` (un precio con ceros de
-    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el menor entre el de la noche y el precio con que
-    se abrió la ficha. Si no, no escribe: queda `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer
+    menos es «verde firme») y el precio nuevo no bajó más de 50 % contra el **mayor** entre el de la noche y el precio con
+    que se abrió la ficha (un precio malo cargado antes de la corrida pasa a ser «el de la noche»; contra el rojo con que se
+    abrió, la caída se ve). Un arreglo legítimo de más de 50 % contra ese rojo también queda para una persona, a propósito.
+    Si no, no escribe: queda `reactivar_a_mano` con el motivo `precio_bajo` (por el protocolo, sin leer
     ni escribir Vendure) y sale en «PARA MIRAR A MANO». Y queda **pegado**: esa ficha no se reactiva sola nunca más hasta
     que una persona decida algo sobre ella (una decisión, Deshacer o «Inactivar»);
   - **doble lectura**: el mismo precio visto en dos lecturas de Vendure separadas por 30 minutos o más (la primera es la

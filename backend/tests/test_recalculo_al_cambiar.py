@@ -1019,14 +1019,37 @@ async def test_adj10_only_hugo_can_use_the_automatic_reactivation(fake):
 # ─── Ajustes 30-oct (2) ─────────────────────────────────────────────
 
 
-async def test_adj2_1_the_50_percent_floor_is_measured_against_the_lower_of_the_night_and_the_item_price(fake):
-    """Si el precio subió entre que se abrió la ficha y la noche, la caída se mide contra el de la ficha (el menor)."""
-    night("rv1", our=2_000_000)
-    item_id = k.disabled_by_hugo("rv1", "corrigiendo", our_price_cents=1_000_000)
-    in_vendure(fake, "rv1", FIXED, enabled=False)                                # -70 % contra la noche, -40 % contra la ficha
+async def test_adj2_1_a_bad_price_loaded_before_the_night_is_held_against_the_price_the_item_opened_with(fake):
+    """El precio malo entra antes de la corrida: la noche lo mide como base y contra eso no cae nada. Contra el precio con que
+    se abrió la ficha (el rojo alto) cae 55 %: queda «reactivar a mano: precio_bajo», sin recálculo previo."""
+    night("rv1", our=450_000, color="verde", flag=None)                          # 0,5 x ML: el cociente no lo frena
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")                            # se abrió con 1.000.000
+    in_vendure(fake, "rv1", 450_000, enabled=False)
+    await price_recalc.watch_live_items(now=w.NOW + timedelta(minutes=31))       # la segunda lectura, después de la noche
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == [] and fake.count("ReviewGuard") == 0
+    [ev] = item_events(item_id, "reactivar_a_mano")
+    assert ev.motive_code == "precio_bajo"
+
+
+async def test_adj2_1_a_40_percent_fix_against_the_item_price_is_reactivated_with_the_double_read(fake):
+    night("rv1", our=1_000_000)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")                            # se abrió con 1.000.000
+    in_vendure(fake, "rv1", FIXED, enabled=False)                                # -40 %
     await recalc("rv1")
+    assert w.item(item_id).state == "corrigiendo"
     await confirm()
     assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+async def test_adj2_1_the_reference_is_the_higher_of_the_night_and_the_item_price(fake):
+    """El precio subió entre la ficha y la noche: la caída se mide contra el de la noche (el mayor). -70 % ⇒ a mano."""
+    night("rv1", our=2_000_000)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo", our_price_cents=1_000_000)
+    in_vendure(fake, "rv1", FIXED, enabled=False)                                # -40 % contra la ficha, -70 % contra la noche
+    await recalc("rv1")
+    await confirm()
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == []
+    assert item_events(item_id, "reactivar_a_mano")[0].motive_code == "precio_bajo"
 
 
 async def test_adj2_2_a_price_held_for_a_person_stays_held_until_a_person_decides(monkeypatch, fake):
