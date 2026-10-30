@@ -28,10 +28,10 @@ from tests import review_decide as k  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests.test_price_review_pg import README, _old_dump, _seed_old_rows, old_schema  # noqa: E402,F401
 from tests.test_qa_tiendas_pg import PG_URL  # noqa: E402
-from tests.test_recalculo_al_cambiar import CHEAPER, FIXED, LATER, in_vendure, night, recalc  # noqa: E402
+from tests.test_recalculo_al_cambiar import CHEAPER, FIXED, LATER, confirm, in_vendure, night, recalc  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Postgres descartable)")
-COLS = {"recalc_at", "recalc_before"}
+COLS = {"recalc_at", "recalc_before", "recalc_flag"}
 
 
 def _rollback_sql() -> str:
@@ -62,7 +62,7 @@ def test_boot_adds_only_the_two_nullable_columns_and_never_touches_the_rows(old_
     with old_schema.connect() as c:
         assert c.execute(text("SELECT pg_relation_filenode('market_price_snapshot')")).scalar() == node
         assert c.execute(text("SELECT count(*) FROM market_price_snapshot WHERE recalc_at IS NOT NULL "
-                              "OR recalc_before IS NOT NULL")).scalar() == 0
+                              "OR recalc_before IS NOT NULL OR recalc_flag IS NOT NULL")).scalar() == 0
 
 
 def test_readme_rollback_sql_removes_the_columns_and_the_settings_and_boot_goes_back_up(old_schema):  # noqa: F811  (fixture importada)
@@ -73,7 +73,9 @@ def test_readme_rollback_sql_removes_the_columns_and_the_settings_and_boot_goes_
     with old_schema.begin() as c:
         c.execute(text("UPDATE market_price_snapshot SET recalc_at = now(), recalc_before = '{}' WHERE id = 1"))
         c.execute(text("INSERT INTO settings (key, value, updated_at) VALUES ('pm_recalc_daily_max', '50', now()), "
-                       "('pm_recalc_reads', '2026-10-29:3', now()), ('pm_mode', '1', now())"))
+                       "('pm_recalc_reads', '2026-10-29:3', now()), ('pm_recalc_watch_daily_max', '60', now()), "
+                       "('pm_recalc_watch_reads', '2026-10-30:7', now()), "
+                       "('vendure_review_requests_recalc', '2026-10-30:2', now()), ('pm_mode', '1', now())"))
     with old_schema.begin() as c:
         for stmt in [s.strip() for s in _rollback_sql().split(";") if s.strip() and not s.strip().startswith("--")]:
             c.execute(text(stmt))
@@ -88,13 +90,16 @@ async def test_the_recalculation_and_the_automatic_reactivation_work_on_postgres
     session.init_db()
     fake = k.setup(monkeypatch)
     price_recalc._pending.clear()
+    monkeypatch.setattr(price_recalc, "_watched_at", {})
     run, sid = night("rv1")
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     _, other = night("rv2", run=run)
     proposed = w.make_item("rv2")
     in_vendure(fake, "rv2", FIXED)
-    assert await recalc("rv1", "rv2") == {"recalculado": 2}
+    assert (await recalc("rv1", "rv2"))["recalculado"] == 2
+    assert w.item(item_id).state == "corrigiendo"                                 # una sola lectura no alcanza
+    await confirm()
     with Session(old_schema) as s:
         snap = s.get(MarketPriceSnapshot, sid)
         assert snap.color == "verde" and snap.recalc_at == LATER and json.loads(snap.recalc_before)["color"] == "rojo"

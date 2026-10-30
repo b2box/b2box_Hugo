@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
@@ -19,10 +19,12 @@ os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 import pytest  # noqa: E402
 from sqlmodel import Session  # noqa: E402
 
+from app.clock import utcnow  # noqa: E402
 from app.db.models import AuditLog, MarketPriceSnapshot, PriceReviewEvent  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.pricing import daily_budget, price_monitor, price_recalc, price_review_digest, semaforo  # noqa: E402
 from app.pricing import price_review as pr  # noqa: E402
+from app.pricing import price_review_actions as actions  # noqa: E402
 from app.vendure import catalog  # noqa: E402
 from app.vendure.client import VendureClient, VendureProduct  # noqa: E402
 from tests import review_decide as k  # noqa: E402
@@ -68,6 +70,11 @@ def in_vendure(fake, pid: str, price: int, **kw) -> None:
 async def recalc(*pids: str, now=LATER) -> dict:
     price_recalc.enqueue(pids)
     return await price_recalc.run_pending(now=now)
+
+
+async def confirm(minutes: int = 30) -> dict:
+    """La segunda lectura que confirma el «no rojo» antes de reactivar (la del vigía de 30 min, ajustes 30-oct)."""
+    return await price_recalc.watch_live_items(now=LATER + timedelta(minutes=minutes))
 
 
 def snap(sid: int) -> MarketPriceSnapshot:
@@ -359,10 +366,16 @@ async def test_r4_a_mass_change_reads_two_products_at_a_time(fake):
 def test_r4_both_caps_are_admin_only_settings():
     from app.api import routes
 
-    assert {"pm_recalc_daily_max", "pm_recalc_reactivations_daily_max"} <= routes._COSTLY_SETTINGS
+    keys = {"pm_recalc_daily_max", "pm_recalc_reactivations_daily_max", "pm_recalc_watch_daily_max",
+            # ajustes 30-oct: deciden qué se prende solo
+            "pm_tier_policy", "pm_green_min_pct", "pm_yellow_min_pct", "pm_review_min_listings", "pm_review_min_sellers",
+            "pm_review_data_max_age_h", "pm_review_max_price_ratio"}
+    assert keys <= routes._COSTLY_SETTINGS
     c = k.client()                                                              # Pao no es admin
     assert c.put("/api/settings/pm_recalc_daily_max", json={"value": 2000}).status_code == 403
     assert c.put("/api/settings/pm_recalc_reactivations_daily_max", json={"value": 500}).status_code == 403
+    assert c.put("/api/settings/pm_recalc_watch_daily_max", json={"value": 3000}).status_code == 403
+    assert c.put("/api/settings/pm_tier_policy", json={"value": 1}).status_code == 403
 
 
 async def test_r5_nothing_runs_while_the_night_is_running_and_the_queue_waits(fake):
@@ -446,7 +459,7 @@ async def test_s1_the_snapshot_is_recalculated_against_the_same_identicals_and_k
             after.data_at, after.captured_at) == (before.ml_median_cents, before.ml_min_cents, before.commission_pct,
                                                   before.shipping_cents, before.matched_listings, before.data_at,
                                                   before.captured_at)
-    assert after.recalc_at == LATER and after.review_flag is None
+    assert after.recalc_at == LATER and after.recalc_flag is None and after.review_flag == "firme"   # la racha, intacta
     assert json.loads(after.recalc_before) == {"our_price_cents": 1_000_000, "tier_used": "priceWithTax", "color": "rojo",
                                                "est_margin_pct": before.est_margin_pct, "review_flag": "firme"}
     r = w.run_of(run)
@@ -542,7 +555,7 @@ async def test_b4_a_product_without_item_that_turns_red_is_shown_but_no_item_is_
     _, sid = night("rv1", our=FIXED, color="verde", flag=None)
     in_vendure(fake, "rv1", WORSE)
     await recalc("rv1")
-    assert snap(sid).color == "rojo" and snap(sid).review_flag == "firme"
+    assert snap(sid).color == "rojo" and snap(sid).recalc_flag == "firme" and snap(sid).review_flag is None
     assert w.items() == [] and fake.mutations == []
 
 
@@ -607,6 +620,8 @@ async def test_a3_what_hugo_turned_off_and_is_no_longer_firm_red_is_turned_back_
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == []        # una lectura sola no alcanza
+    await confirm()                                                              # la segunda, 30 min después, igual
     it = w.item(item_id)
     assert it.state == "corregido" and it.open_key is None and it.hugo_disabled is False and it.reactivated_at
     assert it.decision == "reactivar_auto" and it.decision_by == pr.ACTOR_AUTO
@@ -620,12 +635,29 @@ async def test_a3_what_hugo_turned_off_and_is_no_longer_firm_red_is_turned_back_
     assert snap(sid).product_enabled is True
 
 
-async def test_a1_from_en_revision_too(fake):
+async def test_a1_from_corrigiendo_a_firm_yellow_also_reactivates(fake):
     night("rv1")
-    item_id = k.disabled_by_hugo("rv1", "en_revision")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", CHEAPER, enabled=False)                             # amarillo firme también reactiva
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+async def test_a1_en_revision_is_never_reactivated_alone_it_only_gets_the_warning_once(fake):
+    """Ajustes 30-oct: solo desde `corrigiendo` (una persona ya dijo «Corregir»). En revisión queda el aviso, una vez."""
+    night("rv1")
+    item_id = k.disabled_by_hugo("rv1", "en_revision")
+    in_vendure(fake, "rv1", FIXED, enabled=False)
+    await recalc("rv1")
+    await confirm()
+    await confirm(60)
+    it = w.item(item_id)
+    assert it.state == "en_revision" and fake.mutations == [] and price_recalc.FLAG_NOT_RED in json.loads(it.flags)
+    [ev] = item_events(item_id, "aviso_reactivar")
+    assert ev.motive_code == "en_revision" and ev.motive_text.startswith("Ya no está en rojo: pasala a «Corregir»")
+    with pytest.raises(actions.ActionError):                                    # tampoco por el protocolo
+        await actions.auto_reactivate(item_id, "en_revision")
 
 
 @pytest.mark.parametrize("state,fields", [
@@ -639,6 +671,7 @@ async def test_a1_never_reactivates_closed_items_despublicado_or_what_hugo_did_n
     item_id = w.make_item("rv1", state, **fields)
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == state and fake.mutations == []
 
 
@@ -652,6 +685,7 @@ async def test_a2_a_not_red_with_weak_data_does_not_reactivate(fake, weak):
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     assert snap(sid).color == "verde" and w.item(item_id).state == "corrigiendo" and fake.mutations == []
     assert item_events(item_id, "recalculado")
 
@@ -671,6 +705,8 @@ async def test_a4_a_guard_that_stops_it_leaves_the_item_as_it_was_for_manual_rev
             s.add(AuditLog(action="duplicate_disabled", source="audit", product_id="rv1", created_at=w.NOW + timedelta(hours=1)))
             s.commit()
     await recalc("rv1")
+    await confirm()
+    await confirm(60)                                                            # el intento frenado no se repite
     it = w.item(item_id)
     assert it.state == "corrigiendo" and it.open_key == "rv1" and it.hugo_disabled is True and fake.writes() == []
     [ev] = item_events(item_id, "reactivar_a_mano")
@@ -684,6 +720,7 @@ async def test_a4_if_someone_already_turned_it_on_nothing_is_written(fake):
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=True)                                 # otra persona lo prendió a mano
     await recalc("rv1")
+    await confirm()
     assert w.item(item_id).state == "corregido" and fake.writes() == [] and item_events(item_id, "ya_activo")
 
 
@@ -706,27 +743,30 @@ async def test_a5_daily_cap_of_automatic_reactivations_leaves_the_warning(fake):
         ids[pid] = k.disabled_by_hugo(pid, "corrigiendo")
         in_vendure(fake, pid, FIXED, enabled=False)
     await recalc("rv1", "rv2")
+    await confirm()
+    await confirm(60)                                                            # el aviso no se repite
     states = sorted(w.item(i).state for i in ids.values())
     assert states == ["corregido", "corrigiendo"] and fake.writes() == [True]
     waiting = next(i for i in ids.values() if w.item(i).state == "corrigiendo")
     [ev] = item_events(waiting, "aviso_reactivar")
-    assert ev.motive_text == "Ya no está en rojo: reactivala con «Ya lo corregí»."
+    assert ev.motive_text == "Ya no está en rojo: reactivala con «Ya lo corregí»." and ev.motive_code == "tope_del_dia"
     assert price_recalc.FLAG_NOT_RED in json.loads(w.item(waiting).flags)
     # al volver a rojo, el aviso se va
     fake.products[[p["id"] for p in fake.products].index(w.item(waiting).product_id)] = product(
         w.item(waiting).product_id, WORSE, enabled=False)
-    await recalc(w.item(waiting).product_id, now=LATER + timedelta(minutes=10))
+    await recalc(w.item(waiting).product_id, now=LATER + timedelta(minutes=70))
     assert price_recalc.FLAG_NOT_RED not in json.loads(w.item(waiting).flags)
 
 
 async def test_a5_cap_zero_never_reactivates(fake):
     w.set_setting("pm_recalc_reactivations_daily_max", 0)
     night("rv1")
-    item_id = k.disabled_by_hugo("rv1", "en_revision")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
-    assert w.item(item_id).state == "en_revision" and fake.mutations == []
-    assert item_events(item_id, "aviso_reactivar")[0].motive_text.startswith("Ya no está en rojo: pasala a «Corregir»")
+    await confirm()
+    assert w.item(item_id).state == "corrigiendo" and fake.mutations == []
+    assert item_events(item_id, "aviso_reactivar")[0].motive_code == "tope_del_dia"
 
 
 async def test_a6_the_next_mail_lists_it_once_under_reactivados_solos(fake):
@@ -734,6 +774,7 @@ async def test_a6_the_next_mail_lists_it_once_under_reactivados_solos(fake):
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
+    await confirm()
     with Session(engine, expire_on_commit=False) as s:
         data = price_review_digest.collect(s, LATER)
         assert [i.id for _, i in data.reactivated] == [item_id] and not data.empty
@@ -744,18 +785,216 @@ async def test_a6_the_next_mail_lists_it_once_under_reactivados_solos(fake):
         assert price_review_digest.collect(s, LATER).reactivated == []
 
 
-async def test_a7_the_next_night_follows_the_normal_path_and_needs_the_streak_again(fake):
+async def test_a7_the_next_night_follows_the_normal_path_with_the_nightly_streak_and_flags_it(fake):
+    """Ajustes 30-oct: el recálculo no toca `review_flag`, así que la racha (R8) sale solo de las noches. Si tras una
+    reactivación automática la noche vuelve a dar rojo firme, la ficha nueva se abre con la racha normal de noches (la de
+    antes del arreglo cuenta) y la reactivada deja un aviso en «PARA MIRAR A MANO». Nunca se apaga solo."""
     run, _ = night("rv1")
-    k.disabled_by_hugo("rv1", "corrigiendo")
+    old = k.disabled_by_hugo("rv1", "corrigiendo")
     in_vendure(fake, "rv1", FIXED, enabled=False)
     await recalc("rv1")
-    tomorrow = w.make_run(started=w.NOW + timedelta(days=1))
-    w.add_snap(tomorrow, "rv1", tier="priceWithTax", captured_at=w.NOW + timedelta(days=1),
-               data_at=w.NOW + timedelta(days=1))
-    await pr.process_run(tomorrow, now=w.NOW + timedelta(days=1, hours=1))
+    await confirm()
+    assert w.item(old).state == "corregido"
+    night_after = utcnow() + timedelta(hours=1)          # `act` cierra la ficha con el reloj real: la noche va después
+    tomorrow = w.make_run(started=night_after)
+    w.add_snap(tomorrow, "rv1", tier="priceWithTax", captured_at=night_after, data_at=night_after)
+    await pr.process_run(tomorrow, now=night_after + timedelta(hours=1))
     with Session(engine) as s:
-        assert pr.streaks(s, tomorrow, ["rv1"]) == {"rv1": 1}                    # el recálculo cortó la racha
-    assert [i.state for i in w.items()] == ["corregido"] and fake.writes() == [True]   # no se apaga solo ni abre ficha
+        assert pr.streaks(s, tomorrow, ["rv1"]) == {"rv1": 2}                    # la noche de antes cuenta
+    assert [i.state for i in w.items()] == ["corregido", "propuesto"] and fake.writes() == [True]
+    [ev] = item_events(old, "rojo_tras_reactivar")
+    data = price_review_digest.collect(Session(engine), night_after + timedelta(hours=2))
+    assert ("rojo_tras_reactivar", old) in [(e.kind, i.id) for e, i in data.attention]
+    later = w.make_run(started=night_after + timedelta(days=1))
+    w.add_snap(later, "rv1", tier="priceWithTax", captured_at=night_after + timedelta(days=1),
+               data_at=night_after + timedelta(days=1))
+    await pr.process_run(later, now=night_after + timedelta(days=1, hours=1))
+    assert len(item_events(old, "rojo_tras_reactivar")) == 1                    # una vez por ficha
+
+
+# ─── Ajustes 30-oct (QA y seguridad) ───────────────────────────────
+
+
+async def test_adj1_a_price_that_fell_more_than_half_against_the_night_is_left_for_a_person(fake):
+    """El piso de precio: además del cociente contra ML (QA-1), el precio nuevo no puede haber caído más de la mitad
+    contra el de la noche. Queda «reactivar a mano: precio_bajo» por el protocolo, sin leer ni escribir Vendure, una vez."""
+    night("rv1", our=1_000_000)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", 400_000, enabled=False)                             # verde firme, 0,44 x ML, -60 % en el día
+    await recalc("rv1")
+    await confirm()
+    await confirm(60)
+    it = w.item(item_id)
+    assert it.state == "corrigiendo" and it.hugo_disabled is True and fake.mutations == []
+    assert fake.count("ReviewGuard") == 0 and price_recalc.FLAG_NOT_RED not in json.loads(it.flags or "[]")
+    [ev] = item_events(item_id, "reactivar_a_mano")
+    assert ev.motive_code == "precio_bajo" and ev.actor == pr.ACTOR_AUTO
+    data = price_review_digest.collect(Session(engine), LATER)
+    assert [(e.kind, i.id) for e, i in data.attention] == [("reactivar_a_mano", item_id)]
+
+
+async def test_adj3_the_not_red_has_to_be_read_twice_30_minutes_apart_with_the_same_price(fake):
+    night("rv1")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", FIXED, enabled=False)
+    await recalc("rv1")
+    await confirm(10)                                                            # 10 min: todavía no
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == []
+    fake.products[0] = product("rv1", CHEAPER, enabled=False)                    # otro precio: la cuenta arranca de nuevo
+    assert (await confirm(30))["recalculado"] == 1
+    assert w.item(item_id).state == "corrigiendo" and fake.writes() == []
+    await confirm(59)
+    assert w.item(item_id).state == "corrigiendo"
+    await confirm(60)                                                            # 30 min con el mismo precio
+    assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+async def test_adj3_the_first_read_can_be_the_night_itself(fake):
+    """Arreglado antes de la corrida: la noche ya lo midió no rojo con ese precio, y la lectura del vigía lo confirma."""
+    night("rv1", our=FIXED, color="verde", flag=None)
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", FIXED, enabled=False)
+    assert await price_recalc.watch_live_items(now=w.NOW + timedelta(minutes=29)) == {"sin_cambio": 1}
+    assert w.item(item_id).state == "corrigiendo"
+    await price_recalc.watch_live_items(now=w.NOW + timedelta(minutes=31))
+    assert w.item(item_id).state == "corregido" and fake.writes() == [True]
+
+
+def _tiered(pid: str, *, enabled: bool = True) -> dict:
+    """Un producto con tramos: con la política 0 (tramo mínimo) vale 1.125.000; con la 1 (priceWithTax), 1.000.000."""
+    raw = product(pid, 1_000_000, enabled=enabled)
+    raw["variantList"]["items"][0]["bulkPriceTiers"] = [
+        {"position": 0, "enabled": True, "minQuantity": 10, "maxQuantity": 99, "salePrice": 900_000},
+        {"position": 1, "enabled": True, "minQuantity": 100, "maxQuantity": None, "salePrice": 800_000}]
+    return raw
+
+
+async def test_adj4_changing_the_tier_policy_is_configuration_not_a_fix(fake):
+    """QA-5: cambiar `pm_tier_policy` cambia `tier_used` sin que nadie haya tocado Vendure: no cuenta como cambio (ni
+    snapshot, ni evento, ni reactivación). Un cambio de verdad en Vendure se sigue viendo."""
+    sid = w.add_snap(w.make_run(), "rv1", our=1_125_000, tier="tier:min_qty=10", flag="firme")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    fake.products.append(_tiered("rv1", enabled=False))
+    fake.enabled["rv1"] = False
+    w.set_setting("pm_tier_policy", 1)                                           # con la 1 daría 1.000.000
+    before = snap(sid).model_dump()
+    assert await recalc("rv1") == {"sin_cambio": 1}
+    await confirm()
+    assert snap(sid).model_dump() == before and item_events(item_id, "recalculado") == [] and fake.mutations == []
+    fake.products[0]["variantList"]["items"][0]["priceWithTax"] = 500_000        # ahora sí cambió en Vendure
+    assert (await recalc("rv1", now=LATER + timedelta(minutes=40)))["recalculado"] == 1
+
+
+async def test_adj6_the_watch_does_not_run_in_shadow_mode_nor_with_the_recalc_off_and_has_its_own_cap(fake):
+    run = w.make_run()
+    for pid in ("rv1", "rv2"):
+        night(pid, run=run)
+        w.make_item(pid, "mantenido", kept_ratio=1.277)
+        in_vendure(fake, pid, 1_000_000)
+    w.set_setting("pm_mode", 0)
+    assert await price_recalc.watch_live_items(now=LATER) == {} and reads(fake) == 0
+    w.set_setting("pm_mode", 1)
+    w.set_setting("pm_recalc_daily_max", 0)
+    assert await price_recalc.watch_live_items(now=LATER) == {} and reads(fake) == 0
+    w.set_setting("pm_recalc_daily_max", 300)
+    w.set_setting("pm_recalc_watch_daily_max", 1)
+    assert await price_recalc.watch_live_items(now=LATER) == {"sin_cambio": 1, "tope": 1} and reads(fake) == 1
+    day = daily_budget.today_art(LATER)
+    assert daily_budget.used_today(price_recalc.WATCH_READS_KEY, day=day) == 1
+    assert daily_budget.used_today(price_recalc.READS_KEY, day=day) == 0
+
+
+async def test_adj6_while_the_watch_is_busy_the_queue_returns_without_emptying(fake):
+    price_recalc.enqueue(["rv1"])
+    async with price_recalc._busy:
+        assert await price_recalc.run_pending(now=LATER) == {"ocupado": 1}
+    assert price_recalc._pending == {"rv1"}
+
+
+async def test_adj7_what_could_not_be_applied_is_retried_on_a_later_read(monkeypatch, fake):
+    """`pm_mode` en 0 al recalcular y un error que no es de la acción (la base, por ejemplo): la lectura siguiente con el
+    mismo precio lo vuelve a evaluar y lo reactiva. Lo que terminó en una decisión de la acción no se repite."""
+    w.set_setting("pm_mode", 0)
+    night("rv1")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    in_vendure(fake, "rv1", FIXED, enabled=False)
+    await recalc("rv1")
+    w.set_setting("pm_mode", 1)
+    real = actions.auto_reactivate
+    calls = 0
+
+    async def flaky(iid, state, client=None, **kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("database is locked")
+        return await real(iid, state, client, **kw)
+
+    monkeypatch.setattr(actions, "auto_reactivate", flaky)
+    assert await confirm() == {"error": 1}
+    assert w.item(item_id).state == "corrigiendo"
+    await confirm(60)
+    assert w.item(item_id).state == "corregido" and fake.writes() == [True] and calls == 2
+
+
+async def test_adj10_if_the_context_cannot_be_built_the_queue_stays_whole(monkeypatch):
+    def broken(*_a, **_k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(price_recalc, "_context", broken)
+    price_recalc.enqueue(["rv1", "rv2"])
+    with pytest.raises(RuntimeError):
+        await price_recalc.run_pending(now=LATER)
+    assert price_recalc._pending == {"rv1", "rv2"}
+
+
+async def test_adj10_a_variant_dated_in_the_future_does_not_freeze_the_watermark(monkeypatch, fake):
+    """QA-9: una variante con fecha del 2099 no deja el watermark ahí: no pasa de ahora + el margen."""
+    _clean_catalog(monkeypatch)
+    _, sid = night("rv1")
+    in_vendure(fake, "rv1", 1_000_000)
+    fake.variant_updates = [_variant("rv9", "2099-01-01T00:00:00Z")]
+    await _refresh(monkeypatch)
+    ceiling = datetime.now(timezone.utc) + timedelta(minutes=3)
+    assert catalog._parse_iso(catalog._variant_watermark) <= ceiling
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    fake.products[0] = product("rv1", FIXED)
+    fake.variant_updates.append(_variant("rv1", soon))
+    await _refresh(monkeypatch)
+    assert snap(sid).our_price_cents == FIXED
+
+
+async def test_adj10_the_rediagnosis_has_its_own_slice_of_the_review_reads_and_reads_the_channel_once_a_day(fake):
+    from app.pricing import diagnosis_source as ds
+
+    day = daily_budget.today_art(LATER)
+    pr._day_channel.clear()
+    run = w.make_run()
+    ids = []
+    for pid in ("rv1", "rv2"):
+        night(pid, run=run)
+        ids.append(w.make_item(pid, diag_status="pendiente"))
+        in_vendure(fake, pid, WORSE)
+    await recalc("rv1")
+    await recalc("rv2", now=LATER + timedelta(minutes=5))
+    assert fake.count("ActiveChannelPricing") == 1                               # una vez por día
+    used = daily_budget.used_today(pr._RecalcBudget.KEY, day=day)
+    assert 0 < used <= int(ds.MAX_VENDURE_CALLS * pr.REDIAG_SHARE)
+    assert daily_budget.used_today(ds.RequestBudget.KEY, day=day) == used        # cuenta también en el total
+    for _ in range(int(ds.MAX_VENDURE_CALLS * pr.REDIAG_SHARE) - used):         # el sub-cupo se acaba ...
+        daily_budget.reserve(pr._RecalcBudget.KEY, int(ds.MAX_VENDURE_CALLS * pr.REDIAG_SHARE), day=day)
+    before = fake.count("TierBreakdowns")
+    fake.products[0] = product("rv1", WORSE + 10_000)
+    await recalc("rv1", now=LATER + timedelta(minutes=10))
+    assert fake.count("TierBreakdowns") == before                               # ... y no lee más, aunque el total tenga
+
+
+async def test_adj10_only_hugo_can_use_the_automatic_reactivation(fake):
+    night("rv1")
+    item_id = k.disabled_by_hugo("rv1", "corrigiendo")
+    with pytest.raises(actions.ActionError) as err:
+        await actions.act(item_id, actions.REACTIVAR_AUTO, k.PAO, expected_state="corrigiendo")
+    assert err.value.status == 400 and w.item(item_id).state == "corrigiendo" and fake.mutations == []
 
 
 # ─── K: regresión y seguridad ─────────────────────────────────────
@@ -781,6 +1020,7 @@ async def test_k3_no_vendure_text_reaches_events_or_the_mail(fake):
     in_vendure(fake, "rv2", FIXED, enabled=False)
     fake.approval["rv2"] = "algo raro de vendure <b>"
     await recalc("rv1", "rv2")
+    await confirm()
     for ev in w.events():
         if ev.item_id not in (item_id, other):
             continue
