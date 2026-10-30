@@ -53,11 +53,12 @@ ERROR = "error"
 DISABLED = "disabled"
 
 # Lo que queda reservado después de Apify para miniaturas, Qwen y Vendure.
-TAIL_RESERVE_S = 15.0
+TAIL_RESERVE_S = 30.0
 _PHOTO_TIMEOUT_S = 5.0
 _OTAPI_TIMEOUT_S = 4.0
 _THUMBS_TIMEOUT_S = 4.0
-_JUDGE_TIMEOUT_S = 8.0
+# Medido el 30-oct por OpenRouter: 8 s no alcanzaba para la foto + 8 miniaturas.
+_JUDGE_TIMEOUT_S = 20.0
 _VENDURE_TIMEOUT_S = 5.0
 # Menos que esto de ventana no alcanza para una corrida (la más rápida: 10 s).
 _MIN_APIFY_WINDOW_S = 8.0
@@ -80,6 +81,12 @@ _APIFY_STATUS_MAP = {
     "no_candidates": NO_CANDIDATES, "over_budget": OVER_BUDGET, "busy": OVER_BUDGET,
     "disabled": DISABLED, "timeout": TIMEOUT, "error": ERROR,
 }
+
+def _rt(key: str) -> Any:
+    """Valor de Configuración (runtime) o, si no hay, el default del .env."""
+    raw = runtime.get(key)
+    return getattr(get_settings(), key) if raw is None else raw
+
 
 # Tareas que registran un estimado después de responder (referencia fuerte).
 _background: set[asyncio.Task] = set()
@@ -151,12 +158,11 @@ class EstimateSession:
     def __init__(self, *, source: str, started_at: float, input_kind: str,
                  ip_hash: str | None = None, preset: str | None = None,
                  reason: str | None = None, taken: Sequence[str] = ()) -> None:
-        s = get_settings()
         self.source = source
         self.input_kind = input_kind
         self.ip_hash = ip_hash
         self.started_at = started_at
-        self.deadline_at = started_at + float(s.estimate_deadline_s)
+        self.deadline_at = started_at + float(_rt("estimate_deadline_s"))
         self.preset = preset
         self.reason = reason
         self.taken = tuple(taken)
@@ -261,7 +267,7 @@ class EstimateSession:
         self._mark("photo", t)
         if self.offer is not None:
             return            # link de 1688: el precio ya está, no se busca
-        window = min(float(get_settings().estimate_apify_deadline_s),
+        window = min(float(_rt("estimate_apify_deadline_s")),
                      self.remaining() - TAIL_RESERVE_S)
         if window < _MIN_APIFY_WINDOW_S:
             self.search = apify_1688.Search1688Result(status="timeout")
@@ -427,6 +433,7 @@ class EstimateSession:
 
         log_rows = []
         good = []
+        best_score = 0
         for i, (combined, clip, c) in enumerate(shortlist):
             verdict = verdicts.verdicts.get(i) if judged and verdicts else None
             # Con juez, una oferta sin veredicto válido (índice que el modelo no
@@ -439,6 +446,8 @@ class EstimateSession:
                 ok = c.similarity is not None and c.similarity <= ACTOR_DISTANCE_GOOD
             if ok:
                 good.append(c)
+                if verdict is not None:
+                    best_score = max(best_score, verdict.score_visual)
             log_rows.append({
                 "offer_id": c.offer_id, "title": c.title[:120], "price_cny": c.price_cny,
                 "similarity": c.similarity, "clip": None if clip is None else round(clip, 4),
@@ -457,19 +466,33 @@ class EstimateSession:
         }
         if judged and verdicts and verdicts.excluded:
             return self._fail(LOW_CONFIDENCE, "categoría excluida (ropa, marca o réplica)", detail)
-        if len(good) < 2:
+        # Una sola oferta alcanza si el juez la vio idéntica (Configuración).
+        single_min = int(_rt("estimate_single_good_min_score") or 0)
+        single = len(good) == 1 and judged and single_min > 0 and best_score >= single_min
+        detail["single_offer"] = single
+        if len(good) < 2 and not single:
             return self._fail(LOW_CONFIDENCE if shortlist else NO_CANDIDATES,
                               f"{len(good)} candidatos buenos (hacen falta 2)", detail)
-        prices = pricing.remove_bait([c.price_cny for c in good])
+        good_prices = [c.price_cny for c in good]
+        prices = pricing.remove_bait(good_prices)
+        min_prices = 1 if single else 2
+        if len(prices) < min_prices and int(_rt("estimate_bait_fallback") or 0):
+            prices = sorted(p for p in good_prices if p > 0)
+            detail["bait_fallback"] = True
+        if len(prices) < min_prices:
+            return self._fail(LOW_CONFIDENCE, "quedan menos de 2 precios sin carnada", detail)
+        max_spread = float(_rt("estimate_max_dispersion"))
+        spread = pricing.dispersion(prices)
+        detail["dispersion"] = round(spread, 3)
+        if spread > max_spread and int(_rt("estimate_trim_dispersed") or 0):
+            prices = pricing.trim_to_dispersion(prices, max_spread)
+            spread = pricing.dispersion(prices)
+            detail["trimmed_dispersion"] = round(spread, 3)
+        if spread > max_spread or len(prices) < min_prices:
+            return self._fail(LOW_CONFIDENCE, f"dispersión {spread:.2f} > {max_spread:g}", detail)
         kept = set(prices)
         for row in log_rows:
             row["used"] = bool(row["good"] and row["price_cny"] in kept)
-        if len(prices) < 2:
-            return self._fail(LOW_CONFIDENCE, "quedan menos de 2 precios sin carnada", detail)
-        spread = pricing.dispersion(prices)
-        detail["dispersion"] = round(spread, 3)
-        if spread > pricing.MAX_PRICE_DISPERSION:
-            return self._fail(LOW_CONFIDENCE, f"dispersión {spread:.2f} > 2,5", detail)
         detail["median_cny"] = statistics.median(prices)
         scenarios = pricing.scenarios_from_prices(prices, k)
         used = [c for c in good if c.price_cny in kept]
@@ -606,10 +629,11 @@ class EstimateSession:
         raw_margin = runtime.get("estimate_margin_pct")
         margin = float(get_settings().estimate_margin_pct if raw_margin is None else raw_margin)
         detail["margin_pct"] = margin
-        max_ratio = float(get_settings().estimate_max_range_ratio)
+        max_ratio = float(_rt("estimate_max_range_ratio"))
+        clamp = bool(int(_rt("estimate_clamp_wide_range") or 0))
         tiers: list[pricing.Tier] = []
         for q in quantities:
-            rng = pricing.tier_range(est.invoice_by_quantity(q), margin, max_ratio)
+            rng = pricing.tier_range(est.invoice_by_quantity(q), margin, max_ratio, clamp=clamp)
             if rng is None:
                 return self._fail(LOW_CONFIDENCE, f"rango demasiado ancho o vacío para {q} u.",
                                   detail)
@@ -740,7 +764,7 @@ async def open_session(*, source: str, started_at: float | None = None, input_ki
     reservation = await limits.reserve_estimate_async(
         ip_hash,
         global_limit=int(runtime.get("estimate_daily_budget") or 0),
-        visitor_limit=int(s.estimate_visitor_daily_limit),
+        visitor_limit=int(_rt("estimate_visitor_daily_limit")),
         per_minute=int(s.estimate_visitor_per_minute),
     )
     if not reservation.granted:

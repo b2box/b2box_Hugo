@@ -52,7 +52,16 @@ RUNTIME = {
     "lookup_visitor_daily_limit": 1000, "lookup_visitor_per_minute": 1000,
     "lookup_shared_daily_limit": 1000, "lookup_shared_per_minute": 1000,
     "vision_rerank_daily_budget": 300,
+    # Las reglas estrictas de antes del 30-oct: cada test que las afloja lo dice.
+    "estimate_single_good_min_score": 0, "estimate_max_dispersion": 2.5,
+    "estimate_trim_dispersed": 0, "estimate_bait_fallback": 0,
+    "estimate_max_range_ratio": 2.0, "estimate_clamp_wide_range": 0,
+    "apify_1688_max_concurrent": 14,
 }
+# Editables en Configuración, pero los tests los mueven en Settings: el stub
+# devuelve None y el servicio usa el de Settings.
+FROM_SETTINGS = frozenset({"estimate_deadline_s", "estimate_apify_deadline_s",
+                           "estimate_visitor_daily_limit"})
 
 
 def _cand(i: int, price: float, sim: float = 0.9) -> Candidate1688:
@@ -210,7 +219,8 @@ def env(monkeypatch):
     monkeypatch.setattr(app_routes, "_phash_scan", fake_phash)
     monkeypatch.setattr(app_routes.cloud_integration, "enabled", lambda: False)
     monkeypatch.setattr(app_routes, "_record", lambda **kw: state.records.append(kw))
-    monkeypatch.setattr(app_routes.runtime, "get", lambda k: RUNTIME[k])
+    monkeypatch.setattr(app_routes.runtime, "get",
+                        lambda k: None if k in FROM_SETTINGS else RUNTIME[k])
     monkeypatch.setattr(apify_1688, "search_by_image", fake_search)
     monkeypatch.setattr(images, "_fetch", fake_fetch)
     monkeypatch.setattr(images, "_vector", fake_vector)
@@ -362,6 +372,47 @@ async def test_er03_dispersion_mayor_a_2_5(env):
     resp = await _ask()
     assert resp.estimate_status == "low_confidence" and resp.estimate is None
     assert "dispersión" in _rows()[-1].reason
+
+
+# ─── Reglas aflojadas desde Configuración (30-oct) ─────────────────
+
+
+async def test_con_una_sola_oferta_identica_alcanza_si_esta_prendido(env, monkeypatch):
+    env.llm = FakeLLM(_verdicts([90, 40, 30, 20, 10]))
+    monkeypatch.setitem(RUNTIME, "estimate_single_good_min_score", 85)
+    resp = await _ask()
+    assert resp.estimate_status == "ok" and resp.estimate is not None
+
+
+async def test_una_sola_oferta_con_puntaje_bajo_sigue_sin_precio(env, monkeypatch):
+    env.llm = FakeLLM(_verdicts([80, 40, 30, 20, 10]))
+    monkeypatch.setitem(RUNTIME, "estimate_single_good_min_score", 85)
+    assert (await _ask()).estimate_status == "low_confidence"
+
+
+async def test_dispersos_se_recortan_las_puntas_si_esta_prendido(env, monkeypatch):
+    env.candidates = [_cand(0, 10.0), _cand(1, 26.0), _cand(2, 18.0)]
+    env.llm = FakeLLM(_verdicts([90, 90, 90]))
+    monkeypatch.setitem(RUNTIME, "estimate_trim_dispersed", 1)
+    resp = await _ask()
+    # Recortado pasa la dispersión; el rango sale ancho y sin angostar no se muestra.
+    assert resp.estimate_status == "low_confidence" and "rango" in _rows()[-1].reason
+    monkeypatch.setitem(RUNTIME, "estimate_clamp_wide_range", 1)
+    resp = await _ask(url=ML_URL + "?otra=1")
+    assert resp.estimate_status == "ok" and resp.estimate is not None
+
+
+async def test_si_las_carnadas_dejan_un_precio_se_usan_todos_si_esta_prendido(env, monkeypatch):
+    # mediana 11: el de 30 queda afuera como carnada y quedaría uno solo... salvo el respaldo.
+    env.candidates = [_cand(0, 5.0), _cand(1, 11.0), _cand(2, 30.0)]
+    env.llm = FakeLLM(_verdicts([90, 90, 90]))
+    monkeypatch.setitem(RUNTIME, "estimate_bait_fallback", 0)
+    assert (await _ask()).estimate_status == "low_confidence"
+    monkeypatch.setitem(RUNTIME, "estimate_bait_fallback", 1)
+    monkeypatch.setitem(RUNTIME, "estimate_trim_dispersed", 1)
+    monkeypatch.setitem(RUNTIME, "estimate_clamp_wide_range", 1)
+    resp = await _ask(url=ML_URL + "?otra=1")
+    assert resp.estimate_status == "ok"
 
 
 async def test_er03_vendure_sin_configuracion(env):

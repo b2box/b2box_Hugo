@@ -613,6 +613,7 @@ async def test_foto_que_no_es_https_publica_no_va_a_apify(apify_on, monkeypatch,
 
 
 async def test_cuarta_busqueda_en_paralelo_es_busy(apify_on, monkeypatch):
+    monkeypatch.setattr(apify_1688, "_max_concurrent", lambda: 3)
     monkeypatch.setattr(apify_1688, "_SLOT_WAIT_S", 0.05)
     monkeypatch.setattr(apify_on, "apify_1688_hedge_after_s", 10.0, raising=False)
     fake = FakeApify("hang").install(monkeypatch)
@@ -745,6 +746,33 @@ async def test_timeout_no_se_cachea(apify_on, monkeypatch):
 
     assert again.status == "ok" and again.cached is False
     assert len(fake.starts) == 3
+
+
+async def test_con_los_lugares_ocupados_se_hace_fila_si_alcanza_el_deadline(apify_on, monkeypatch):
+    """Una búsqueda con deadline de sobra espera a que se libere el lugar en
+    vez de salir `busy`: dos fotos con un solo lugar, las dos con resultado."""
+    monkeypatch.setattr(apify_1688, "_max_concurrent", lambda: 1)
+    monkeypatch.setattr(apify_1688, "_SLOT_WAIT_S", 0.05)
+    monkeypatch.setattr(apify_1688, "_MIN_RUN_WINDOW_S", 0.1)
+    fake = FakeApify("ok").install(monkeypatch)
+
+    results = await asyncio.gather(*(
+        apify_1688.search_by_image(f"https://storage.example-bucket.com/fila{n}.jpg", deadline_s=5.0)
+        for n in range(2)))
+
+    assert [r.status for r in results] == ["ok", "ok"]
+    assert len(fake.starts) == 2
+
+
+async def test_el_tope_de_busquedas_en_paralelo_sale_de_la_configuracion(apify_on, monkeypatch):
+    from app import runtime
+
+    assert get_settings().apify_1688_max_concurrent == 14
+    monkeypatch.setattr(runtime, "get", lambda k: 5 if k == "apify_1688_max_concurrent" else None)
+    assert apify_1688._semaphore()._value == 5
+    # Cambiarlo en Configuración arma otro semáforo sin reiniciar.
+    monkeypatch.setattr(runtime, "get", lambda k: 9 if k == "apify_1688_max_concurrent" else None)
+    assert apify_1688._semaphore()._value == 9
 
 
 async def test_over_budget_y_busy_no_se_cachean(apify_on, monkeypatch):

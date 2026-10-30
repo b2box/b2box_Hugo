@@ -83,10 +83,16 @@ def test_cupo_de_apify_tope_500(client):
     assert _rows() == []
 
 
-def test_cupo_de_apify_1688_queda_en_el_audit_log_y_tope_500(client):
+def test_cupo_de_apify_1688_queda_en_el_audit_log_y_tope_5000(client):
     assert client.put("/api/settings/apify_1688_daily_budget", json={"value": 20}).status_code == 200
     (row,) = _rows()
     assert row.detail == "nico@b2box.pro cambió apify_1688_daily_budget: 0 → 20"
-    assert client.put("/api/settings/apify_1688_daily_budget", json={"value": 501}).status_code == 400
+    assert client.put("/api/settings/apify_1688_daily_budget", json={"value": 5001}).status_code == 400
     assert client.delete("/api/settings/apify_1688_daily_budget").status_code == 200
     assert [r.detail for r in _rows()][-1].endswith("20 → 0")
+
+
+def test_las_reglas_del_estimado_las_cambia_un_admin_y_quedan_en_el_audit_log(client):
+    assert client.put("/api/settings/estimate_single_good_min_score", json={"value": 90}).status_code == 200
+    assert _rows()[-1].detail == "nico@b2box.pro cambió estimate_single_good_min_score: 85 → 90"
+    assert client.put("/api/settings/apify_1688_max_concurrent", json={"value": 17}).status_code == 400

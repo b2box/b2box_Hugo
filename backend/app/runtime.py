@@ -245,7 +245,7 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="int", parser=int,
         default_attr="apify_1688_daily_budget",
-        min=0, max=500, step=10, group="app",
+        min=0, max=5000, step=10, group="app",
     ),
     # Límites del lookup público y del rerank de visión
     SettingMeta(
@@ -321,7 +321,7 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="int", parser=int,
         default_attr="estimate_daily_budget",
-        min=0, max=500, step=10, group="app",
+        min=0, max=5000, step=10, group="app",
     ),
     SettingMeta(
         key="estimate_price_factor_k",
@@ -368,6 +368,110 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="int", parser=int,
         default_attr="estimate_tier_qty_3",
         min=1, max=100000, step=10, group="app",
+    ),
+    # Reglas que descartan un estimado (30-oct: se prefiere un rango a no dar nada).
+    SettingMeta(
+        key="estimate_single_good_min_score",
+        label="Estimado: con 1 sola oferta, puntaje mínimo del juez",
+        description=(
+            "Hacen falta 2 ofertas de 1688 que sean el mismo producto. Con 1 sola alcanza si "
+            "el juez de IA le dio al menos este puntaje (0-100). 0 = siempre pedir 2."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_single_good_min_score",
+        min=0, max=100, step=5, group="app",
+    ),
+    SettingMeta(
+        key="estimate_max_dispersion",
+        label="Estimado: dispersión máxima de precios (techo/piso)",
+        description=(
+            "Cuánto más caro puede ser el precio más alto de las ofertas buenas que el más "
+            "bajo. Con más, no se da precio (o se recortan las puntas, ver abajo)."
+        ),
+        type="float", parser=float,
+        default_attr="estimate_max_dispersion",
+        min=1.2, max=10.0, step=0.1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_trim_dispersed",
+        label="Estimado: recortar precios de las puntas (1 / 0)",
+        description=(
+            "1 = si los precios están más dispersos que el máximo, se sacan los de las puntas "
+            "hasta entrar y se da ese rango. 0 = no se da precio."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_trim_dispersed",
+        min=0, max=1, step=1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_bait_fallback",
+        label="Estimado: usar los precios aunque parezcan carnada (1 / 0)",
+        description=(
+            "Se descartan los precios de menos de la mitad o más del doble de la mediana "
+            "(ofertas gancho). 1 = si así quedan muy pocos, se usan todos los de las ofertas "
+            "buenas. 0 = no se da precio."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_bait_fallback",
+        min=0, max=1, step=1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_max_range_ratio",
+        label="Estimado: ancho máximo del rango (techo/piso)",
+        description="El rango que ve el cliente no puede ser más ancho que esto.",
+        type="float", parser=float,
+        default_attr="estimate_max_range_ratio",
+        min=1.2, max=5.0, step=0.1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_clamp_wide_range",
+        label="Estimado: angostar un rango demasiado ancho (1 / 0)",
+        description=(
+            "1 = un rango más ancho que el máximo se angosta alrededor de su centro y se "
+            "muestra. 0 = no se da precio."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_clamp_wide_range",
+        min=0, max=1, step=1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_deadline_s",
+        label="Estimado: segundos máximos por foto",
+        description=(
+            "Tiempo total que Hugo se toma para buscar y cotizar una foto. Más tiempo = más "
+            "fotos con precio. El storefront espera hasta 170 s."
+        ),
+        type="float", parser=float,
+        default_attr="estimate_deadline_s",
+        min=30.0, max=160.0, step=5.0, group="app",
+    ),
+    SettingMeta(
+        key="estimate_apify_deadline_s",
+        label="Estimado: segundos máximos de la búsqueda en 1688",
+        description="Tope de la búsqueda por foto en 1688 dentro del tiempo total.",
+        type="float", parser=float,
+        default_attr="estimate_apify_deadline_s",
+        min=15.0, max=130.0, step=5.0, group="app",
+    ),
+    SettingMeta(
+        key="estimate_visitor_daily_limit",
+        label="Estimado: consultas por día por visitante",
+        description="Estimados por día por visitante (IP real, con hash). 0 = ninguno.",
+        type="int", parser=int,
+        default_attr="estimate_visitor_daily_limit",
+        min=0, max=1000, step=1, group="app",
+    ),
+    SettingMeta(
+        key="apify_1688_max_concurrent",
+        label="Apify: búsquedas por foto en paralelo",
+        description=(
+            "Cuántas fotos se buscan en 1688 a la vez. Cada una usa hasta 2 corridas y el plan "
+            "de Apify corre 32 a la vez (deja lugar al job de ML). Con todo ocupado, la foto "
+            "espera turno."
+        ),
+        type="int", parser=int,
+        default_attr="apify_1688_max_concurrent",
+        min=1, max=16, step=1, group="app",
     ),
     SettingMeta(
         key="apify_meli_search_enabled",

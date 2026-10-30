@@ -347,10 +347,10 @@ async def test_er02_peor_caso_apify_al_limite_y_lo_demas_colgado_50s(env, monkey
     if thumbs == "colgadas":
         assert resp.estimate_status == "low_confidence" and FakeVendure.calls == []
     else:
-        # Las medidas van antes que Vendure: con el juez colgado se come el
-        # tiempo y el corte llega ahí, sin llegar a llamar a Vendure.
-        assert resp.estimate_status == "timeout" and row.deadline_hit == "measures"
-        assert FakeVendure.calls == []
+        # Con la reserva de cola de 30 s, Apify termina antes y las medidas
+        # entran: el corte llega en Vendure, que está colgado.
+        assert resp.estimate_status == "timeout" and row.deadline_hit == "vendure"
+        assert len(FakeVendure.calls) == 1
 
 
 async def test_er02_otapi_colgado_en_link_de_1688_no_cuelga_el_lookup(env, monkeypatch):

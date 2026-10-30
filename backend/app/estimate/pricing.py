@@ -21,8 +21,6 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-# Dispersión máxima (máx/mín) de los precios buenos para mostrar rango.
-MAX_PRICE_DISPERSION = 2.5
 # Anti-carnada: alrededor de la mediana.
 _BAIT_LOW, _BAIT_HIGH = 0.5, 2.0
 # Si techo/piso queda por debajo de esto, se abre a ± _MIN_HALF_WIDTH del medio.
@@ -68,6 +66,19 @@ def remove_bait(prices: Sequence[float]) -> list[float]:
 
 def dispersion(prices: Sequence[float]) -> float:
     return max(prices) / min(prices) if prices and min(prices) > 0 else math.inf
+
+
+def trim_to_dispersion(prices: Sequence[float], max_ratio: float) -> list[float]:
+    """Saca de a uno el precio de la punta más lejana a la mediana (en proporción)
+    hasta que techo/piso entre en `max_ratio`. Puede quedar un solo precio."""
+    values = sorted(p for p in prices if p > 0 and math.isfinite(p))
+    while len(values) > 1 and dispersion(values) > max_ratio:
+        median = statistics.median(values)
+        if median / values[0] >= values[-1] / median:
+            values.pop(0)
+        else:
+            values.pop()
+    return values
 
 
 def _quantile(sorted_values: Sequence[float], q: float) -> float:
@@ -131,10 +142,11 @@ def round_up(cents: float) -> int:
 
 
 def tier_range(prices_by_scenario: dict[str, int], margin_pct: float,
-               max_ratio: float) -> tuple[int, int] | None:
+               max_ratio: float, *, clamp: bool = False) -> tuple[int, int] | None:
     """(piso, techo) en centavos para UNA cantidad, o None si el rango sale
     demasiado ancho para mostrarse. `prices_by_scenario`: invoiceChannelPerUnit
-    de cada escenario a esa cantidad."""
+    de cada escenario a esa cantidad. Con `clamp` un rango ancho se angosta a
+    `max_ratio` alrededor de su centro (geométrico) en vez de descartarse."""
     values = [v for v in prices_by_scenario.values() if v and v > 0]
     if not values:
         return None
@@ -146,7 +158,10 @@ def tier_range(prices_by_scenario: dict[str, int], margin_pct: float,
         mid = prices_by_scenario.get(MID) or (min(values) + max(values)) / 2
         low, high = min(low, mid * (1 - _MIN_HALF_WIDTH)), max(high, mid * (1 + _MIN_HALF_WIDTH))
     if high / low > max_ratio:
-        return None
+        if not clamp:
+            return None
+        center, half = math.sqrt(low * high), math.sqrt(max_ratio)
+        low, high = center / half, center * half
     return round_down(low), round_up(high)
 
 

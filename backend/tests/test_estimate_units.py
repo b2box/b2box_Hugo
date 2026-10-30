@@ -22,6 +22,20 @@ def test_carnada_fuera_y_dispersion():
     assert pricing.dispersion([10, 25]) == 2.5
 
 
+def test_recortar_puntas_hasta_que_entre_la_dispersion():
+    # mediana 14: el de 4 está más lejos (3,5×) que el de 40 (2,9×), sale primero.
+    assert pricing.trim_to_dispersion([4, 12, 14, 16, 40], 2.5) == [12, 14, 16]
+    assert pricing.trim_to_dispersion([10, 12], 2.5) == [10, 12]
+    assert pricing.trim_to_dispersion([1, 100], 2.5) == [100]
+
+
+def test_rango_ancho_se_angosta_al_centro_si_se_pide():
+    wide = {"low": 1_000_00, "mid": 2_000_00, "high": 4_000_00}
+    assert pricing.tier_range(wide, 0.0, 2.0) is None
+    low, high = pricing.tier_range(wide, 0.0, 2.0, clamp=True)
+    assert low < 2_000_00 < high and high / low <= 2.2      # el redondeo suma un poco
+
+
 def test_escenarios_con_pocos_y_con_muchos_precios():
     few = pricing.scenarios_from_prices([10, 12, 14], k=1.1)
     assert (few.low, few.mid, few.high) == (11.0, 13.2, 15.4)
