@@ -90,11 +90,17 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (pos - lo)
 
 
-def scenarios_from_prices(prices_cny: Sequence[float], k: float) -> Scenarios:
-    """low/mid/high en yuanes por unidad, ya multiplicados por k."""
+def scenarios_from_prices(prices_cny: Sequence[float], k: float,
+                          band_pct: float = 0.0) -> Scenarios:
+    """low/mid/high en yuanes por unidad, ya multiplicados por k. Con `band_pct`,
+    low/high son la mediana ± ese %: una oferta más o menos casi no la mueve."""
     values = sorted(prices_cny)
     if not values:
         raise ValueError("sin precios")
+    if band_pct > 0:
+        mid = statistics.median(values)
+        b = band_pct / 100.0
+        return Scenarios(round(mid * (1 - b) * k, 4), round(mid * k, 4), round(mid * (1 + b) * k, 4))
     if len(values) <= 3:
         low, mid, high = values[0], statistics.median(values), values[-1]
     else:

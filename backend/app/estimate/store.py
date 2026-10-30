@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import delete
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.clock import utcnow
 from app.db.models import AuditLog, LookupEstimate
@@ -82,6 +82,30 @@ def save(row: dict[str, Any], audit: dict[str, Any] | None = None) -> None:
             s.commit()
     except Exception:  # noqa: BLE001
         log.exception("No se pudo guardar el registro del estimado")
+
+
+def recent_ok(image_sha256: str, hours: int) -> dict[str, Any] | None:
+    """El último estimado bueno de la misma foto en las últimas `hours`, o None.
+    Nunca lanza: sin base, se busca de nuevo."""
+    if not image_sha256 or hours <= 0:
+        return None
+    try:
+        with Session(engine) as s:
+            row = s.exec(
+                select(LookupEstimate)
+                .where(LookupEstimate.image_sha256 == image_sha256,
+                       LookupEstimate.estimate_status == "ok",
+                       LookupEstimate.created_at >= utcnow() - timedelta(hours=hours))
+                .order_by(LookupEstimate.created_at.desc())  # type: ignore[union-attr]
+                .limit(1)
+            ).first()
+            if row is None or not row.tiers:
+                return None
+            return {"estimate_id": row.estimate_id, "currency": row.currency,
+                    "tiers": json.loads(row.tiers)}
+    except Exception:  # noqa: BLE001
+        log.warning("estimado: no se pudo leer el estimado anterior de la foto")
+        return None
 
 
 def prune(retention_days: int) -> int:

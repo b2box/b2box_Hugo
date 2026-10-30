@@ -57,6 +57,7 @@ RUNTIME = {
     "estimate_trim_dispersed": 0, "estimate_bait_fallback": 0,
     "estimate_max_range_ratio": 2.0, "estimate_clamp_wide_range": 0,
     "apify_1688_max_concurrent": 14,
+    "estimate_reuse_hours": 0, "estimate_median_band_pct": 0.0,
 }
 # Editables en Configuración, pero los tests los mueven en Settings: el stub
 # devuelve None y el servicio usa el de Settings.
@@ -413,6 +414,31 @@ async def test_si_las_carnadas_dejan_un_precio_se_usan_todos_si_esta_prendido(en
     monkeypatch.setitem(RUNTIME, "estimate_clamp_wide_range", 1)
     resp = await _ask(url=ML_URL + "?otra=1")
     assert resp.estimate_status == "ok"
+
+
+async def test_la_misma_foto_da_el_mismo_estimado_sin_volver_a_buscar(env, monkeypatch):
+    monkeypatch.setitem(RUNTIME, "estimate_reuse_hours", 24)
+    first = await _ask()
+    searches = len(env.searches) if hasattr(env, "searches") else None
+    assert first.estimate_status == "ok"
+    second = await _ask(url=ML_URL + "?otra=1")
+    assert second.estimate_status == "ok"
+    assert second.estimate.tiers == first.estimate.tiers
+    assert "misma foto" in (_rows()[-1].reason or "")
+    if searches is not None:
+        assert len(env.searches) == searches
+
+
+async def test_rango_alrededor_de_la_mediana_no_lo_mueven_las_puntas(env, monkeypatch):
+    monkeypatch.setitem(RUNTIME, "estimate_median_band_pct", 10.0)
+    env.candidates = [_cand(0, 10.0), _cand(1, 12.0), _cand(2, 14.0)]
+    env.llm = FakeLLM(_verdicts([90, 90, 90]))
+    a = await _ask()
+    env.candidates = [_cand(0, 11.0), _cand(1, 12.0), _cand(2, 13.0)]
+    b = await _ask(url=ML_URL + "?otra=1")
+    assert a.estimate_status == b.estimate_status == "ok"
+    # Misma mediana (¥12), puntas distintas: el mismo rango.
+    assert a.estimate.tiers == b.estimate.tiers
 
 
 async def test_er03_vendure_sin_configuracion(env):

@@ -36,6 +36,11 @@ def test_rango_ancho_se_angosta_al_centro_si_se_pide():
     assert low < 2_000_00 < high and high / low <= 2.2      # el redondeo suma un poco
 
 
+def test_escenarios_alrededor_de_la_mediana():
+    sc = pricing.scenarios_from_prices([10, 12, 30], k=1.0, band_pct=10.0)
+    assert (sc.low, sc.mid, sc.high) == (10.8, 12.0, 13.2)
+
+
 def test_escenarios_con_pocos_y_con_muchos_precios():
     few = pricing.scenarios_from_prices([10, 12, 14], k=1.1)
     assert (few.low, few.mid, few.high) == (11.0, 13.2, 15.4)
