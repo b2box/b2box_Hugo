@@ -175,6 +175,8 @@ class EstimateSession:
         self.otapi_calls = 0
         self.photo: images.QueryPhoto | None = None
         self.search: apify_1688.Search1688Result | None = None
+        # Estimado anterior de la misma foto (store.recent_ok): se devuelve tal cual.
+        self.reused: dict[str, Any] | None = None
         self.search_error: str | None = None
         self.apify_launched = False
         self._task: asyncio.Task | None = None
@@ -267,6 +269,13 @@ class EstimateSession:
         self._mark("photo", t)
         if self.offer is not None:
             return            # link de 1688: el precio ya está, no se busca
+        # La misma foto ya cotizada hace poco: el mismo precio, sin pagar otra búsqueda.
+        sha = self.photo.sha256 if self.photo else None
+        if sha:
+            prev = await asyncio.to_thread(store.recent_ok, sha, int(_rt("estimate_reuse_hours") or 0))
+            if prev and [t.get("quantity") for t in prev["tiers"]] == tier_quantities():
+                self.reused = prev
+                return
         window = min(float(_rt("estimate_apify_deadline_s")),
                      self.remaining() - TAIL_RESERVE_S)
         if window < _MIN_APIFY_WINDOW_S:
@@ -369,6 +378,8 @@ class EstimateSession:
                               deadline="global")
         if self.offer is not None:
             return await self._from_offer()
+        if self.reused is not None:
+            return self._from_reused(self.reused)
         if self.search is None:
             return self._fail(ERROR, self.search_error or "sin búsqueda")
         if self.search.status != "ok":
@@ -376,6 +387,19 @@ class EstimateSession:
             return self._fail(status, f"apify {self.search.status}",
                               deadline="apify" if status == TIMEOUT else None)
         return await self._from_candidates(self.search.candidates)
+
+    def _from_reused(self, prev: dict[str, Any]) -> EstimateResult:
+        tiers = [pricing.Tier(int(t["quantity"]), int(t["low_cents"]), int(t["high_cents"]))
+                 for t in prev["tiers"]]
+        valid_hours = int(get_settings().estimate_valid_hours)
+        return EstimateResult(
+            OK, estimate_id="e_" + secrets.token_urlsafe(12), currency=prev.get("currency"),
+            tiers=tiers,
+            valid_until=datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=valid_hours),
+            message=pricing.estimate_message(tiers),
+            internal={"reason": f"misma foto que {prev.get('estimate_id')}",
+                      "reused_from": prev.get("estimate_id")},
+        )
 
     # ── link de 1688 ──────────────────────────────────────────────
 
@@ -494,7 +518,8 @@ class EstimateSession:
         for row in log_rows:
             row["used"] = bool(row["good"] and row["price_cny"] in kept)
         detail["median_cny"] = statistics.median(prices)
-        scenarios = pricing.scenarios_from_prices(prices, k)
+        scenarios = pricing.scenarios_from_prices(prices, k,
+                                                  float(_rt("estimate_median_band_pct") or 0))
         used = [c for c in good if c.price_cny in kept]
         unit = await self._unit_from_offers(used, detail)
         return await self._price(scenarios, tier_quantities(), judged=judged, detail=detail,

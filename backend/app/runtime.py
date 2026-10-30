@@ -435,6 +435,29 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1, step=1, group="app",
     ),
     SettingMeta(
+        key="estimate_reuse_hours",
+        label="Estimado: la misma foto da el mismo precio durante (horas)",
+        description=(
+            "Si llega exactamente la misma foto dentro de estas horas, se devuelve el mismo "
+            "estimado sin volver a buscar en 1688 (ni pagar Apify). 0 = siempre busca."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_reuse_hours",
+        min=0, max=720, step=1, group="app",
+    ),
+    SettingMeta(
+        key="estimate_median_band_pct",
+        label="Estimado: banda alrededor de la mediana (%)",
+        description=(
+            "El rango sale de la mediana de los precios de las ofertas buenas ± este %, "
+            "más el margen. La mediana cambia poco entre búsquedas. 0 = de la oferta más "
+            "barata a la más cara (varía más)."
+        ),
+        type="float", parser=float,
+        default_attr="estimate_median_band_pct",
+        min=0.0, max=50.0, step=1.0, group="app",
+    ),
+    SettingMeta(
         key="estimate_deadline_s",
         label="Estimado: segundos máximos por foto",
         description=(

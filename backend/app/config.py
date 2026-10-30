@@ -259,6 +259,12 @@ class Settings(EnvSettings):
     estimate_bait_fallback: int = 1
     # 1 = un rango más ancho que `estimate_max_range_ratio` se angosta al centro.
     estimate_clamp_wide_range: int = 1
+    # La misma foto (mismos bytes) dentro de estas horas devuelve el mismo estimado
+    # sin volver a buscar: 1688 y el juez no dan siempre lo mismo (30-oct). 0 = siempre busca.
+    estimate_reuse_hours: int = 24
+    # Banda ± alrededor de la mediana de los precios buenos (%). La mediana se mueve
+    # poco entre búsquedas; las puntas, mucho. 0 = de la oferta más barata a la más cara.
+    estimate_median_band_pct: float = 10.0
     estimate_retention_days: int = 90
     # Fotos subidas que pueden ir a Apify/Qwen: entradas "host/bucket/prefijo/"
     # separadas por coma (S3 path-style: el bucket va en el path). Vacío =
