@@ -2,7 +2,7 @@
 `POST /api/vendure/events` y su contrato con el emisor de Vendure (repo b2box, plugin hugo-events).
 
 Mismo mundo que test_recalculo_al_cambiar (Vendure falso que acepta escrituras, SQLite de la suite, `pm_mode = 1`). Los que
-llevan `xfail(strict=True)` son hallazgos abiertos: describen lo que pide el criterio y hoy no pasa.
+llevaban `xfail(strict=True)` (QA-11 a QA-13) se arreglaron en los ajustes 30-oct (2) y pasan.
 """
 
 from __future__ import annotations
@@ -59,9 +59,6 @@ def tiers(raw: dict, *rows: tuple[int, int]) -> dict:
 # ─── piso de precio y doble lectura ───────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason="QA-11: el «sin cambio» que compara también contra la otra política de tramos "
-                                       "confunde un cambio de tramos en Vendure con un cambio de configuración y "
-                                       "reactiva con el precio viejo")
 async def test_qa11_a_pricier_minimum_tier_saved_in_vendure_is_not_taken_for_a_policy_change(fake):
     """Política 0 (tramo mínimo, el default). La noche lo midió rojo sin tramos (tier_used = priceWithTax). Pao «Corregir:
     los tramos». Bajan el precio (verde, recálculo). Después cargan tramos: el de 1 unidad caro (rojo) y el más barato igual
@@ -77,8 +74,6 @@ async def test_qa11_a_pricier_minimum_tier_saved_in_vendure_is_not_taken_for_a_p
     assert snap(sid).color == "rojo"
 
 
-@pytest.mark.xfail(strict=True, reason="QA-12: el piso del 50 % contra la noche se olvida a la noche siguiente: lo que "
-                                       "Hugo dejó «reactivar a mano: precio_bajo» lo prende solo a la mañana")
 async def test_qa12_a_price_left_for_a_person_is_not_turned_on_alone_after_the_next_night(fake):
     night("rv1", our=1_000_000)
     item_id = k.disabled_by_hugo("rv1", "corrigiendo")
@@ -239,13 +234,16 @@ async def test_qa_receiver_notices_wait_while_the_watch_is_busy_and_then_run(fak
 
 
 async def test_qa_receiver_unknown_products_cost_no_reads_and_do_not_stay(fake):
+    # Ajustes 30-oct (2): 500 productos de golpe es un cambio masivo (solo se leen las fichas vivas); con 200 o menos,
+    # los que Hugo no mide se descartan sin leer.
     price_recalc.notify({str(10**19 + i): True for i in range(500)}, now=LATER)
     out = await price_recalc.process_notices(now=LATER + timedelta(seconds=20))
-    assert out == {"sin_snapshot": 500} and reads(fake) == 0 and price_recalc._notices == {}
+    assert out == {"masivo": 500} and reads(fake) == 0 and price_recalc._notices == {}
+    price_recalc.notify({str(10**19 + i): True for i in range(200)}, now=LATER)
+    out = await price_recalc.process_notices(now=LATER + timedelta(seconds=20))
+    assert out == {"sin_snapshot": 200} and reads(fake) == 0 and price_recalc._notices == {}
 
 
-@pytest.mark.xfail(strict=True, reason="QA-13: el sondeo vuelve a leer lo que el aviso ya leyó: cada guardado gasta 2 "
-                                       "lecturas del cupo diario (3 con la relectura de tramo/variante)")
 async def test_qa13_a_change_already_read_by_the_notice_is_not_read_again_by_the_polling(monkeypatch, fake):
     from app.scheduler import jobs
     from app.vendure import catalog

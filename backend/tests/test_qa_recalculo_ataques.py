@@ -253,18 +253,21 @@ async def test_qa_a7_red_again_after_the_automatic_reactivation_never_turns_it_o
 
 
 async def test_qa_r4_a_mass_change_of_2000_products_reads_only_the_cap_and_ends(fake):
-    """2.000 productos cambiados en un refresh (un cambio de fórmula): se leen 300, el resto va a la noche, la cola queda
-    vacía y no hay escrituras."""
+    """2.000 productos cambiados en un refresh (un cambio de fórmula). Desde los ajustes 30-oct (2) es un cambio masivo: se
+    leen primero (y solo) las fichas vivas, el resto va a la noche, la cola queda vacía y no hay escrituras."""
     run = w.make_run()
     pids = [f"rv{i:04d}" for i in range(2000)]
     for pid in pids:
         w.add_snap(run, pid, tier="priceWithTax", flag="firme")
         fake.products.append(product(pid, FIXED))
+    for pid in pids[-3:]:
+        w.make_item(pid, "mantenido", kept_ratio=1.277)                             # tres con ficha viva
     out = await recalc(*pids)
-    assert out == {"recalculado": 300, "tope": 1700} and reads(fake) == 300
+    assert out == {"recalculado": 3, "masivo": 1997} and reads(fake) == 3
+    assert {r["variables"]["id"] for r in fake.requests if r["op"] == "PricedProduct"} == set(pids[-3:])
     assert price_recalc._pending == set() and fake.mutations == []
     r = w.run_of(run)
-    assert r.n_verde == 300 and r.n_rojo == 1700
+    assert r.n_verde == 3 and r.n_rojo == 1997
 
 
 async def test_qa_r1a_a_mass_variant_save_enqueues_every_product_once(monkeypatch, fake):
