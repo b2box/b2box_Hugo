@@ -9,8 +9,8 @@ cambio» se relee una vez a los ~2 min (pricing/price_recalc.py: mismos topes, l
 vigía de 30 min quedan de respaldo.
 
 Autenticación PROPIA: el header `X-Hugo-Events-Key` contra VENDURE_EVENTS_KEY, comparado en tiempo constante. No usa la
-cookie del dashboard (está en las rutas públicas del middleware, auth.py). Sin la variable, o con una key floja, contesta
-503: falla cerrado. Defensas como las de /api/oficina: rate limit por IP, bloqueo temporal tras varios intentos con key
+cookie del dashboard (auth.py la deja pasar SOLO para `POST /api/vendure/events`). Sin la variable, o con una key floja,
+contesta 404, como si no existiera (igual que /api/oficina): falla cerrado y no le cuenta a nadie qué falta configurar. Defensas como las de /api/oficina: rate limit por IP, bloqueo temporal tras varios intentos con key
 mala, tope de body y validación estricta (Pydantic, `extra="forbid"`, ids solo dígitos).
 """
 
@@ -75,11 +75,11 @@ def configured_key() -> str | None:
 
 
 def guard(request: Request) -> None:
-    """Sin key configurada (o floja): 503. Key mala, vacía o ausente: 401 y, tras varios intentos, 429 para esa IP. Con la
-    key correcta, rate limit por IP. El bloqueo frena solo FALLOS: nunca a quien trae la key buena."""
+    """Sin key configurada (o floja): 404, como si no existiera. Key mala, vacía o ausente: 401 y, tras varios intentos,
+    429 para esa IP. Con la key correcta, rate limit por IP. El bloqueo frena solo FALLOS: nunca a quien trae la key buena."""
     configured = configured_key()
     if configured is None:
-        raise HTTPException(status_code=503, detail="Avisos de Vendure apagados (falta VENDURE_EVENTS_KEY)")
+        raise HTTPException(status_code=404, detail="Not Found")
     ip = _ip_key(client_ip(request))
     now = time.monotonic()
     if not _key_matches(request.headers.get(HEADER), configured):
