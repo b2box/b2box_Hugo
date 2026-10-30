@@ -4,24 +4,27 @@
 que tienen una variante con `updatedAt` nuevo; `enqueue` los encola y `run_pending` los recalcula. Los tramos son otra
 entidad y guardarlos no toca ni la variante ni el producto: por eso `watch_live_items` (job cada 30 min) relee además el
 precio de los productos con ficha viva o `mantenido` (hasta 60 por vuelta, los que se miraron hace más tiempo primero, de
-a 2, sin gastar el cupo diario del punto 3). Un cambio de tramos de un producto sin ficha lo toma la noche. Los dos
-caminos recalculan igual:
+a 2, con su propio cupo diario `pm_recalc_watch_daily_max`; no corre con `pm_mode = 0` ni con `pm_recalc_daily_max = 0`).
+Un cambio de tramos de un producto sin ficha lo toma la noche. Los dos caminos recalculan igual:
 
     1. nunca con la corrida de la noche en curso: si arranca, lo que falta queda en la cola para la próxima vuelta;
     2. solo productos cuyo último snapshot tiene dato de ML `ok` de menos de `pm_review_data_max_age_h` horas (si no, nada:
        queda para la noche y el motivo va al log);
-    3. UNA lectura por producto (`get_product_priced`), con tope diario propio (`pm_recalc_daily_max`, día ART) y
-       concurrencia 2; nuestro precio sale de `semaforo.pick_our_price` con la `pm_tier_policy` vigente, como la noche;
-    4. si el precio y el tramo son los del último snapshot no se hace nada (ni snapshot ni evento): un cambio de fotos,
-       de descripción o el propio `enabled` que escribe Hugo no hacen ruido ni bucles;
+    3. UNA lectura por producto (`get_product_priced`), con tope diario (`pm_recalc_daily_max` la cola, el suyo el vigía,
+       día ART) y concurrencia 2; nuestro precio sale de `semaforo.pick_our_price` con la `pm_tier_policy` vigente;
+    4. si el precio y el tramo son los del último snapshot (con esa política o con la otra: cambiar `pm_tier_policy` es
+       configuración, no un arreglo) el snapshot no se toca y no hay evento; la ficha que apagó Hugo igual se vuelve a mirar
+       (paso 6), porque esa lectura puede ser la segunda que confirma el «no rojo»;
     5. si cambió, el snapshot se recalcula EN EL LUGAR contra los MISMOS idénticos (misma mediana, comisión y envío):
-       ganancia, color, marca de la bandeja y contadores de la corrida. `recalc_at` dice cuándo y `recalc_before` guarda
-       lo que había medido la corrida. La corrida siguiente lo reemplaza: vuelve a ser la fuente;
+       ganancia, color y contadores de la corrida. `recalc_at` dice cuándo, `recalc_before` guarda lo que había medido la
+       corrida y `recalc_flag` el veredicto de la bandeja con el precio nuevo. `review_flag` NO se toca: es la medición de
+       la noche y de ahí sale la racha (R8). La corrida siguiente lo reemplaza: vuelve a ser la fuente;
     6. con `pm_mode >= 1`, la ficha viva del producto (si no tiene una escritura en curso): evento `recalculado` con el
        antes y el después, el `propuesto` que dejó de ser rojo se cierra solo, el `mantenido` que empeoró se reabre (regla
-       del 10 %), el diagnóstico a-e se rehace (con el cupo de lecturas de la bandeja) y lo que apagó Hugo y ya no es rojo
-       FIRME se reactiva solo, por `price_review_actions` (mismo protocolo y guardas que «Ya lo corregí», actor
-       `hugo:auto`) y con tope diario (`pm_recalc_reactivations_daily_max`).
+       del 10 %), el diagnóstico a-e se rehace (con un sub-cupo de las lecturas de la bandeja) y lo que apagó Hugo y ya no
+       es rojo FIRME (`_decide`): desde `corrigiendo`, con piso de precio y el mismo precio en dos lecturas separadas por
+       30 min, se reactiva solo por `price_review_actions` (mismo protocolo y guardas que «Ya lo corregí», actor
+       `hugo:auto`, tope `pm_recalc_reactivations_daily_max`); desde `en_revision` solo queda el aviso.
 
 Lo que NO hace: no busca de nuevo en Mercado Libre, no abre fichas (un producto que empeora sin ficha se ve en el semáforo
 y sigue con la racha de la noche) y no apaga nada. Lo único que escribe en Vendure es la reactivación, y la escribe
@@ -36,14 +39,14 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from sqlmodel import Session, select
 
 from app import runtime
 from app.clock import utcnow
-from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewItem
+from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent, PriceReviewItem
 from app.db.session import engine
 from app.pricing import daily_budget, price_monitor, semaforo, store_match
 from app.pricing import price_review as pr
@@ -57,8 +60,16 @@ READS_KEY = "pm_recalc_reads"
 REACTIVATIONS_KEY = "pm_recalc_reactivations"
 # Lecturas a Vendure a la vez: cada una es un N+1 de variantList del lado de Vendure (como el full refresh).
 CONCURRENCY = 2
-# La marca que deja en la ficha una reactivación que no se hizo por el tope del día.
-FLAG_NOT_RED = "ya_no_rojo"
+# La marca de la ficha «ya no está en rojo: reactivala a mano» (vive en price_review: la noche también la limpia).
+FLAG_NOT_RED = pr.FLAG_NOT_RED
+# Lecturas del vigía por día (ART): contador propio, aparte del de la cola.
+WATCH_READS_KEY = "pm_recalc_watch_reads"
+# Doble lectura (ajustes 30-oct): Hugo reactiva solo si el «no rojo» se vio en dos lecturas de Vendure con el mismo precio
+# separadas por al menos esto. La primera es la que trajo ese precio (`recalc_at`, o la corrida); la segunda, en general,
+# la del vigía de 30 min.
+CONFIRM_AFTER = timedelta(minutes=30)
+# Piso de precio para reactivar solo: el precio nuevo no puede haber bajado más que esto contra el de la noche.
+MAX_DROP = 0.5
 # El vigía de las fichas vivas (R-1b): cada cuánto y cuántos productos por vuelta.
 WATCH_JOB_ID = "price_recalc_watch"
 WATCH_EVERY_MIN = 30
@@ -87,6 +98,7 @@ class _Ctx:
     tier_policy: int
     max_reads: int
     max_reactivations: int
+    max_watch_reads: int
     # True = la cola de cambios (gasta el cupo diario y lo que frena la noche vuelve a la cola); False = el vigía.
     from_queue: bool = True
     catalog: dict[str, VendureProduct] = field(default_factory=dict)
@@ -96,9 +108,18 @@ class _Ctx:
 
 
 @dataclass(slots=True)
+class _Attempt:
+    """Una reactivación automática para después de guardar. `hold` = (código, por qué) si no se puede: se anota a mano."""
+    item_id: int
+    state: str
+    hold: tuple[str, str] | None = None
+
+
+@dataclass(slots=True)
 class _Change:
-    """Lo que hay que hacer después de guardar: reactivar (ficha y estado esperado) o rehacer el diagnóstico."""
-    reactivate: tuple[int, str] | None = None
+    """Lo que hay que hacer después de guardar: reactivar o rehacer el diagnóstico. `changed` = cambió el precio."""
+    changed: bool = False
+    reactivate: _Attempt | None = None
     diagnose: int | None = None
 
 
@@ -107,7 +128,8 @@ def _context(client: Any, now: datetime | None, *, from_queue: bool) -> _Ctx:
     return _Ctx(client=client or VendureClient(), now=now, day=daily_budget.today_art(now),
                 params=pr.ReviewParams.from_runtime(), mode=int(runtime.get("pm_mode") or 0),
                 tier_policy=int(runtime.get("pm_tier_policy")), max_reads=int(runtime.get("pm_recalc_daily_max")),
-                max_reactivations=int(runtime.get("pm_recalc_reactivations_daily_max")), from_queue=from_queue)
+                max_reactivations=int(runtime.get("pm_recalc_reactivations_daily_max")),
+                max_watch_reads=int(runtime.get("pm_recalc_watch_daily_max")), from_queue=from_queue)
 
 
 async def run_pending(client: Any = None, now: datetime | None = None) -> dict[str, int]:
@@ -117,18 +139,26 @@ async def run_pending(client: Any = None, now: datetime | None = None) -> dict[s
         return {}
     if price_monitor.price_monitor_lock.locked():
         return {"corrida": len(_pending)}
+    if _busy.locked():                           # el vigía está recalculando: la cola sigue entera para la próxima vuelta
+        return {"ocupado": len(_pending)}
     async with _busy:
+        ctx = _context(client, now, from_queue=True)     # antes de sacar nada: si falla, la cola queda como estaba
         ids = sorted(_pending)
         _pending.clear()
-        return await _run(_context(client, now, from_queue=True), ids, "cambios en Vendure")
+        return await _run(ctx, ids, "cambios en Vendure")
 
 
 async def watch_live_items(client: Any = None, now: datetime | None = None, limit: int = WATCH_MAX) -> dict[str, int]:
     """El vigía (R-1b, cada 30 min): relee el precio de los productos con ficha viva o `mantenido`, hasta `limit` por
     vuelta, primero los que se miraron hace más tiempo (los nunca mirados, por la ficha más vieja). Mismo camino que la
-    cola: si el precio y el tramo no cambiaron, nada. No gasta el cupo diario de la cola y no corre con la noche."""
+    cola: si el precio y el tramo no cambiaron, el snapshot no se toca, pero la ficha que apagó Hugo se vuelve a mirar
+    (es la segunda lectura que confirma el «no rojo», o lo que no se pudo aplicar antes). Contador diario propio
+    (`pm_recalc_watch_daily_max`), no el de la cola. No corre con la noche, con `pm_mode = 0` ni con el recálculo
+    apagado (`pm_recalc_daily_max = 0`)."""
     if price_monitor.price_monitor_lock.locked():
         return {"corrida": 0}
+    if int(runtime.get("pm_mode") or 0) == 0 or int(runtime.get("pm_recalc_daily_max") or 0) <= 0:
+        return {}                                # bandeja en sombra o recálculo apagado: el vigía tampoco lee
     async with _busy:
         pids = await asyncio.to_thread(_live_products)
         never = datetime.min
@@ -188,27 +218,28 @@ async def _recalc_one(ctx: _Ctx, pid: str) -> str:
         _pending.add(pid)
     if snap_id is None:
         return reason
-    if ctx.from_queue and await asyncio.to_thread(daily_budget.reserve, READS_KEY, ctx.max_reads, None, None,
-                                                  ctx.day) is None:
+    key, cap = (READS_KEY, ctx.max_reads) if ctx.from_queue else (WATCH_READS_KEY, ctx.max_watch_reads)
+    if await asyncio.to_thread(daily_budget.reserve, key, cap, None, None, ctx.day) is None:
         ctx.capped = True
         return "tope"
     product = await ctx.client.get_product_priced(pid)
     if product is None:
         return "no_existe"
-    our = semaforo.pick_our_price(product.priced_variants or [], ctx.tier_policy)
+    variants = product.priced_variants or []
+    our = semaforo.pick_our_price(variants, ctx.tier_policy)
     if our is None:
         return "sin_precio"
     if our.currency and our.currency.upper() != price_monitor.CURRENCY:
         return "moneda"
+    other_policy = (semaforo.TIER_POLICY_CHEAPEST if ctx.tier_policy == semaforo.TIER_POLICY_MIN
+                    else semaforo.TIER_POLICY_MIN)
     ctx.catalog[pid] = product
-    change = await asyncio.to_thread(_apply, ctx, snap_id, product, our)
-    if change is None:
-        return "sin_cambio"
+    change = await asyncio.to_thread(_apply, ctx, snap_id, product, our, semaforo.pick_our_price(variants, other_policy))
     if change.reactivate is not None:
-        await _reactivate(ctx, *change.reactivate)
+        await _reactivate(ctx, change.reactivate)
     if change.diagnose is not None:
         ctx.to_diagnose.append(change.diagnose)
-    return "recalculado"
+    return "recalculado" if change.changed else "sin_cambio"
 
 
 def _last_measured(pid: str, ctx: _Ctx) -> tuple[int | None, str]:
@@ -230,12 +261,28 @@ def _last_measured(pid: str, ctx: _Ctx) -> tuple[int | None, str]:
         return int(snap.id), ""  # type: ignore[arg-type]
 
 
-def _apply(ctx: _Ctx, snap_id: int, product: VendureProduct, our: semaforo.OurPrice) -> _Change | None:
-    """El snapshot recalculado, los contadores de la corrida y la ficha, en UNA transacción. None si no cambió nada."""
+def _apply(ctx: _Ctx, snap_id: int, product: VendureProduct, our: semaforo.OurPrice,
+           other: semaforo.OurPrice | None) -> _Change:
+    """El snapshot recalculado, los contadores de la corrida y la ficha, en UNA transacción.
+
+    Si el precio y el tramo son los del snapshot (con la política de tramos vigente o con la otra: un cambio de
+    `pm_tier_policy` es configuración, no un arreglo en Vendure) el snapshot no se toca; la ficha que apagó Hugo igual se
+    vuelve a mirar, porque esta lectura puede ser la que confirma el «no rojo»."""
+    change = _Change()
     with Session(engine, expire_on_commit=False) as s:
         snap = s.get(MarketPriceSnapshot, snap_id)
-        if snap is None or (snap.our_price_cents, snap.tier_used) == (our.price_cents, our.tier_used):
-            return None
+        if snap is None:
+            return change
+        seen = {(o.price_cents, o.tier_used) for o in (our, other) if o is not None}
+        if (snap.our_price_cents, snap.tier_used) in seen:
+            if ctx.mode >= 1:
+                item = _live_item(s, snap.product_id)
+                if item is not None:
+                    change.reactivate = _decide(s, ctx, item, snap)
+                    s.add(item)
+                    s.commit()
+            return change
+        change.changed = True
         # Dos productos de la misma corrida se recalculan a la vez: sin este lock, en Postgres cada uno recontaría la
         # corrida sin ver el cambio del otro (READ COMMITTED) y el último commit dejaría los contadores mal.
         s.exec(select(PriceMonitorRun).where(PriceMonitorRun.id == snap.run_id).with_for_update()).first()
@@ -255,22 +302,30 @@ def _apply(ctx: _Ctx, snap_id: int, product: VendureProduct, our: semaforo.OurPr
         snap.est_margin_pct = None if margin is None else round(margin, 2)
         store_match.reapply_color(s, snap)          # con las tiendas contando, el color las incluye (como la noche)
         verdict = pr.evaluate_firm(snap, ctx.params, ctx.now)
-        snap.review_flag = verdict.flag
+        # `review_flag` es la medición de la noche y de ahí sale la racha (R8): el veredicto del recálculo va aparte.
+        snap.recalc_flag = verdict.flag
         s.add(snap)
         price_monitor.recount_run(s, snap.run_id)
-        change = _Change()
         if ctx.mode >= 1:
             _update_item(s, ctx, snap, verdict, change, old_price, old_color, ratio_before)
         s.commit()
     return change
 
 
+def _live_item(s: Session, product_id: str) -> PriceReviewItem | None:
+    """La ficha viva del producto, salvo que tenga una escritura en Vendure en curso (esa no se toca: B-6)."""
+    item = pr.open_item_for(s, product_id)
+    if item is None or pr.pending_intent(s, int(item.id)) is not None:   # type: ignore[arg-type]
+        return None
+    return item
+
+
 def _update_item(s: Session, ctx: _Ctx, snap: MarketPriceSnapshot, verdict: pr.FirmVerdict, change: _Change,
                  old_price: int | None, old_color: str, ratio_before: float | None) -> None:
     """La ficha viva (abierta o `mantenido`) del producto. Sin ficha no se abre ninguna: eso es de la noche (R8)."""
-    item = pr.open_item_for(s, snap.product_id)
-    if item is None or pr.pending_intent(s, int(item.id)) is not None:   # type: ignore[arg-type]
-        return                                   # una escritura en Vendure en curso: la ficha no se toca
+    item = _live_item(s, snap.product_id)
+    if item is None:
+        return
     new_price = snap.our_price_cents or 0
     item.last_run_id, item.last_snapshot_id = snap.run_id, snap.id
     item.last_color, item.last_margin_pct = snap.color, snap.est_margin_pct
@@ -288,48 +343,109 @@ def _update_item(s: Session, ctx: _Ctx, snap: MarketPriceSnapshot, verdict: pr.F
         # Regla del 10 % en el momento: la racha ya se cumplió cuando se abrió la ficha, no se vuelve a pedir.
         pr._watch_kept(s, item, snap, verdict, max(item.streak_nights, ctx.params.confirm_nights), ctx.params,
                        snap.run_id, ctx.now)
-    elif item.state in (pr.EN_REVISION, pr.CORRIGIENDO) and item.hugo_disabled is True:
-        flags = [f for f in (pr._loads(item.flags) or []) if f != FLAG_NOT_RED]
-        item.flags = json.dumps(flags)
-        if pr.evaluate_firm(snap, ctx.params, ctx.now, colors=pr.NOT_RED).firm:
-            change.reactivate = (int(item.id), item.state)  # type: ignore[arg-type]
+    else:
+        change.reactivate = _decide(s, ctx, item, snap)
     s.add(item)
     if item.state in pr.OPEN_STATES:
         change.diagnose = int(item.id)  # type: ignore[arg-type]
 
 
-AVISO_TOPE = {
+AVISO = {
     pr.CORRIGIENDO: "Ya no está en rojo: reactivala con «Ya lo corregí».",
     pr.EN_REVISION: "Ya no está en rojo: pasala a «Corregir» y reactivala con «Ya lo corregí».",
 }
+PRECIO_BAJO = ("el precio nuevo quedó demasiado bajo (contra Mercado Libre o contra el de la noche): revisá que no sea un "
+               "error de carga")
 
 
-async def _reactivate(ctx: _Ctx, item_id: int, state: str) -> None:
-    """La reactivación automática, con su tope del día. Las guardas, la escritura y lo que queda anotado (evento, AuditLog,
-    «reactivar a mano» si algo frena) son de `price_review_actions`: este módulo no escribe en Vendure."""
+def _decide(s: Session, ctx: _Ctx, item: PriceReviewItem, snap: MarketPriceSnapshot) -> _Attempt | None:
+    """¿Hugo reactiva solo esta ficha? (A-1 a A-5 y los ajustes del 30-oct). Solo lo que apagó Hugo:
+
+      * no rojo FIRME (verde o amarillo con la misma calidad de dato que la entrada); si no, nada y se va el aviso;
+      * piso de precio: nuestro precio / mediana firme >= 1 / `pm_review_max_price_ratio` y no más de 50 % por debajo del
+        de la noche; si no, se intenta igual por el protocolo para que quede «reactivar a mano: precio_bajo»;
+      * `en_revision` nunca: solo el aviso «ya no está en rojo» (una vez);
+      * `corrigiendo`, con el mismo precio visto en dos lecturas separadas por `CONFIRM_AFTER`, y un solo intento por
+        precio (lo que terminó sin escribir no se repite en cada lectura).
+
+    Devuelve el intento para después de guardar, o None. No escribe en Vendure ni hace commit."""
+    if item.hugo_disabled is not True or item.state not in AVISO:
+        return None
+    ok = pr.evaluate_firm(snap, ctx.params, ctx.now, colors=pr.NOT_RED)
+    if not ok.firm:
+        pr.drop_flag(item, FLAG_NOT_RED)
+        return None
+    hold = _too_low(snap, ok, ctx.params)
+    if hold is not None:
+        pr.drop_flag(item, FLAG_NOT_RED)             # con un precio sospechoso no se invita a reactivar
+    if item.state == pr.EN_REVISION:
+        if hold is None:
+            _warn_once(s, item, "en_revision", ctx.now)
+        return None
+    first = snap.recalc_at or snap.captured_at
+    if ctx.now - first < CONFIRM_AFTER or _attempted_since(s, int(item.id), first):  # type: ignore[arg-type]
+        return None
+    return _Attempt(int(item.id), item.state, hold)  # type: ignore[arg-type]
+
+
+def _too_low(snap: MarketPriceSnapshot, ok: pr.FirmVerdict, p: pr.ReviewParams) -> tuple[str, str] | None:
+    """El piso de precio: un precio con ceros de menos es «verde firme» y no se puede prender solo."""
+    night = (pr._loads(snap.recalc_before) or {}).get("our_price_cents") if snap.recalc_before else snap.our_price_cents
+    now_price = snap.our_price_cents or 0
+    if ok.price_ratio is None or ok.price_ratio < 1.0 / p.max_price_ratio:
+        return "precio_bajo", PRECIO_BAJO
+    if isinstance(night, (int, float)) and night > 0 and now_price < night * (1 - MAX_DROP):
+        return "precio_bajo", PRECIO_BAJO
+    return None
+
+
+def _attempted_since(s: Session, item_id: int, since: datetime) -> bool:
+    """¿Ya hubo un intento automático con este precio? (el que terminó en «reactivar a mano» o en un error de Vendure no se
+    repite en cada lectura: vuelve a intentarse recién con otro precio u otra medición)."""
     from app.pricing import price_review_actions as actions   # lazy: actions importa price_review y el cliente
 
-    if await asyncio.to_thread(daily_budget.reserve, REACTIVATIONS_KEY, ctx.max_reactivations, None, None,
-                               ctx.day) is None:
-        await asyncio.to_thread(_warn_cap, item_id)
+    return s.exec(select(PriceReviewEvent.id).where(
+        PriceReviewEvent.item_id == item_id, PriceReviewEvent.kind == actions.AUTO_KIND,
+        PriceReviewEvent.at >= since).limit(1)).first() is not None
+
+
+def _warn_once(s: Session, item: PriceReviewItem, code: str, now: datetime) -> None:
+    """El aviso «ya no está en rojo» (marca y evento), una sola vez mientras siga valiendo."""
+    if FLAG_NOT_RED in (pr._loads(item.flags) or []):
+        return
+    item.flags = json.dumps([*(pr._loads(item.flags) or []), FLAG_NOT_RED])
+    pr.add_event(s, item, "aviso_reactivar", motive_code=code, motive_text=AVISO[item.state], now=now)
+
+
+async def _reactivate(ctx: _Ctx, attempt: _Attempt) -> None:
+    """La reactivación automática, con su tope del día. Las guardas, la escritura y lo que queda anotado (evento, AuditLog,
+    «reactivar a mano» si algo frena, también el piso de precio) son de `price_review_actions`: este módulo no escribe en
+    Vendure."""
+    from app.pricing import price_review_actions as actions   # lazy: actions importa price_review y el cliente
+
+    if attempt.hold is None and await asyncio.to_thread(
+            daily_budget.reserve, REACTIVATIONS_KEY, ctx.max_reactivations, None, None, ctx.day) is None:
+        await asyncio.to_thread(_warn_cap, attempt.item_id)
         return
     try:
-        await actions.auto_reactivate(item_id, state)
+        if attempt.hold is None:
+            await actions.auto_reactivate(attempt.item_id, attempt.state)
+        else:
+            await actions.auto_reactivate(attempt.item_id, attempt.state, hold=attempt.hold)
     except actions.ActionError as exc:
-        log.info("recálculo: la ficha #%s no se reactivó sola (%s)", item_id, exc.code)
+        log.info("recálculo: la ficha #%s no se reactivó sola (%s)", attempt.item_id, exc.code)
     else:
-        await asyncio.to_thread(_mark_enabled, item_id)
+        await asyncio.to_thread(_mark_enabled, attempt.item_id)
 
 
 def _warn_cap(item_id: int) -> None:
-    """Pasado el tope del día, la ficha queda con el aviso para reactivarla a mano."""
+    """Pasado el tope del día, la ficha queda con el aviso para reactivarla a mano (una vez; el día siguiente se reintenta)."""
     with Session(engine) as s:
         item = s.get(PriceReviewItem, item_id)
-        if item is None or item.state not in AVISO_TOPE:
+        if item is None or item.state != pr.CORRIGIENDO:
             return
-        item.flags = json.dumps([f for f in (pr._loads(item.flags) or []) if f != FLAG_NOT_RED] + [FLAG_NOT_RED])
+        _warn_once(s, item, "tope_del_dia", utcnow())
         s.add(item)
-        pr.add_event(s, item, "aviso_reactivar", motive_code="tope_del_dia", motive_text=AVISO_TOPE[item.state])
         s.commit()
 
 

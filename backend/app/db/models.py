@@ -387,6 +387,9 @@ class MarketPriceSnapshot(SQLModel, table=True):
     # se guarda en el primer recálculo y no se pisa. None = la fila es tal cual la dejó la corrida.
     recalc_at: datetime | None = Field(default=None)
     recalc_before: str | None = Field(default=None)
+    # El veredicto de la bandeja (`firme` / `dudoso:<motivo>`) con el precio recalculado. Va aparte de `review_flag`, que
+    # sigue siendo la medición de la noche: de ahí sale la racha (R8), y un recálculo de día no la mueve.
+    recalc_flag: str | None = Field(default=None, max_length=40)
 
 
 class MarketMatchFeedback(SQLModel, table=True):
