@@ -37,6 +37,7 @@ FIXED, CHEAPER, WORSE = 600_000, 700_000, 1_200_000      # contra la mediana 900
 def fake(monkeypatch):
     f = k.setup(monkeypatch)
     price_recalc._pending.clear()
+    monkeypatch.setattr(price_recalc, "_watched_at", {})
     yield f
     price_recalc._pending.clear()
     k.clean_audit()
@@ -91,6 +92,13 @@ def _vp(pid: str, updated: str) -> VendureProduct:
                           updated_at=updated)
 
 
+def _clean_catalog(monkeypatch) -> None:
+    for name, value in (("_cache", []), ("_loaded_at", 0.0), ("_full_at", None), ("_watermark", None),
+                        ("_changed", set()), ("_variant_watermark", None), ("_variant_seen", {}),
+                        ("_variants_supported", True)):
+        monkeypatch.setattr(catalog, name, value)
+
+
 async def test_r1_the_incremental_refresh_notes_only_products_saved_again_in_vendure(monkeypatch):
     """Cuenta solo lo que ya estaba en el cache con otro `updatedAt`: ni los del margen del watermark (mismo `updatedAt`)
     ni los nuevos (no tienen nada medido)."""
@@ -106,12 +114,16 @@ async def test_r1_the_incremental_refresh_notes_only_products_saved_again_in_ven
         async def fetch_all_products(self, **_k):
             return list(remote.values())
 
+        async def latest_variant_update(self):
+            return None
+
+        async def fetch_variants_updated_since(self, since, page_size=None):
+            return []
+
     monkeypatch.setattr(catalog, "VendureClient", Fake)
     monkeypatch.setattr(catalog, "get_settings",
                         lambda: SimpleNamespace(verify_catalog_ttl_seconds=300, catalog_full_refresh_seconds=43200))
-    for name, value in (("_cache", []), ("_loaded_at", 0.0), ("_full_at", None), ("_watermark", None)):
-        monkeypatch.setattr(catalog, name, value)
-    monkeypatch.setattr(catalog, "_changed", set())
+    _clean_catalog(monkeypatch)
     await catalog.get_catalog()
     assert catalog.pop_changed() == []                                        # el primer full no sabe qué cambió
     remote["1"] = _vp("1", "2026-10-14T11:00:00.000Z")                          # alguien lo guardó en Vendure
@@ -150,10 +162,116 @@ def test_r1_the_refresh_job_runs_well_within_ten_minutes():
     try:
         job = jobs.scheduler.get_job("refresh_catalog")
         assert job is not None and job.trigger.interval <= timedelta(minutes=5)
+        watch = jobs.scheduler.get_job(price_recalc.WATCH_JOB_ID)                # R-1b: el vigía de las fichas vivas
+        assert watch is not None and watch.trigger.interval == timedelta(minutes=30) and watch.max_instances == 1
     finally:
         for job in jobs.scheduler.get_jobs():                                   # como clean_scheduler de test_price_monitor
             jobs.scheduler.remove_job(job.id)
     assert Settings(vendure_api_url="https://x.invalid/admin-api").verify_catalog_ttl_seconds - 30 <= 300
+
+
+# ─── R-1a: lo que se guarda solo en la variante; R-1b: los tramos, cada 30 min ─
+
+
+def _variant(pid: str, at: str, vid: str | None = None) -> dict:
+    return {"id": vid or f"v{pid}", "productId": pid, "updatedAt": at}
+
+
+async def _refresh(monkeypatch) -> None:
+    from app.scheduler import jobs
+
+    monkeypatch.setattr(price_recalc, "utcnow", lambda: LATER)
+    await jobs.refresh_catalog()
+
+
+async def test_r1a_a_change_saved_only_in_a_variant_is_recalculated_and_the_margin_does_not_repeat_it(monkeypatch, fake):
+    """La caja, las medidas y el precio viven en la variante: guardarla no toca el `updatedAt` del producto. El refresh
+    pide además las variantes con `updatedAt` nuevo (solo id, productId y updatedAt) y encola su producto."""
+    _clean_catalog(monkeypatch)
+    _, sid = night("rv1")
+    night("rv2", run=w.run_of(snap(sid).run_id).id)
+    in_vendure(fake, "rv1", 1_000_000)
+    in_vendure(fake, "rv2", 1_000_000)
+    fake.variant_updates = [_variant("rv1", "2026-10-14T10:00:00Z"), _variant("rv2", "2026-10-14T10:30:00Z")]
+    await _refresh(monkeypatch)                                                  # arranque: full + punto de partida
+    assert reads(fake) == 0 and fake.count("LatestVariantUpdate") == 1
+    fake.products[0] = product("rv1", FIXED)                                     # el producto sigue con su updatedAt
+    fake.variant_updates[0] = _variant("rv1", "2026-10-14T11:15:00Z")            # se guardó solo la variante
+    await _refresh(monkeypatch)
+    assert snap(sid).our_price_cents == FIXED and snap(sid).recalc_at == LATER and reads(fake) == 1
+    seed, q = [r for r in fake.requests if r["op"] == "VariantsUpdatedSince"]   # el arranque anota el margen
+    assert "productId" in q["query"] and "bulkPriceTiers" not in q["query"] and "priceWithTax" not in q["query"]
+    assert seed["variables"]["since"] == q["variables"]["since"] == "2026-10-14T10:28:00Z"   # watermark - margen
+    await _refresh(monkeypatch)                                                  # el margen la trae otra vez, igual
+    assert reads(fake) == 1 and catalog.pop_changed() == []
+
+
+@pytest.mark.parametrize("rejected_from", ["arranque", "incremental"])
+async def test_r1a_if_vendure_rejects_the_variant_filter_it_warns_once_and_goes_on_with_products(monkeypatch, fake,
+                                                                                                  caplog, rejected_from):
+    import logging
+
+    _clean_catalog(monkeypatch)
+    _, sid = night("rv1")
+    in_vendure(fake, "rv1", 1_000_000)
+    fake.variant_updates = [_variant("rv1", "2026-10-14T10:00:00Z")]
+    rejection = 'Unknown argument "filter" on field "Query.productVariants"'
+    if rejected_from == "arranque":
+        fake.errors["VariantsUpdatedSince"] = rejection
+    with caplog.at_level(logging.WARNING, logger="app.vendure.catalog"):
+        await _refresh(monkeypatch)
+        fake.errors["VariantsUpdatedSince"] = rejection
+        await _refresh(monkeypatch)                                              # rechazado (si no lo fue antes): aviso
+        await _refresh(monkeypatch)                                              # no se vuelve a pedir ni a avisar
+        fake.products[0] = {**product("rv1", FIXED), "updatedAt": "2026-10-14T12:00:00Z"}
+        await _refresh(monkeypatch)                                              # el producto sí se sigue viendo
+    assert snap(sid).our_price_cents == FIXED and catalog._variants_supported is False
+    assert fake.count("VariantsUpdatedSince") == (1 if rejected_from == "arranque" else 2)
+    assert sum("no acepta pedir variantes" in r.getMessage() for r in caplog.records) == 1
+
+
+async def test_r1b_a_tier_change_of_a_product_with_a_live_item_is_picked_by_the_30_minute_watch(fake):
+    """Un tramo es otra entidad: no toca ni la variante ni el producto. El vigía relee el precio de las fichas vivas por el
+    mismo camino (acá: deja de ser rojo y la propuesta se cierra) sin gastar el cupo diario de la cola."""
+    _, sid = night("rv1")
+    item_id = w.make_item("rv1")
+    in_vendure(fake, "rv1", CHEAPER)                                             # cambió un tramo
+    out = await price_recalc.watch_live_items(now=LATER)
+    assert out == {"recalculado": 1} and snap(sid).our_price_cents == CHEAPER
+    assert w.item(item_id).state == "cerrado_auto"
+    assert daily_budget.used_today(price_recalc.READS_KEY, day=daily_budget.today_art(LATER)) == 0
+    assert await price_recalc.watch_live_items(now=LATER + timedelta(minutes=30)) == {}   # ya no tiene ficha viva
+
+
+async def test_r1b_without_a_live_item_the_watch_does_not_read_it(fake):
+    run = w.make_run()
+    for pid in ("rv1", "rv2", "rv3"):
+        night(pid, run=run)
+        in_vendure(fake, pid, FIXED)
+    w.make_item("rv2", "despublicado", closed_at=w.NOW)                          # cerrada
+    w.make_item("rv3", "mantenido", kept_ratio=1.277)                            # viva: se mira
+    out = await price_recalc.watch_live_items(now=LATER)
+    assert [r["variables"]["id"] for r in fake.requests if r["op"] == "PricedProduct"] == ["rv3"]
+    assert out == {"recalculado": 1}
+
+
+async def test_r1b_the_watch_respects_the_night_lock_and_reads_at_most_60_oldest_first(fake):
+    run = w.make_run()
+    pids = [f"rv{i:02d}" for i in range(65)]
+    for i, pid in enumerate(pids):
+        night(pid, run=run)
+        in_vendure(fake, pid, 1_000_000)                                         # sin cambios: lectura y nada más
+        w.make_item(pid, at=w.NOW - timedelta(minutes=100 - i))                  # rv00 es la ficha más vieja
+    async with price_monitor.price_monitor_lock:
+        assert await price_recalc.watch_live_items(now=LATER) == {"corrida": 0}
+    assert reads(fake) == 0
+    assert await price_recalc.watch_live_items(now=LATER) == {"sin_cambio": 60} and reads(fake) == 60
+    first = {r["variables"]["id"] for r in fake.requests if r["op"] == "PricedProduct"}
+    assert first == set(pids[:60])
+    fake.requests.clear()
+    await price_recalc.watch_live_items(now=LATER + timedelta(minutes=30), limit=5)
+    assert {r["variables"]["id"] for r in fake.requests if r["op"] == "PricedProduct"} == set(pids[60:])
+    assert price_recalc._pending == set() and w.events("recalculado") == []
 
 
 async def test_r2_same_price_and_tier_does_nothing_at_all(fake):

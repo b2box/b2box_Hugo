@@ -5,7 +5,7 @@ test_price_review_pg.py para levantarlo).
     resto), sin reescribir la tabla ni tocar las filas; tres arranques dan lo mismo;
   * el SQL de vuelta atrás del README, copiado tal cual, las saca sin perder datos y volver a subir da lo mismo;
   * el recálculo completo (snapshot en el lugar, contadores, ficha, reactivación por el protocolo, AuditLog y mail) corre
-    sobre Postgres.
+    sobre Postgres, y el vigía de las fichas vivas (cada 30 min) también.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from tests import review_decide as k  # noqa: E402
 from tests import review_world as w  # noqa: E402
 from tests.test_price_review_pg import README, _old_dump, _seed_old_rows, old_schema  # noqa: E402,F401
 from tests.test_qa_tiendas_pg import PG_URL  # noqa: E402
-from tests.test_recalculo_al_cambiar import FIXED, LATER, in_vendure, night, recalc  # noqa: E402
+from tests.test_recalculo_al_cambiar import CHEAPER, FIXED, LATER, in_vendure, night, recalc  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not PG_URL, reason="falta HUGO_TEST_PG_URL (Postgres descartable)")
 COLS = {"recalc_at", "recalc_before"}
@@ -107,4 +107,22 @@ async def test_the_recalculation_and_the_automatic_reactivation_work_on_postgres
         assert [i.id for _, i in data.reactivated] == [item_id]
         price_review_digest.mark_sent(s, data)
         s.commit()
+    k.clean_audit()
+
+
+async def test_the_watch_of_live_items_works_on_postgres(old_schema, monkeypatch):  # noqa: F811  (fixture importada)
+    session.init_db()
+    fake = k.setup(monkeypatch)
+    monkeypatch.setattr(price_recalc, "_watched_at", {})
+    run, sid = night("rv1")
+    kept = w.make_item("rv1", "mantenido", kept_ratio=1.277)
+    night("rv2", run=run)
+    w.make_item("rv2", "despublicado", closed_at=w.NOW)
+    in_vendure(fake, "rv1", CHEAPER)
+    in_vendure(fake, "rv2", CHEAPER)
+    assert await price_recalc.watch_live_items(now=LATER) == {"recalculado": 1}
+    assert [r["variables"]["id"] for r in fake.requests if r["op"] == "PricedProduct"] == ["rv1"]
+    with Session(old_schema) as s:
+        assert s.get(MarketPriceSnapshot, sid).our_price_cents == CHEAPER
+    assert w.item(kept).state == "mantenido" and w.events("recalculado")
     k.clean_audit()
