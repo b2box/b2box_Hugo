@@ -89,6 +89,7 @@ const EVENT_LABEL: Record<string, string> = {
   recalculado: "Recalculado por un cambio en Vendure",
   decision_reactivar_auto: "Hugo lo reactivó solo (se corrigió en Vendure y ya no es rojo)",
   aviso_reactivar: "No se reactivó solo",
+  rojo_tras_reactivar: "Volvió a dar rojo firme después de que Hugo lo reactivó solo",
 };
 
 // La marca que deja en la ficha una reactivación automática que no se hizo por el tope del día (price_recalc.FLAG_NOT_RED).
@@ -407,7 +408,9 @@ export function ItemRow({ it, onOpen }: { it: PriceReviewItemRow; onOpen: () => 
           <span className="block text-[11px] text-muted-foreground mt-0.5">dato de la oficina</span>
         )}
         {it.flags.includes(FLAG_NOT_RED) && (
-          <span className="block text-[11px] text-success mt-0.5">ya no está en rojo: reactivala con «Ya lo corregí»</span>
+          <span className="block text-[11px] text-success mt-0.5">
+            ya no está en rojo: {it.state === "en_revision" ? "pasala a «Corregir»" : "reactivala con «Ya lo corregí»"}
+          </span>
         )}
       </td>
       <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{fmtDays(it.waiting_days)}</td>
@@ -489,7 +492,10 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
       )}
       {notRedAnymore && (
         <p className="p-2 rounded-md text-xs border bg-success/10 border-success/40 text-success">
-          {notRedAnymore} Hugo no la reactivó solo porque llegó al tope de reactivaciones automáticas del día.
+          {notRedAnymore}{" "}
+          {d.state === "en_revision"
+            ? "Hugo reactiva solo desde «Corrigiendo»: en revisión decide una persona."
+            : "Hugo no la reactivó solo porque llegó al tope de reactivaciones automáticas del día."}
         </p>
       )}
       {!closed && lastRecalc && (

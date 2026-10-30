@@ -340,6 +340,9 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
     placeholderData: keepPreviousData,
     // Mientras corre, la tabla de la corrida en curso va creciendo.
     refetchInterval: running ? 20_000 : false,
+    // Un producto recalculado de día cambia sin que nadie toque la pantalla: al volver a la pestaña se vuelve a pedir
+    // (solo esta tabla; el resto del dashboard no re-pide al volver).
+    refetchOnWindowFocus: true,
   });
 
   const data = snapsQ.data;
