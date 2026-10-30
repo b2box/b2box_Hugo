@@ -53,11 +53,12 @@ ERROR = "error"
 DISABLED = "disabled"
 
 # Lo que queda reservado después de Apify para miniaturas, Qwen y Vendure.
-TAIL_RESERVE_S = 15.0
+TAIL_RESERVE_S = 30.0
 _PHOTO_TIMEOUT_S = 5.0
 _OTAPI_TIMEOUT_S = 4.0
 _THUMBS_TIMEOUT_S = 4.0
-_JUDGE_TIMEOUT_S = 8.0
+# Medido el 30-oct por OpenRouter: 8 s no alcanzaba para la foto + 8 miniaturas.
+_JUDGE_TIMEOUT_S = 20.0
 _VENDURE_TIMEOUT_S = 5.0
 # Menos que esto de ventana no alcanza para una corrida (la más rápida: 10 s).
 _MIN_APIFY_WINDOW_S = 8.0

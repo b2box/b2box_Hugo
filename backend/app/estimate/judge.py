@@ -17,6 +17,7 @@ estimado sigue solo con CLIP (más estricto y con margen más ancho).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -150,6 +151,22 @@ def parse(text: str, n: int) -> JudgeOutcome | None:
     return out
 
 
+# Un 429 del proveedor es pasajero (medido el 30-oct con Gemini por OpenRouter):
+# un reintento corto, dentro del techo que pone quien llama.
+_RETRY_429_DELAY_S = 1.0
+
+
+async def _create_with_retry(client: Any, request: dict[str, Any]) -> Any:
+    try:
+        return await client.chat.completions.create(**request)
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "status_code", None) != 429:
+            raise
+        log.info("estimado: el juez recibió 429, reintento en %.0f s", _RETRY_429_DELAY_S)
+    await asyncio.sleep(_RETRY_429_DELAY_S)
+    return await client.chat.completions.create(**request)
+
+
 async def judge(query_image: str, thumbs: Sequence[tuple[str, str]], *,
                 max_calls: int, client: Any | None = None) -> JudgeOutcome | None:
     """Una llamada. None = no se llamó o falló la llamada (apagado, sin cupo,
@@ -172,7 +189,7 @@ async def judge(query_image: str, thumbs: Sequence[tuple[str, str]], *,
     if body:
         request["extra_body"] = body
     try:
-        response = await client.chat.completions.create(**request)
+        response = await _create_with_retry(client, request)
     except Exception as exc:  # noqa: BLE001
         log.warning("estimado: el juez falló (%s)", market_judge.error_summary(exc))
         return None
