@@ -388,6 +388,8 @@ export interface PriceMonitorSnapshotsResponse {
   // Aparte del color real: productos con color estimado y cuántos hay en cada estado.
   estimated_colors?: Partial<Record<"verde" | "amarillo" | "rojo", number>>;
   states?: Partial<Record<"igual" | "solo_similar" | "solo_diferente" | "ninguno", number>>;
+  // Sin dato con un similar que conviene que mire una persona («Es el mismo»).
+  para_confirmar?: number;
   // Las columnas de fuente de la tabla: Mercado Libre y las tiendas activas.
   sources?: SourceMeta[];
   // ¿Las tiendas cuentan para el color? (ajuste «Tiendas cuentan para el color»)
