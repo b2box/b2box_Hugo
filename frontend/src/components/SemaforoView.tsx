@@ -530,6 +530,11 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
           }))}
           onPick={(v) => {
             setMatch(v);
+            if (v === "para_confirmar") {
+              // igual que el chip: son todos sin dato, un color elegido dejaría la tabla vacía
+              setColor(null);
+              setEstimated(null);
+            }
             resetView();
           }}
         />
