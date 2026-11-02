@@ -102,7 +102,8 @@ def recent_ok(image_sha256: str, hours: int) -> dict[str, Any] | None:
             if row is None or not row.tiers:
                 return None
             return {"estimate_id": row.estimate_id, "currency": row.currency,
-                    "tiers": json.loads(row.tiers)}
+                    "tiers": json.loads(row.tiers),
+                    "candidates": json.loads(row.candidates) if row.candidates else None}
     except Exception:  # noqa: BLE001
         log.warning("estimado: no se pudo leer el estimado anterior de la foto")
         return None

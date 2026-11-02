@@ -265,6 +265,10 @@ class Settings(EnvSettings):
     # Banda ± alrededor de la mediana de los precios buenos (%). La mediana se mueve
     # poco entre búsquedas; las puntas, mucho. 0 = de la oferta más barata a la más cara.
     estimate_median_band_pct: float = 10.0
+    # 1 = el estimado trae la foto de la oferta de 1688 limpia (sin texto ni marcas) para la card.
+    estimate_offer_photo: int = 1
+    # Modelo de imagen (por el endpoint del juez, OpenRouter) que limpia esa foto.
+    estimate_photo_model: str = "google/gemini-2.5-flash-image"
     estimate_retention_days: int = 90
     # Fotos subidas que pueden ir a Apify/Qwen: entradas "host/bucket/prefijo/"
     # separadas por coma (S3 path-style: el bucket va en el path). Vacío =

@@ -165,6 +165,8 @@ class EstimateOut(BaseModel):
     valid_until: str | None = None
     label: str = "estimado"
     estimate_id: str | None = None
+    # Foto de la oferta limpia, como data URL WebP. None = usar la del cliente.
+    photo: str | None = None
 
 
 class LookupVariant(BaseModel):
