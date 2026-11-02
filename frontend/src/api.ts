@@ -255,7 +255,7 @@ export interface SnapshotQuery {
 }
 
 export type EnabledFilter = "all" | "enabled" | "disabled";
-export type MatchFilter = "igual" | "similar" | "solo_similar" | "diferente" | "solo_diferente" | "ninguno";
+export type MatchFilter = "igual" | "similar" | "solo_similar" | "diferente" | "solo_diferente" | "ninguno" | "para_confirmar";
 export type EstimatedFilter = "verde" | "amarillo" | "rojo" | "any";
 
 export async function getPriceMonitorSnapshots(query: SnapshotQuery): Promise<PriceMonitorSnapshotsResponse> {

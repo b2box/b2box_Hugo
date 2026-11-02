@@ -280,7 +280,7 @@ async def test_with_the_ml_judge_off_the_stores_do_not_use_theirs_even_with_a_ca
 API_GOLDEN = json.loads((Path(__file__).parent / "golden" / "semaforo_origin_main_77645f9_api_qa2.json").read_text())
 NEW_ITEM_KEYS = {"cells", "stores", "cheapest_outside", "price_basis", "ml_variant", "web_via", "unmeasurable",
                  "data_at", "review_flag", "recalc"}
-NEW_LIST_KEYS = {"sources", "stores_affect_color"}
+NEW_LIST_KEYS = {"sources", "stores_affect_color", "para_confirmar"}
 # failures / skipped / cut: dentro de `llm`, lo que el juez no contestó o no consultó (fix/semaforo-sin-dato).
 NEW_RUN_KEYS = {"sources", "variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"stores", "stores_affect_color", "oficina"}

@@ -353,3 +353,30 @@ def test_old_rows_without_a_price_list_keep_their_real_minimum(client):
     assert out["ml_min_cents"] == 20_000                                  # el 15.000 salió, el 20.000 sigue
     out = client.post(f"/api/price-monitor/snapshots/{sid}/not-same", json={"ml_id": "MLA1001"}).json()["snapshot"]
     assert out["ml_min_cents"] == 30_000 and out["ml_listing_count"] == 1
+
+
+def test_para_confirmar_lists_sin_dato_worth_a_human_look(client):
+    run_id = _seed()
+    common = dict(run_id=run_id, our_price_cents=10_000, color="sin_dato", ml_status="no_data", similar_count=1)
+    judged = json.dumps([_igual("MLA950", category="similar", source="llm", reason="La marca es diferente.")])
+    with Session(engine) as s:
+        # nombre casi igual y foto media: entra
+        s.add(MarketPriceSnapshot(product_id="6", product_name="Nombre casi igual", image_score_max=0.55,
+                                  name_score_max=0.85, similar_listings=judged, **common))
+        # el juez no llegó a mirarlo: entra aunque los scores sean bajos
+        s.add(MarketPriceSnapshot(product_id="7", product_name="Sin juez", image_score_max=0.45, name_score_max=0.5,
+                                  similar_listings=json.dumps([_igual("MLA951", category="similar", source="ambiguo",
+                                                                      reason="parecido en foto y nombre, sin confirmar")]),
+                                  **common))
+        # el juez dijo otra marca y los scores son bajos: no entra
+        s.add(MarketPriceSnapshot(product_id="8", product_name="Juzgado", image_score_max=0.45, name_score_max=0.85,
+                                  similar_listings=judged, **common))
+        # no medible: no entra aunque se parezca
+        s.add(MarketPriceSnapshot(product_id="9", product_name="No medible", image_score_max=0.6, name_score_max=0.9,
+                                  similar_listings=judged, unmeasurable="sin_precio", **common))
+        s.commit()
+    body = client.get("/api/price-monitor/snapshots?match=para_confirmar").json()
+    assert sorted(i["product"]["id"] for i in body["items"]) == ["6", "7"]
+    assert body["para_confirmar"] == 2
+    # el contador no depende del filtro de color elegido
+    assert client.get("/api/price-monitor/snapshots?color=verde").json()["para_confirmar"] == 2

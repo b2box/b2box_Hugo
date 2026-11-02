@@ -130,12 +130,13 @@ const ENABLED_OPTIONS: { value: EnabledFilter; label: string }[] = [
   { value: "disabled", label: "Deshabilitados" },
 ];
 // Qué devolvió ML para el producto. El orden es el de "más a menos parecido".
-const MATCH_OPTIONS: { value: MatchFilter | null; label: string; state?: "igual" | "solo_similar" | "solo_diferente" | "ninguno" }[] = [
+const MATCH_OPTIONS: { value: MatchFilter | null; label: string; state?: "igual" | "solo_similar" | "solo_diferente" | "ninguno" | "para_confirmar" }[] = [
   { value: null, label: "Todos" },
   { value: "igual", label: "Tiene idéntico", state: "igual" },
   { value: "solo_similar", label: "Solo similares", state: "solo_similar" },
   { value: "solo_diferente", label: "Solo diferentes", state: "solo_diferente" },
   { value: "ninguno", label: "Sin resultados", state: "ninguno" },
+  { value: "para_confirmar", label: "Para confirmar", state: "para_confirmar" },
 ];
 const ESTIMATED_COLORS: ("verde" | "amarillo" | "rojo")[] = ["verde", "amarillo", "rojo"];
 
@@ -351,7 +352,7 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const colorCounts = data?.colors ?? {};
   const estimatedCounts = data?.estimated_colors ?? {};
-  const stateCounts = data?.states ?? {};
+  const stateCounts = { ...(data?.states ?? {}), para_confirmar: data?.para_confirmar };
   const sources: SourceMeta[] = data?.sources ?? [];
   const storeSources = sources.filter((x) => x.key !== "ml");
   // Producto, Color, Mediana, Mínimo, Publ., Nuestro, Ganancia, Mercado Libre, [tiendas], Más barato, Fecha.
@@ -477,6 +478,20 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
             {COLOR_META[c].label} <span className="num-tabular">{nfmt(estimatedCounts[c] ?? 0)}</span>
           </FilterChip>
         ))}
+        {(data?.para_confirmar ?? 0) > 0 && (
+          <FilterChip
+            active={match === "para_confirmar"}
+            onClick={() => {
+              setMatch(match === "para_confirmar" ? null : "para_confirmar");
+              setColor(null);
+              setEstimated(null);
+              resetView();
+            }}
+            className="border-dashed border-warning/40 text-warning"
+          >
+            Para confirmar <span className="num-tabular">{nfmt(data?.para_confirmar ?? 0)}</span>
+          </FilterChip>
+        )}
         <div className="relative ml-auto w-full sm:w-64">
           <IconSearch className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -487,6 +502,14 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
           />
         </div>
       </div>
+
+      {match === "para_confirmar" && (
+        <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
+          Sin dato, pero con un similar que puede ser el mismo producto: nombre casi igual o el juez no llegó a mirarlo.
+          Abrí cada uno y, si la publicación es el mismo producto, tocá «Es el mismo»: pasa a color real y queda así en
+          las próximas corridas.
+        </p>
+      )}
 
       <div className="flex items-center gap-x-5 gap-y-2 flex-wrap">
         <FilterGroup
@@ -507,6 +530,11 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
           }))}
           onPick={(v) => {
             setMatch(v);
+            if (v === "para_confirmar") {
+              // igual que el chip: son todos sin dato, un color elegido dejaría la tabla vacía
+              setColor(null);
+              setEstimated(null);
+            }
             resetView();
           }}
         />

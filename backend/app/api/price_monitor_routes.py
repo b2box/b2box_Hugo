@@ -32,7 +32,7 @@ from app import auth, runtime
 from app.clock import utcnow
 from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
-from app.pricing import match_feedback, price_monitor, price_review, store_match
+from app.pricing import market_match, match_feedback, price_monitor, price_review, store_match
 from app.pricing.market_ml import ml_budget_status
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
@@ -51,8 +51,15 @@ STATUSES = ("ok", "no_data", "failed", "skipped")
 # origin=: de dónde salió el precio.
 ENABLED_FILTERS = ("enabled", "disabled", "all")
 # Qué devolvió ML: igual (tiene idéntico) | similar (tiene similares) | solo_similar |
-# diferente (tiene diferentes) | solo_diferente | ninguno (sin resultados).
-MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno")
+# diferente (tiene diferentes) | solo_diferente | ninguno (sin resultados) |
+# para_confirmar (sin dato con un similar que vale la pena que mire una persona).
+MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno", "para_confirmar")
+# "Para confirmar": nombre casi igual con foto que no llegó al umbral, o un similar
+# que el juez no llegó a mirar. Medido el 02-nov: ~110 de los 383 sin dato con similares.
+# shortcut: los scores son el máximo del snapshot (también de los diferentes) y «No es el mismo»
+# no los recalcula, así que un producto puede seguir en la lista; mirar por publicación si molesta.
+TO_CONFIRM_NAME_MIN = 0.8
+TO_CONFIRM_IMAGE_MIN = 0.5
 ORIGINS = ("api", "web", "oficina")
 # color=: los cuatro del semáforo y "no_medible" (sin_dato que no se puede medir: sin precio en
 # Vendure, sin foto, sin nombre). "sin_dato" deja afuera a los no medibles.
@@ -167,6 +174,12 @@ def _match_condition(match: str) -> list[Any]:
         return [MarketPriceSnapshot.other_count > 0]
     if match == "solo_diferente":
         return [no_igual, MarketPriceSnapshot.similar_count == 0, MarketPriceSnapshot.other_count > 0]
+    if match == "para_confirmar":
+        return [no_igual, MarketPriceSnapshot.similar_count > 0, *_color_condition(SIN_DATO),
+                or_(and_(MarketPriceSnapshot.name_score_max >= TO_CONFIRM_NAME_MIN,  # type: ignore[operator]
+                         MarketPriceSnapshot.image_score_max >= TO_CONFIRM_IMAGE_MIN),  # type: ignore[operator]
+                    # similar_listings es JSON en texto: el valor entre comillas no choca con un título.
+                    MarketPriceSnapshot.similar_listings.like(f'%"{market_match.SOURCE_UNCONFIRMED}"%'))]  # type: ignore[union-attr]
     # ninguno: ML no devolvió nada (no es lo mismo que fallar: eso es failed/skipped)
     return [MarketPriceSnapshot.ml_status == "no_data", no_igual,
             MarketPriceSnapshot.similar_count == 0, MarketPriceSnapshot.other_count == 0]
@@ -266,7 +279,7 @@ async def list_snapshots(
         run_id = _latest_run_id(session)
     if run_id is None:
         return {"run_id": None, "items": [], "total": 0, "page": page, "page_size": page_size,
-                "has_more": False, "colors": {}, "estimated_colors": {}, "states": {},
+                "has_more": False, "colors": {}, "estimated_colors": {}, "states": {}, "para_confirmar": 0,
                 "sources": store_match.sources_meta(session)}
 
     base = select(MarketPriceSnapshot).where(MarketPriceSnapshot.run_id == run_id)
@@ -351,6 +364,10 @@ async def list_snapshots(
         "colors": {c: int(colors.get(c, 0)) for c in COLOR_FILTERS},
         "estimated_colors": {c: int(estimated_counts.get(c, 0)) for c in ("verde", "amarillo", "rojo")},
         "states": states,
+        "para_confirmar": int(session.exec(
+            select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
+            .where(MarketPriceSnapshot.run_id == run_id, *base_scope, *_match_condition("para_confirmar"))
+        ).one() or 0),
     }
 
 

@@ -61,6 +61,8 @@ ADDED_BY_THIS_BRANCH = {"ml_variant", "variant_stats", "web_via", "oficina_fresh
 NEW_ITEM_KEYS = {"ml_variant", "web_via", "unmeasurable", "data_at", "review_flag", "recalc"}
 NEW_RUN_KEYS = {"variants", "oficina", "failures", "skipped", "cut"}
 NEW_SUMMARY_KEYS = {"oficina"}
+# Contador de «Para confirmar» en la lista de snapshots.
+NEW_LIST_KEYS = {"para_confirmar"}
 
 CONFIGS: dict[str, dict] = {
     "defecto": {},
@@ -275,7 +277,7 @@ def _old_keys_equal(old, new, path: str) -> None:
         missing = set(old) - set(new)
         assert not missing, f"{path}: la API dejó de servir {sorted(missing)}"
         extra = set(new) - set(old)
-        assert extra <= NEW_ITEM_KEYS | NEW_RUN_KEYS | NEW_SUMMARY_KEYS, f"{path}: claves nuevas no previstas {sorted(extra)}"
+        assert extra <= NEW_ITEM_KEYS | NEW_RUN_KEYS | NEW_SUMMARY_KEYS | NEW_LIST_KEYS, f"{path}: claves nuevas no previstas {sorted(extra)}"
         for k, v in old.items():
             _old_keys_equal(v, new[k], f"{path}.{k}")
     elif isinstance(old, list):
