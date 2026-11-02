@@ -515,7 +515,9 @@ async def test_er08_cuatro_caminos_sin_datos_de_proveedores(env, monkeypatch, ki
         assert not re.search(rf"(?<![\d.]){re.escape(cny)}(?![\d])", body), cny
     estimate_keys = set(data["estimate"])
     assert estimate_keys == {"currency", "vat_included", "tiers", "valid_until", "label",
-                             "estimate_id"}
+                             "estimate_id", "photo"}
+    # La foto de la card viaja como data URL: nunca el link de la oferta.
+    assert data["estimate"]["photo"] is None or data["estimate"]["photo"].startswith("data:image/")
     if kind in ("ml", "photo"):
         assert "1688" not in body and "alicdn" not in body
     if kind == "alibaba":

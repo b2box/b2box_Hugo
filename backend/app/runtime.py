@@ -446,6 +446,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=720, step=1, group="app",
     ),
     SettingMeta(
+        key="estimate_offer_photo",
+        label="Estimado: foto de la fábrica limpia en la card (1 / 0)",
+        description=(
+            "1 = junto al precio va la foto de la oferta de 1688 más parecida, limpia por "
+            "IA (sin texto chino, marcas ni logos, fondo blanco). Corre mientras se calcula "
+            "el precio. Cuesta una llamada al modelo de imagen por foto nueva. 0 = el chat "
+            "muestra la foto que mandó el cliente."
+        ),
+        type="int", parser=int,
+        default_attr="estimate_offer_photo",
+        min=0, max=1, step=1, group="app",
+    ),
+    SettingMeta(
         key="estimate_median_band_pct",
         label="Estimado: banda alrededor de la mediana (%)",
         description=(

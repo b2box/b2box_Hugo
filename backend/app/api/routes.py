@@ -977,6 +977,7 @@ _COSTLY_SETTINGS = frozenset({
     "estimate_clamp_wide_range",
     "estimate_reuse_hours",
     "estimate_median_band_pct",
+    "estimate_offer_photo",
     "estimate_deadline_s",
     "estimate_apify_deadline_s",
     "estimate_visitor_daily_limit",

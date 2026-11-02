@@ -58,6 +58,7 @@ RUNTIME = {
     "estimate_max_range_ratio": 2.0, "estimate_clamp_wide_range": 0,
     "apify_1688_max_concurrent": 14,
     "estimate_reuse_hours": 0, "estimate_median_band_pct": 0.0,
+    "estimate_offer_photo": 0,
 }
 # Editables en Configuración, pero los tests los mueven en Settings: el stub
 # devuelve None y el servicio usa el de Settings.
@@ -373,6 +374,63 @@ async def test_er03_dispersion_mayor_a_2_5(env):
     resp = await _ask()
     assert resp.estimate_status == "low_confidence" and resp.estimate is None
     assert "dispersión" in _rows()[-1].reason
+
+
+# ─── Foto de la oferta, limpia, para la mini card ──────────────────
+
+
+async def test_trae_la_foto_limpia_de_la_oferta_mas_parecida(env, monkeypatch):
+    cleaned: list[str] = []
+
+    async def fake_clean(url, **_kw):
+        cleaned.append(url)
+        return "data:image/webp;base64,TElNUElB"
+
+    monkeypatch.setitem(RUNTIME, "estimate_offer_photo", 1)
+    monkeypatch.setattr(est_service.offer_photo, "available", lambda: True)
+    monkeypatch.setattr(est_service.offer_photo, "clean", fake_clean)
+    est_service._OFFER_PHOTO_CACHE.clear()
+    resp = await _ask()
+    assert resp.estimate.photo == "data:image/webp;base64,TElNUElB"
+    # Una sola foto, de una oferta usada para el precio; nunca el link de alicdn al navegador.
+    (url,) = cleaned
+    used = {c["image_url"] for c in json.loads(_rows()[-1].candidates) if c.get("used")}
+    assert url in used
+    assert "alicdn" not in resp.model_dump_json()
+
+
+async def test_sin_foto_limpia_a_tiempo_el_precio_sale_igual(env, monkeypatch):
+    async def never(url, **_kw):
+        await asyncio.sleep(60)
+
+    monkeypatch.setitem(RUNTIME, "estimate_offer_photo", 1)
+    monkeypatch.setattr(est_service.offer_photo, "available", lambda: True)
+    monkeypatch.setattr(est_service.offer_photo, "clean", never)
+    monkeypatch.setattr(est_service, "_OFFER_PHOTO_WAIT_S", 0.05)
+    est_service._OFFER_PHOTO_CACHE.clear()
+    resp = await _ask()
+    assert resp.estimate_status == "ok" and resp.estimate.photo is None
+
+
+async def test_apagada_en_configuracion_no_limpia_nada(env, monkeypatch):
+    async def boom(url, **_kw):
+        raise AssertionError("no debería llamarse")
+
+    monkeypatch.setattr(est_service.offer_photo, "available", lambda: True)
+    monkeypatch.setattr(est_service.offer_photo, "clean", boom)
+    resp = await _ask()
+    assert resp.estimate.photo is None
+
+
+def test_la_mejor_foto_es_la_usada_con_mejor_puntaje_del_juez():
+    rows = [
+        {"image_url": "a", "used": True, "score_visual": 70, "score": 0.9},
+        {"image_url": "b", "used": True, "score_visual": 95, "score": 0.5},
+        {"image_url": "c", "used": False, "score_visual": 99, "score": 0.99},
+    ]
+    assert est_service.best_offer_image(rows) == "b"
+    assert est_service.best_offer_image([]) is None
+    assert est_service.best_offer_image(None) is None
 
 
 # ─── Reglas aflojadas desde Configuración (30-oct) ─────────────────

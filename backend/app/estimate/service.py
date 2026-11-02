@@ -36,7 +36,8 @@ from typing import Any
 from app import runtime, security
 from app.config import get_settings
 from app.dedup import catalog_index
-from app.estimate import identity, images, judge, limits, measures, otapi_item, pricing, store
+from app.estimate import (identity, images, judge, limits, measures, offer_photo, otapi_item,
+                          pricing, store)
 from app.estimate import vendure_estimate as vendure
 from app.ingest import apify_1688
 
@@ -55,6 +56,12 @@ DISABLED = "disabled"
 # Lo que queda reservado después de Apify para miniaturas, Qwen y Vendure.
 TAIL_RESERVE_S = 30.0
 _PHOTO_TIMEOUT_S = 5.0
+# La foto limpia de la oferta corre en paralelo con medidas y precio; esto es lo
+# más que se la espera después (es un adorno: sin ella, la foto del cliente).
+_OFFER_PHOTO_WAIT_S = 12.0
+# shortcut: caché por proceso (se pierde en cada deploy); si hiciera falta entre réplicas, a la base.
+_OFFER_PHOTO_CACHE: dict[str, str] = {}
+_OFFER_PHOTO_CACHE_MAX = 300
 _OTAPI_TIMEOUT_S = 4.0
 _THUMBS_TIMEOUT_S = 4.0
 # Medido el 30-oct por OpenRouter: 8 s no alcanzaba para la foto + 8 miniaturas.
@@ -101,6 +108,8 @@ class EstimateResult:
     valid_until: datetime | None = None
     message: str = ""
     internal: dict[str, Any] = field(default_factory=dict)
+    # Data URL de la foto de la oferta, limpia (offer_photo). Nunca el link de 1688.
+    photo: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -119,7 +128,19 @@ class EstimateResult:
             if self.valid_until else None,
             "label": "estimado",
             "estimate_id": self.estimate_id,
+            "photo": self.photo,
         }
+
+
+def best_offer_image(rows: object) -> str | None:
+    """La foto de la oferta usada que el juez vio más parecida (después, la de mejor
+    puntaje combinado). Sirve con las filas recién armadas y con las guardadas."""
+    used = [r for r in rows if isinstance(r, dict) and r.get("used") and r.get("image_url")] \
+        if isinstance(rows, list) else []
+    if not used:
+        return None
+    best = max(used, key=lambda r: (r.get("score_visual") or -1, r.get("score") or 0.0))
+    return str(best["image_url"])
 
 
 def enabled() -> bool:
@@ -180,6 +201,7 @@ class EstimateSession:
         self.search_error: str | None = None
         self.apify_launched = False
         self._task: asyncio.Task | None = None
+        self._photo_task: asyncio.Task | None = None
         self._done = False
         # skip_found / abandon: ya no hay que lanzar Apify (lo mira _prepare
         # justo antes de lanzar, sin await de por medio: no hay carrera).
@@ -365,8 +387,50 @@ class EstimateSession:
         except Exception as exc:  # noqa: BLE001
             log.exception("estimado: error inesperado")
             result = EstimateResult(ERROR, internal={"reason": f"error {type(exc).__name__}"})
+        if result.ok:
+            result.photo = await self._offer_photo()
+        elif self._photo_task is not None:
+            self._photo_task.cancel()
         await self._persist(result)
         return result
+
+    # ── foto de la oferta (mini card) ─────────────────────────────
+
+    def _start_offer_photo(self, url: str | None) -> None:
+        """Empieza a limpiar la foto ya, en paralelo con medidas y precio."""
+        if not url or not int(_rt("estimate_offer_photo") or 0) or not offer_photo.available():
+            return
+        cached = _OFFER_PHOTO_CACHE.get(url)
+        if cached:
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            fut.set_result(cached)
+            self._photo_task = fut  # type: ignore[assignment]
+            return
+        self._photo_task = asyncio.create_task(self._clean_and_cache(url))
+
+    @staticmethod
+    async def _clean_and_cache(url: str) -> str | None:
+        photo = await offer_photo.clean(url)
+        if photo:
+            if len(_OFFER_PHOTO_CACHE) >= _OFFER_PHOTO_CACHE_MAX:
+                _OFFER_PHOTO_CACHE.pop(next(iter(_OFFER_PHOTO_CACHE)))
+            _OFFER_PHOTO_CACHE[url] = photo
+        return photo
+
+    async def _offer_photo(self) -> str | None:
+        task = self._photo_task
+        if task is None:
+            return None
+        t = time.monotonic()
+        try:
+            return await asyncio.wait_for(task, timeout=_OFFER_PHOTO_WAIT_S)
+        except asyncio.TimeoutError:
+            self.timings["offer_photo_timeout"] = 1
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            self._mark("offer_photo_wait", t)
 
     async def _finish(self) -> EstimateResult:
         if self._task is None:
@@ -379,6 +443,7 @@ class EstimateSession:
         if self.offer is not None:
             return await self._from_offer()
         if self.reused is not None:
+            self._start_offer_photo(best_offer_image(self.reused.get("candidates")))
             return self._from_reused(self.reused)
         if self.search is None:
             return self._fail(ERROR, self.search_error or "sin búsqueda")
@@ -412,6 +477,7 @@ class EstimateSession:
             "offer_id": offer.offer_id, "price_cny": offer.price_cny, "ladder": offer.ladder,
             "moq": offer.moq, "used": True, "source": "otapi",
         }], "k": None}
+        self._start_offer_photo(offer.pictures[0] if offer.pictures else None)
         unit = offer.unit or offer.attr_unit
         if unit is not None:
             detail["measures"] = unit.as_dict()
@@ -521,6 +587,7 @@ class EstimateSession:
         scenarios = pricing.scenarios_from_prices(prices, k,
                                                   float(_rt("estimate_median_band_pct") or 0))
         used = [c for c in good if c.price_cny in kept]
+        self._start_offer_photo(best_offer_image(log_rows))
         unit = await self._unit_from_offers(used, detail)
         return await self._price(scenarios, tier_quantities(), judged=judged, detail=detail,
                                  unit=unit)
