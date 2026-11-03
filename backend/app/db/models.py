@@ -393,9 +393,9 @@ class MarketPriceSnapshot(SQLModel, table=True):
 
 
 class MarketMatchFeedback(SQLModel, table=True):
-    """"No es el mismo": una persona dijo que esta publicación de ML NO es el
-    producto. Excluye ese id de ML para ese producto en las próximas corridas y
-    queda como etiqueta negativa para calibrar el filtro."""
+    """"No es el mismo" / "No tiene nada que ver": una persona dijo que esta publicación de
+    ML NO es el producto (y por qué). Excluye ese id de ML para ese producto en las próximas
+    corridas, le enseña al juez y queda como etiqueta negativa para calibrar el filtro."""
     __tablename__ = "market_match_feedback"
     __table_args__ = (
         Index("ix_mmf_product_ml", "product_id", "ml_id", unique=True),
@@ -424,6 +424,10 @@ class MarketMatchFeedback(SQLModel, table=True):
     # La marca anterior cuando una persona cambió de opinión (0 → 1 o 1 → 0): "Deshacer"
     # vuelve a ella en vez de borrar la fila. None = nunca cambió.
     previous_label: int | None = Field(default=None)
+    # Por qué la sacó (label 0): una clave de match_feedback.MOTIVES y una nota opcional.
+    # Son las "lecciones" que recibe el juez para ese producto. None = marca sin motivo.
+    motive: str | None = Field(default=None, max_length=24)
+    note: str | None = Field(default=None)
 
 
 class MlSellerCache(SQLModel, table=True):

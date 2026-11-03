@@ -66,7 +66,9 @@ OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim", "apify_
 # Lo mismo con las del recálculo al cambiar en Vendure, que entra DESPUÉS (las prueba test_recalculo_pg.py).
 OTHER_PRS_COLS = {"market_price_snapshot": {"unmeasurable", "recalc_at", "recalc_before", "recalc_flag"},
                   "price_monitor_run": {"llm_failures", "llm_skipped_cap", "llm_skipped_api", "llm_skipped_photos",
-                                        "llm_skipped_cut", "llm_status", "n_no_medible"}}
+                                        "llm_skipped_cut", "llm_status", "n_no_medible"},
+                  # el motivo de «No tiene nada que ver» (feat/semaforo-sacar-similar): lo prueba test_qa_sacar_similar_pg.py
+                  "market_match_feedback": {"motive", "note"}}
 NOW = w.NOW
 
 

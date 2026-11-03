@@ -6,8 +6,9 @@ GET  /api/price-monitor/snapshots              → tabla paginada (run_id, color
                                                   match, origin, source, igual_in)
 GET  /api/price-monitor/products/{id}/history  → tendencia de un producto
 GET  /api/price-monitor/summary                → tarjeta de Salud
-POST /api/price-monitor/snapshots/{id}/not-same → "No es el mismo": saca una publicación,
-                                                  recalcula el snapshot y la excluye
+POST /api/price-monitor/snapshots/{id}/not-same → "No es el mismo" / "No tiene nada que ver": saca
+                                                  una publicación (con motivo), recalcula el
+                                                  snapshot, la excluye y le enseña al juez
 POST /api/price-monitor/snapshots/{id}/same     → "Es el mismo": promueve un similar o diferente
                                                   a idéntico (recalcula el color real)
 DELETE /api/price-monitor/products/{id}/not-same/{ml_id} → vuelve a considerarla (también
@@ -34,6 +35,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
 from app.pricing import market_match, match_feedback, price_monitor, price_review, store_match
 from app.pricing.market_ml import ml_budget_status
+from app.pricing.market_ml_web import clean_line
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
@@ -56,8 +58,8 @@ ENABLED_FILTERS = ("enabled", "disabled", "all")
 MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno", "para_confirmar")
 # "Para confirmar": nombre casi igual con foto que no llegó al umbral, o un similar
 # que el juez no llegó a mirar. Medido el 02-nov: ~110 de los 383 sin dato con similares.
-# shortcut: los scores son el máximo del snapshot (también de los diferentes) y «No es el mismo»
-# no los recalcula, así que un producto puede seguir en la lista; mirar por publicación si molesta.
+# shortcut: los scores son el máximo del snapshot (también de los diferentes; una corrección los
+# recalcula sin lo que sacó una persona); mirar por publicación si un diferente lo deja en la lista.
 TO_CONFIRM_NAME_MIN = 0.8
 TO_CONFIRM_IMAGE_MIN = 0.5
 ORIGINS = ("api", "web", "oficina")
@@ -386,8 +388,34 @@ async def product_history(
     return {"product_id": product_id, "items": [price_monitor.snapshot_to_dict(r) for r in rows]}
 
 
+# Las correcciones escriben con la cookie de sesión: solo desde el dashboard (CSRF, ver auth._reject_cross_site).
+_CROSS_SITE = "Solo se puede hacer desde el dashboard de Hugo."
+
+
 class NotSameBody(BaseModel):
     ml_id: str = Field(min_length=3, max_length=24)
+    # Solo "No es el mismo" / "No tiene nada que ver": una clave de match_feedback.MOTIVES y
+    # una nota de una línea. Opcionales para los clientes de antes; la pantalla siempre los manda.
+    motive: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def _motive(body: NotSameBody) -> tuple[str | None, str | None]:
+    """El motivo y la nota, saneados (una línea, sin controles ni invisibles). 400 si la clave no
+    existe, si la nota es larga, si falta con "Otro" o si viene sin motivo (no se usaría)."""
+    # Sin recortar: el largo se valida acá, ya saneada.
+    note = clean_line(body.note, len(body.note)) if body.note else None
+    if note and len(note) > match_feedback.NOTE_MAX:
+        raise HTTPException(400, f"la nota puede tener hasta {match_feedback.NOTE_MAX} caracteres")
+    if body.motive is None:
+        if note:
+            raise HTTPException(400, "la nota va con un motivo")
+        return None, None
+    if body.motive not in match_feedback.MOTIVES:
+        raise HTTPException(400, "motivo inválido")
+    if body.motive == match_feedback.MOTIVE_OTHER and not note:
+        raise HTTPException(400, "con «Otro» hay que contar el motivo en la nota")
+    return body.motive, note or None
 
 
 def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id: int, added: bool,
@@ -421,22 +449,27 @@ async def not_the_same(
     snapshot_id: int = Path(..., ge=1, le=DB_INT_MAX),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """"No es el mismo": una persona dice que esta publicación de ML no es el
-    producto. Pasa a la lista de diferentes del snapshot (nada se descarta; con "Es
-    el mismo" se puede dar vuelta) y, si era idéntica, se recalculan el color real
-    y los contadores. Queda como diferente para ese producto en las próximas
-    corridas y se guarda como etiqueta (label 0) para calibrar, con quién la marcó.
-    No toca Vendure ni el precio nuestro.
+    """"No es el mismo" (idéntica) / "No tiene nada que ver" (similar): una persona dice
+    que esta publicación de ML no es el producto, y por qué (`motive`, `note`). Pasa a la
+    lista de diferentes del snapshot con ese motivo (nada se descarta; con "Es el mismo"
+    se puede dar vuelta); si era idéntica se recalculan el color real y los contadores, si
+    era similar el color estimado. Queda como diferente para ese producto en las próximas
+    corridas, el juez la recibe como ejemplo de lo que no es (si tiene motivo) y se guarda
+    como etiqueta (label 0) para calibrar, con quién la marcó. No toca Vendure ni el
+    precio nuestro.
 
     La corrección, el snapshot y los contadores se guardan en UNA transacción: o
     quedan los tres o ninguno. Apretarlo dos veces (o desde dos pestañas a la vez)
     no duplica nada."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
+    motive, note = _motive(body)
     snap = session.get(MarketPriceSnapshot, snapshot_id)
     if snap is None:
         raise HTTPException(404, "snapshot no encontrado")
-    removed = price_monitor.drop_listing(snap, body.ml_id)
+    removed = price_monitor.drop_listing(snap, body.ml_id, motive=match_feedback.MOTIVES.get(motive or ""),
+                                         note=note)
     if removed is None:
         already = body.ml_id in match_feedback.load_excluded().get(snap.product_id, frozenset())
         if not already:
@@ -445,7 +478,8 @@ async def not_the_same(
     actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
     added = match_feedback.add_feedback(
         product_id=snap.product_id, ml_id=body.ml_id, entry=removed, snapshot_id=snapshot_id,
-        product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_NOT_SAME, session=session,
+        product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_NOT_SAME,
+        motive=motive, note=note, session=session,
     )
     return _commit_correction(session, snap, snapshot_id, added, actor)
 
@@ -463,6 +497,7 @@ async def same_product(
     desaparece, y la próxima corrida la respeta como IGUAL (label 1 en
     market_match_feedback, con quién la marcó). Misma transacción única y misma
     idempotencia que "No es el mismo"; "Deshacer" borra la marca (DELETE)."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
     snap = session.get(MarketPriceSnapshot, snapshot_id)
@@ -485,6 +520,7 @@ async def same_product(
 @router.delete("/products/{product_id}/feedback/{ml_id}")
 @router.delete("/products/{product_id}/not-same/{ml_id}")
 async def undo_feedback(
+    request: Request,
     product_id: str = Path(..., min_length=1, max_length=PRODUCT_ID_MAX_LEN),
     ml_id: str = Path(..., min_length=3, max_length=24),
 ) -> dict[str, Any]:
@@ -493,9 +529,11 @@ async def undo_feedback(
     la marca anterior (`{"removed": false, "restored": 0|1}`); si no, borra la marca
     (`{"removed": true}`) y la próxima corrida vuelve a juzgarla sola. El snapshot de
     hoy no se reconstruye."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(ml_id):
         raise HTTPException(400, "ml_id inválido")
-    result = match_feedback.undo_feedback(product_id, ml_id)
+    actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
+    result = match_feedback.undo_feedback(product_id, ml_id, actor)
     if result is None:
         raise HTTPException(404, "esa publicación no estaba marcada")
     return result

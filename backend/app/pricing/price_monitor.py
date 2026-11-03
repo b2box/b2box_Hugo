@@ -193,6 +193,9 @@ class RunContext:
     # "Es el mismo" (quedan IGUALES), por producto.
     excluded: dict[str, frozenset[str]] = field(default_factory=dict)
     promoted: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Las que sacó con motivo, la más nueva primero: van al juez de ese producto y dan el
+    # motivo de la card (match_feedback.load_lessons).
+    lessons: dict[str, tuple[market_judge.JudgeLesson, ...]] = field(default_factory=dict)
     # Cuántas publicaciones se guardan por producto (pm_ml_keep_listings).
     keep_listings: int = 8
     # Búsquedas por producto en la API de ML (pm_ml_query_variants). 1 = como siempre.
@@ -651,8 +654,11 @@ async def _consult_judge(ctx: RunContext, product: VendureProduct,
         await _judge_skipped(ctx, "llm_skipped_cut")
         return
     cap = ctx.judge_max_calls if max_calls is None else max_calls
-    # Solo se pasa `counter_key` si no es el de siempre (los dobles de los tests no lo conocen).
-    extra = {} if counter_key == market_judge.LLM_COUNTER_KEY else {"counter_key": counter_key}
+    # Solo se pasan `counter_key` si no es el de siempre y `lessons` si hay (los dobles de los
+    # tests no los conocen). Las lecciones son del producto: valen también para las tiendas.
+    extra: dict[str, Any] = {} if counter_key == market_judge.LLM_COUNTER_KEY else {"counter_key": counter_key}
+    if ctx.lessons.get(product.id):
+        extra["lessons"] = ctx.lessons[product.id]
     outcomes: list[tuple[str, str]] = []
     prices: dict[str, int | None] = {}
     if await _judge_will_answer(ctx, counter_key, cap):
@@ -780,16 +786,26 @@ def _ref_entry(ctx: RunContext, d: market_match.Decision, category: str,
     return entry
 
 
-def _manual_other_entry(ctx: RunContext, c: MlCandidate, our_name: str) -> dict[str, Any]:
+def _manual_other_entry(ctx: RunContext, c: MlCandidate, our_name: str,
+                        lesson: market_judge.JudgeLesson | None = None) -> dict[str, Any]:
     """Una publicación que una persona marcó "No es el mismo": no se compara de
     nuevo (ni se baja su foto), pero se muestra, con su precio, como DIFERENTE."""
+    reason = _removed_reason(lesson.motive, lesson.note) if lesson else _NOT_SAME_REASON
     d = market_match.Decision(c, None, market_match.name_score(our_name, c.name), market_match.NO,
-                              market_match.SOURCE_MANUAL, reason=_NOT_SAME_REASON)
+                              market_match.SOURCE_MANUAL, reason=reason)
     return _ref_entry(ctx, d, "diferente", {})
 
 
 _NOT_SAME_REASON = "una persona la marcó «No es el mismo»"
 _SAME_REASON = "una persona la marcó «Es el mismo»"
+
+
+def _removed_reason(motive: str | None, note: str | None = None) -> str:
+    """El motivo de la card de una publicación que una persona sacó: "Sacada a mano: Otra
+    marca (nota)"; sin motivo (marcas de antes), el texto de siempre."""
+    if not motive:
+        return _NOT_SAME_REASON
+    return f"Sacada a mano: {motive}" + (f" ({note})" if note else "")
 
 
 def _apply_prices(snap: MarketPriceSnapshot, prices: list[int], n_sellers: int,
@@ -1046,7 +1062,8 @@ def _split_excluded(ctx: RunContext, product: VendureProduct, w: _Work,
     keep: list[MlCandidate] = []
     for c in candidates:
         if c.id in w.excluded and c.id not in w.promoted:
-            w.others.append(_manual_other_entry(ctx, c, product.name))
+            lesson = next((x for x in ctx.lessons.get(product.id, ()) if x.ml_id == c.id), None)
+            w.others.append(_manual_other_entry(ctx, c, product.name, lesson))
         else:
             keep.append(c)
     return keep
@@ -1595,9 +1612,11 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
         _update_run(run_id, oficina_fresh=len(oficina))
     excluded = await asyncio.to_thread(match_feedback.load_excluded)
     promoted = await asyncio.to_thread(match_feedback.load_promoted)
+    lessons = await asyncio.to_thread(match_feedback.load_lessons)
     async with MlMarket(budget=budget, on_reserve=_usage_increment(run_id, ml_requests_used=1)) as ml:
         ctx = _context(run_id, ml, web, excluded, promoted)
         ctx.oficina = oficina
+        ctx.lessons = lessons
         ctx.extra["stores"] = stores
         try:
             sem = asyncio.Semaphore(concurrency)
@@ -1759,11 +1778,16 @@ def _rebuild(snap: MarketPriceSnapshot, priced: list[dict], unpriced: list[dict]
         else:
             _clear_prices(snap)
             _mark(snap, NO_DATA, reason or "no quedan publicaciones idénticas con precio")
+    # «Para confirmar» mira los puntajes máximos: lo que una persona sacó ya no cuenta (la
+    # próxima corrida tampoco lo vuelve a puntuar).
+    scored = [*priced, *unpriced, *similar, *(m for m in other if not _is_manual(m))]
+    snap.image_score_max = max((m["image_score"] for m in scored if m.get("image_score") is not None), default=None)
+    snap.name_score_max = max((m["name_score"] for m in scored if m.get("name_score") is not None), default=None)
     _store_listings(snap, priced, unpriced, similar, other, keep=int(runtime.get("pm_ml_keep_listings")),
                     green_min=green, yellow_min=yellow)
 
 
-def _as_manual_other(entry: dict[str, Any]) -> dict[str, Any]:
+def _as_manual_other(entry: dict[str, Any], reason: str) -> dict[str, Any]:
     """Una publicación que una persona marcó "No es el mismo", para la lista de
     diferentes (con su precio de referencia; ya no aporta a ningún cálculo)."""
     prices = _entry_prices(entry)
@@ -1771,7 +1795,7 @@ def _as_manual_other(entry: dict[str, Any]) -> dict[str, Any]:
     clean = {k: v for k, v in entry.items()
              if k not in ("prices_cents", "sellers", "listings", "min_cents", "median_cents", "est_ok")}
     return {**clean, "category": "diferente", "source": market_match.SOURCE_MANUAL,
-            "reason": _NOT_SAME_REASON, "differences": [], "price_cents": _clean_price(price)}
+            "reason": reason, "differences": [], "price_cents": _clean_price(price)}
 
 
 def _as_manual_igual(entry: dict[str, Any]) -> dict[str, Any]:
@@ -1786,10 +1810,13 @@ def _as_manual_igual(entry: dict[str, Any]) -> dict[str, Any]:
             "sellers": [str(seller)[:60]] if price and seller else []}
 
 
-def drop_listing(snap: MarketPriceSnapshot, ml_id: str) -> dict[str, Any] | None:
-    """"No es el mismo": la publicación pasa a la lista de DIFERENTES (nada se
-    descarta; con "Es el mismo" se puede dar vuelta) y, si era IDÉNTICA, se
-    recalculan mediana, mínimo, ganancia y color real con las que quedan. Devuelve
+def drop_listing(snap: MarketPriceSnapshot, ml_id: str, *, motive: str | None = None,
+                 note: str | None = None) -> dict[str, Any] | None:
+    """"No es el mismo" (IDÉNTICA) / "No tiene nada que ver" (SIMILAR): la publicación
+    pasa a la lista de DIFERENTES (nada se descarta; con "Es el mismo" se puede dar
+    vuelta), con el motivo (`motive`, la etiqueta: "Otra marca") y la nota en su card.
+    Si era IDÉNTICA se recalculan mediana, mínimo, ganancia y color real con las que
+    quedan; si era SIMILAR, el color estimado (`_rebuild` lo rehace siempre). Devuelve
     la publicación tal como estaba, o None si no estaba. No guarda: lo hace el
     llamador.
 
@@ -1803,7 +1830,8 @@ def drop_listing(snap: MarketPriceSnapshot, ml_id: str) -> dict[str, Any] | None
     priced = [m for m in priced if m.get("ml_id") != ml_id]
     unpriced = [m for m in unpriced if m.get("ml_id") != ml_id]
     similar = [m for m in similar if m.get("ml_id") != ml_id]
-    other = [_as_manual_other(removed)] + [m for m in other if m.get("ml_id") != ml_id]
+    dropped = _as_manual_other(removed, _removed_reason(motive, note))
+    other = [dropped] + [m for m in other if m.get("ml_id") != ml_id]
     _rebuild(snap, priced, unpriced, similar, other, real_changed=was_igual,
              reason=f"se descartó «{(removed.get('title') or ml_id)[:60]}» (No es el mismo)")
     return removed
