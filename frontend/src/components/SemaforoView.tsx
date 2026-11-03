@@ -744,6 +744,7 @@ function RunLine({ run, shownRunId }: { run: PriceMonitorRun | null; shownRunId:
           Buscador de la oficina:{" "}
           <span className="num-tabular">
             {nfmt(run.oficina.fresh)} productos con búsqueda fresca · {nfmt(run.oficina.n_ok)} con precio
+            {(run.oficina.n_lens_ok ?? 0) > 0 && ` (${nfmt(run.oficina.n_lens_ok ?? 0)} por Google Lens)`}
           </span>
         </span>
       )}

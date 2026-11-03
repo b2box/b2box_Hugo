@@ -225,8 +225,9 @@ export interface PriceMonitorRun {
   };
   n_con_similares?: number;
   // Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar la corrida y
-  // los que terminaron con precio por eso. Corridas viejas: sin campo.
-  oficina?: { fresh: number; n_ok: number };
+  // los que terminaron con precio por eso (n_lens_ok: de esos, los que ganó una consulta de Google Lens).
+  // Corridas viejas: sin campo.
+  oficina?: { fresh: number; n_ok: number; n_lens_ok?: number };
   // Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML
   // (titulo | corto | claves | inicio). Corridas viejas: sin campo o vacío.
   variants?: Record<string, number>;
