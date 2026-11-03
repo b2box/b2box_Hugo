@@ -6,11 +6,14 @@ ML, CLIP y el juez son dobles (los mismos del test del semáforo)."""
 from __future__ import annotations
 
 import json
+import re
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, select
 
 from app import runtime
+from app.config import Settings
 from app.db.models import (
     MarketPriceSnapshot,
     MarketStore,
@@ -298,6 +301,54 @@ async def test_known_brand_goes_to_the_judge_and_the_store_own_brand_does_not(st
     assert gd["Organizador de cocina plegable"].category == "igual"      # su propia marca = genérica = igual
     [run] = [r for r in _runs()]
     assert run.llm_calls >= 1
+
+
+class _RateLimitedOnceClient:
+    """Proveedor de mentira para el juez REAL: a cada consulta le contesta primero un 429 y, en el
+    reintento, «similar» para todas las publicaciones del prompt."""
+
+    def __init__(self):
+        self.calls, self.seen = 0, []          # `seen` guarda los prompts: el mismo objeto en cada reintento
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def close(self):
+        return None
+
+    async def _create(self, *, messages, **kw):
+        self.calls += 1
+        if not any(m is messages for m in self.seen):
+            self.seen.append(messages)
+            err = Exception("HTTP 429")
+            err.status_code = 429
+            raise err
+        texts = [p["text"] for m in messages if isinstance(m["content"], list) for p in m["content"]
+                 if p.get("type") == "text"]
+        ids = [m.group(1) for t in texts if (m := re.match(r"- (\S+): ", t))]
+        body = {"results": [{"ml_id": i, "verdict": "similar", "confidence": 0.9, "reason": "tras el 429"} for i in ids]}
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(body)))],
+                               usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, completion_tokens_details=None))
+
+
+async def test_the_real_judge_retries_a_429_for_the_stores_too(stores_world, monkeypatch):
+    client = _RateLimitedOnceClient()
+    monkeypatch.setattr(market_judge, "_RETRY_429_DELAYS_S", (0.0, 0.0))
+    monkeypatch.setattr(market_judge, "enabled", lambda: True)
+    monkeypatch.setattr(market_judge, "make_client", lambda: client)
+    monkeypatch.setattr(market_judge, "get_settings", lambda: Settings(
+        vendure_api_url="https://example.invalid/admin-api", pm_llm_base_url="https://llm.invalid/v1",
+        pm_llm_api_key="k", pm_llm_model="qwen3-vl-plus"))
+    runtime.set_value("pm_vision_max_calls", 50)
+
+    await price_monitor.run_price_monitor()
+
+    stores_used = daily_budget.used_today(market_judge.STORES_LLM_COUNTER_KEY)
+    assert stores_used >= 1, "las tiendas consultaron al juez real"
+    # Cada consulta: un 429 y un reintento que contesta; el cupo se reservó una sola vez.
+    assert client.calls == 2 * (stores_used + daily_budget.used_today(market_judge.LLM_COUNTER_KEY))
+    [run] = _runs()
+    assert run.llm_failures == 0 and run.llm_status is None
+    stanley = _by_title(_rows("1", "Gadnic"))["Organizador cocina Stanley"]
+    assert (stanley.category, stanley.reason) == ("similar", "tras el 429")
 
 
 async def test_ambiguous_band_without_a_judge_is_similar_unconfirmed_like_ml(stores_world):

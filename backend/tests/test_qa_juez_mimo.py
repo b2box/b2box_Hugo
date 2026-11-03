@@ -288,6 +288,7 @@ async def test_c2b_http_errors_log_only_status_and_code(llm_env, clean_budget, c
         res = await market_judge.judge("x", [], [JudgeCandidate("MLA8", "t", None)], max_calls=5,
                                        client=provider.client())
     assert res is None
+    assert len(provider.bodies) == (3 if status == 429 else 1)     # con el SDK real: solo el 429 se reintenta
     assert f"Juez LLM falló (" in caplog.text and expected in caplog.text
     assert "SECRETO" not in caplog.text and "x" * 41 not in caplog.text
     assert daily_budget.used_today(market_judge.LLM_COUNTER_KEY) == 1      # la llamada cuenta igual

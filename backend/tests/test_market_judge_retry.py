@@ -1,6 +1,7 @@
 """El juez del semáforo reintenta un 429 del proveedor (hasta 2 veces) y nada más."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from app.pricing.market_judge import JudgeCandidate
 
 CANDS = [JudgeCandidate("MLA1", "Org A", "https://ml/a.jpg")]
 GOOD = '{"results":[{"ml_id":"MLA1","verdict":"igual","confidence":0.9,"reason":"igual"}]}'
+_PROD_DELAYS = market_judge._RETRY_429_DELAYS_S  # el de producción, antes de que el fixture lo ponga en 0
 
 
 def _rate_limited(retry_after: str | None = None) -> openai.RateLimitError:
@@ -119,3 +121,21 @@ async def test_retry_after_is_used_with_a_cap(monkeypatch):
 ])
 def test_retry_wait(header, cap, expected):
     assert market_judge._retry_wait(_rate_limited(header), 2.0, cap) == expected
+
+
+@pytest.mark.parametrize("header,expected", [(None, [2.0, 5.0]), ("60", [10.0, 10.0])])
+async def test_judge_waits_2_and_5_s_or_the_capped_retry_after_then_gives_up(monkeypatch, caplog, header, expected):
+    """judge() de punta a punta con las esperas de producción: sin header 2 s y 5 s; Retry-After 60 → 10 s."""
+    waits: list[float] = []
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(market_judge, "_RETRY_429_DELAYS_S", _PROD_DELAYS)
+    monkeypatch.setattr(market_judge, "asyncio", SimpleNamespace(sleep=_sleep, to_thread=asyncio.to_thread))
+    client = _Client(*[_rate_limited(header) for _ in range(3)])
+    with caplog.at_level(logging.WARNING, logger=market_judge.__name__):
+        result, outcomes = await _judge(client)
+    assert waits == expected and client.calls == 3
+    assert result is None and outcomes == [(market_judge.OUTCOME_ERROR, "HTTP 429, code=-")]
+    assert caplog.messages == ["Juez LLM falló (RateLimitError): HTTP 429, code=-"]
