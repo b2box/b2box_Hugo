@@ -277,9 +277,37 @@ async def test_the_dashboard_sees_the_origin_and_the_run_counters(webw, client):
     assert client.get("/api/price-monitor/snapshots?origin=web").json()["items"] == []
     assert client.get("/api/price-monitor/snapshots?origin=otra").status_code == 400
     run = client.get("/api/price-monitor/runs").json()["items"][0]
-    assert run["oficina"] == {"fresh": 1, "n_ok": 1}
+    assert run["oficina"] == {"fresh": 1, "n_ok": 1, "n_lens_ok": 0}
     summary = client.get("/api/price-monitor/summary").json()["oficina"]
     assert summary["fresh_products"] == 1 and summary["last_24h"]["ok"] == 1 and summary["ttl_days"] == 7
+
+
+async def test_an_igual_won_by_a_google_lens_query_is_counted_apart(webw, client):
+    """M-1 / M-2: el IGUAL con precio que salió de una búsqueda con consulta Lens marca ml_variant="lens"; el resumen lo
+    da como oficina.n_lens_ok y no como una búsqueda de la API."""
+    _store("3", [_wire("MLA901", "Producto Raro", 250.0)])
+    with Session(engine) as s:
+        row = s.exec(select(MlWebResult)).one()
+        row.origin = oficina_ml.ORIGIN_LENS
+        s.commit()
+    _score(webw, "MLA901", 0.95)
+    await price_monitor.run_price_monitor()
+    s = _snaps()["3"]
+    assert (s.ml_status, s.match_origin, s.ml_variant) == ("ok", "oficina", "lens")
+    assert json.loads(_runs()[0].variant_stats) == {"lens": 1}
+    run = client.get("/api/price-monitor/runs").json()["items"][0]
+    assert run["oficina"] == {"fresh": 1, "n_ok": 1, "n_lens_ok": 1}
+    assert "lens" not in run["variants"]
+
+
+async def test_a_lens_result_without_an_igual_does_not_mark_the_variant(webw):
+    _store("3", [_wire("MLA901", "Otra cosa", 250.0)])
+    with Session(engine) as s:
+        s.exec(select(MlWebResult)).one().origin = oficina_ml.ORIGIN_LENS
+        s.commit()
+    _score(webw, "MLA901", 0.2)
+    await price_monitor.run_price_monitor()
+    assert _snaps()["3"].ml_status != "ok" and _snaps()["3"].ml_variant is None
 
 
 def test_the_status_of_the_card_when_nothing_ever_came_in():

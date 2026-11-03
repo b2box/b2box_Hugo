@@ -316,6 +316,9 @@ class Settings(EnvSettings):
     )
     apify_meli_search_enabled: int = 0
     apify_meli_search_daily_max: int = 200
+    # Google Lens en el semáforo (app/pricing/ml_lens.py): runtime, admin y auditados.
+    pm_lens_enabled: int = 0
+    pm_lens_daily_max: int = 30
 
     # ── Radar de Luis: cuánta oferta hay en ML por palabra ─────
     # Ver app/pricing/radar_ml_supply.py (POST /radar/ml-supply). Mismo APIFY_TOKEN.

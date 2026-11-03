@@ -58,7 +58,7 @@ def _shape(engine) -> dict:
     # (ml_web_claim, búsqueda con Apify) son de PRs posteriores a este esquema de partida: las prueban
     # test_seo_text_audit_pg.py, test_qa_estimate_migracion.py y test_apify_ml_search.py.
     # Lo mismo con la bandeja de revisión: sus tablas price_review_* y sus cinco columnas las prueba test_price_review_pg.py.
-    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_")
+    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_", "ml_lens_result")
     for table in sorted(t for t in insp.get_table_names() if not t.startswith(later)):
         cols = {c["name"]: (str(c["type"]), c["nullable"], str(c.get("default"))) for c in insp.get_columns(table)
                 if c["name"] not in _BANDEJA_COLS.get(table, ())}

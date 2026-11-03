@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -41,7 +42,7 @@ from sqlmodel import Session, func, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult, PriceMonitorRun
+from app.db.models import MarketPriceSnapshot, MlLensResult, MlWebClaim, MlWebResult, PriceMonitorRun
 from app.db.session import engine
 from app.pricing import market_query, semaforo
 from app.pricing.market_ml import (
@@ -56,6 +57,9 @@ from app.security import weak_key_reason
 log = logging.getLogger(__name__)
 
 ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR = "ok", "empty", "blocked", "error"
+# Origen de las búsquedas de Apify con una consulta de Google Lens (pricing/ml_lens.py): el semáforo las usa igual y
+# marca el snapshot con ml_variant="lens" para medir cuántos IGUAL ganó Lens.
+ORIGIN_LENS = "lens"
 STATUSES = (ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR)
 # Los que sirven como resultado: la Mac buscó y ML contestó (con o sin publicaciones).
 RESULT_STATUSES = (ST_OK, ST_EMPTY)
@@ -416,7 +420,7 @@ def _prune(s: Session, product_ids: set[str], now: datetime) -> None:
 
 
 def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None = None,
-                take_stale_oficina: bool = False) -> list[dict[str, Any]]:
+                take_stale_oficina: bool = False, with_lens: bool = False) -> list[dict[str, Any]]:
     """Qué buscar esta noche, en este orden:
 
       1. los ROJOS de la última corrida terminada (de hace 2 días o menos) cuyo precio salió de la oficina y cuyo
@@ -432,7 +436,14 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
       3. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
          siguiente, la noche siguiente);
       4. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
-         idéntico y los que hoy tienen precio gracias a la oficina. Empiezan de nuevo por la primera variante.
+         idéntico empiezan de nuevo por la primera variante; los que hoy tienen precio gracias a la oficina se
+         refrescan con la consulta que lo ganó (con la primera podrían perderlo).
+
+    Con `with_lens` (solo Apify, si `pm_lens_enabled`; la Mac nunca recibe consultas Lens) el orden queda: rojos →
+    nunca buscados → siguiente variante de texto → refresco de los que tienen precio → **lens** → refresco de los sin
+    dato. El grupo lens son los sin IDÉNTICO con una consulta de Google Lens todavía sin buscar (ver pricing/ml_lens.py),
+    pasadas NEXT_VARIANT_AFTER desde su último resultado y sin variante de texto pendiente; el item lleva `"lens": True`.
+    Lens solo desplaza el refresco de los sin dato, que repetiría la primera variante y daría lo mismo.
 
     Un producto sale UNA vez: si salió como rojo (1) no se repite en los otros grupos.
 
@@ -475,6 +486,9 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
                        MarketPriceSnapshot.match_origin == ORIGIN_OFICINA)
             ).all())
         taken_by_others = _claimed_by_others(s, claimer, now, take_stale_oficina)
+        lens_rows = s.exec(
+            select(MlLensResult.product_id, MlLensResult.ran_at, MlLensResult.queries).where(MlLensResult.status == "ok")
+        ).all() if with_lens else []
     last_result: dict[str, tuple[datetime, str, str]] = {}
     last_try: dict[str, datetime] = {}
     for pid, fetched, status, query in results:
@@ -482,12 +496,15 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             last_try[pid] = fetched
         if status in RESULT_STATUSES and (pid not in last_result or fetched > last_result[pid][0]):
             last_result[pid] = (fetched, status, query)
+    lens_pending = _lens_pending(lens_rows, results)
     still_measured = max((row[5] for row in snaps), default=now) - SNAPSHOT_MAX_AGE
 
     red: list[tuple[Any, ...]] = []
     never: list[tuple[Any, ...]] = []
     next_variant: list[tuple[Any, ...]] = []
-    expiring: list[tuple[Any, ...]] = []
+    expiring_priced: list[tuple[Any, ...]] = []
+    lens: list[tuple[Any, ...]] = []
+    expiring_rest: list[tuple[Any, ...]] = []
     for pid, ml_status, origin, name, enabled, captured in snaps:
         if not name or captured < still_measured or pid in taken_by_others:
             continue
@@ -507,22 +524,68 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
                 never.append((enabled is False, _sort_id(pid), pid, plan[0]))
             continue
         fetched, status, used = last
-        if fetched <= stale_before:
-            expiring.append((fetched, _sort_id(pid), pid, plan[0]))
-        elif needs_search and status == ST_EMPTY and fetched <= now - NEXT_VARIANT_AFTER:
-            keys = [market_query._key(q) for q in plan]
-            at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
-            if at + 1 < len(plan):
-                next_variant.append((fetched, _sort_id(pid), pid, plan[at + 1]))
-    for group in (red, never, next_variant, expiring):
+        next_text = _next_text(plan, used) if needs_search and status == ST_EMPTY else None
+        pending = lens_pending.get(pid) if needs_search else None
+        waited = fetched <= now - NEXT_VARIANT_AFTER
+        if pending and next_text is None and waited:
+            lens.append((fetched, _sort_id(pid), pid, pending[0]))
+        elif fetched <= stale_before:
+            if by_oficina:
+                expiring_priced.append((fetched, _sort_id(pid), pid, used or plan[0]))
+            else:
+                expiring_rest.append((fetched, _sort_id(pid), pid, plan[0]))
+        elif next_text is not None and waited:
+            next_variant.append((fetched, _sort_id(pid), pid, next_text))
+    for group in (red, never, next_variant, expiring_priced, lens, expiring_rest):
         group.sort(key=lambda t: t[:2])
     # Los rojos, a lo sumo la mitad: con 71 rojos viejos se comerían el cupo de Apify la primera noche. Los que no
     # entran siguen en su grupo de siempre (si les toca) y vuelven mañana.
     red = red[:max(limit // 2, 1)]
     chosen = {t[2] for t in red}
 
-    return [{"product_id": pid, "queries": [query]}
-            for *_, pid, query in [*red, *(t for t in [*never, *next_variant, *expiring] if t[2] not in chosen)]][:limit]
+    if with_lens:
+        rest = [*never, *next_variant, *expiring_priced, *lens, *expiring_rest]
+    else:       # la cola de siempre: los que vencen, con y sin precio, mezclados por antigüedad
+        rest = [*never, *next_variant, *sorted([*expiring_priced, *expiring_rest], key=lambda t: t[:2])]
+    lens_ids = {t[2] for t in lens}
+    return [{"product_id": pid, "queries": [query], **({"lens": True} if pid in lens_ids else {})}
+            for *_, pid, query in [*red, *(t for t in rest if t[2] not in chosen)]][:limit]
+
+
+def _next_text(plan: list[str], used: str) -> str | None:
+    """La variante de texto que sigue a `used` en el plan, o None (se probaron todas o `used` no es del plan)."""
+    keys = [market_query._key(q) for q in plan]
+    at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
+    return plan[at + 1] if at + 1 < len(plan) else None
+
+
+def _lens_pending(lens_rows: Sequence[Any], results: Sequence[Any]) -> dict[str, list[str]]:
+    """Por producto, las consultas Lens que todavía no tienen un resultado ok / empty de después de lensear. Un
+    `error` no cuenta como buscada: se vuelve a ofrecer."""
+    if not lens_rows:
+        return {}
+    searched: dict[str, list[tuple[datetime, str]]] = {}
+    for pid, fetched, status, query in results:
+        if status in RESULT_STATUSES:
+            searched.setdefault(pid, []).append((fetched, market_query._key(query)))
+    out: dict[str, list[str]] = {}
+    for pid, ran_at, raw in lens_rows:
+        used = {key for fetched, key in searched.get(pid, ()) if fetched >= ran_at}
+        pending = [q for q in _lens_queries(raw) if market_query._key(q) not in used]
+        if pending:
+            out[pid] = pending
+    return out
+
+
+def _lens_queries(raw: str | None) -> list[str]:
+    """Las consultas de `ml_lens_result.queries`. Las escribe ml_lens ya saneadas; se re-sanean igual (la tabla no es
+    de fiar más que la entrada)."""
+    try:
+        data = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    found = [clean_line(q.get("q"), 200) for q in data[:4] if isinstance(q, dict)] if isinstance(data, list) else []
+    return [q for q in found if q]
 
 
 def _sort_id(pid: str) -> tuple[int, str]:
@@ -654,6 +717,8 @@ class FreshResult:
     query: str
     fetched_at: datetime
     candidates: list[MlCandidate]
+    # Al final y con default: hay quien lo construye por posición.
+    origin: str = ORIGIN_OFICINA
 
 
 def load_fresh(*, now: datetime | None = None) -> dict[str, FreshResult]:
@@ -676,7 +741,8 @@ def load_fresh(*, now: datetime | None = None) -> dict[str, FreshResult]:
         except ValueError:
             raw = []
         cands = sanitize_candidates(raw, limit) if r.status == ST_OK else []
-        out[r.product_id] = FreshResult(r.product_id, ST_OK if cands else ST_EMPTY, r.query, r.fetched_at, cands)
+        out[r.product_id] = FreshResult(r.product_id, ST_OK if cands else ST_EMPTY, r.query, r.fetched_at, cands,
+                                        r.origin or ORIGIN_OFICINA)
     return out
 
 

@@ -989,6 +989,8 @@ _COSTLY_SETTINGS = frozenset({
     "vision_rerank_daily_budget",
     "apify_meli_search_enabled",
     "apify_meli_search_daily_max",
+    "pm_lens_enabled",
+    "pm_lens_daily_max",
     # Bajarlo hace que la cola pida más búsquedas de Apify por noche (hasta el tope de arriba).
     "oficina_result_ttl_days",
     "otapi_daily_budget",

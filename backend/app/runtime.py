@@ -534,6 +534,27 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=500, step=10, group="monitor",
     ),
     SettingMeta(
+        key="pm_lens_enabled",
+        label="Google Lens en el semáforo (1 / 0)",
+        description=(
+            "1 = cada madrugada, antes de buscar en ML con Apify, pasa por Google Lens la foto de hasta "
+            "pm_lens_daily_max productos sin idéntico, saca de los links de ML el título que usa el vendedor y lo "
+            "busca como una consulta más, dentro del tope de búsquedas de ML. Unos USD 0,005 por foto. "
+            "0 = apagado; lo ya ganado se conserva."
+        ),
+        type="int", parser=int,
+        default_attr="pm_lens_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_lens_daily_max",
+        label="Google Lens: fotos por día",
+        description="Tope de fotos por día (UTC) que pasan por Google Lens. Cupo atómico: dos corridas no se pasan.",
+        type="int", parser=int,
+        default_attr="pm_lens_daily_max",
+        min=0, max=100, step=10, group="monitor",
+    ),
+    SettingMeta(
         key="oficina_result_ttl_days",
         label="Apify y oficina: días que vale un resultado de ML",
         description=(

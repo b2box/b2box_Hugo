@@ -483,8 +483,9 @@ class MlWebResult(SQLModel, table=True):
     # Cuándo buscó la Mac (UTC, sin zona, a los segundos) y cuándo lo recibió Hugo.
     fetched_at: datetime
     received_at: datetime = Field(default_factory=utcnow)
-    # Quién buscó: "oficina" (la Mac) o "apify" (pricing/apify_ml_search.py). El semáforo
-    # usa los dos igual; esto queda para auditar de dónde salió cada resultado.
+    # Quién buscó: "oficina" (la Mac), "apify" (pricing/apify_ml_search.py) o "lens" (Apify, con una
+    # consulta sacada de Google Lens: pricing/ml_lens.py). El semáforo usa todos igual; "lens" además
+    # marca el snapshot con ml_variant="lens" para medir si Lens sirve.
     origin: str = Field(default="oficina", max_length=8)
     # JSON: lista de publicaciones (id, name, image_urls, permalink, price_cents…), ya saneadas.
     candidates: str = Field(default="[]")
@@ -509,6 +510,25 @@ class MlWebClaim(SQLModel, table=True):
     # de una Mac está colgada (oficina_ml.OFICINA_STALE_AFTER).
     renewed_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime = Field(index=True)
+
+
+class MlLensResult(SQLModel, table=True):
+    """Lo que dejó Google Lens para un producto sin IDÉNTICO (ver pricing/ml_lens.py): la consulta
+    sacada del título que usa el vendedor en ML, que después busca Apify como una más. Una fila por
+    producto (se pisa al volver a lensear); no guarda los links ni los goto, solo contadores."""
+    __tablename__ = "ml_lens_result"
+
+    product_id: str = Field(primary_key=True, max_length=64)
+    ran_at: datetime = Field(default_factory=utcnow)
+    # ok (hay consulta) | sin_links | error (se reintenta a las 20 h). 12 y no 8: "sin_links" mide 9.
+    status: str = Field(max_length=12)
+    # JSON: [{"q": "...", "host": "mercadolibre.com.ar", "ml_id": "MLA…", "pos": 19}]
+    queries: str = Field(default="[]")
+    n_matches: int = Field(default=0)
+    # Links de ML resueltos y aceptados (AR o país hispano).
+    n_ml_links: int = Field(default=0)
+    # USD imputados a esta foto (lo de la corrida repartido entre sus fotos).
+    usd: float = Field(default=0.0)
 
 
 # ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───

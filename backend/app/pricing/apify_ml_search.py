@@ -57,7 +57,7 @@ from app.db.models import AuditLog
 from app.db.session import engine
 from app.notifier.dispatcher import notify
 from app.ingest.apify_1688 import _json, _number, _request_bounded, _Run
-from app.pricing import daily_budget, oficina_ml
+from app.pricing import daily_budget, ml_lens, oficina_ml
 from app.pricing.market_ml import (
     MAX_URL_CHARS,
     _clean_https_parts,
@@ -413,12 +413,16 @@ class RunReport:
     overcharged: list[dict[str, Any]] = field(default_factory=list)
     # Se frenó por algo que hay que mirar (token, saldo, permisos del actor, racha de errores): se avisa.
     fatal: bool = False
+    # El paso Google Lens (ml_lens.LensReport.as_dict) y cuántas de las búsquedas fueron con una consulta Lens.
+    lens: dict[str, Any] = field(default_factory=lambda: ml_lens.LensReport().as_dict())
+    lens_searches: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {"status": self.status, "reason": self.reason, "searches": self.searches, "ok": self.ok,
                 "empty": self.empty, "errors": self.errors, "results": self.results, "stored": self.stored,
                 "rejected": self.rejected, "usd_imputado": round(self.usd_imputado, 6),
-                "runs": len(self.run_ids), "overcharged_runs": self.overcharged, "fatal": self.fatal}
+                "runs": len(self.run_ids), "overcharged_runs": self.overcharged, "fatal": self.fatal,
+                "lens": self.lens, "lens_searches": self.lens_searches}
 
 
 async def run_search(trigger: str = "cron") -> RunReport:
@@ -488,18 +492,21 @@ async def _run(report: RunReport, started: float) -> None:
     timeout_s, batch_size = int(s.apify_meli_search_timeout_s), max(1, int(s.apify_meli_search_concurrency))
     limit = oficina_ml._max_candidates()
     claimer = f"apify-{secrets.token_hex(4)}"
-    # Un lote de más que el cupo libre: quien corta es la reserva atómica (otra corrida puede gastar entre medio),
-    # y así se sabe si quedó cola sin buscar por falta de cupo.
-    queue = await asyncio.to_thread(
-        oficina_ml.build_queue, min(left + batch_size, oficina_ml.MAX_QUEUE), claimer=claimer,
-        take_stale_oficina=True)
-    if not queue:
-        report.reason = "la cola está vacía"
-        return
     headers = {"Authorization": f"Bearer {s.apify_token.strip()}", "Accept": "application/json"}
     http = _new_client(_POLL_WAIT_S + 15.0)
     fail_streak = 0
     try:
+        # Google Lens (si está prendido) deja consultas nuevas que la cola ofrece esta misma noche. Nunca frena lo de abajo.
+        report.lens = (await ml_lens.run_step(http, headers)).as_dict()
+        # Un lote de más que el cupo libre: quien corta es la reserva atómica (otra corrida puede gastar entre medio),
+        # y así se sabe si quedó cola sin buscar por falta de cupo.
+        queue = await asyncio.to_thread(
+            oficina_ml.build_queue, min(left + batch_size, oficina_ml.MAX_QUEUE), claimer=claimer,
+            take_stale_oficina=True, with_lens=ml_lens.is_enabled())
+        if not queue:
+            report.reason = "la cola está vacía"
+            return
+        lens_pids = {i["product_id"] for i in queue if i.get("lens")}
         level = await _actor_permission(http, actor, headers)
         if level != _REQUIRED_PERMISSION:
             report.status, report.fatal = "stopped", True
@@ -528,7 +535,7 @@ async def _run(report: RunReport, started: float) -> None:
                 outcomes = await asyncio.gather(*(
                     search_one(http, pid, batch[pid], actor=actor, build=build, headers=headers,
                                timeout_s=timeout_s, limit=limit) for pid in todo))
-                await asyncio.to_thread(_store, outcomes, report)
+                await asyncio.to_thread(_store, outcomes, report, lens_pids)
                 await asyncio.to_thread(oficina_ml.release, claimer, todo)
                 if any(o.fatal for o in outcomes):
                     report.status, report.fatal = "stopped", True
@@ -548,7 +555,7 @@ async def _run(report: RunReport, started: float) -> None:
         await asyncio.to_thread(oficina_ml.release, claimer)
 
 
-def _store(outcomes: list[SearchOutcome], report: RunReport) -> None:
+def _store(outcomes: list[SearchOutcome], report: RunReport, lens_pids: frozenset[str] | set[str] = frozenset()) -> None:
     for o in outcomes:
         report.searches += 1
         report.usd_imputado += o.usd_imputado
@@ -563,9 +570,16 @@ def _store(outcomes: list[SearchOutcome], report: RunReport) -> None:
             report.empty += 1
         else:
             report.errors += 1
-    ingested = oficina_ml.ingest([o.as_result() for o in outcomes], origin=ORIGIN_APIFY)
-    report.stored += ingested.stored
-    report.rejected += len(ingested.rejected)
+    # Lo buscado con una consulta Lens se guarda con su origen: el semáforo lo marca y así se mide si Lens sirve.
+    for origin, group in ((oficina_ml.ORIGIN_LENS, [o for o in outcomes if o.product_id in lens_pids]),
+                          (ORIGIN_APIFY, [o for o in outcomes if o.product_id not in lens_pids])):
+        if not group:
+            continue
+        if origin == oficina_ml.ORIGIN_LENS:
+            report.lens_searches += len(group)
+        ingested = oficina_ml.ingest([o.as_result() for o in group], origin=origin)
+        report.stored += ingested.stored
+        report.rejected += len(ingested.rejected)
 
 
 def _audit(report: RunReport, trigger: str) -> None:
@@ -574,6 +588,9 @@ def _audit(report: RunReport, trigger: str) -> None:
     detail = (f"Búsqueda web de ML con Apify ({trigger}): {report.searches} búsquedas, {report.results} "
               f"publicaciones, USD {report.usd_imputado:.4f} — {report.status}"
               + (f" ({report.reason})" if report.reason else ""))
+    if report.lens.get("status") != "disabled":
+        detail += (f". Lens: {report.lens.get('products', 0)} productos, USD {report.lens.get('usd', 0.0):.4f}, "
+                   f"{report.lens_searches} búsquedas")
     try:
         with Session(engine) as s:
             s.add(AuditLog(action="apify_ml_search_run", source="apify", product_id="(semaforo)",

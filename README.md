@@ -961,6 +961,66 @@ existentes). Para volver atrás:
 DROP TABLE IF EXISTS ml_web_claim;
 ```
 
+### Google Lens para los sin IDÉNTICO (fuente 2d, dentro del job de Apify)
+
+La búsqueda de ML usa NUESTRO nombre y el vendedor le pone otro. `pricing/ml_lens.py` busca por la foto: foto → Google Lens
+→ links de ML → del slug sale el título del vendedor → esa frase la busca Apify como una consulta más → decide el juez de
+siempre. Corre al principio del job `apify_ml_search` (sin cron nuevo) y solo si está prendido.
+
+- **Prender / tope** (dashboard, grupo monitor, admin y audit log): `pm_lens_enabled` (default **0 = apagado**) y
+  `pm_lens_daily_max` (default **30**, máximo 100 fotos por día UTC; cupo atómico `_meta:ml_lens_today`). Si la búsqueda
+  de ML no corre (apagada, sin token o sin cupo), Lens tampoco.
+- **A quién:** el último snapshot vigente `no_data` con `diferente` / `similar` / `ninguno`, medible, con foto pública y
+  ya buscado por texto; sin lensear o lenseado hace más de 60 días (con `error`, 20 h). Habilitados primero.
+- **Actor:** `s-r/google-lens` build `0.2.7` (constantes: otro actor entra por PR), solo con `LIMITED_PERMISSIONS`; si no,
+  `lens.status = stopped` y la búsqueda de ML sigue. Lotes de 25 fotos, hasta 3 corridas a la vez, `maxTotalChargeUsd =
+  n · 0,005 · 1,5`. El paso entero tiene **15 min**: lo que no terminó se aborta y queda `error`.
+- **Los `google.com/goto`:** se resuelven en el momento con un GET a `https://www.google.com/goto?…` (la URL exacta: otra
+  cosa no genera ningún request), sin seguir la redirección, sin leer el body, timeout 5 s, 4 a la vez y 10 por foto. Del
+  `Location` solo se acepta https a `mercadolibre.com.ar` o a un ML hispano (`.com.mx .cl .com.co .com.uy .com.pe .com.ve
+  .com.ec`); Brasil nunca. **Hugo nunca le pide nada a ML.** Tres `429` / `google.com/sorry` / `consent.google.com`
+  seguidos frenan la noche (`lens.resolve_blocked = true`, lo pendiente queda `error`). Los logs llevan contadores, no URLs.
+- **Consulta:** **una por producto** (decisión del 03-nov), primero links AR por posición en Lens, hispanos solo si no
+  hay AR. Slug en minúsculas sin guiones, sin la última palabra si el slug mide ≥ 56 (ML la corta a medias), solo letras,
+  números y espacios, ≤ 120 caracteres y ≥ 2 palabras, distinta del plan de texto del producto. Sin ninguna:
+  `sin_links`.
+- **Cola:** `build_queue(with_lens=True)` (solo Apify; la Mac nunca recibe consultas Lens) ofrece la consulta pendiente
+  en el grupo `lens`, después del refresco de los que tienen precio y antes del de los sin dato, pasadas 12 h desde la
+  última búsqueda y si no queda una variante de texto pendiente. Se busca del **mismo** cupo `apify_meli_search_daily_max`
+  y se guarda con `origin = lens`. Un producto con precio se refresca **con la consulta que lo ganó** (también «corto» o
+  «claves»), con Lens prendido o apagado.
+- **Medición:** si el IGUAL con precio salió de un resultado `lens`, el snapshot queda `ml_variant = lens` y el resumen de
+  la corrida lo da como `oficina.n_lens_ok` («(Z por Google Lens)» en la línea del buscador). El audit
+  `apify_ml_search_run` lleva `lens` (status, products, with_queries, sin_links, errors, matches, ml_links, usd,
+  resolve_blocked) y `lens_searches`.
+
+Cuánto costó cada ganado (Postgres):
+
+```sql
+WITH last AS (SELECT DISTINCT ON (product_id) product_id, ml_variant
+              FROM market_price_snapshot ORDER BY product_id, id DESC)
+SELECT count(*)                                         AS lenseados,
+       count(*) FILTER (WHERE l.status = 'ok')          AS con_consulta,
+       count(*) FILTER (WHERE last.ml_variant = 'lens') AS ganados,
+       round(sum(l.usd)::numeric, 2)                    AS usd_lens
+FROM ml_lens_result l LEFT JOIN last USING (product_id);
+-- búsquedas Lens:
+SELECT SUM((after::json->>'lens_searches')::int) FROM audit_log WHERE action = 'apify_ml_search_run';
+```
+
+Costo total por ganado = `(usd_lens + búsquedas_lens · 0,02) / ganados`. **Se deja** si `ganados ≥ 10 %` de
+`con_consulta`, el costo total por ganado es ≤ US$ 0,25 y en una muestra de 20 ganados hay ≤ 2 que no son el mismo
+producto. Una corrección manual que recalcula el snapshot pone `ml_variant = NULL`: `ganados` cuenta un poco de menos.
+
+**Migración y rollback.** Automática en el arranque: la tabla `ml_lens_result` (nueva; no toca las existentes). Para
+volver atrás, `pm_lens_enabled = 0` y:
+
+```sql
+DROP TABLE IF EXISTS ml_lens_result;
+```
+
+Las filas `origin = 'lens'` de `ml_web_result` siguen sirviendo como si fueran de Apify, también con el código anterior.
+
 ### Tiendas (Gadnic, Casa Perfecta…)
 
 Además de Mercado Libre, la **misma corrida** del semáforo compara cada producto contra las
