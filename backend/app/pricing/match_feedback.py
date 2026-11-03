@@ -120,8 +120,9 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
     """Guarda la corrección ("No es el mismo", label 0; "Es el mismo", label 1).
     `entry` es la publicación tal como estaba en el snapshot; `motive` (clave de MOTIVES) y
     `note` ya vienen validados por la ruta. False si ya estaba
-    con ese mismo label (idempotente: apretar dos veces no duplica); si estaba con
-    el otro label se da vuelta (una persona cambió de opinión) y devuelve True.
+    con ese mismo label y nada nuevo (idempotente: apretar dos veces no duplica); con
+    el mismo label y otro motivo gana el último (también completa una marca de antes sin
+    motivo); si estaba con el otro label se da vuelta (una persona cambió de opinión).
 
     Con `session` el alta va en la sesión del llamador y NO se commitea: así la
     corrección y el snapshot recalculado se guardan juntos o no se guarda nada.
@@ -148,7 +149,12 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
             s.add(row)
             return True
         if int(existing.label or 0) == int(label):
-            return False
+            # Mismo label: solo cambia si trae otro motivo (la card y la lección dicen lo mismo).
+            if not row.motive or (existing.motive, existing.note) == (row.motive, row.note):
+                return False
+            existing.motive, existing.note = row.motive, row.note
+            s.add(existing)
+            return True
         # Cambió de opinión: se guarda la marca anterior para que "Deshacer" vuelva a ella.
         existing.previous_label = int(existing.label or 0)
         existing.label, existing.actor, existing.snapshot_id = int(label), row.actor, snapshot_id

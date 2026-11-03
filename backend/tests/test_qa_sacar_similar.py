@@ -214,8 +214,6 @@ def test_qa_dropping_the_same_similar_twice_changes_nothing_the_second_time(clie
     assert _counters(_run(snap2.run_id)) == run1
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: la 2da vez reescribe la card con el motivo nuevo pero add_feedback "
-                   "(mismo label) no actualiza motive/note: la card dice una cosa y el juez aprende otra")
 def test_qa_dropping_again_with_another_motive_keeps_card_and_lesson_in_agreement(client):
     """La segunda vez (otro motivo) no duplica: lo que dice la card tiene que ser lo que recibe el juez."""
     sid = _seed(_sim("MLA111", 12_000), _sim("MLA112", 40_000))

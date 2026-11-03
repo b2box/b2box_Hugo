@@ -108,6 +108,16 @@ def test_without_motive_it_works_as_before(client):
     assert match_feedback.load_lessons() == {}
 
 
+def test_dropping_again_with_a_motive_completes_a_mark_without_one(client):
+    sid = _seed(_sim("MLA111", 12_000))
+    assert _drop(client, sid, "MLA111").status_code == 200                # cliente de antes: sin motivo
+    r = _drop(client, sid, "MLA111", motive="marca", note="es Stanley")
+    assert r.status_code == 200 and r.json()["already"] is False
+    assert [(f.motive, f.note) for f in _feedback()] == [("marca", "es Stanley")]
+    assert r.json()["snapshot"]["other_listings"][0]["reason"] == "Sacada a mano: Otra marca (es Stanley)"
+    assert match_feedback.load_lessons()["7"][0].motive == "Otra marca"
+
+
 # ─── el snapshot se recalcula ──────────────────────────────────────────────
 
 
