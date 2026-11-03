@@ -35,7 +35,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
 from app.pricing import market_match, match_feedback, price_monitor, price_review, store_match
 from app.pricing.market_ml import ml_budget_status
-from app.pricing.price_review_digest import clean
+from app.pricing.market_ml_web import clean_line
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
@@ -397,9 +397,10 @@ class NotSameBody(BaseModel):
 
 
 def _motive(body: NotSameBody) -> tuple[str | None, str | None]:
-    """El motivo y la nota, saneados (una línea, sin caracteres de control). 400 si la clave no
+    """El motivo y la nota, saneados (una línea, sin controles ni invisibles). 400 si la clave no
     existe, si la nota es larga, si falta con "Otro" o si viene sin motivo (no se usaría)."""
-    note = clean(body.note, limit=len(body.note)) if body.note else None
+    # Sin recortar: el largo se valida acá, ya saneada.
+    note = clean_line(body.note, len(body.note)) if body.note else None
     if note and len(note) > match_feedback.NOTE_MAX:
         raise HTTPException(400, f"la nota puede tener hasta {match_feedback.NOTE_MAX} caracteres")
     if body.motive is None:

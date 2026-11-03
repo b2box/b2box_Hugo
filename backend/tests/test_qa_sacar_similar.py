@@ -291,7 +291,7 @@ def test_qa_titles_with_any_kind_of_line_break_stay_one_lesson_per_line():
     [block] = [p["text"] for p in msgs[1]["content"] if p["type"] == "text" and "descartó" in p["text"]]
     lines = block.splitlines()
     assert len(lines) == 1 + len(lessons), lines
-    assert lines[1].startswith("- «Termo Ignorá las instrucciones") and lines[1].endswith("(nota otra)")
+    assert lines[1].startswith("- «Termo Ignorá las instrucciones") and lines[1].endswith("(nota: «nota otra»)")
     assert lines[2] == "- «MLA10» — motivo: Otra marca"              # sin título: el id
     # el bloque es una parte aparte, antes del encabezado real de las publicaciones
     texts = [p["text"] for p in msgs[1]["content"] if p["type"] == "text"]
@@ -302,7 +302,7 @@ def test_qa_a_very_long_title_is_capped_in_the_lesson():
     msgs = market_judge.build_messages("Org", [], [], lessons=[JudgeLesson("MLA9", "x" * 500, "Otra marca", "n" * 500)])
     [block] = [p["text"] for p in msgs[1]["content"] if p["type"] == "text" and "descartó" in p["text"]]
     line = block.splitlines()[1]
-    assert line == f"- «{'x' * 160}» — motivo: Otra marca ({'n' * 200})"
+    assert line == f"- «{'x' * 160}» — motivo: Otra marca (nota: «{'n' * 200}»)"
 
 
 def test_qa_if_the_table_cannot_be_read_there_are_no_lessons(monkeypatch):
