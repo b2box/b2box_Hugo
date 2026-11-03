@@ -138,13 +138,16 @@ def test_qa_explicit_null_motive_is_the_old_client(client):
     assert match_feedback.load_lessons() == {}
 
 
-def test_qa_a_note_without_motive_is_accepted_but_is_not_a_lesson(client):
-    """Sin motivo la marca es «de antes»: excluye, pero el juez no la recibe (la nota queda solo en la base)."""
+def test_qa_a_note_without_motive_is_a_400_and_a_blank_one_is_the_old_client(client):
+    """Una nota sin motivo no se usaría (no es lección): 400 y no se guarda nada. En blanco es «de antes»."""
     sid = _seed(_sim("MLA111", 12_000))
     r = _drop(client, sid, "MLA111", note="algo")
+    assert r.status_code == 400, r.text
+    assert _feedback() == []
+    r = _drop(client, sid, "MLA111", note=" \n ")
     assert r.status_code == 200, r.text
     assert r.json()["snapshot"]["other_listings"][0]["reason"] == "una persona la marcó «No es el mismo»"
-    assert [(f.motive, f.note) for f in _feedback()] == [(None, "algo")]
+    assert [(f.motive, f.note) for f in _feedback()] == [(None, None)]
     assert match_feedback.load_lessons() == {}
     assert match_feedback.load_excluded() == {"7": frozenset({"MLA111"})}
 

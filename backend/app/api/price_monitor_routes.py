@@ -398,12 +398,14 @@ class NotSameBody(BaseModel):
 
 def _motive(body: NotSameBody) -> tuple[str | None, str | None]:
     """El motivo y la nota, saneados (una línea, sin caracteres de control). 400 si la clave no
-    existe, si la nota es larga o si falta con "Otro"."""
+    existe, si la nota es larga, si falta con "Otro" o si viene sin motivo (no se usaría)."""
     note = clean(body.note, limit=len(body.note)) if body.note else None
     if note and len(note) > match_feedback.NOTE_MAX:
         raise HTTPException(400, f"la nota puede tener hasta {match_feedback.NOTE_MAX} caracteres")
     if body.motive is None:
-        return None, note or None
+        if note:
+            raise HTTPException(400, "la nota va con un motivo")
+        return None, None
     if body.motive not in match_feedback.MOTIVES:
         raise HTTPException(400, f"motivo inválido: {body.motive}")
     if body.motive == match_feedback.MOTIVE_OTHER and not note:
