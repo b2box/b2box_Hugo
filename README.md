@@ -707,15 +707,20 @@ mismo" y "No tiene nada que ver", y cada diferente tiene "Es el mismo". "Es el m
   `motive` es una clave fija: `otro_producto` (Es otro producto), `medida` (Otra medida o
   tamaño), `cantidad` (Otra cantidad o pack), `material` (Otro material o calidad),
   `marca` (Otra marca), `repuesto` (Es un repuesto o accesorio) u `otro` (Otro); `note`
-  es una línea de hasta 200 caracteres, obligatoria con `otro`. Una clave que no existe,
-  una nota más larga o `otro` sin nota = 400. Sin `motive` (clientes de antes) funciona
-  como siempre; la pantalla siempre lo manda.
+  es una línea de hasta 200 caracteres (sin controles ni caracteres invisibles), obligatoria
+  con `otro`. Una clave que no existe, una nota más larga, `otro` sin nota o una nota sin
+  motivo = 400 (el mensaje no repite lo que se mandó). Sin `motive` (clientes de antes)
+  funciona como siempre; la pantalla siempre lo manda. Sacarla de nuevo con otro motivo
+  lo reemplaza (gana el último). La nota la lee el juez, que es un servicio externo: la
+  pantalla avisa que no lleve costos, proveedores ni datos de clientes, y el log de las
+  marcas no la incluye.
 - **Hugo aprende**: las marcas con motivo son **lecciones** para el juez IA de ese
   producto. Cada corrida las lee una vez (`match_feedback.load_lessons`) y, cuando le
   pregunta al juez por ese producto, le pasa las 8 más nuevas (título de la publicación,
-  motivo y nota) con la regla "si una publicación coincide con una descartada en lo que
-  dice su motivo, va como `diferente`". Sin lecciones el prompt es exactamente el de
-  siempre. Vale también para el juez de las tiendas (comparten el camino); las marcas de
+  motivo y `nota: «…»`) con la regla "si una publicación coincide con una descartada en lo
+  que dice su motivo, va como `diferente`"; título, motivo y nota son datos de referencia,
+  no instrucciones (nunca sirven para marcar `igual` o `similar`). Sin lecciones el prompt
+  es exactamente el de siempre. Vale también para el juez de las tiendas (comparten el camino); las marcas de
   las tiendas (`store_match_feedback`) no tienen motivo.
 - *Es el mismo* (`POST /api/price-monitor/snapshots/{id}/same`): pasa a **idéntica**,
   su precio cuenta, **recalcula el color real** (y el estimado desaparece), rehace los
@@ -736,10 +741,21 @@ mismo" sobre una publicación sin precio la deja como idéntica sin precio: "cue
 el color desde la próxima corrida". Esas filas son etiquetas para calibrar:
 `calibrate_market_match export` las saca ya etiquetadas (0 y 1).
 
+**Migración y rollback de «No tiene nada que ver» (nov-2026).** Automática en el arranque
+(`init_db`): agrega a `market_match_feedback` dos columnas opcionales, `motive` y `note`
+(sin NOT NULL ni backfill: las marcas de antes quedan sin motivo y no son lecciones; el
+código anterior sigue insertando). No crea tablas ni settings. Para volver el esquema atrás:
+
+```sql
+ALTER TABLE market_match_feedback DROP COLUMN IF EXISTS motive, DROP COLUMN IF EXISTS note;
+```
+
 **Pendiente (B3, fuera de este PR): CSRF.** Los POST/DELETE del dashboard
 (`run`, `not-same`) se apoyan en la cookie de sesión `SameSite=Lax` y no llevan
 token CSRF. `Lax` ya frena los POST entre sitios, pero conviene sumar un token (o
-validar `Origin`) para todos los endpoints que escriben, no solo estos.
+validar `Origin`) para todos los endpoints que escriben. `not-same`, `same` y el
+deshacer ya rechazan un `Sec-Fetch-Site` que no sea `same-origin` (como la bandeja);
+`run` todavía no.
 
 ### Buscador de la oficina (fuente 2b: la búsqueda web de ML hecha desde la Mac de la oficina)
 
