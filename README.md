@@ -499,11 +499,11 @@ cambian nunca por esto**; la corrida suma `n_est_verde/amarillo/rojo` y
 por similares". Hay un test que compara el semáforo real con el de `main` columna por
 columna (web apagada): los campos nuevos son solo aditivos.
 
-**"Es el mismo" / "No es el mismo".** Una persona puede corregir en los dos sentidos
-(ver más abajo): promover un similar o un diferente a idéntico, o pasar un idéntico a
-diferente. La marca se guarda por producto e id de ML (`market_match_feedback.label`,
-0 o 1) y la próxima corrida la respeta, sin que el juez ni el chequeo de medidas la
-cambien.
+**"Es el mismo" / "No es el mismo" / "No tiene nada que ver".** Una persona puede
+corregir en los dos sentidos (ver más abajo): promover un similar o un diferente a
+idéntico, o pasar un idéntico o un similar a diferente (con un motivo). La marca se
+guarda por producto e id de ML (`market_match_feedback.label`, 0 o 1) y la próxima
+corrida la respeta, sin que el juez ni el chequeo de medidas la cambien.
 
 Ganancia estimada (en % sobre lo que nos paga el revendedor):
 
@@ -693,22 +693,39 @@ prender la fuente en producción conviene que Nico y Gabriel den el OK explícit
 (poner `pm_ml_web_daily_budget` en 0 la apaga sin redeploy). Una IP residencial
 es la única forma de que ML responda; no se intenta evadir captchas.
 
-**"No es el mismo" y "Es el mismo".** En el detalle de cada producto, cada
-publicación idéntica tiene "No es el mismo" y cada similar o diferente tiene "Es el
-mismo"; los dos **piden confirmación**.
-- *No es el mismo* (`POST /api/price-monitor/snapshots/{id}/not-same`): pasa a la
-  lista de **diferentes** (no se descarta: se ve con su precio y se puede dar
-  vuelta), **recalcula** mediana, mínimo, ganancia y color real con los idénticos que
-  quedan (y el estimado, si ya no queda ninguno) y rehace los contadores de la
+**"No es el mismo", "No tiene nada que ver" y "Es el mismo".** En el detalle de cada
+producto, cada publicación idéntica tiene "No es el mismo", cada similar tiene "Es el
+mismo" y "No tiene nada que ver", y cada diferente tiene "Es el mismo". "Es el mismo"
+**pide confirmación**; los otros dos **piden el motivo**.
+- *No es el mismo* (idéntica) y *No tiene nada que ver* (similar)
+  (`POST /api/price-monitor/snapshots/{id}/not-same`, `{"ml_id", "motive", "note"}`):
+  pasa a la lista de **diferentes** (no se descarta: se ve con su precio, con "Sacada a
+  mano: Otra marca (nota)", y se puede dar vuelta), **recalcula** mediana, mínimo,
+  ganancia y color real con los idénticos que quedan, el **color estimado** con los
+  similares que quedan, los puntajes que mira «Para confirmar» y los contadores de la
   corrida. Queda como diferente para ese producto en las próximas corridas.
+  `motive` es una clave fija: `otro_producto` (Es otro producto), `medida` (Otra medida o
+  tamaño), `cantidad` (Otra cantidad o pack), `material` (Otro material o calidad),
+  `marca` (Otra marca), `repuesto` (Es un repuesto o accesorio) u `otro` (Otro); `note`
+  es una línea de hasta 200 caracteres, obligatoria con `otro`. Una clave que no existe,
+  una nota más larga o `otro` sin nota = 400. Sin `motive` (clientes de antes) funciona
+  como siempre; la pantalla siempre lo manda.
+- **Hugo aprende**: las marcas con motivo son **lecciones** para el juez IA de ese
+  producto. Cada corrida las lee una vez (`match_feedback.load_lessons`) y, cuando le
+  pregunta al juez por ese producto, le pasa las 8 más nuevas (título de la publicación,
+  motivo y nota) con la regla "si una publicación coincide con una descartada en lo que
+  dice su motivo, va como `diferente`". Sin lecciones el prompt es exactamente el de
+  siempre. Vale también para el juez de las tiendas (comparten el camino); las marcas de
+  las tiendas (`store_match_feedback`) no tienen motivo.
 - *Es el mismo* (`POST /api/price-monitor/snapshots/{id}/same`): pasa a **idéntica**,
   su precio cuenta, **recalcula el color real** (y el estimado desaparece), rehace los
   contadores y la próxima corrida la toma como IGUAL aunque el juez o el chequeo de
   medidas dijeran otra cosa. Si no tenía precio, queda como idéntica sin precio.
 
 Las dos se guardan en la tabla `market_match_feedback` (`label` 0 / 1, con los
-puntajes, el origen que tenía y **quién la marcó**: el usuario de la sesión), en una
-sola transacción con el snapshot y los contadores, y son idempotentes. Una persona
+puntajes, el origen que tenía, `motive` y `note` y **quién la marcó**: el usuario de la
+sesión), en una sola transacción con el snapshot y los contadores, y son idempotentes.
+Si después la da vuelta con "Es el mismo", el motivo queda guardado: al deshacer, la lección vuelve. Una persona
 puede cambiar de opinión (la fila se da vuelta y guarda la marca anterior en
 `previous_label`). "Deshacer"
 (`DELETE /api/price-monitor/products/{id}/feedback/{ml_id}`, también sirve el path
@@ -1453,8 +1470,8 @@ retención y de uso de datos para entrenamiento del proveedor elegido.
   similares / diferentes) con precio, link, % de foto y de nombre, origen (ficha API
   / web), cómo se decidió (foto + nombre, juez IA con su confianza, medidas, una
   persona, sin confirmar) y el motivo, más las medidas nuestras junto a las de la
-  publicación y los botones "No es el mismo" / "Es el mismo" (con confirmación y
-  "Deshacer"). El color real es un punto lleno; el **estimado por similares** va con
+  publicación y los botones "No es el mismo" / "No tiene nada que ver" (con motivo) /
+  "Es el mismo" (con confirmación), todos con "Deshacer". El color real es un punto lleno; el **estimado por similares** va con
   punto hueco, en cursiva y "estimado por similares", con chips aparte (Estimado
   verde / amarillo / rojo); "Solo diferentes" tiene su etiqueta y "Sin dato" es solo
   cuando ML no devolvió nada. Filtros: producto (habilitados / deshabilitados /
@@ -1845,7 +1862,7 @@ backend/
 │   │   ├── oficina_ml.py     # buscador de la oficina: saneo, cola, resultados frescos
 │   │   ├── market_match.py   # filtro "mismo producto" (CLIP + nombre)
 │   │   ├── market_specs.py   # cantidad, capacidad, medidas y peso (IGUAL → SIMILAR)
-│   │   ├── match_feedback.py # "No es el mismo": exclusiones y etiquetas negativas
+│   │   ├── match_feedback.py # "No es el mismo": exclusiones, etiquetas negativas y lecciones del juez
 │   │   ├── market_judge.py   # juez IA opcional (OpenAI-compatible)
 │   │   ├── store_catalog.py  # indexador incremental de tiendas (sitemap, robots, cupo, dead)
 │   │   ├── store_parse.py    # fichas de Tiendanube / JSON-LD y sitemaps (sin red)
