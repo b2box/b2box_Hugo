@@ -138,7 +138,7 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
         title=(str(entry.get("title"))[:200] if entry.get("title") else None),
         permalink=(str(entry.get("permalink"))[:300] if entry.get("permalink") else None),
         snapshot_id=snapshot_id, product_name=(product_name or "")[:200] or None,
-        actor=(actor or "")[:120] or None, motive=motive, note=note,
+        actor=(actor or "")[:120] or None, motive=motive, note=(note or "")[:NOTE_MAX] or None,
     )
 
     def _upsert(s: Session) -> bool:
@@ -164,27 +164,34 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
         return True
 
     if session is not None:
-        return _upsert(session)
-    with Session(engine) as s:
-        added = _upsert(s)
-        try:
-            s.commit()
-        except IntegrityError:
-            s.rollback()
-            return False
+        added = _upsert(session)
+    else:
+        with Session(engine) as s:
+            added = _upsert(s)
+            try:
+                s.commit()
+            except IntegrityError:
+                s.rollback()
+                return False
+    if added:
+        # Sin la nota: es texto libre de una persona.
+        log.info("market_match_feedback: producto %s, %s → label %s, motivo %s, por %s",
+                 product_id[:64], ml_id, int(label), motive, (actor or "")[:120] or None)
     return added
 
 
-def undo_feedback(product_id: str, ml_id: str) -> dict[str, Any] | None:
+def undo_feedback(product_id: str, ml_id: str, actor: str | None = None) -> dict[str, Any] | None:
     """"Deshacer": si la marca es el segundo parecer de una persona que cambió de
     opinión, vuelve a la anterior (`{"removed": False, "restored": 0|1}`); si no,
-    borra la fila (`{"removed": True}`). None si no había marca."""
+    borra la fila (`{"removed": True}`). None si no había marca. `actor` solo va al log."""
     with Session(engine) as s:
         row = s.exec(select(MarketMatchFeedback).where(
             MarketMatchFeedback.product_id == product_id,
             MarketMatchFeedback.ml_id == ml_id)).first()
         if row is None:
             return None
+        log.info("market_match_feedback: deshacer producto %s, %s (label %s, motivo %s), por %s",
+                 product_id, ml_id, row.label, row.motive, actor)
         if row.previous_label is not None:
             restored = int(row.previous_label)
             row.label, row.previous_label = restored, None

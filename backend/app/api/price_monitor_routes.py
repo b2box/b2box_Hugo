@@ -388,6 +388,10 @@ async def product_history(
     return {"product_id": product_id, "items": [price_monitor.snapshot_to_dict(r) for r in rows]}
 
 
+# Las correcciones escriben con la cookie de sesión: solo desde el dashboard (CSRF, ver auth._reject_cross_site).
+_CROSS_SITE = "Solo se puede hacer desde el dashboard de Hugo."
+
+
 class NotSameBody(BaseModel):
     ml_id: str = Field(min_length=3, max_length=24)
     # Solo "No es el mismo" / "No tiene nada que ver": una clave de match_feedback.MOTIVES y
@@ -408,7 +412,7 @@ def _motive(body: NotSameBody) -> tuple[str | None, str | None]:
             raise HTTPException(400, "la nota va con un motivo")
         return None, None
     if body.motive not in match_feedback.MOTIVES:
-        raise HTTPException(400, f"motivo inválido: {body.motive}")
+        raise HTTPException(400, "motivo inválido")
     if body.motive == match_feedback.MOTIVE_OTHER and not note:
         raise HTTPException(400, "con «Otro» hay que contar el motivo en la nota")
     return body.motive, note or None
@@ -457,6 +461,7 @@ async def not_the_same(
     La corrección, el snapshot y los contadores se guardan en UNA transacción: o
     quedan los tres o ninguno. Apretarlo dos veces (o desde dos pestañas a la vez)
     no duplica nada."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
     motive, note = _motive(body)
@@ -492,6 +497,7 @@ async def same_product(
     desaparece, y la próxima corrida la respeta como IGUAL (label 1 en
     market_match_feedback, con quién la marcó). Misma transacción única y misma
     idempotencia que "No es el mismo"; "Deshacer" borra la marca (DELETE)."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
     snap = session.get(MarketPriceSnapshot, snapshot_id)
@@ -514,6 +520,7 @@ async def same_product(
 @router.delete("/products/{product_id}/feedback/{ml_id}")
 @router.delete("/products/{product_id}/not-same/{ml_id}")
 async def undo_feedback(
+    request: Request,
     product_id: str = Path(..., min_length=1, max_length=PRODUCT_ID_MAX_LEN),
     ml_id: str = Path(..., min_length=3, max_length=24),
 ) -> dict[str, Any]:
@@ -522,9 +529,11 @@ async def undo_feedback(
     la marca anterior (`{"removed": false, "restored": 0|1}`); si no, borra la marca
     (`{"removed": true}`) y la próxima corrida vuelve a juzgarla sola. El snapshot de
     hoy no se reconstruye."""
+    auth._reject_cross_site(request, _CROSS_SITE)
     if not match_feedback.valid_ml_id(ml_id):
         raise HTTPException(400, "ml_id inválido")
-    result = match_feedback.undo_feedback(product_id, ml_id)
+    actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
+    result = match_feedback.undo_feedback(product_id, ml_id, actor)
     if result is None:
         raise HTTPException(404, "esa publicación no estaba marcada")
     return result

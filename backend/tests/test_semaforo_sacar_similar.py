@@ -118,6 +118,45 @@ def test_dropping_again_with_a_motive_completes_a_mark_without_one(client):
     assert match_feedback.load_lessons()["7"][0].motive == "Otra marca"
 
 
+@pytest.mark.parametrize("method, path", [
+    ("post", "/api/price-monitor/snapshots/{sid}/not-same"), ("post", "/api/price-monitor/snapshots/{sid}/same"),
+    ("delete", "/api/price-monitor/products/7/feedback/MLA111"), ("delete", "/api/price-monitor/products/7/not-same/MLA111"),
+])
+def test_corrections_from_another_site_are_a_403(client, method, path):
+    """CSRF: un navegador manda Sec-Fetch-Site; si el pedido lo armó otra página, no pasa (la cookie iría sola)."""
+    sid = _seed(_sim("MLA111", 12_000))
+    kw = {"json": {"ml_id": "MLA111", "motive": "marca"}} if method == "post" else {}
+    r = getattr(client, method)(path.format(sid=sid), headers={"Sec-Fetch-Site": "cross-site"}, **kw)
+    assert r.status_code == 403, r.text
+    assert _feedback() == []
+    with Session(engine) as s:
+        assert s.get(MarketPriceSnapshot, sid).similar_count == 1
+
+
+def test_from_the_dashboard_it_goes_through_and_the_log_has_no_note(client, caplog):
+    sid = _seed(_sim("MLA111", 12_000))
+    same_origin = {"Sec-Fetch-Site": "same-origin"}
+    with caplog.at_level("INFO", logger="app.pricing.match_feedback"):
+        r = client.post(f"/api/price-monitor/snapshots/{sid}/not-same", headers=same_origin,
+                        json={"ml_id": "MLA111", "motive": "marca", "note": "dato privado"})
+        assert r.status_code == 200, r.text
+        assert client.delete("/api/price-monitor/products/7/feedback/MLA111", headers=same_origin).status_code == 200
+    logged = caplog.text
+    assert "MLA111" in logged and "marca" in logged and "admin" in logged and "deshacer" in logged
+    assert "dato privado" not in logged
+
+
+def test_an_invalid_motive_does_not_echo_what_was_sent(client):
+    sid = _seed(_sim("MLA111", 12_000))
+    r = _drop(client, sid, "MLA111", motive="<script>")
+    assert r.status_code == 400 and r.json()["detail"] == "motivo inválido"
+
+
+def test_the_note_is_capped_even_if_the_route_did_not(client):
+    _mark("1", "MLA1", motive="otro", note="n" * 500)
+    assert [len(f.note) for f in _feedback()] == [match_feedback.NOTE_MAX]
+
+
 # ─── el snapshot se recalcula ──────────────────────────────────────────────
 
 
