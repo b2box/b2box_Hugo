@@ -29,6 +29,7 @@ es base64; `PM_LLM_IMAGE_MODE` lo pisa.
 Costo bajo control:
   * solo corre si `pm_vision_max_calls` > 0 (default 0 = sombra sin IA);
   * tope diario con reserva atómica (misma mecánica que el budget de ML);
+  * un 429 se reintenta hasta 2 veces sin reservar otro cupo (no se factura);
   * tokens y costo estimado quedan en `price_monitor_run`.
 
 Nunca rompe el job: sin API key, sin cupo, timeout o JSON ilegible → "sin
@@ -526,6 +527,42 @@ def error_summary(exc: Exception) -> str:
     return type(exc).__name__[:60]
 
 
+# Un 429 del proveedor es pasajero (corrida #29 del semáforo: 272 fallas en 1.421 llamadas):
+# esperas cortas y crecientes, y el Retry-After del proveedor con tope para no frenar la corrida.
+_RETRY_429_DELAYS_S: tuple[float, ...] = (2.0, 5.0)
+_RETRY_AFTER_MAX_S = 10.0
+
+
+def _retry_wait(exc: Exception, default: float, cap: float | None) -> float:
+    """Espera antes de reintentar un 429: el Retry-After en segundos (con tope `cap`) o
+    `default` si no viene, no es un número o `cap` es None."""
+    if cap is None:
+        return default
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    try:
+        seconds = float(headers.get("retry-after"))  # httpx.Headers no distingue mayúsculas
+    except (AttributeError, TypeError, ValueError):
+        return default
+    return min(seconds, cap) if seconds >= 0 else default  # NaN también va al default
+
+
+async def create_with_retry(client: Any, request: dict[str, Any], delays: Sequence[float], *,
+                            label: str, retry_after_max_s: float | None = None) -> Any:
+    """`chat.completions.create` que reintenta SOLO un 429 (ni 5xx, ni timeout, ni otro 4xx),
+    una vez por cada espera de `delays`; el último error sale tal cual. Un 429 no se factura:
+    quien llama no vuelve a reservar cupo. `retry_after_max_s` None = no mira el Retry-After."""
+    for delay in delays:
+        try:
+            return await client.chat.completions.create(**request)
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "status_code", None) != 429:
+                raise
+            wait = _retry_wait(exc, delay, retry_after_max_s)
+            log.info("%s: el juez recibió 429, reintento en %.0f s", label, wait)
+            await asyncio.sleep(wait)
+    return await client.chat.completions.create(**request)
+
+
 async def judge(
     our_name: str,
     our_image_urls: Sequence[str],
@@ -575,8 +612,9 @@ async def judge(
     if body:
         request["extra_body"] = body
     try:
-        response = await client.chat.completions.create(**request)
-    except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red)
+        response = await create_with_retry(client, request, _RETRY_429_DELAYS_S, label="semáforo",
+                                           retry_after_max_s=_RETRY_AFTER_MAX_S)
+    except Exception as exc:  # noqa: BLE001  (timeout, 4xx/5xx, red, 429 tras los reintentos)
         summary = error_summary(exc)
         # El log (no la DB) sigue diciendo el mensaje de un timeout o de la red.
         detail = summary if isinstance(getattr(exc, "status_code", None), int) else str(exc)[:200]
