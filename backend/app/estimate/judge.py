@@ -17,7 +17,6 @@ estimado sigue solo con CLIP (más estricto y con margen más ancho).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -157,14 +156,9 @@ _RETRY_429_DELAY_S = 1.0
 
 
 async def _create_with_retry(client: Any, request: dict[str, Any]) -> Any:
-    try:
-        return await client.chat.completions.create(**request)
-    except Exception as exc:  # noqa: BLE001
-        if getattr(exc, "status_code", None) != 429:
-            raise
-        log.info("estimado: el juez recibió 429, reintento en %.0f s", _RETRY_429_DELAY_S)
-    await asyncio.sleep(_RETRY_429_DELAY_S)
-    return await client.chat.completions.create(**request)
+    # Sin Retry-After: un valor largo se pasaría del techo de quien llama.
+    return await market_judge.create_with_retry(client, request, (_RETRY_429_DELAY_S,),
+                                                label="estimado")
 
 
 async def judge(query_image: str, thumbs: Sequence[tuple[str, str]], *,

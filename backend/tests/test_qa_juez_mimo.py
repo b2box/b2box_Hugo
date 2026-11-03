@@ -279,7 +279,9 @@ class ErrorProvider(FakeProvider):
     (500, "<html>SECRETO upstream</html>", "HTTP 500, code=-"),
     (400, {"error": {"code": "x" * 500, "message": "SECRETO"}}, "HTTP 400, code=" + "x" * 40),
 ])
-async def test_c2b_http_errors_log_only_status_and_code(llm_env, clean_budget, caplog, status, body, expected):
+async def test_c2b_http_errors_log_only_status_and_code(llm_env, clean_budget, caplog, monkeypatch,
+                                                        status, body, expected):
+    monkeypatch.setattr(market_judge, "_RETRY_429_DELAYS_S", (0.0, 0.0))  # el 429 se reintenta
     llm_env(PM_LLM_BASE_URL=MIMO, PM_LLM_API_KEY="k", PM_LLM_IMAGE_MODE="url")
     provider = ErrorProvider(status, body)
     with caplog.at_level(logging.WARNING, logger="app.pricing.market_judge"):

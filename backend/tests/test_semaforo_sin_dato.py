@@ -365,7 +365,8 @@ async def test_c_empty_and_unreadable_answers_count_as_failures(world, monkeypat
 
 
 async def test_c_with_streak_zero_it_never_cuts(world, monkeypatch):
-    client = _real_judge(monkeypatch, [_HttpError(429, "rate_limit")] * 10)
+    monkeypatch.setattr(market_judge, "_RETRY_429_DELAYS_S", (0.0, 0.0))
+    client = _real_judge(monkeypatch, [_HttpError(429, "rate_limit")] * 21)
     _ambiguous_catalog(world, 7)
     _set("pm_vision_max_calls", 100)
     _set("pm_vision_fail_streak", 0)
@@ -373,7 +374,9 @@ async def test_c_with_streak_zero_it_never_cuts(world, monkeypatch):
     await price_monitor.run_price_monitor()
 
     run = _runs()[0]
-    assert client.calls == 7 and run.llm_status is None and run.llm_failures == 7
+    # Cada 429 se reintenta 2 veces: 3 llamadas por producto, pero una sola reserva y una sola falla.
+    assert client.calls == 21 and run.llm_calls == 7
+    assert run.llm_status is None and run.llm_failures == 7
 
 
 async def test_c_the_daily_cap_is_counted_and_warned_once_per_run(world, monkeypatch, caplog):
