@@ -58,8 +58,8 @@ ENABLED_FILTERS = ("enabled", "disabled", "all")
 MATCH_FILTERS = ("igual", "similar", "solo_similar", "diferente", "solo_diferente", "ninguno", "para_confirmar")
 # "Para confirmar": nombre casi igual con foto que no llegó al umbral, o un similar
 # que el juez no llegó a mirar. Medido el 02-nov: ~110 de los 383 sin dato con similares.
-# shortcut: los scores son el máximo del snapshot (también de los diferentes) y «No es el mismo»
-# no los recalcula, así que un producto puede seguir en la lista; mirar por publicación si molesta.
+# shortcut: los scores son el máximo del snapshot (también de los diferentes; una corrección los
+# recalcula sin lo que sacó una persona); mirar por publicación si un diferente lo deja en la lista.
 TO_CONFIRM_NAME_MIN = 0.8
 TO_CONFIRM_IMAGE_MIN = 0.5
 ORIGINS = ("api", "web", "oficina")

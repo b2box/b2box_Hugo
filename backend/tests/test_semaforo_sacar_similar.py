@@ -137,6 +137,22 @@ def test_dropping_a_similar_recalculates_the_estimate_and_the_run_counters(clien
         assert (run.n_est_verde, run.n_est_rojo, run.n_solo_diferentes) == (0, 0, 1)
 
 
+def test_dropping_the_similar_that_made_it_worth_a_look_takes_it_out_of_para_confirmar(client):
+    """«Para confirmar» mira los puntajes máximos del snapshot: el de la publicación sacada ya no cuenta."""
+    sid = _seed(_sim("MLA111", 12_000, name=0.9, image=0.6), _sim("MLA112", 40_000, name=0.3, image=0.3),
+                name_max=0.9, image_max=0.6)
+
+    def listed():
+        body = client.get("/api/price-monitor/snapshots", params={"match": "para_confirmar"}).json()
+        return [i["id"] for i in body["items"]], body["para_confirmar"]
+
+    assert listed() == ([sid], 1)
+    snap = _drop(client, sid, "MLA111", motive="otro_producto").json()["snapshot"]
+    assert (snap["name_score_max"], snap["image_score_max"]) == (0.3, 0.3)
+    assert snap["similar_count"] == 1                    # queda un similar, pero nada que valga la pena mirar
+    assert listed() == ([], 0)
+
+
 # ─── las lecciones ─────────────────────────────────────────────────────────
 
 

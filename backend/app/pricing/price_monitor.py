@@ -1778,6 +1778,11 @@ def _rebuild(snap: MarketPriceSnapshot, priced: list[dict], unpriced: list[dict]
         else:
             _clear_prices(snap)
             _mark(snap, NO_DATA, reason or "no quedan publicaciones idénticas con precio")
+    # «Para confirmar» mira los puntajes máximos: lo que una persona sacó ya no cuenta (la
+    # próxima corrida tampoco lo vuelve a puntuar).
+    scored = [*priced, *unpriced, *similar, *(m for m in other if not _is_manual(m))]
+    snap.image_score_max = max((m["image_score"] for m in scored if m.get("image_score") is not None), default=None)
+    snap.name_score_max = max((m["name_score"] for m in scored if m.get("name_score") is not None), default=None)
     _store_listings(snap, priced, unpriced, similar, other, keep=int(runtime.get("pm_ml_keep_listings")),
                     green_min=green, yellow_min=yellow)
 
