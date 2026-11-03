@@ -150,7 +150,7 @@ class World(FakeApify):
     ML (token AR<pid>) que el goto manda a una publicación AR con slug propio."""
 
     def __init__(self, *, lens_items=None, goto=None, lens_permission="LIMITED_PERMISSIONS", lens_behavior="ok",
-                 lens_raw=None, google_delay=0.0, **kw):
+                 lens_raw=None, google_delay=0.0, lens_usage=0.0, **kw):
         super().__init__(**kw)
         self.lens_items = lens_items or (lambda urls: [_lens_item(i, u, [_ml_match(f"AR{_pid(u)}")])
                                                        for i, u in enumerate(urls)])
@@ -160,6 +160,7 @@ class World(FakeApify):
         self.lens_behavior = lens_behavior
         self.lens_raw = lens_raw
         self.google_delay = google_delay
+        self.lens_usage = lens_usage
         self.lens_starts: list[tuple[httpx.URL, dict]] = []
         self.lens_aborted: list[str] = []
         self.google: list[httpx.Request] = []
@@ -194,7 +195,8 @@ class World(FakeApify):
             await asyncio.sleep(0.01)
             status = {"ok": "SUCCEEDED", "fail": "FAILED", "hang": "RUNNING"}[self.lens_behavior]
             return httpx.Response(200, json={"data": {"id": f"lens{m.group(1)}", "status": status,
-                                                      "defaultDatasetId": f"lds{m.group(1)}", "usageTotalUsd": 0.0}})
+                                                      "defaultDatasetId": f"lds{m.group(1)}",
+                                                      "usageTotalUsd": self.lens_usage}})
         if m := re.fullmatch(r"/v2/datasets/lds(\d+)/items", path):
             if self.lens_raw is not None:
                 return httpx.Response(200, content=self.lens_raw)
@@ -308,7 +310,7 @@ async def test_una_noche_lens_genera_la_consulta_y_apify_la_busca_con_origen_len
     audit = _lens_audit()
     assert audit["lens"] == {"status": "ok", "reason": "", "products": 3, "with_queries": 3, "sin_links": 0,
                              "errors": 0, "matches": 3, "ml_links": 3, "usd": pytest.approx(0.015),
-                             "resolve_blocked": False}
+                             "resolve_blocked": False, "suspicious": False, "overcharged_runs": []}
     assert audit["lens_searches"] == 3 and "Lens: 3 productos" in audit["_detail"]
 
 
@@ -410,7 +412,8 @@ def test_l1_elegibles_solo_los_sin_igual_ya_buscados_y_no_lenseados_hace_poco(le
     for pid in [str(i) for i in range(1, 16) if i != 10]:
         _text(pid, status="empty" if pid == "2" else "ok")
     _text("10", status="error")                                              # un error no es búsqueda hecha
-    assert [p for p, _, _ in ml_lens.eligible(50)] == ["1", "2", "13", "14", "3"]
+    # Primero los nunca lenseados (habilitados antes); después los que vuelven, el lenseado hace más tiempo primero.
+    assert [p for p, _, _ in ml_lens.eligible(50)] == ["1", "2", "3", "14", "13"]
     assert ml_lens.eligible(2)[0] == ("1", PHOTO.format("1"), "Uno uno")
 
 
@@ -698,3 +701,189 @@ def test_la_consulta_guardada_se_vuelve_a_sanear_al_leer(lens):
                            queries=json.dumps([{"q": "hola\n\x00mundo"}, "basura", {"q": 5}])))
         s.commit()
     assert _q(with_lens=True) == [("1", ["hola mundo"], True)]
+
+
+# ─── Arreglos de QA y seguridad (03-nov) ───────────────────────────
+
+
+def _next_night() -> None:
+    from app.db.models import Setting
+
+    with Session(engine) as s:
+        for key in (ml_lens.COUNTER_KEY, ams.COUNTER_KEY):
+            row = s.get(Setting, key)
+            if row is not None:
+                s.delete(row)
+        s.commit()
+    runtime.invalidate()
+
+
+async def test_d1_el_rojo_ganado_por_lens_se_rebusca_con_origen_lens(lens, monkeypatch):
+    """D1: si el item busca la consulta Lens del producto (de ml_lens_result) se guarda como lens, aunque venga del
+    grupo de rojos o del refresco, y no solo del grupo lens."""
+    from app.db.models import PriceMonitorRun
+
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
+        s.add(run)
+        s.commit()
+        s.add(MarketPriceSnapshot(run_id=run.id, product_id="300", ml_status="ok", product_name=LONG, color="rojo",
+                                  match_origin="oficina", match_state="igual"))
+        s.commit()
+    _text("300", "organizador lens modelo 300", ago=timedelta(hours=60))              # sin origen lens a propósito
+    _lens_row("300", ["organizador lens modelo 300"], ago=timedelta(days=5))
+    try:
+        world = World().install(monkeypatch)
+        report = await ams.run_search()
+    finally:
+        _clear(PriceMonitorRun)
+    assert world.ml_queries == ["organizador lens modelo 300"] and report.lens_searches == 1
+    with Session(engine) as s:
+        newest = s.exec(select(MlWebResult).where(MlWebResult.product_id == "300")
+                        .order_by(MlWebResult.fetched_at.desc())).first()  # type: ignore[attr-defined]
+    assert newest.origin == "lens"
+
+
+async def test_d2_matches_sin_ningun_link_de_ml_marca_la_noche_como_sospechosa(lens, monkeypatch, caplog):
+    _eligible(2)
+    World(goto=lambda token: httpx.Response(302, headers={"location": "https://www.example.com/x"})).install(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        report = await ams.run_search()
+    assert report.lens["suspicious"] is True and report.lens["sin_links"] == 2 and report.lens["ml_links"] == 0
+    assert "ningún link de ML" in caplog.text
+    _clear(MlLensResult)
+    _next_night()
+    World().install(monkeypatch)
+    assert (await ams.run_search()).lens["suspicious"] is False
+
+
+@pytest.mark.parametrize("won, mac_gets", [("lens", "plan0"), ("corto", "corto")])
+def test_mac_el_refresco_de_un_producto_con_precio_nunca_lleva_la_consulta_lens(lens, won, mac_gets):
+    v1, corto, _ = market_query.query_variants(LONG, 3)
+    query = "organizador lens modelo 300" if won == "lens" else corto
+    _snap("300", LONG, status="ok", state="igual", origin="oficina")
+    _text("300", query, ago=timedelta(days=8), origin="lens" if won == "lens" else "apify")
+    assert oficina_ml.queue_for_oficina(10, take=False) == [
+        {"product_id": "300", "queries": [v1 if mac_gets == "plan0" else corto]}]
+    assert oficina_ml.build_queue(10, claimer="apify-1234")[0]["queries"] == [query]    # Apify: la que ganó (I-5)
+
+
+def test_m1a_primero_los_nunca_lenseados_y_los_errores_del_mas_viejo_al_mas_nuevo(lens):
+    for pid in ("1", "2", "3", "4"):
+        _snap(pid, f"Producto {pid} {pid}")
+        _text(pid)
+    _lens_row("1", [], ago=timedelta(hours=30), status="error")
+    _lens_row("2", [], ago=timedelta(hours=50), status="error")
+    assert [p for p, _, _ in ml_lens.eligible(10)] == ["3", "4", "2", "1"]
+    assert [p for p, _, _ in ml_lens.eligible(3)] == ["3", "4", "2"]
+
+
+def test_m1b_tres_errores_seguidos_dejan_la_foto_sin_links_60_dias(lens):
+    _snap("1", "Producto uno uno")
+    _text("1")
+    for n in range(1, 4):
+        ml_lens._save([MlLensResult(product_id="1", status="error", ran_at=utcnow() - timedelta(hours=21), usd=0.005)])
+        row = _lens_rows()["1"]
+        assert row.attempts == n and row.status == ("sin_links" if n == 3 else "error")
+    assert ml_lens.eligible(10) == [], "no se vuelve a pagar a las 20 h"
+    assert [p for p, _, _ in ml_lens.eligible(10, now=utcnow() + timedelta(days=61))] == ["1"]
+    ml_lens._save([MlLensResult(product_id="1", status="ok", queries="[]")])
+    assert (_lens_rows()["1"].attempts, _lens_rows()["1"].status) == (0, "ok"), "un resultado bueno corta la racha"
+
+
+async def test_m1c_con_una_consulta_vale_ok_aunque_otro_goto_haya_fallado(lens, monkeypatch):
+    pids = _eligible(1)
+    items = lambda urls: [_lens_item(0, urls[0], [_ml_match("AR200"), _ml_match("FAIL")])]  # noqa: E731
+    goto = lambda token: httpx.Response(503) if token == "FAIL" else httpx.Response(  # noqa: E731
+        302, headers={"location": AR_LINK.format(200, 200)})
+    World(lens_items=items, goto=goto).install(monkeypatch)
+    await ams.run_search()
+    row = _lens_rows()[pids[0]]
+    assert (row.status, row.n_ml_links) == ("ok", 1)
+    assert json.loads(row.queries)[0]["q"] == "organizador lens modelo 200"
+
+
+async def test_m1d_el_freno_dura_dos_noches_avisa_y_se_suelta_solo_con_una_prueba_chica(lens, monkeypatch):
+    sent: list[str] = []
+
+    async def fake_notify(subject, body):
+        sent.append(subject)
+        return {}
+
+    monkeypatch.setattr(ml_lens, "notify", fake_notify)
+    _eligible(2)
+    items = lambda urls: [_lens_item(i, u, [_ml_match(f"AR{k}") for k in range(5)]) for i, u in enumerate(urls)]  # noqa: E731
+    world = World(lens_items=items, goto=lambda token: httpx.Response(429)).install(monkeypatch)
+    first = await ams.run_search()
+    assert first.lens["resolve_blocked"] is True and ml_lens._brake_day() == utcnow().date()
+    assert sent == ["Hugo: Google frenó Google Lens"]
+    for pid in [str(600 + i) for i in range(8)]:
+        _snap(pid, f"Producto {pid} nuevo")
+        _text(pid)
+    _next_night()
+    second = await ams.run_search()                                           # noche salteada: ni se lanza el actor
+    assert second.lens["status"] == "stopped" and "frenó" in second.lens["reason"] and len(world.lens_starts) == 1
+    ml_lens._set_brake(utcnow().date() - timedelta(days=3))                   # pasaron las 2 noches salteadas
+    world.goto = lambda token: httpx.Response(302, headers={"location": AR_LINK.format(token[2:], token[2:])})
+    _next_night()
+    third = await ams.run_search()
+    assert len(world.lens_starts[-1][1]["image_urls"]) == 5 and third.lens["products"] == 5      # prueba chica
+    assert ml_lens._brake_day() is None, "Google ya no frena: se suelta solo"
+
+
+def test_b1_al_leer_se_re_sanea_con_la_misma_regla_que_al_escribir():
+    assert ml_lens.clean_query is oficina_ml.clean_query
+    raw = json.dumps([{"q": "hola<b>mundo</b> {x}"}, {"q": "una"}, {"q": "y " * 100}])
+    assert oficina_ml.lens_queries(raw) == ["hola b mundo b x", ("y " * 60).strip()]
+
+
+async def test_b2_un_cobro_de_lens_por_encima_del_techo_se_avisa_y_va_al_audit(lens, monkeypatch, caplog):
+    _eligible(2)
+    World(lens_usage=1.0).install(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        report = await ams.run_search()
+    assert report.lens["overcharged_runs"] == [{"run_id": "lens1", "usage_usd": 1.0}]
+    assert {"run_id": "lens1", "usage_usd": 1.0} in report.overcharged
+    assert {"run_id": "lens1", "usage_usd": 1.0} in _lens_audit()["overcharged_runs"]
+    assert "más que el techo" in caplog.text
+    _clear(MlLensResult)
+    _next_night()
+    World(lens_usage=2 * 0.005 + 0.002).install(monkeypatch)                  # lo normal: 2 fotos + el arranque
+    assert (await ams.run_search()).lens["overcharged_runs"] == []
+
+
+async def test_b3_si_el_actor_de_ml_no_tiene_permisos_limitados_lens_no_gasta(lens, monkeypatch):
+    _eligible(2)
+    world = World(permission="FULL_PERMISSIONS").install(monkeypatch)
+    report = await ams.run_search()
+    assert report.status == "stopped" and world.lens_starts == [] and world.google == []
+    assert report.lens["status"] == "disabled" and _lens_rows() == {}
+    assert daily_budget.used_today(ml_lens.COUNTER_KEY) == 0
+
+
+def test_b4_una_fila_que_falla_no_se_lleva_las_demas(lens):
+    ml_lens._save([MlLensResult(product_id="1", status="ok"), MlLensResult(product_id="2", status=None),  # type: ignore[arg-type]
+                   MlLensResult(product_id="3", status="sin_links")])
+    assert sorted(_lens_rows()) == ["1", "3"]
+
+
+@pytest.mark.parametrize("change", ["apagado", "tope"])
+async def test_b5_prendido_y_tope_se_releen_entre_lotes(lens, monkeypatch, change):
+    monkeypatch.setattr(ml_lens, "_PARALLEL_RUNS", 1)
+    for pid in [str(700 + i) for i in range(30)]:
+        _snap(pid, f"Producto {pid} lote")
+        _text(pid)
+
+    def items(urls):
+        if change == "apagado":
+            runtime.set_value("pm_lens_enabled", 0)                           # alguien lo apaga desde el dashboard
+        else:
+            runtime.set_value("pm_lens_daily_max", 20)                        # o baja el tope por debajo de lo gastado
+        return [_lens_item(i, u, []) for i, u in enumerate(urls)]
+
+    world = World(lens_items=items).install(monkeypatch)
+    report = await ams.run_search()
+    assert [len(b["image_urls"]) for _, b in world.lens_starts] == [25]
+    assert report.lens["products"] == 25
+    assert report.lens["status"] == ("stopped" if change == "apagado" else "over_budget")

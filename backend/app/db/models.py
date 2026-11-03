@@ -529,6 +529,8 @@ class MlLensResult(SQLModel, table=True):
     n_ml_links: int = Field(default=0)
     # USD imputados a esta foto (lo de la corrida repartido entre sus fotos).
     usd: float = Field(default=0.0)
+    # Errores seguidos (se vuelve a 0 con un ok / sin_links). Al tercero queda sin_links: 60 días sin reintentar.
+    attempts: int = Field(default=0)
 
 
 # ─── Tiendas argentinas como fuentes de comparación (Casa Perfecta, Gadnic…) ───

@@ -496,8 +496,17 @@ async def _run(report: RunReport, started: float) -> None:
     http = _new_client(_POLL_WAIT_S + 15.0)
     fail_streak = 0
     try:
+        # Primero el actor de ML: si la búsqueda no va a correr, Lens tampoco gasta.
+        level = await _actor_permission(http, actor, headers)
+        if level != _REQUIRED_PERMISSION:
+            report.status, report.fatal = "stopped", True
+            report.reason = (f"el actor corre con permisos {level}, se exige {_REQUIRED_PERMISSION}" if level
+                             else "no se pudo confirmar que el actor corra con permisos limitados")
+            return
         # Google Lens (si está prendido) deja consultas nuevas que la cola ofrece esta misma noche. Nunca frena lo de abajo.
-        report.lens = (await ml_lens.run_step(http, headers)).as_dict()
+        lens = await ml_lens.run_step(http, headers)
+        report.lens = lens.as_dict()
+        report.overcharged.extend(lens.overcharged)
         # Un lote de más que el cupo libre: quien corta es la reserva atómica (otra corrida puede gastar entre medio),
         # y así se sabe si quedó cola sin buscar por falta de cupo.
         queue = await asyncio.to_thread(
@@ -506,13 +515,7 @@ async def _run(report: RunReport, started: float) -> None:
         if not queue:
             report.reason = "la cola está vacía"
             return
-        lens_pids = {i["product_id"] for i in queue if i.get("lens")}
-        level = await _actor_permission(http, actor, headers)
-        if level != _REQUIRED_PERMISSION:
-            report.status, report.fatal = "stopped", True
-            report.reason = (f"el actor corre con permisos {level}, se exige {_REQUIRED_PERMISSION}" if level
-                             else "no se pudo confirmar que el actor corra con permisos limitados")
-            return
+        lens_pids = await asyncio.to_thread(ml_lens.lens_product_ids, queue)
         for at in range(0, len(queue), batch_size):
             if time.monotonic() - started > _JOB_MAX_S:
                 report.status, report.reason = "stopped", "se pasó el tiempo máximo de la corrida"

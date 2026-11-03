@@ -16,6 +16,9 @@ Seguridad: lo que vuelve del actor es de un tercero. Solo se le pega a `www.goog
 userinfo ni puerto) y solo se acepta un `Location` https a un dominio de ML hispano de la lista cerrada. La consulta
 sale de un slug externo: queda en letras, números y espacios antes de llegar a Apify o al juez. Los logs llevan
 contadores, nunca URLs ni el token.
+
+Gasto acotado: cupo diario atómico releído en cada lote, 3 errores seguidos de una foto la dejan sin_links 60 días, y si
+Google frena los goto (BRAKE_KEY) se saltean 2 noches y se prueba con pocas fotos antes de volver.
 """
 
 from __future__ import annotations
@@ -24,25 +27,35 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
+from sqlalchemy import and_, case
 from sqlmodel import Session, func, select
 
+from app import runtime
 from app.clock import utcnow
-from app.db.models import MarketPriceSnapshot, MlLensResult, MlWebResult
+from app.db.models import MarketPriceSnapshot, MlLensResult, MlWebResult, Setting
 from app.db.session import engine
 from app.ingest.apify_1688 import _json, _request_bounded, _Run, allowed_image_url
 from app.pricing import apify_ml_search as ams
 from app.pricing import daily_budget, market_query, oficina_ml
+from app.notifier.dispatcher import notify
 from app.pricing.market_ml import _clean_https_parts, _host_in
 
 log = logging.getLogger(__name__)
 
 COUNTER_KEY = "_meta:ml_lens_today"
+# Freno que dura entre noches: el día (UTC, AAAA-MM-DD) en que Google frenó los goto. Las _BRAKE_SKIP_NIGHTS noches
+# siguientes no se lanza el actor; después se prueba con _PROBE_PHOTOS fotos y, si Google no frena, se suelta solo.
+BRAKE_KEY = "_meta:ml_lens_brake"
+_BRAKE_SKIP_NIGHTS = 2
+_PROBE_PHOTOS = 5
+# Errores seguidos de una foto: al tercero queda sin_links (60 días sin pagar otro intento).
+MAX_ATTEMPTS = 3
 # Actor y build en constantes, no en env: otro actor (u otro formato de salida) entra por PR.
 _ACTOR = "s-r/google-lens"
 _BUILD = "0.2.7"
@@ -75,8 +88,8 @@ _ML_HISPANIC = ("mercadolibre.com.mx", "mercadolibre.cl", "mercadolibre.com.co",
                 "mercadolibre.com.pe", "mercadolibre.com.ve", "mercadolibre.com.ec")
 _ML_DOMAINS = (_ML_AR, *_ML_HISPANIC)
 
-# Link de ML → consulta.
-_MAX_QUERY_CHARS = 120
+# Link de ML → consulta. La regla del texto (`clean_query`) vive en oficina_ml: la cola la usa al leer la tabla.
+clean_query = oficina_ml.clean_query
 # ML corta el slug en ~60 caracteres y deja la última palabra a medias ("gran-capac"); con 55 todavía está entera.
 _CUT_SLUG_AT = 56
 _SLUG = re.compile(r"^[A-Za-z0-9%-]{1,200}$", re.ASCII)
@@ -97,16 +110,6 @@ def daily_max() -> int:
 
 
 # ─── Link de ML → consulta ─────────────────────────────────────────
-
-
-def clean_query(text: object) -> str:
-    """Solo letras, números y espacios, hasta 120 caracteres y con al menos 2 palabras; "" si no.
-    Sale de un slug de un tercero y llega al actor de Apify y al prompt del juez."""
-    if not isinstance(text, str):
-        return ""
-    text = "".join(c if c.isalnum() else " " for c in text[: _MAX_QUERY_CHARS * 2])
-    text = " ".join(text.split())[:_MAX_QUERY_CHARS].strip()
-    return text if len(text.split()) >= 2 else ""
 
 
 def slug_to_query(slug: str) -> str:
@@ -194,12 +197,14 @@ def _is_google_block(status: int, target: str) -> bool:
     return host == "consent.google.com" or (_host_in(host, "google.com") and parts.path.startswith("/sorry"))
 
 
-_FAILED = object()      # el link no se pudo resolver por Google (freno, red): el producto queda en error y se reintenta
+_FAILED = object()      # el link no se pudo resolver por Google (freno, error, red): el producto queda en error y se reintenta
 
 
 class _Resolver:
     """GET al goto sin seguir la redirección y sin leer el body; el destino es el `Location`. Como mucho
-    _RESOLVE_PARALLEL a la vez. Con _BLOCK_STREAK frenos seguidos de Google deja de resolver por esta noche."""
+    _RESOLVE_PARALLEL a la vez. Un 429, una redirección a /sorry o a consent y cualquier respuesta que no es una
+    redirección (200, 403, 5xx…) son fallas que suman a la racha: con _BLOCK_STREAK seguidas deja de resolver por esta
+    noche. Solo una redirección a algo que no es un ML hispano da None (ese link no sirve, sin reintentar)."""
 
     def __init__(self, http: httpx.AsyncClient) -> None:
         self.http = http
@@ -218,14 +223,14 @@ class _Resolver:
                 log.info("Google Lens: un goto no se pudo resolver (%s)", type(exc).__name__)
                 return _FAILED
         target = urljoin(url, location) if location else ""
-        if _is_google_block(status, target):
+        if status not in _REDIRECTS or _is_google_block(status, target):
             self.streak += 1
             if self.streak >= _BLOCK_STREAK and not self.blocked:
                 self.blocked = True
                 log.warning("Google Lens: Google frenó %d goto seguidos; no se resuelve más esta noche", self.streak)
             return _FAILED
         self.streak = 0
-        return target if status in _REDIRECTS and _ml_domain(target) else None
+        return target if _ml_domain(target) else None
 
     async def _get(self, url: str) -> tuple[int, str]:
         # Sin headers: el de Apify (Authorization) nunca viaja a Google.
@@ -259,7 +264,8 @@ def _due(ran_at: datetime, status: str, now: datetime) -> bool:
 def eligible(limit: int, *, now: datetime | None = None) -> list[tuple[str, str, str]]:
     """(product_id, foto, nombre) de hasta `limit` productos para lensear: último snapshot vigente sin IDÉNTICO
     (`no_data` con diferente / similar / ninguno), medible, con foto pública, ya buscado por texto, y sin
-    lensear (o lenseado hace 60 días; con error, 20 h). Habilitados primero."""
+    lensear (o lenseado hace 60 días; con error, 20 h). Primero los nunca lenseados (habilitados primero); después los
+    que vuelven (error o 60 días), el que se lenseó hace más tiempo primero: un error no le gana el lugar a uno nuevo."""
     if limit <= 0:
         return []
     now = now or utcnow()
@@ -287,7 +293,9 @@ def eligible(limit: int, *, now: datetime | None = None) -> list[tuple[str, str,
             continue
         url = allowed_image_url(image)
         if url:
-            out.append(((enabled is False, oficina_ml._sort_id(pid)), pid, url, name or ""))
+            order = (1, lensed[pid][0], oficina_ml._sort_id(pid)) if pid in lensed else \
+                (0, enabled is False, oficina_ml._sort_id(pid))
+            out.append((order, pid, url, name or ""))
     out.sort(key=lambda t: t[0])
     return [t[1:] for t in out[:limit]]
 
@@ -307,12 +315,17 @@ class LensReport:
     ml_links: int = 0
     usd: float = 0.0
     resolve_blocked: bool = False
+    # Hubo matches de Lens y ningún link de ML: Google pudo haber cambiado el goto (todo quedaría sin_links 60 días).
+    suspicious: bool = False
+    # Corridas que informaron más que el techo de cobro (n · 0,005 · 1,5): [{run_id, usage_usd}].
+    overcharged: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {"status": self.status, "reason": self.reason, "products": self.products,
                 "with_queries": self.with_queries, "sin_links": self.sin_links, "errors": self.errors,
                 "matches": self.matches, "ml_links": self.ml_links, "usd": round(self.usd, 6),
-                "resolve_blocked": self.resolve_blocked}
+                "resolve_blocked": self.resolve_blocked, "suspicious": self.suspicious,
+                "overcharged_runs": self.overcharged}
 
 
 @dataclass(slots=True)
@@ -324,16 +337,62 @@ class _Step:
     resolver: _Resolver
     rows: dict[str, MlLensResult]
     runs: list[_Run]
+    report: LensReport
     out_of_budget: bool = False
+    switched_off: bool = False
 
 
 def _actor_input(urls: list[str]) -> dict[str, Any]:
     return {"image_urls": urls, "language": "es", "retries": 4}
 
 
+def _max_charge(n: int) -> float:
+    return round(n * _USD_PER_PHOTO * 1.5, 4)
+
+
 def _start_url(n: int) -> str:
     return (f"{ams.API_BASE}/acts/{_ACTOR.replace('/', '~')}/runs?timeout={_ACTOR_TIMEOUT_S}"
-            f"&memory={_ACTOR_MEMORY_MB}&build={_BUILD}&maxTotalChargeUsd={round(n * _USD_PER_PHOTO * 1.5, 4)}")
+            f"&memory={_ACTOR_MEMORY_MB}&build={_BUILD}&maxTotalChargeUsd={_max_charge(n)}")
+
+
+def _brake_day() -> date | None:
+    """El día en que se puso el freno de Google, o None. Si la base no contesta: sin freno (el cupo es fail-closed)."""
+    try:
+        with Session(engine) as s:
+            row = s.get(Setting, BRAKE_KEY)
+        return date.fromisoformat(row.value) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Google Lens: no se pudo leer el freno (%s)", type(exc).__name__)
+        return None
+
+
+def _set_brake(day: date | None) -> None:
+    try:
+        with Session(engine) as s:
+            row = s.get(Setting, BRAKE_KEY)
+            if day is None:
+                if row is not None:
+                    s.delete(row)
+            elif row is None:
+                s.add(Setting(key=BRAKE_KEY, value=day.isoformat()))
+            else:
+                row.value = day.isoformat()
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Google Lens: no se pudo guardar el freno (%s)", type(exc).__name__)
+
+
+async def _notify_brake(day: date) -> None:
+    retry = day + timedelta(days=_BRAKE_SKIP_NIGHTS + 1)
+    try:
+        await notify(
+            "Hugo: Google frenó Google Lens",
+            f"Google contestó {_BLOCK_STREAK} veces seguidas con un freno (429, /sorry, consent u otro error) al resolver "
+            f"los links de Google Lens. Las próximas {_BRAKE_SKIP_NIGHTS} noches no se lanza el actor de Lens (las "
+            f"búsquedas de ML siguen); el {retry.isoformat()} se prueba con {_PROBE_PHOTOS} fotos y, si Google ya no "
+            "frena, vuelve solo. Para apagarlo del todo: pm_lens_enabled = 0.")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Google Lens: no se pudo avisar el freno (%s)", type(exc).__name__)
 
 
 async def run_step(http: httpx.AsyncClient, headers: dict) -> LensReport:
@@ -355,12 +414,22 @@ async def run_step(http: httpx.AsyncClient, headers: dict) -> LensReport:
 
 
 async def _run(http: httpx.AsyncClient, headers: dict, report: LensReport) -> None:
+    today = utcnow().date()
+    brake = await asyncio.to_thread(_brake_day)
+    if brake is not None and today <= brake + timedelta(days=_BRAKE_SKIP_NIGHTS):
+        retry = brake + timedelta(days=_BRAKE_SKIP_NIGHTS + 1)
+        report.status = "stopped"
+        report.reason = (f"Google frenó los goto el {brake.isoformat()}: no se lanza Lens hasta el "
+                         f"{retry.isoformat()} (prueba con {_PROBE_PHOTOS} fotos)")
+        log.warning("Google Lens: %s", report.reason)
+        return
     budget = daily_max()
     left = budget - await asyncio.to_thread(daily_budget.used_today, COUNTER_KEY)
     if left <= 0:
         report.status, report.reason = "over_budget", f"cupo diario agotado ({budget})"
         return
-    picked = await asyncio.to_thread(eligible, left)
+    probe = brake is not None              # pasaron las noches salteadas: pocas fotos para ver si Google sigue frenando
+    picked = await asyncio.to_thread(eligible, min(left, _PROBE_PHOTOS) if probe else left)
     if not picked:
         report.reason = "no hay productos para lensear"
         return
@@ -371,7 +440,7 @@ async def _run(http: httpx.AsyncClient, headers: dict, report: LensReport) -> No
                          else "no se pudo confirmar que el actor corra con permisos limitados")
         log.warning("Google Lens: %s", report.reason)
         return
-    step = _Step(http, headers, budget, asyncio.Semaphore(_PARALLEL_RUNS), _Resolver(http), {}, [])
+    step = _Step(http, headers, budget, asyncio.Semaphore(_PARALLEL_RUNS), _Resolver(http), {}, [], report)
     batches = [picked[i:i + _PHOTOS_PER_RUN] for i in range(0, len(picked), _PHOTOS_PER_RUN)]
     try:
         await asyncio.wait_for(asyncio.gather(*(_one_run(step, b) for b in batches)), timeout=_STEP_DEADLINE_S)
@@ -381,9 +450,17 @@ async def _run(http: httpx.AsyncClient, headers: dict, report: LensReport) -> No
     finally:
         await asyncio.gather(*(ams._abort(http, r, headers) for r in step.runs if r.run_id and not r.finished))
         await asyncio.to_thread(_save, list(step.rows.values()))
-    if step.out_of_budget and not report.reason:
+    if step.switched_off and not report.reason:
+        report.status, report.reason = "stopped", "se apagó durante el paso (pm_lens_enabled = 0)"
+    elif step.out_of_budget and not report.reason:
         report.status, report.reason = "over_budget", f"cupo diario agotado ({budget}) o no se pudo reservar"
     report.resolve_blocked = step.resolver.blocked
+    if step.resolver.blocked:
+        await asyncio.to_thread(_set_brake, today)
+        await _notify_brake(today)
+    elif probe and step.rows:
+        await asyncio.to_thread(_set_brake, None)
+        log.info("Google Lens: la prueba después del freno pasó, se suelta el freno")
     for row in step.rows.values():
         report.products += 1
         report.matches += row.n_matches
@@ -395,12 +472,20 @@ async def _run(http: httpx.AsyncClient, headers: dict, report: LensReport) -> No
             report.sin_links += 1
         else:
             report.errors += 1
+    report.suspicious = report.matches > 0 and report.ml_links == 0
+    if report.suspicious:
+        log.warning("Google Lens: %d matches y ningún link de ML resuelto: revisar los goto de Google", report.matches)
 
 
 async def _one_run(step: _Step, batch: list[tuple[str, str, str]]) -> None:
     """Una corrida del actor para un lote de fotos. Nunca lanza: lo que no termina queda con error."""
     async with step.sem:
-        granted = await asyncio.to_thread(daily_budget.reserve_up_to, COUNTER_KEY, step.budget, len(batch))
+        # Prendido y tope se releen en cada lote (como la búsqueda de ML): apagarlo o bajarlo corta esta misma noche.
+        runtime.invalidate()
+        if not is_enabled():
+            step.switched_off = True
+            return
+        granted = await asyncio.to_thread(daily_budget.reserve_up_to, COUNTER_KEY, daily_max(), len(batch))
         if granted < len(batch):
             step.out_of_budget = True
         batch = batch[:granted]
@@ -417,6 +502,10 @@ async def _one_run(step: _Step, batch: list[tuple[str, str, str]]) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("Google Lens: la corrida falló (%s)", type(exc).__name__)
             items = None
+        if run.usage_usd > _max_charge(len(batch)):
+            log.warning("Google Lens: la corrida %s informa USD %.4f (más que el techo de %.4f)",
+                        run.run_id, run.usage_usd, _max_charge(len(batch)))
+            step.report.overcharged.append({"run_id": run.run_id, "usage_usd": round(run.usage_usd, 6)})
         if items is None:
             return
         by_index = _by_input_index(items, len(batch))
@@ -480,24 +569,59 @@ async def _photo(step: _Step, pid: str, name: str, item: dict | None, usd: float
     row.n_matches = len(matches)
     gotos = _ml_gotos(matches)
     resolved = await asyncio.gather(*(step.resolver.resolve(url) for _, url in gotos))
-    if any(r is _FAILED for r in resolved):
-        return                                              # quedó un link sin resolver: error, se reintenta
     links = [(pos, loc) for (pos, _), loc in zip(gotos, resolved) if isinstance(loc, str)]
     row.n_ml_links = len(links)
     queries = pick_queries(links, market_query.query_variants(name, _TEXT_PLAN_VARIANTS) if name else [])
+    if not queries and any(r is _FAILED for r in resolved):
+        return                                              # sin consulta y con un link sin resolver: error, se reintenta
     row.queries = json.dumps(queries, ensure_ascii=False)
-    row.status = ST_OK if queries else ST_SIN_LINKS
+    row.status = ST_OK if queries else ST_SIN_LINKS         # con consulta vale aunque algún otro goto haya fallado
 
 
 def _save(rows: list[MlLensResult]) -> None:
-    """Upsert por producto: volver a lensear pisa la fila, no la duplica."""
-    if not rows:
-        return
+    """Upsert por producto (`INSERT … ON CONFLICT (product_id) DO UPDATE`, igual en SQLite y Postgres): volver a lensear
+    pisa la fila, dos procesos no chocan y una fila que falla no se lleva las demás (ya están pagas). `attempts` cuenta
+    los errores seguidos; al MAX_ATTEMPTS-ésimo la fila queda sin_links (60 días)."""
+    t = MlLensResult.__table__  # type: ignore[attr-defined]
+    with Session(engine) as s:
+        for row in rows:
+            ins = oficina_ml._insert_stmt()(t).values(
+                product_id=row.product_id, ran_at=row.ran_at, status=row.status, queries=row.queries,
+                n_matches=row.n_matches, n_ml_links=row.n_ml_links, usd=row.usd,
+                attempts=1 if row.status == ST_ERROR else 0)
+            failed = ins.excluded.status == ST_ERROR
+            stmt = ins.on_conflict_do_update(index_elements=[t.c.product_id], set_={
+                "ran_at": ins.excluded.ran_at, "queries": ins.excluded.queries, "n_matches": ins.excluded.n_matches,
+                "n_ml_links": ins.excluded.n_ml_links, "usd": ins.excluded.usd,
+                "status": case((and_(failed, t.c.attempts + 1 >= MAX_ATTEMPTS), ST_SIN_LINKS), else_=ins.excluded.status),
+                "attempts": case((failed, t.c.attempts + 1), else_=0)})
+            try:
+                s.execute(stmt)
+                s.commit()
+            except Exception as exc:  # noqa: BLE001
+                s.rollback()
+                log.warning("Google Lens: no se pudo guardar un resultado (%s)", type(exc).__name__)
+
+
+def lens_product_ids(queue: list[dict[str, Any]]) -> set[str]:
+    """Los items de la cola que buscan una consulta de Google Lens: los del grupo lens y también el refresco (o el rojo)
+    de lo que ganó el IDÉNTICO con una. Una consulta es de Lens si está en `ml_lens_result` del producto o si ya se buscó
+    para ese producto con origen `lens` (así sigue contando aunque la fila de Lens se haya pisado o borrado). Lo que se
+    busque con ellos se guarda con origen `lens`."""
+    out = {i["product_id"] for i in queue if i.get("lens")}
+    pids = [i["product_id"] for i in queue]
+    keys: dict[str, set[str]] = {}
     try:
         with Session(engine) as s:
-            for row in rows:
-                s.merge(row)
-            s.commit()
+            for pid, raw in s.exec(select(MlLensResult.product_id, MlLensResult.queries)
+                                   .where(MlLensResult.product_id.in_(pids))).all():  # type: ignore[attr-defined]
+                keys.setdefault(pid, set()).update(market_query._key(q) for q in oficina_ml.lens_queries(raw))
+            for pid, query in s.exec(select(MlWebResult.product_id, MlWebResult.query)
+                                     .where(MlWebResult.origin == oficina_ml.ORIGIN_LENS,
+                                            MlWebResult.product_id.in_(pids))).all():  # type: ignore[attr-defined]
+                keys.setdefault(pid, set()).add(market_query._key(query))
     except Exception as exc:  # noqa: BLE001
-        log.warning("Google Lens: no se pudieron guardar %d resultados (%s)", len(rows), type(exc).__name__)
+        log.warning("Google Lens: no se pudieron leer las consultas Lens (%s)", type(exc).__name__)
+        return out
+    return out | {i["product_id"] for i in queue if market_query._key(i["queries"][0]) in keys.get(i["product_id"], ())}
 

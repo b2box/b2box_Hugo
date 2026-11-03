@@ -227,7 +227,7 @@ def test_lens_table_upsert_and_rollback_on_postgres(pg):
     from app.pricing import ml_lens
 
     cols = {c["name"]: c for c in inspect(pg).get_columns("ml_lens_result")}
-    assert set(cols) == {"product_id", "ran_at", "status", "queries", "n_matches", "n_ml_links", "usd"}
+    assert set(cols) == {"product_id", "ran_at", "status", "queries", "n_matches", "n_ml_links", "usd", "attempts"}
     assert inspect(pg).get_pk_constraint("ml_lens_result")["constrained_columns"] == ["product_id"]
     assert cols["status"]["type"].length >= len("sin_links") and not getattr(cols["ran_at"]["type"], "timezone", False)
     ml_lens._save([MlLensResult(product_id="11", status="sin_links", usd=0.005)])
@@ -236,6 +236,11 @@ def test_lens_table_upsert_and_rollback_on_postgres(pg):
     with Session(pg) as s:
         [row] = s.exec(select(MlLensResult)).all()
     assert (row.status, row.n_ml_links, row.usd) == ("ok", 2, 0.004)
+    for n in range(1, 4):                                                    # el upsert con la racha de errores en Postgres
+        ml_lens._save([MlLensResult(product_id="11", status="error", usd=0.005)])
+        with Session(pg) as s:
+            row = s.get(MlLensResult, "11")
+        assert (row.attempts, row.status) == (n, "sin_links" if n == 3 else "error")
     with pg.begin() as c:
         c.execute(text("DROP TABLE IF EXISTS ml_lens_result"))               # el rollback del README
     session.init_db()

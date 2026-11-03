@@ -1,7 +1,7 @@
 """QA de Google Lens en el semáforo (feat/semaforo-google-lens): bordes que test_ml_lens.py no cubre.
 
 Sin red: el mismo mundo falso de test_ml_lens.py (MockTransport de httpx para Apify y www.google.com/goto). Los
-xfail(strict=True) son defectos encontrados en QA: cuando se arreglen, el test pasa a verde y hay que sacar la marca.
+defectos que encontró QA (D1, D2) ya están arreglados y sus tests corren como tests normales.
 """
 
 from __future__ import annotations
@@ -165,8 +165,9 @@ async def test_qa_el_location_solo_vale_si_es_https_a_un_ml_hispano_y_no_se_sigu
 
 
 async def test_qa_un_200_con_location_no_es_un_link():
+    """D2: lo que no es una redirección es una falla de Google (error, se reintenta, suma a la racha), no «no lleva a ML»."""
     resolver, _, http = _resolver(lambda r: httpx.Response(200, headers={"location": "https://www.mercadolibre.com.ar/a-b"}))
-    assert await resolver.resolve(GOTO) is None
+    assert await resolver.resolve(GOTO) is ml_lens._FAILED and resolver.streak == 1
     await http.aclose()
 
 
@@ -212,8 +213,6 @@ async def test_qa_el_freno_corta_rapido_deja_error_reintenta_a_las_20_h_y_ml_sig
     assert {p for p, _, _ in ml_lens.eligible(10, now=now + timedelta(hours=21))} == {"200", "201", "202", "400"}
 
 
-@pytest.mark.xfail(strict=True, reason="QA: un 5xx/403 de Google (o un 200 sin redirección) cuenta como «no lleva a ML»: "
-                   "el producto queda sin_links 60 días en vez de error 20 h, y no suma a la racha de freno")
 @pytest.mark.parametrize("status", [503, 403])
 @pytest.mark.usefixtures("lens")
 async def test_qa_un_error_de_google_que_no_es_429_deja_el_producto_en_error(monkeypatch, status):
@@ -319,9 +318,6 @@ def test_qa_n_lens_ok_de_una_corrida_vieja_o_rota():
         assert d["oficina"]["n_lens_ok"] == expected and "lens" not in d["variants"]
 
 
-@pytest.mark.xfail(strict=True, reason="QA: el refresco de un IGUAL ganado por Lens (grupo de los que vencen o rojo) se "
-                   "guarda con origin=apify: el snapshot siguiente pierde ml_variant='lens' y `ganados` / n_lens_ok "
-                   "cuentan de menos a los ~14 días (rojos: a las 2 noches)")
 @pytest.mark.usefixtures("lens")
 async def test_qa_el_refresco_de_lo_ganado_por_lens_sigue_contando_como_lens(monkeypatch):
     _snap("300", "Organizador cocina", status="ok", state="igual", origin="oficina")

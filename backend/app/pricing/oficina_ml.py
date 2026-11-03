@@ -60,6 +60,7 @@ ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR = "ok", "empty", "blocked", "error"
 # Origen de las búsquedas de Apify con una consulta de Google Lens (pricing/ml_lens.py): el semáforo las usa igual y
 # marca el snapshot con ml_variant="lens" para medir cuántos IGUAL ganó Lens.
 ORIGIN_LENS = "lens"
+MAX_LENS_QUERY_CHARS = 120
 STATUSES = (ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR)
 # Los que sirven como resultado: la Mac buscó y ML contestó (con o sin publicaciones).
 RESULT_STATUSES = (ST_OK, ST_EMPTY)
@@ -531,7 +532,9 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             lens.append((fetched, _sort_id(pid), pid, pending[0]))
         elif fetched <= stale_before:
             if by_oficina:
-                expiring_priced.append((fetched, _sort_id(pid), pid, used or plan[0]))
+                # Con la consulta que lo ganó; la Mac, solo si es de texto (nunca recibe una consulta de Google Lens).
+                text = claimer != CLAIM_OFICINA or market_query._key(used) in {market_query._key(q) for q in plan}
+                expiring_priced.append((fetched, _sort_id(pid), pid, used if used and text else plan[0]))
             else:
                 expiring_rest.append((fetched, _sort_id(pid), pid, plan[0]))
         elif next_text is not None and waited:
@@ -571,20 +574,30 @@ def _lens_pending(lens_rows: Sequence[Any], results: Sequence[Any]) -> dict[str,
     out: dict[str, list[str]] = {}
     for pid, ran_at, raw in lens_rows:
         used = {key for fetched, key in searched.get(pid, ()) if fetched >= ran_at}
-        pending = [q for q in _lens_queries(raw) if market_query._key(q) not in used]
+        pending = [q for q in lens_queries(raw) if market_query._key(q) not in used]
         if pending:
             out[pid] = pending
     return out
 
 
-def _lens_queries(raw: str | None) -> list[str]:
-    """Las consultas de `ml_lens_result.queries`. Las escribe ml_lens ya saneadas; se re-sanean igual (la tabla no es
-    de fiar más que la entrada)."""
+def clean_query(text: object) -> str:
+    """Una consulta de Google Lens: solo letras, números y espacios, hasta 120 caracteres y con al menos 2 palabras; ""
+    si no. Sale de un slug de un tercero y llega al actor de Apify y al prompt del juez. La usa ml_lens al escribir y
+    la cola al leer (la tabla no es de fiar más que la entrada)."""
+    if not isinstance(text, str):
+        return ""
+    text = "".join(c if c.isalnum() else " " for c in text[: MAX_LENS_QUERY_CHARS * 2])
+    text = " ".join(text.split())[:MAX_LENS_QUERY_CHARS].strip()
+    return text if len(text.split()) >= 2 else ""
+
+
+def lens_queries(raw: str | None) -> list[str]:
+    """Las consultas de `ml_lens_result.queries`, re-saneadas con la misma regla con que se escribieron."""
     try:
         data = json.loads(raw or "[]")
     except ValueError:
         return []
-    found = [clean_line(q.get("q"), 200) for q in data[:4] if isinstance(q, dict)] if isinstance(data, list) else []
+    found = [clean_query(q.get("q")) for q in data[:4] if isinstance(q, dict)] if isinstance(data, list) else []
     return [q for q in found if q]
 
 
