@@ -22,7 +22,7 @@ from sqlmodel import Session, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import AuditLog, MarketPriceSnapshot, MlWebClaim, MlWebResult, Setting
+from app.db.models import AuditLog, MarketPriceSnapshot, MlWebClaim, MlWebResult, PriceMonitorRun, Setting
 from app.db.session import engine, init_db
 from app.pricing import apify_ml_search as ams
 from app.pricing import daily_budget, oficina_ml
@@ -276,6 +276,33 @@ async def test_cupo_ya_gastado_por_otra_corrida(env, monkeypatch):
     report = await ams.run_search()
 
     assert fake.starts == 1 and report.searches == 1 and _used() == 5
+
+
+async def test_el_rojo_va_primero_con_su_consulta_y_el_cupo_sigue_mandando(env, monkeypatch):
+    """Un rojo de la oficina con dato viejo le gana el cupo a los nunca buscados, con la consulta de su resultado; el
+    tope diario corta igual."""
+    _snaps(3)
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok")
+        s.add(run)
+        s.commit()
+        run_id = run.id
+        s.add(MarketPriceSnapshot(run_id=run_id, product_id="200", ml_status="ok", product_name="Termo acero",
+                                  product_enabled=True, match_origin="oficina", color="rojo"))
+        s.add(MlWebResult(product_id="200", query="termo de la vez pasada", candidates="[]", n_candidates=0,
+                          status="ok", fetched_at=(utcnow() - timedelta(hours=50)).replace(microsecond=0)))
+        s.commit()
+    runtime.set_value("apify_meli_search_daily_max", 1)
+    fake = FakeApify().install(monkeypatch)
+    try:
+        report = await ams.run_search()
+    finally:
+        with Session(engine) as s:
+            s.delete(s.get(PriceMonitorRun, run_id))
+            s.commit()
+
+    assert report.status == "over_budget" and fake.starts == 1 and _used() == 1
+    assert fake.queries[1] == ["termo de la vez pasada"]
 
 
 def test_reserve_up_to_da_lo_que_queda_y_despues_cero(env):

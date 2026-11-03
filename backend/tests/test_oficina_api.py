@@ -495,6 +495,63 @@ def test_a_red_comes_out_once_and_the_limit_and_claims_still_count(reds):
     assert _ids(claimer="apify-x") == ["2", "3"]
 
 
+def test_a_skipped_run_does_not_hide_the_reds(reds):
+    """Una corrida `skipped` (sin cupo de ML) no midió nada: los rojos siguen siendo los de la última terminada."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    with Session(engine) as s:
+        s.add(PriceMonitorRun(status="skipped"))
+        s.commit()
+    assert _ids() == ["1"]
+
+
+def test_sin_dato_or_a_red_from_the_server_web_do_not_go_first(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50), origin="web")                # el dato es de la hora de la corrida
+    _snap("2", "no_data", run_id=reds, color="sin_dato", name=LONG_NAME)
+    v1, v2, _ = market_query.query_variants(LONG_NAME, 3)
+    _result("2", timedelta(hours=50), status="empty", query=v1)
+    # El 2 sigue su camino de variantes (la segunda), no la consulta vigente como si fuera rojo.
+    assert oficina_ml.build_queue(10) == [{"product_id": "2", "queries": [v2]}]
+
+
+def test_a_red_without_a_usable_result_is_not_searched_by_this_group(reds):
+    """Rojo de la oficina sin resultado ok/empty (se purgó, o solo hay bloqueos): no hay consulta vigente que repetir."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _snap("1", "ok", origin="oficina", run_id=reds, color="rojo")
+    _snap("2", "ok", origin="oficina", run_id=reds, color="rojo")
+    _result("2", timedelta(hours=50), status="blocked")
+    assert _ids() == []
+
+
+def test_the_reds_cost_the_same_queries_with_one_or_many(reds):
+    """Sin N+1: armar la cola hace las mismas consultas con 1 rojo que con 30."""
+    from sqlalchemy import event
+
+    runtime.set_value("pm_review_data_max_age_h", 72)
+
+    def count() -> int:
+        seen: list[str] = []
+
+        def on_execute(conn, cursor, statement, *a):
+            seen.append(statement)
+
+        oficina_ml.build_queue(500)                                   # calienta el cache de settings
+        event.listen(engine, "before_cursor_execute", on_execute)
+        try:
+            oficina_ml.build_queue(500)
+        finally:
+            event.remove(engine, "before_cursor_execute", on_execute)
+        return len(seen)
+
+    _red(reds, "1", timedelta(hours=50))
+    one = count()
+    for i in range(2, 31):
+        _red(reds, str(i), timedelta(hours=50))
+    assert len(_ids(500)) == 30
+    assert count() == one
+
+
 # ─── guardar resultados ─────────────────────────────────────────────────────
 
 
