@@ -285,13 +285,19 @@ export async function runPriceMonitor(): Promise<Response> {
   return apiFetch("/api/price-monitor/run", { method: "POST" });
 }
 
-// "No es el mismo": saca la publicación del snapshot (que se recalcula) y la excluye
-// para ese producto en las próximas corridas. Devuelve el snapshot actualizado.
-export async function markNotTheSame(snapshotId: number, mlId: string): Promise<PriceMonitorSnapshot> {
+// "No es el mismo" (idéntica) / "No tiene nada que ver" (similar): saca la publicación del
+// snapshot (que se recalcula) y la excluye para ese producto en las próximas corridas. El
+// motivo y la nota le enseñan al juez. Devuelve el snapshot actualizado.
+export async function markNotTheSame(
+  snapshotId: number,
+  mlId: string,
+  motive: string,
+  note: string,
+): Promise<PriceMonitorSnapshot> {
   const r = await apiFetch(`/api/price-monitor/snapshots/${snapshotId}/not-same`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ml_id: mlId }),
+    body: JSON.stringify({ ml_id: mlId, motive, note: note.trim() || null }),
   });
   return (await asJson<{ snapshot: PriceMonitorSnapshot }>(r)).snapshot;
 }

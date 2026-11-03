@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getPriceMonitorHistory,
@@ -110,6 +110,18 @@ const DIFFERENCE_LABEL: Record<string, string> = {
   accesorio: "accesorio",
   peso: "peso",
 };
+// Por qué una persona saca una publicación ("No es el mismo" / "No tiene nada que ver"). Las mismas
+// claves que match_feedback.MOTIVES del backend; con "Otro" la nota es obligatoria.
+const DROP_MOTIVES: { code: string; label: string }[] = [
+  { code: "otro_producto", label: "Es otro producto" },
+  { code: "medida", label: "Otra medida o tamaño" },
+  { code: "cantidad", label: "Otra cantidad o pack" },
+  { code: "material", label: "Otro material o calidad" },
+  { code: "marca", label: "Otra marca" },
+  { code: "repuesto", label: "Es un repuesto o accesorio" },
+  { code: "otro", label: "Otro" },
+];
+const DROP_NOTE_MAX = 200;
 // Lo que dejó la búsqueda de la Mac de la oficina (solo "buscó" y "sin publicaciones" existen).
 const OFICINA_STATE_LABEL: Partial<Record<WebState, string>> = {
   ok: "Web (oficina): buscó",
@@ -507,7 +519,8 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
         <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
           Sin dato, pero con un similar que puede ser el mismo producto: nombre casi igual o el juez no llegó a mirarlo.
           Abrí cada uno y, si la publicación es el mismo producto, tocá «Es el mismo»: pasa a color real y queda así en
-          las próximas corridas.
+          las próximas corridas. Si no tiene nada que ver, tocá «No tiene nada que ver» y contá por qué: el juez lo
+          tiene en cuenta para ese producto.
         </p>
       )}
 
@@ -1092,11 +1105,15 @@ function verdictText(m: MatchedListing, category: MatchCategory): string {
   return parts.join(" · ");
 }
 
+type Correction = "same" | "not_same";
+
 type Pending = {
   mlId: string;
   title: string;
-  kind: "same" | "not_same";
+  kind: Correction;
   hasPrice: boolean;
+  // "not_same": el motivo elegido (la etiqueta).
+  motive?: string;
   undone: boolean;
   // Si "Deshacer" volvió a una marca anterior: 1 = "Es el mismo", 0 = "No es el mismo".
   restored?: 0 | 1;
@@ -1105,12 +1122,13 @@ type Pending = {
 // Qué encontramos en Mercado Libre. Siempre se muestra lo que devolvió ML, en tres
 // listas: idénticos (cuentan para el color real), similares (dan el color estimado) y
 // diferentes (solo referencia). Cada publicación con su % de foto y de nombre, precio,
-// link, de dónde salió y el motivo. "No es el mismo" sobre un idéntico; "Es el mismo"
-// sobre un similar o un diferente: los dos piden confirmación y se pueden deshacer.
+// link, de dónde salió y el motivo. "No es el mismo" sobre un idéntico y "No tiene nada que
+// ver" sobre un similar (los dos piden el motivo); "Es el mismo" sobre un similar o un
+// diferente (pide confirmación). Todo se puede deshacer.
 export function ListingsPanel({ s, onChanged }: { s: PriceMonitorSnapshot; onChanged?: () => void }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
-  const [asking, setAsking] = useState<string | null>(null);
+  const [asking, setAsking] = useState<{ mlId: string; kind: Correction } | null>(null);
   const [done, setDone] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const igual = [...s.matched_listings, ...(s.unpriced_listings ?? [])];
@@ -1126,13 +1144,14 @@ export function ListingsPanel({ s, onChanged }: { s: PriceMonitorSnapshot; onCha
     onChanged?.();
   }
 
-  async function correct(m: MatchedListing, kind: "same" | "not_same") {
+  async function correct(m: MatchedListing, kind: Correction, motive = "", note = "") {
     setBusy(m.ml_id);
     setError(null);
     try {
-      await (kind === "same" ? markTheSame(s.id, m.ml_id) : markNotTheSame(s.id, m.ml_id));
+      await (kind === "same" ? markTheSame(s.id, m.ml_id) : markNotTheSame(s.id, m.ml_id, motive, note));
       setAsking(null);
-      setDone({ mlId: m.ml_id, title: m.title || m.ml_id, kind, hasPrice: m.price_cents != null, undone: false });
+      const motiveLabel = DROP_MOTIVES.find((o) => o.code === motive)?.label;
+      setDone({ mlId: m.ml_id, title: m.title || m.ml_id, kind, hasPrice: m.price_cents != null, motive: motiveLabel, undone: false });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
@@ -1165,10 +1184,10 @@ export function ListingsPanel({ s, onChanged }: { s: PriceMonitorSnapshot; onCha
           m={m}
           category={category}
           busy={busy === m.ml_id}
-          asking={asking === m.ml_id}
-          onAsk={() => setAsking(m.ml_id)}
+          asking={asking?.mlId === m.ml_id ? asking.kind : null}
+          onAsk={(kind) => setAsking({ mlId: m.ml_id, kind })}
           onCancel={() => setAsking(null)}
-          onConfirm={() => correct(m, category === "igual" ? "not_same" : "same")}
+          onConfirm={(kind, motive, note) => correct(m, kind, motive, note)}
         />
       ))}
     </div>
@@ -1209,7 +1228,7 @@ export function ListingsPanel({ s, onChanged }: { s: PriceMonitorSnapshot; onCha
                   ? done.hasPrice
                     ? `«${done.title}» pasó a idéntica y cuenta para el color; la próxima corrida la respeta.`
                     : `«${done.title}» pasó a idéntica; cuenta para el color desde la próxima corrida (hoy no tiene precio).`
-                  : `«${done.title}» pasó a diferentes y no se va a usar para este producto en las próximas corridas.`}
+                  : `«${done.title}» pasó a diferentes${done.motive ? ` (${done.motive})` : ""} y no se va a usar para este producto en las próximas corridas; el juez lo tiene en cuenta para las demás.`}
               </span>
               <Button variant="secondary" size="sm" disabled={busy !== null} onClick={undo}>
                 Deshacer
@@ -1271,10 +1290,10 @@ function ListingCard({
   m: MatchedListing;
   category: MatchCategory;
   busy: boolean;
-  asking: boolean;
-  onAsk: () => void;
+  asking: Correction | null;
+  onAsk: (kind: Correction) => void;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: (kind: Correction, motive?: string, note?: string) => void;
 }) {
   const isIgual = category === "igual";
   const img = safeMlImage(m.image_url);
@@ -1282,79 +1301,157 @@ function ListingCard({
   // Idéntico con precio: la mediana de sus vendedores; el resto, el precio de referencia.
   const price = isIgual && m.median_cents != null ? m.median_cents : m.price_cents;
   const showReason = !isIgual || m.source === "manual";
-  const action = isIgual ? "No es el mismo" : "Es el mismo";
-  const confirmText = isIgual
-    ? "¿Seguro? Pasa a diferentes y no se usa en las próximas corridas."
-    : m.price_cents != null
+  const sameText =
+    m.price_cents != null
       ? "¿Seguro? Pasa a idéntica, cuenta para el color real y la próxima corrida la respeta."
       : "¿Seguro? Pasa a idéntica; cuenta para el color desde la próxima corrida (hoy no tiene precio).";
   return (
     <div
       className={cn(
-        "flex items-start gap-3 rounded-md border px-2.5 py-2",
+        "rounded-md border px-2.5 py-2",
         category === "igual" && "border-border bg-background",
         category === "similar" && "border-dashed border-border bg-muted/30 text-muted-foreground",
         category === "diferente" && "border-dotted border-border bg-muted/20 text-muted-foreground",
       )}
     >
-      <MiniThumb url={img} alt={m.title} />
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <a
-          href={safeMlHref(m.permalink, m.ml_id)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-          title={m.title}
-        >
-          <IconExternalLink className="w-3 h-3 shrink-0" />
-          <span className="truncate">{m.title || m.ml_id}</span>
-        </a>
-        <p className="text-[11px]">
-          <span className={cn("font-medium", isIgual && "text-foreground")}>{verdictText(m, category)}</span>
-          {" · "}foto <span className="num-tabular">{pct(m.image_score)}</span> · nombre{" "}
-          <span className="num-tabular">{pct(m.name_score)}</span>
-        </p>
-        {showReason && ((m.differences?.length ?? 0) > 0 || m.reason) ? (
-          <p className="text-[11px] flex flex-wrap items-center gap-1">
-            {(m.differences ?? []).map((d) => (
-              <Badge key={d} variant="outline">
-                {DIFFERENCE_LABEL[d] ?? d}
-              </Badge>
-            ))}
-            {m.reason && <span className="italic">{m.reason}</span>}
+      <div className="flex items-start gap-3">
+        <MiniThumb url={img} alt={m.title} />
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <a
+            href={safeMlHref(m.permalink, m.ml_id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            title={m.title}
+          >
+            <IconExternalLink className="w-3 h-3 shrink-0" />
+            <span className="truncate">{m.title || m.ml_id}</span>
+          </a>
+          <p className="text-[11px]">
+            <span className={cn("font-medium", isIgual && "text-foreground")}>{verdictText(m, category)}</span>
+            {" · "}foto <span className="num-tabular">{pct(m.image_score)}</span> · nombre{" "}
+            <span className="num-tabular">{pct(m.name_score)}</span>
           </p>
-        ) : null}
-        {m.notes && m.notes.length > 0 && <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>}
-        {category === "similar" && (
-          <p className="text-[11px] italic">{estimateText(m)}</p>
-        )}
-        <p className="text-[11px]">
-          {m.brand && <>marca {m.brand} · </>}
-          {m.seller && <>vende {m.seller} · </>}
-          {m.sold_quantity != null && <>{nfmt(m.sold_quantity)}+ vendidos · </>}
-          {isIgual && m.listings > 1 && <>{m.listings} publicaciones · </>}
-          {theirs && <>medidas de la publicación: {theirs}</>}
-        </p>
-      </div>
-      <div className="text-right shrink-0 space-y-1">
-        <p className="text-xs num-tabular font-semibold">{price != null ? fmtArs(price) : "sin precio"}</p>
-        {asking ? (
-          <div className="space-y-1 max-w-[210px]">
-            <p className="text-[11px] text-foreground">{confirmText}</p>
-            <div className="flex justify-end gap-1.5">
-              <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
-                Cancelar
-              </Button>
-              <Button size="sm" disabled={busy} onClick={onConfirm}>
-                {busy ? "Guardando…" : `Sí, ${action.toLowerCase()}`}
-              </Button>
+          {showReason && ((m.differences?.length ?? 0) > 0 || m.reason) ? (
+            <p className="text-[11px] flex flex-wrap items-center gap-1">
+              {(m.differences ?? []).map((d) => (
+                <Badge key={d} variant="outline">
+                  {DIFFERENCE_LABEL[d] ?? d}
+                </Badge>
+              ))}
+              {m.reason && <span className="italic">{m.reason}</span>}
+            </p>
+          ) : null}
+          {m.notes && m.notes.length > 0 && <p className="text-[11px] text-warning">{m.notes.join(" · ")}</p>}
+          {category === "similar" && (
+            <p className="text-[11px] italic">{estimateText(m)}</p>
+          )}
+          <p className="text-[11px]">
+            {m.brand && <>marca {m.brand} · </>}
+            {m.seller && <>vende {m.seller} · </>}
+            {m.sold_quantity != null && <>{nfmt(m.sold_quantity)}+ vendidos · </>}
+            {isIgual && m.listings > 1 && <>{m.listings} publicaciones · </>}
+            {theirs && <>medidas de la publicación: {theirs}</>}
+          </p>
+        </div>
+        <div className="text-right shrink-0 space-y-1">
+          <p className="text-xs num-tabular font-semibold">{price != null ? fmtArs(price) : "sin precio"}</p>
+          {asking === "same" ? (
+            <div className="space-y-1 max-w-[210px]">
+              <p className="text-[11px] text-foreground">{sameText}</p>
+              <div className="flex justify-end gap-1.5">
+                <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
+                  Cancelar
+                </Button>
+                <Button size="sm" disabled={busy} onClick={() => onConfirm("same")}>
+                  {busy ? "Guardando…" : "Sí, es el mismo"}
+                </Button>
+              </div>
             </div>
-          </div>
-        ) : (
-          <Button variant="secondary" size="sm" disabled={busy} onClick={onAsk}>
-            {action}
-          </Button>
-        )}
+          ) : asking === null ? (
+            <div className="flex flex-col items-end gap-1">
+              {!isIgual && (
+                <Button variant="secondary" size="sm" disabled={busy} onClick={() => onAsk("same")}>
+                  Es el mismo
+                </Button>
+              )}
+              {category !== "diferente" && (
+                <Button variant="secondary" size="sm" disabled={busy} onClick={() => onAsk("not_same")}>
+                  {isIgual ? "No es el mismo" : "No tiene nada que ver"}
+                </Button>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {asking === "not_same" && (
+        <DropForm
+          isIgual={isIgual}
+          busy={busy}
+          onCancel={onCancel}
+          onDrop={(motive, note) => onConfirm("not_same", motive, note)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Por qué se saca una publicación: un motivo de la lista y una nota (obligatoria con "Otro").
+// Queda en su card y el juez lo recibe para ese producto en las próximas corridas.
+function DropForm({
+  isIgual,
+  busy,
+  onCancel,
+  onDrop,
+}: {
+  isIgual: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onDrop: (motive: string, note: string) => void;
+}) {
+  const group = useId();
+  const [motive, setMotive] = useState("");
+  const [note, setNote] = useState("");
+  const needsNote = motive === "otro";
+  const valid = motive !== "" && (!needsNote || note.trim() !== "");
+  return (
+    <div className="mt-2 pt-2 border-t border-border space-y-2 text-foreground">
+      <p className="text-[11px]">
+        {isIgual
+          ? "¿Por qué no es el mismo? Pasa a diferentes y no se usa en las próximas corridas."
+          : "¿Por qué no tiene nada que ver? Pasa a diferentes, deja de contar para el estimado y no se usa en las próximas corridas."}
+      </p>
+      <fieldset className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]" disabled={busy}>
+        <legend className="sr-only">Motivo</legend>
+        {DROP_MOTIVES.map((o) => (
+          <label key={o.code} className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="radio"
+              name={group}
+              value={o.code}
+              checked={motive === o.code}
+              onChange={() => setMotive(o.code)}
+            />
+            {o.label}
+          </label>
+        ))}
+      </fieldset>
+      <Input
+        value={note}
+        maxLength={DROP_NOTE_MAX}
+        onChange={(e) => setNote(e.target.value)}
+        disabled={busy}
+        aria-label="Nota"
+        placeholder={needsNote ? "Contá por qué (obligatorio)" : "Nota (opcional)"}
+        className="h-8 text-xs"
+      />
+      <div className="flex justify-end gap-1.5">
+        <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
+          Cancelar
+        </Button>
+        <Button size="sm" disabled={busy || !valid} onClick={() => onDrop(motive, note)}>
+          {busy ? "Guardando…" : "Sacar"}
+        </Button>
       </div>
     </div>
   );
