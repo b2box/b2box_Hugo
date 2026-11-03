@@ -1423,7 +1423,7 @@ function DropForm({
       </p>
       <fieldset className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]" disabled={busy}>
         <legend className="sr-only">Motivo</legend>
-        {DROP_MOTIVES.map((o) => (
+        {DROP_MOTIVES.map((o, i) => (
           <label key={o.code} className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="radio"
@@ -1431,6 +1431,7 @@ function DropForm({
               value={o.code}
               checked={motive === o.code}
               onChange={() => setMotive(o.code)}
+              autoFocus={i === 0}
             />
             {o.label}
           </label>
@@ -1442,9 +1443,14 @@ function DropForm({
         onChange={(e) => setNote(e.target.value)}
         disabled={busy}
         aria-label="Nota"
+        aria-required={needsNote}
+        aria-describedby={`${group}-aviso`}
         placeholder={needsNote ? "Contá por qué (obligatorio)" : "Nota (opcional)"}
         className="h-8 text-xs"
       />
+      <p id={`${group}-aviso`} className="text-[11px] text-muted-foreground">
+        La lee el juez (servicio externo): no pongas costos, proveedores ni datos de clientes.
+      </p>
       <div className="flex justify-end gap-1.5">
         <Button variant="secondary" size="sm" disabled={busy} onClick={onCancel}>
           Cancelar
