@@ -41,9 +41,9 @@ from sqlmodel import Session, func, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult
+from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult, PriceMonitorRun
 from app.db.session import engine
-from app.pricing import market_query
+from app.pricing import market_query, semaforo
 from app.pricing.market_ml import (
     ORIGIN_OFICINA,
     MlCandidate,
@@ -74,6 +74,13 @@ MIN_REFRESH_AGE = timedelta(hours=12)
 # UNA página de ML por producto por noche: si la consulta vino vacía, la siguiente variante se prueba recién la noche
 # siguiente (pasadas al menos estas horas), para no multiplicar las búsquedas desde la IP de la oficina.
 NEXT_VARIANT_AFTER = timedelta(hours=12)
+# Los rojos se re-buscan cuando su dato pasa `pm_review_data_max_age_h` - 1 día (piso: 1 día), con media noche de
+# tolerancia: Apify no busca cada producto a la misma hora (fetched_at es el final de cada búsqueda y la corrida dura
+# hasta 2 h), y sin esto a "las 48 h" el dato tiene 47 h 55 min y se re-busca una noche tarde.
+RED_REFRESH_SLACK = timedelta(hours=12)
+# Corridas del semáforo que terminaron (price_monitor.RUN_OK / RUN_DEGRADED; importarlo sería circular). Una `failed`
+# reventó a mitad y una `skipped` no midió nada: sus rojos no son todos los rojos.
+_RUN_FINISHED = ("ok", "degraded")
 # Un producto cuyo último snapshot es más viejo que esto (respecto del snapshot más nuevo de todos) ya no se mide: borrado de
 # Vendure, deshabilitado con `pm_include_disabled=0`. Buscarlo sería gastar una página de ML en un resultado que nadie usa.
 SNAPSHOT_MAX_AGE = timedelta(days=3)
@@ -404,13 +411,19 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
                 take_stale_oficina: bool = False) -> list[dict[str, Any]]:
     """Qué buscar esta noche, en este orden:
 
-      1. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
+      1. los ROJOS de la última corrida terminada cuyo precio salió de la oficina y cuyo resultado tiene más de
+         `pm_review_data_max_age_h` - 1 día (piso: 1 día; el más viejo primero), con la MISMA consulta de ese resultado:
+         la bandeja (R5) y el recálculo solo usan dato de menos de `pm_review_data_max_age_h`, y el TTL de 15 días los
+         dejaba sin dato fresco al tercer día. Con 72 h, cada rojo se re-busca cada 2 noches;
+      2. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
          todavía no buscó (habilitados antes que deshabilitados; los deshabilitados se miden por pedido de Nico y
          se buscan también);
-      2. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
+      3. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
          siguiente, la noche siguiente);
-      3. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
+      4. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
          idéntico y los que hoy tienen precio gracias a la oficina. Empiezan de nuevo por la primera variante.
+
+    Un producto sale UNA vez: si es rojo (1) no se repite en los otros grupos.
 
     **Cada item lleva UNA sola consulta**: una página de ML por producto por noche como tope. Y solo el id del producto:
     ni costos ni proveedor ni nada interno. Los productos cuyo último snapshot es viejo (ya no se miden) no entran.
@@ -422,6 +435,9 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
     variants = market_query.clamp_variants(runtime.get("pm_ml_query_variants"))
     refresh_after = max(ttl() - QUEUE_REFRESH_MARGIN, MIN_REFRESH_AGE)
     stale_before = now - refresh_after
+    red_after = max(timedelta(hours=int(runtime.get("pm_review_data_max_age_h"))) - timedelta(days=1),
+                    timedelta(days=1))
+    red_before = now - red_after + RED_REFRESH_SLACK
     with Session(engine) as s:
         newest = select(func.max(MarketPriceSnapshot.id)).group_by(MarketPriceSnapshot.product_id)
         snaps = s.exec(
@@ -433,6 +449,14 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             select(MlWebResult.product_id, MlWebResult.fetched_at, MlWebResult.status, MlWebResult.query)
             .where(MlWebResult.status.in_(RESULT_STATUSES))  # type: ignore[attr-defined]
         ).all()
+        last_run = (select(func.max(PriceMonitorRun.id))
+                    .where(PriceMonitorRun.status.in_(_RUN_FINISHED)).scalar_subquery())  # type: ignore[attr-defined]
+        # Solo los que tienen precio por la oficina: el dato de la API o de la web del servidor es de la hora de la corrida.
+        reds = set(s.exec(
+            select(MarketPriceSnapshot.product_id)
+            .where(MarketPriceSnapshot.run_id == last_run, MarketPriceSnapshot.color == semaforo.ROJO,
+                   MarketPriceSnapshot.match_origin == ORIGIN_OFICINA)
+        ).all())
         taken_by_others = _claimed_by_others(s, claimer, now, take_stale_oficina)
     last_result: dict[str, tuple[datetime, str, str]] = {}
     for pid, fetched, status, query in results:
@@ -440,11 +464,16 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             last_result[pid] = (fetched, status, query)
     still_measured = max((row[5] for row in snaps), default=now) - SNAPSHOT_MAX_AGE
 
+    red: list[tuple[Any, ...]] = []
     never: list[tuple[Any, ...]] = []
     next_variant: list[tuple[Any, ...]] = []
     expiring: list[tuple[Any, ...]] = []
     for pid, ml_status, origin, name, enabled, captured in snaps:
         if not name or captured < still_measured or pid in taken_by_others:
+            continue
+        last = last_result.get(pid)
+        if pid in reds and last is not None and last[0] <= red_before:
+            red.append((last[0], _sort_id(pid), pid, last[2]))
             continue
         by_oficina = ml_status == "ok" and origin == ORIGIN_OFICINA
         needs_search = ml_status in _NEEDS_SEARCH
@@ -453,7 +482,6 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
         plan = market_query.query_variants(name, variants)
         if not plan:
             continue
-        last = last_result.get(pid)
         if last is None:
             if needs_search:
                 never.append((enabled is False, _sort_id(pid), pid, plan[0]))
@@ -466,11 +494,11 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
             at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
             if at + 1 < len(plan):
                 next_variant.append((fetched, _sort_id(pid), pid, plan[at + 1]))
-    for group in (never, next_variant, expiring):
+    for group in (red, never, next_variant, expiring):
         group.sort(key=lambda t: t[:2])
 
     return [{"product_id": pid, "queries": [query]}
-            for *_, pid, query in [*never, *next_variant, *expiring]][:limit]
+            for *_, pid, query in [*red, *never, *next_variant, *expiring]][:limit]
 
 
 def _sort_id(pid: str) -> tuple[int, str]:

@@ -786,11 +786,14 @@ backend/tools/oficina_ml_search.py
   agrupan por **/64** (quien tiene una red IPv6 tiene 2^64 direcciones): cada request cuesta O(1) aunque inventen 100.000 IPs.
   **El bloqueo frena fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
   sin cola al runner bloqueándola. La auth está declarada UNA vez, en el `APIRouter`: una ruta nueva no puede olvidarse de ella.
-- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los productos cuya última medición no tuvo un
+- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los **rojos** de la última corrida terminada
+  con precio de la oficina cuyo resultado tiene más de `pm_review_data_max_age_h` - 1 día (piso 1 día, con media noche de tolerancia;
+  el más viejo primero), con la **misma consulta** de ese resultado: la bandeja (R5) y el recálculo solo usan dato de menos de
+  `pm_review_data_max_age_h`, así que con 72 h cada rojo se re-busca cada 2 noches; (2) los productos cuya última medición no tuvo un
   IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados — **los
   deshabilitados se buscan también**: Nico pidió medirlos (`pm_include_disabled`) y su nombre viaja en la consulta, como el de
-  cualquier otro producto del catálogo —; (2) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante
-  por probar; (3) los que tienen resultado **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a
+  cualquier otro producto del catálogo —; (3) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante
+  por probar; (4) los que tienen resultado **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a
   la oficina). **Cada item trae UNA sola consulta**: una página de ML por producto por noche como tope. Si la del título vino
   vacía, la variante siguiente (corta, después claves) se da recién la noche siguiente (12 horas después como mínimo); si las tres
   vinieron vacías el producto espera a que venza el resultado y empieza de nuevo por el título. Solo viaja `product_id` y `queries`
