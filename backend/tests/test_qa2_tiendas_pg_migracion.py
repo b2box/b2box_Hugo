@@ -100,7 +100,7 @@ def _signature(engine) -> dict:
     # búsqueda con Apify) y de la bandeja de revisión (price_review_*) son de PRs posteriores a este esquema de
     # partida: las prueban test_seo_text_audit_pg.py, test_qa_estimate_migracion.py, test_qa_apify_ml_search_pg.py
     # y test_price_review_pg.py. Lo mismo con las cinco columnas de la bandeja.
-    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_")
+    later = ("text_audit_", "estimate_usage", "lookup_estimate", "ml_web_claim", "price_review_", "ml_lens_result")
     keep = lambda rows: [r for r in rows if not any(x in r[0] for x in later)]  # noqa: E731
     cols = [r for r in cols if (r[0], r[1]) not in BANDEJA_COLS]
     return {"columns": keep(cols), "indexes": keep(idx), "constraints": keep(con)}

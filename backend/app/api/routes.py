@@ -989,6 +989,8 @@ _COSTLY_SETTINGS = frozenset({
     "vision_rerank_daily_budget",
     "apify_meli_search_enabled",
     "apify_meli_search_daily_max",
+    "pm_lens_enabled",
+    "pm_lens_daily_max",
     # Bajarlo hace que la cola pida más búsquedas de Apify por noche (hasta el tope de arriba).
     "oficina_result_ttl_days",
     "otapi_daily_budget",
@@ -1014,6 +1016,7 @@ _COSTLY_SETTINGS = frozenset({
     "pm_yellow_min_pct",
     "pm_review_min_listings",
     "pm_review_min_sellers",
+    # Además decide cada cuánto la cola re-busca (y paga en Apify) los rojos: bajarlo multiplica esas búsquedas.
     "pm_review_data_max_age_h",
     "pm_review_max_price_ratio",
     # Recálculo al cambiar en Vendure: lecturas a Vendure por día (el admin de Vendure las paga) de la cola y del vigía de

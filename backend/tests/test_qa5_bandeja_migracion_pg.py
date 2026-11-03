@@ -46,7 +46,7 @@ NEW_COLS = {"market_price_snapshot": {"data_at", "review_flag"}, "price_monitor_
 # Tablas de los PRs que entran antes que la bandeja (estimado por foto y reservas de la cola de la búsqueda con Apify): mientras
 # no estén en origin/main las crea el mismo arranque. Las prueban test_qa_estimate_migracion.py y test_qa_apify_ml_search_pg.py;
 # acá no se miran, ni antes ni después (así el test vale igual con esos PRs mergeados o no).
-OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim"}
+OTHER_PRS_TABLES = {"estimate_usage", "lookup_estimate", "ml_web_claim", "ml_lens_result"}
 
 
 def dsn() -> str:

@@ -1170,7 +1170,10 @@ async def _match_via_oficina(ctx: RunContext, product: VendureProduct, snap: Mar
         snap.web_state = oficina_ml.ST_EMPTY
         return _with_note(snap, "ML web (oficina): ML no tiene publicaciones para el título")
     snap.web_state = oficina_ml.ST_OK
-    return await _match_web_candidates(ctx, product, snap, w, fresh.candidates, ORIGIN_OFICINA, "ML web (oficina)")
+    snap = await _match_web_candidates(ctx, product, snap, w, fresh.candidates, ORIGIN_OFICINA, "ML web (oficina)")
+    if snap.ml_status == OK and fresh.origin == oficina_ml.ORIGIN_LENS:
+        snap.ml_variant = "lens"          # lo ganó una consulta de Google Lens: cuenta en variant_stats
+    return snap
 
 
 async def _match_web_candidates(ctx: RunContext, product: VendureProduct, snap: MarketPriceSnapshot,
@@ -1863,6 +1866,9 @@ def promote_listing(snap: MarketPriceSnapshot, ml_id: str) -> dict[str, Any] | N
 
 def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
     total = int(run.total_products or 0)
+    variants = _json_dict(run.variant_stats)
+    # "lens" no es una búsqueda de la API: va con el buscador de la oficina, que es por donde entra.
+    n_lens_ok = variants.pop("lens", 0)
 
     def pct(n: int) -> float | None:
         return round(n / total * 100.0, 1) if total else None
@@ -1904,9 +1910,11 @@ def run_to_dict(run: PriceMonitorRun) -> dict[str, Any]:
         "n_con_similares": run.n_con_similares,
         # Búsquedas web de la Mac de la oficina: productos con resultado fresco al empezar y los que
         # terminaron con precio gracias a eso.
-        "oficina": {"fresh": run.oficina_fresh or 0, "n_ok": run.n_oficina_ok or 0},
+        # n_lens_ok: de esos, los que ganaron el IGUAL con una consulta de Google Lens.
+        "oficina": {"fresh": run.oficina_fresh or 0, "n_ok": run.n_oficina_ok or 0,
+                    "n_lens_ok": n_lens_ok if isinstance(n_lens_ok, int) else 0},
         # Productos que resolvió con un IGUAL con precio cada búsqueda de la API de ML.
-        "variants": _json_dict(run.variant_stats),
+        "variants": variants,
         # Color ESTIMADO por similares (aparte del real) y productos donde ML solo
         # devolvió publicaciones diferentes.
         "estimated": {"verde": run.n_est_verde, "amarillo": run.n_est_amarillo, "rojo": run.n_est_rojo},

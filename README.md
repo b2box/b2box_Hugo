@@ -786,11 +786,16 @@ backend/tools/oficina_ml_search.py
   agrupan por **/64** (quien tiene una red IPv6 tiene 2^64 direcciones): cada request cuesta O(1) aunque inventen 100.000 IPs.
   **El bloqueo frena fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
   sin cola al runner bloqueándola. La auth está declarada UNA vez, en el `APIRouter`: una ruta nueva no puede olvidarse de ella.
-- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los productos cuya última medición no tuvo un
+- **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los **rojos** de la última corrida terminada
+  (de hace 2 días o menos) con precio de la oficina cuyo resultado vigente es `ok` y tiene más de `pm_review_data_max_age_h` - 1 día
+  (piso 1 día, con media noche de tolerancia; el más viejo primero), con la **misma consulta** de ese resultado: la bandeja (R5) y
+  el recálculo solo usan dato de menos de `pm_review_data_max_age_h`, así que con 72 h cada rojo se re-busca cada 2 noches. Ocupan
+  **a lo sumo la mitad** de la cola, no entra el que tuvo un intento (de cualquier estado) hace menos de 20 h y **la Mac nunca los
+  recibe**: es solo para Apify; (2) los productos cuya última medición no tuvo un
   IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados — **los
   deshabilitados se buscan también**: Nico pidió medirlos (`pm_include_disabled`) y su nombre viaja en la consulta, como el de
-  cualquier otro producto del catálogo —; (2) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante
-  por probar; (3) los que tienen resultado **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a
+  cualquier otro producto del catálogo —; (3) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante
+  por probar; (4) los que tienen resultado **por vencer**, el más viejo primero (siguen sin idéntico, o hoy tienen precio gracias a
   la oficina). **Cada item trae UNA sola consulta**: una página de ML por producto por noche como tope. Si la del título vino
   vacía, la variante siguiente (corta, después claves) se da recién la noche siguiente (12 horas después como mínimo); si las tres
   vinieron vacías el producto espera a que venza el resultado y empieza de nuevo por el título. Solo viaja `product_id` y `queries`
@@ -955,6 +960,87 @@ existentes). Para volver atrás:
 ```sql
 DROP TABLE IF EXISTS ml_web_claim;
 ```
+
+### Google Lens para los sin IDÉNTICO (fuente 2d, dentro del job de Apify)
+
+La búsqueda de ML usa NUESTRO nombre y el vendedor le pone otro. `pricing/ml_lens.py` busca por la foto: foto → Google Lens
+→ links de ML → del slug sale el título del vendedor → esa frase la busca Apify como una consulta más → decide el juez de
+siempre. Corre al principio del job `apify_ml_search` (sin cron nuevo) y solo si está prendido.
+
+- **Prender / tope** (dashboard, grupo monitor, admin y audit log): `pm_lens_enabled` (default **0 = apagado**) y
+  `pm_lens_daily_max` (default **30**, máximo 100 fotos por día UTC; cupo atómico `_meta:ml_lens_today`). Los dos se
+  releen **en cada lote**: apagarlo o bajar el tope corta esa misma noche. Si la búsqueda de ML no corre (apagada, sin
+  token, sin cupo o su actor sin `LIMITED_PERMISSIONS`, que se mira **antes** de Lens), Lens tampoco gasta.
+- **A quién:** el último snapshot vigente `no_data` con `diferente` / `similar` / `ninguno`, medible, con foto pública y
+  ya buscado por texto; sin lensear o lenseado hace más de 60 días (con `error`, 20 h). Primero los **nunca lenseados**
+  (habilitados antes); después los que vuelven (error o 60 días), el lenseado hace más tiempo primero.
+- **Reintentos con tope:** `ml_lens_result.attempts` cuenta los errores seguidos de una foto (vuelve a 0 con un `ok` o
+  `sin_links`). Al **tercero** la fila queda `sin_links`: 60 días sin pagar otro intento. Si después vuelve a fallar,
+  vuelve a quedar `sin_links` al toque (la racha no se reinicia hasta que salga bien).
+- **Actor:** `s-r/google-lens` build `0.2.7` (constantes: otro actor entra por PR), solo con `LIMITED_PERMISSIONS`; si no,
+  `lens.status = stopped` y la búsqueda de ML sigue. Lotes de 25 fotos, hasta 3 corridas a la vez, `maxTotalChargeUsd =
+  n · 0,005 · 1,5` (USD 0,005 por foto con match + 0,002 por arranque). Una corrida que informa más que ese techo se
+  loguea como warning y va a `overcharged_runs` (del paso Lens y del audit). El paso entero tiene **15 min**: lo que no
+  terminó se aborta y queda `error`. Se guarda con un upsert por fila (`INSERT … ON CONFLICT (product_id) DO UPDATE`):
+  una fila que falla no se lleva las demás, ya pagas.
+- **Los `google.com/goto`:** se resuelven en el momento con un GET a `https://www.google.com/goto?…` (la URL exacta: otra
+  cosa no genera ningún request), sin seguir la redirección, sin leer el body, timeout 5 s, 4 a la vez y 10 por foto. Del
+  `Location` solo se acepta https a `mercadolibre.com.ar` o a un ML hispano (`.com.mx .cl .com.co .com.uy .com.pe .com.ve
+  .com.ec`); Brasil nunca. **Hugo nunca le pide nada a ML.** Solo una redirección a algo que no es ese ML da «no sirve»;
+  un `429`, una redirección a `google.com/sorry` o `consent.google.com` y **cualquier respuesta que no es redirección**
+  (200, 403, 5xx) son fallas: el producto queda `error` (se reintenta a las 20 h) y suman a la racha. Si con los links que
+  sí se resolvieron ya hay consulta, la foto queda `ok` igual. Los logs llevan contadores, no URLs.
+- **Freno de Google:** tres fallas seguidas cortan la noche (`lens.resolve_blocked = true`, lo pendiente queda `error`),
+  se guarda el día en `settings` (`_meta:ml_lens_brake`) y se avisa por el notifier (mail / webhook). Las **2 noches
+  siguientes** no se lanza el actor de Lens (`lens.status = stopped`, warning en el log; las búsquedas de ML siguen). La
+  tercera noche se prueba con **5 fotos**: si Google ya no frena, el freno se suelta solo; si frena de nuevo, se vuelve a
+  poner. Para cortarlo del todo: `pm_lens_enabled = 0`. Para soltarlo antes: `DELETE FROM settings WHERE key =
+  '_meta:ml_lens_brake';`.
+- **Noche sospechosa:** si hubo matches de Lens y ningún link de ML resuelto, `lens.suspicious = true` y warning en el
+  log (Google pudo haber cambiado los goto y todo quedaría `sin_links` 60 días).
+- **Consulta:** **una por producto** (decisión del 03-nov), primero links AR por posición en Lens, hispanos solo si no
+  hay AR. Slug en minúsculas sin guiones, sin la última palabra si el slug mide ≥ 56 (ML la corta a medias), solo letras,
+  números y espacios, ≤ 120 caracteres y ≥ 2 palabras, distinta del plan de texto del producto. Sin ninguna:
+  `sin_links`.
+- **Cola:** `build_queue(with_lens=True)` (solo Apify) ofrece la consulta pendiente en el grupo `lens`, después del
+  refresco de los que tienen precio y antes del de los sin dato, pasadas 12 h desde la última búsqueda y si no queda una
+  variante de texto pendiente. Se busca del **mismo** cupo `apify_meli_search_daily_max` y se guarda con `origin = lens`.
+  Apify refresca un producto con precio (y re-busca un rojo) **con la consulta que lo ganó** (también «corto» o «claves»),
+  con Lens prendido o apagado; si esa consulta es de Lens (está en `ml_lens_result` o ya se buscó con origen `lens`), el
+  resultado se guarda otra vez con `origin = lens` y el producto sigue contando como ganado por Lens.
+- **La Mac nunca recibe texto de Lens:** ni el grupo lens ni los rojos, y en su cola el refresco de un producto con precio
+  lleva la consulta que lo ganó solo si es de texto (del plan); si no, la primera variante.
+- **Medición:** si el IGUAL con precio salió de un resultado `lens`, el snapshot queda `ml_variant = lens` y el resumen de
+  la corrida lo da como `oficina.n_lens_ok` («(Z por Google Lens)» en la línea del buscador). El audit
+  `apify_ml_search_run` lleva `lens` (status, products, with_queries, sin_links, errors, matches, ml_links, usd,
+  resolve_blocked, suspicious, overcharged_runs) y `lens_searches`.
+
+Cuánto costó cada ganado (Postgres):
+
+```sql
+WITH last AS (SELECT DISTINCT ON (product_id) product_id, ml_variant
+              FROM market_price_snapshot ORDER BY product_id, id DESC)
+SELECT count(*)                                         AS lenseados,
+       count(*) FILTER (WHERE l.status = 'ok')          AS con_consulta,
+       count(*) FILTER (WHERE last.ml_variant = 'lens') AS ganados,
+       round(sum(l.usd)::numeric, 2)                    AS usd_lens
+FROM ml_lens_result l LEFT JOIN last USING (product_id);
+-- búsquedas Lens:
+SELECT SUM((after::json->>'lens_searches')::int) FROM audit_log WHERE action = 'apify_ml_search_run';
+```
+
+Costo total por ganado = `(usd_lens + búsquedas_lens · 0,02) / ganados`. **Se deja** si `ganados ≥ 10 %` de
+`con_consulta`, el costo total por ganado es ≤ US$ 0,25 y en una muestra de 20 ganados hay ≤ 2 que no son el mismo
+producto. Una corrección manual que recalcula el snapshot pone `ml_variant = NULL`: `ganados` cuenta un poco de menos.
+
+**Migración y rollback.** Automática en el arranque: la tabla `ml_lens_result` (nueva; no toca las existentes). Para
+volver atrás, `pm_lens_enabled = 0` y:
+
+```sql
+DROP TABLE IF EXISTS ml_lens_result;
+```
+
+Las filas `origin = 'lens'` de `ml_web_result` siguen sirviendo como si fueran de Apify, también con el código anterior.
 
 ### Tiendas (Gadnic, Casa Perfecta…)
 

@@ -122,7 +122,7 @@ def test_the_previous_code_keeps_inserting_on_the_upgraded_schema(pg):
     with Session(pg) as s:
         run = s.exec(select(price_monitor.PriceMonitorRun).order_by(price_monitor.PriceMonitorRun.id.desc())).first()
         d = price_monitor.run_to_dict(run)
-    assert d["variants"] == {} and d["oficina"] == {"fresh": 0, "n_ok": 0}            # NULL se sirve como 0
+    assert d["variants"] == {} and d["oficina"] == {"fresh": 0, "n_ok": 0, "n_lens_ok": 0}            # NULL se sirve como 0
 
 
 # ─── guardar, la cola y lo fresco ───────────────────────────────────────────
@@ -208,3 +208,69 @@ async def test_variants_are_recorded_on_postgres(pg, world):
     snap = _snaps()["7"]
     assert snap.ml_status == "ok" and snap.ml_variant == "corto"
     assert json.loads(_runs()[-1].variant_stats) == {"corto": 1}
+
+
+# ─── Google Lens (ml_lens_result) ───────────────────────────────────────────
+
+
+def _readme_lens_sql() -> list[str]:
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    block = next(b for b in readme.split("```sql")[1:] if "FROM ml_lens_result l" in b).split("```")[0]
+    block = "\n".join(line for line in block.splitlines() if not line.lstrip().startswith("--"))
+    return [q.strip() for q in block.split(";") if q.strip()]
+
+
+def test_lens_table_upsert_and_rollback_on_postgres(pg):
+    from app.db.models import MlLensResult
+    from app.pricing import ml_lens
+
+    cols = {c["name"]: c for c in inspect(pg).get_columns("ml_lens_result")}
+    assert set(cols) == {"product_id", "ran_at", "status", "queries", "n_matches", "n_ml_links", "usd", "attempts"}
+    assert inspect(pg).get_pk_constraint("ml_lens_result")["constrained_columns"] == ["product_id"]
+    assert cols["status"]["type"].length >= len("sin_links") and not getattr(cols["ran_at"]["type"], "timezone", False)
+    ml_lens._save([MlLensResult(product_id="11", status="sin_links", usd=0.005)])
+    ml_lens._save([MlLensResult(product_id="11", status="ok", n_ml_links=2, usd=0.004,
+                                queries=json.dumps([{"q": "organizador lens", "host": "mercadolibre.com.ar"}]))])
+    with Session(pg) as s:
+        [row] = s.exec(select(MlLensResult)).all()
+    assert (row.status, row.n_ml_links, row.usd) == ("ok", 2, 0.004)
+    for n in range(1, 4):                                                    # el upsert con la racha de errores en Postgres
+        ml_lens._save([MlLensResult(product_id="11", status="error", usd=0.005)])
+        with Session(pg) as s:
+            row = s.get(MlLensResult, "11")
+        assert (row.attempts, row.status) == (n, "sin_links" if n == 3 else "error")
+    with pg.begin() as c:
+        c.execute(text("DROP TABLE IF EXISTS ml_lens_result"))               # el rollback del README
+    session.init_db()
+    session.init_db()
+    assert "ml_lens_result" in inspect(pg).get_table_names()
+
+
+def test_lens_eligible_queue_and_measurement_sql_on_postgres(pg):
+    from app.db.models import MlLensResult
+    from app.pricing import ml_lens
+
+    with pg.begin() as c:
+        c.execute(text("UPDATE market_price_snapshot SET match_state = 'diferente', "
+                       "product_image_url = 'https://cdn.b2box.example/p/11.jpg' WHERE product_id = '11'"))
+        c.execute(text("UPDATE market_price_snapshot SET match_state = 'similar', ml_variant = 'lens' WHERE product_id = '12'"))
+    with Session(pg) as s:
+        s.add(MlWebResult(product_id="11", query="organizador cocina 11", status="ok",
+                          fetched_at=(utcnow() - timedelta(hours=20)).replace(microsecond=0)))
+        s.commit()
+    assert ml_lens.eligible(10) == [("11", "https://cdn.b2box.example/p/11.jpg", "Organizador cocina 11")]
+    ml_lens._save([MlLensResult(product_id="11", status="ok", usd=0.005,
+                                queries=json.dumps([{"q": "organizador lens bambu", "host": "mercadolibre.com.ar"}])),
+                   MlLensResult(product_id="12", status="sin_links", usd=0.005)])
+    assert ml_lens.eligible(10) == []
+    lens_items = [i for i in oficina_ml.build_queue(10, with_lens=True) if i.get("lens")]
+    assert lens_items == [{"product_id": "11", "queries": ["organizador lens bambu"], "lens": True}]
+    assert all("lens" not in i for i in oficina_ml.build_queue(10))
+    # M-5: el SQL de medición del README corre en Postgres.
+    measure, searches = _readme_lens_sql()
+    with pg.connect() as c:
+        row = c.execute(text(measure)).mappings().one()
+        assert {**row, "usd_lens": float(row["usd_lens"])} == {"lenseados": 2, "con_consulta": 1, "ganados": 1, "usd_lens": 0.01}
+        assert c.execute(text(searches)).scalar() is None                  # sin corridas todavía

@@ -21,7 +21,7 @@ from app import main as main_mod  # noqa: E402
 from app.api import oficina_routes  # noqa: E402
 from app.clock import utcnow  # noqa: E402
 from app.config import Settings  # noqa: E402
-from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult, Setting  # noqa: E402
+from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult, PriceMonitorRun, Setting  # noqa: E402
 from app.db.session import engine, init_db  # noqa: E402
 from app.pricing import market_query, oficina_ml  # noqa: E402
 from tests.test_price_monitor_routes import _use_settings  # noqa: E402
@@ -58,17 +58,17 @@ def api(monkeypatch):
 
 
 def _snap(pid: str, status: str = "no_data", *, name: str | None = "Organizador cocina", enabled: bool = True,
-          origin: str | None = None, snap_id: int | None = None, run_id: int = 1) -> None:
+          origin: str | None = None, snap_id: int | None = None, run_id: int = 1, color: str = "sin_dato") -> None:
     with Session(engine) as s:
         s.add(MarketPriceSnapshot(id=snap_id, run_id=run_id, product_id=pid, ml_status=status, product_name=name,
-                                  product_enabled=enabled, match_origin=origin))
+                                  product_enabled=enabled, match_origin=origin, color=color))
         s.commit()
 
 
-def _result(pid: str, ago: timedelta = timedelta(hours=1), status: str = "ok", n: int = 1) -> None:
+def _result(pid: str, ago: timedelta = timedelta(hours=1), status: str = "ok", n: int = 1, query: str = "q") -> None:
     cands = [oficina_ml.candidate_to_wire(oficina_ml.sanitize_candidate(_card(f"MLA{i + 1}"))) for i in range(n)]
     with Session(engine) as s:
-        s.add(MlWebResult(product_id=pid, query="q", fetched_at=(utcnow() - ago).replace(microsecond=0),
+        s.add(MlWebResult(product_id=pid, query=query, fetched_at=(utcnow() - ago).replace(microsecond=0),
                           candidates=json.dumps(cands), n_candidates=n, status=status))
         s.commit()
 
@@ -383,6 +383,239 @@ def test_the_limit_is_respected_and_bounded(api):
     assert len(_queue(api)["items"]) == 7
     for bad in (0, -1, oficina_ml.MAX_QUEUE + 1, "x"):
         assert api.get("/api/oficina/ml-queue", params={"limit": bad}, headers=H).status_code == 422
+
+
+# ─── los rojos primero ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def reds(api):
+    """Una corrida terminada del semáforo (de ahí sale el color). Devuelve su id; al final deja los settings como estaban."""
+    with Session(engine) as s:
+        for row in s.exec(select(PriceMonitorRun)).all():
+            s.delete(row)
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
+        s.add(run)
+        s.commit()
+        run_id = run.id
+    yield run_id
+    with Session(engine) as s:
+        for key in ("pm_review_data_max_age_h", "oficina_result_ttl_days"):
+            row = s.get(Setting, key)
+            if row is not None:
+                s.delete(row)
+        s.commit()
+    runtime.invalidate()
+
+
+def _red(run_id: int, pid: str, ago: timedelta, *, color: str = "rojo", origin: str = "oficina") -> None:
+    _snap(pid, "ok", origin=origin, run_id=run_id, color=color)
+    _result(pid, ago)
+
+
+def _ids(limit: int = 50, **kw) -> list[str]:
+    return [i["product_id"] for i in oficina_ml.build_queue(limit, **kw)]
+
+
+def test_a_red_with_data_older_than_max_age_minus_a_day_goes_first(reds):
+    runtime.set_value("oficina_result_ttl_days", 15)
+    runtime.set_value("pm_review_data_max_age_h", 72)                 # umbral: 48 h
+    _snap("1")                                                        # nunca buscado: hasta ahora iba primero
+    _red(reds, "2", timedelta(hours=50))
+    _red(reds, "3", timedelta(hours=30))                              # todavía no: la noche siguiente
+    _red(reds, "4", timedelta(hours=60))                              # el dato más viejo primero
+    assert _ids() == ["4", "2", "1"]
+
+
+def test_with_72_hours_a_red_is_searched_every_two_nights(reds):
+    """Apify termina cada búsqueda unos minutos después de que arranca la corrida: a la noche siguiente el dato tiene
+    23 h 50 min y a la otra 47 h 50 min. Sin tolerancia se re-buscaría recién a la tercera, con el dato en 72 h."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=47, minutes=50))
+    _red(reds, "2", timedelta(hours=23, minutes=50))
+    assert _ids() == ["1"]
+
+
+def test_the_red_threshold_has_a_floor_of_one_day(reds):
+    _red(reds, "1", timedelta(hours=23, minutes=50))                  # la búsqueda de anoche
+    _red(reds, "2", timedelta(hours=2))                               # la de esta misma noche: nunca dos por noche
+    for hours in (48, 24, 6):                                         # 24 h, 0 h y -18 h: el piso deja 24 h
+        runtime.set_value("pm_review_data_max_age_h", hours)
+        assert _ids() == ["1"], hours
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    assert _ids() == []
+
+
+def test_green_yellow_or_a_red_from_the_api_do_not_go_first(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _snap("1")
+    _red(reds, "2", timedelta(hours=50), color="verde")
+    _red(reds, "3", timedelta(hours=50), color="amarillo")
+    _red(reds, "4", timedelta(hours=50), origin="api")               # su dato es de la hora de la corrida: siempre fresco
+    assert _ids() == ["1"]
+
+
+def test_a_red_is_searched_again_with_the_query_of_its_current_result(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _snap("1", "ok", origin="oficina", run_id=reds, color="rojo", name=LONG_NAME)
+    _result("1", timedelta(days=4), query="la de antes")
+    _result("1", timedelta(hours=50), query="la que dio el rojo")
+    assert oficina_ml.build_queue(10) == [{"product_id": "1", "queries": ["la que dio el rojo"]}]
+
+
+def test_the_color_is_the_one_of_the_last_finished_run(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    _red(reds, "2", timedelta(hours=50), color="verde")
+    for status in ("failed", "running"):                              # reventó a mitad / en curso: no cuentan
+        with Session(engine) as s:
+            run = PriceMonitorRun(status=status, finished_at=utcnow())
+            s.add(run)
+            s.commit()
+            _snap("1", "ok", origin="oficina", run_id=run.id, color="verde")
+            _snap("2", "ok", origin="oficina", run_id=run.id, color="rojo")
+    assert _ids() == ["1"]
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="degraded", finished_at=utcnow())
+        s.add(run)
+        s.commit()
+        _snap("1", "ok", origin="oficina", run_id=run.id, color="verde")
+        _snap("2", "ok", origin="oficina", run_id=run.id, color="rojo")
+    assert _ids() == ["2"]
+
+
+def test_a_red_comes_out_once_and_the_limit_and_claims_still_count(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(days=8))                                # también se está por vencer (TTL 7): sale una vez
+    _red(reds, "2", timedelta(hours=50))
+    _snap("3")
+    assert _ids() == ["1", "2", "3"]
+    assert _ids(2) == ["1", "3"]                                     # los rojos, a lo sumo la mitad
+    assert oficina_ml.claim(["1"], "oficina", timedelta(hours=1)) == ["1"]
+    assert _ids(claimer="apify-x") == ["2", "3"]
+
+
+def test_the_reds_take_at_most_half_of_the_queue(reds):
+    """En prod (03-nov) hay 71 rojos con dato de 37 a 182 h: sin tope se comían el cupo de Apify la primera noche."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    for i in range(1, 6):
+        _red(reds, str(i), timedelta(hours=50 + i))                   # el 5 es el más viejo
+    for i in range(10, 14):
+        _snap(str(i))                                                 # nunca buscados
+    assert _ids(4) == ["5", "4", "10", "11"]
+    assert _ids(5) == ["5", "4", "10", "11", "12"]                    # mitad para abajo
+    assert _ids(1) == ["5"]                                           # con 1, al menos un rojo
+    assert _ids(50) == ["5", "4", "3", "2", "1", "10", "11", "12", "13"]
+
+
+def test_an_out_of_range_max_age_in_the_table_does_not_break_the_queue(reds):
+    _red(reds, "1", timedelta(hours=170))
+    _red(reds, "2", timedelta(hours=100))
+    for raw, expected in ((str(10**12), ["1"]),                       # acotado a 168 h (sin acotar: OverflowError)
+                          ("-5", ["1", "2"])):                        # acotado a 6 h: el piso deja 24 h
+        with Session(engine) as s:
+            s.merge(Setting(key="pm_review_data_max_age_h", value=raw))
+            s.commit()
+        runtime.invalidate()
+        assert _ids() == expected, raw
+
+
+def test_a_red_that_failed_last_night_is_not_paid_again_tonight(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    for pid in ("1", "2", "3"):
+        _red(reds, pid, timedelta(hours=50))
+    _result("1", timedelta(hours=3), status="error", n=0)             # Apify falló esta noche: no se re-paga
+    _result("2", timedelta(hours=21), status="blocked", n=0)          # falló anoche: hoy sí
+    assert _ids() == ["2", "3"]
+
+
+def test_if_the_last_finished_run_is_old_the_reds_wait(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    _snap("2")
+    for ago, expected in ((timedelta(days=2, hours=1), ["2"]),       # el semáforo está parado: sus rojos no dicen nada
+                          (timedelta(days=1, hours=23), ["1", "2"])):
+        with Session(engine) as s:
+            run = s.get(PriceMonitorRun, reds)
+            run.finished_at = utcnow() - ago
+            s.add(run)
+            s.commit()
+        assert _ids() == expected, ago
+
+
+def test_the_mac_never_gets_the_reds(reds):
+    """Regla del usuario: nada de tráfico a ML desde la Mac. Apify sí los recibe."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    _snap("2")
+    assert _ids(claimer="apify-x") == ["1", "2"]
+    assert _ids(claimer=oficina_ml.CLAIM_OFICINA) == ["2"]
+    assert [i["product_id"] for i in oficina_ml.queue_for_oficina(10, take=False)] == ["2"]
+
+
+def test_a_red_whose_current_result_is_empty_is_not_searched_by_this_group(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=60))
+    _result("1", timedelta(hours=50), status="empty", n=0)            # el vigente vino vacío: no hay rojo que sostener
+    _red(reds, "2", timedelta(hours=50))
+    assert _ids() == ["2"]
+
+
+def test_a_skipped_run_does_not_hide_the_reds(reds):
+    """Una corrida `skipped` (sin cupo de ML) no midió nada: los rojos siguen siendo los de la última terminada."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    with Session(engine) as s:
+        s.add(PriceMonitorRun(status="skipped", finished_at=utcnow()))
+        s.commit()
+    assert _ids() == ["1"]
+
+
+def test_sin_dato_or_a_red_from_the_server_web_do_not_go_first(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50), origin="web")                # el dato es de la hora de la corrida
+    _snap("2", "no_data", run_id=reds, color="sin_dato", name=LONG_NAME)
+    v1, v2, _ = market_query.query_variants(LONG_NAME, 3)
+    _result("2", timedelta(hours=50), status="empty", query=v1)
+    # El 2 sigue su camino de variantes (la segunda), no la consulta vigente como si fuera rojo.
+    assert oficina_ml.build_queue(10) == [{"product_id": "2", "queries": [v2]}]
+
+
+def test_a_red_without_a_usable_result_is_not_searched_by_this_group(reds):
+    """Rojo de la oficina sin resultado ok/empty (se purgó, o solo hay bloqueos): no hay consulta vigente que repetir."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _snap("1", "ok", origin="oficina", run_id=reds, color="rojo")
+    _snap("2", "ok", origin="oficina", run_id=reds, color="rojo")
+    _result("2", timedelta(hours=50), status="blocked")
+    assert _ids() == []
+
+
+def test_the_reds_cost_the_same_queries_with_one_or_many(reds):
+    """Sin N+1: armar la cola hace las mismas consultas con 1 rojo que con 30."""
+    from sqlalchemy import event
+
+    runtime.set_value("pm_review_data_max_age_h", 72)
+
+    def count() -> int:
+        seen: list[str] = []
+
+        def on_execute(conn, cursor, statement, *a):
+            seen.append(statement)
+
+        oficina_ml.build_queue(500)                                   # calienta el cache de settings
+        event.listen(engine, "before_cursor_execute", on_execute)
+        try:
+            oficina_ml.build_queue(500)
+        finally:
+            event.remove(engine, "before_cursor_execute", on_execute)
+        return len(seen)
+
+    _red(reds, "1", timedelta(hours=50))
+    one = count()
+    for i in range(2, 31):
+        _red(reds, str(i), timedelta(hours=50))
+    assert len(_ids(500)) == 30
+    assert count() == one
 
 
 # ─── guardar resultados ─────────────────────────────────────────────────────

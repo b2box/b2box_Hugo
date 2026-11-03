@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -41,9 +42,9 @@ from sqlmodel import Session, func, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import MarketPriceSnapshot, MlWebClaim, MlWebResult
+from app.db.models import MarketPriceSnapshot, MlLensResult, MlWebClaim, MlWebResult, PriceMonitorRun
 from app.db.session import engine
-from app.pricing import market_query
+from app.pricing import market_query, semaforo
 from app.pricing.market_ml import (
     ORIGIN_OFICINA,
     MlCandidate,
@@ -56,6 +57,10 @@ from app.security import weak_key_reason
 log = logging.getLogger(__name__)
 
 ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR = "ok", "empty", "blocked", "error"
+# Origen de las búsquedas de Apify con una consulta de Google Lens (pricing/ml_lens.py): el semáforo las usa igual y
+# marca el snapshot con ml_variant="lens" para medir cuántos IGUAL ganó Lens.
+ORIGIN_LENS = "lens"
+MAX_LENS_QUERY_CHARS = 120
 STATUSES = (ST_OK, ST_EMPTY, ST_BLOCKED, ST_ERROR)
 # Los que sirven como resultado: la Mac buscó y ML contestó (con o sin publicaciones).
 RESULT_STATUSES = (ST_OK, ST_EMPTY)
@@ -74,6 +79,21 @@ MIN_REFRESH_AGE = timedelta(hours=12)
 # UNA página de ML por producto por noche: si la consulta vino vacía, la siguiente variante se prueba recién la noche
 # siguiente (pasadas al menos estas horas), para no multiplicar las búsquedas desde la IP de la oficina.
 NEXT_VARIANT_AFTER = timedelta(hours=12)
+# Los rojos se re-buscan cuando su dato pasa `pm_review_data_max_age_h` - 1 día (piso: 1 día), con media noche de
+# tolerancia: Apify no busca cada producto a la misma hora (fetched_at es el final de cada búsqueda y la corrida dura
+# hasta 2 h), y sin esto a "las 48 h" el dato tiene 47 h 55 min y se re-busca una noche tarde.
+RED_REFRESH_SLACK = timedelta(hours=12)
+# Un rojo con un intento de hace menos de esto (de cualquier estado: error y bloqueo también) no se re-busca: lo que
+# falló anoche no se vuelve a pagar hasta la noche siguiente.
+RED_RETRY_AFTER = timedelta(hours=20)
+# Si la última corrida terminada es más vieja que esto (el semáforo está parado), sus rojos ya no se re-buscan.
+RED_RUN_MAX_AGE = timedelta(days=2)
+# Los límites de `pm_review_data_max_age_h` en runtime.py: un valor fuera de rango metido a mano en la tabla daría
+# OverflowError y tiraría la cola entera.
+_DATA_MAX_AGE_H = (6, 168)
+# Corridas del semáforo que terminaron (price_monitor.RUN_OK / RUN_DEGRADED; importarlo sería circular). Una `failed`
+# reventó a mitad y una `skipped` no midió nada: sus rojos no son todos los rojos.
+_RUN_FINISHED = ("ok", "degraded")
 # Un producto cuyo último snapshot es más viejo que esto (respecto del snapshot más nuevo de todos) ya no se mide: borrado de
 # Vendure, deshabilitado con `pm_include_disabled=0`. Buscarlo sería gastar una página de ML en un resultado que nadie usa.
 SNAPSHOT_MAX_AGE = timedelta(days=3)
@@ -401,16 +421,32 @@ def _prune(s: Session, product_ids: set[str], now: datetime) -> None:
 
 
 def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None = None,
-                take_stale_oficina: bool = False) -> list[dict[str, Any]]:
+                take_stale_oficina: bool = False, with_lens: bool = False) -> list[dict[str, Any]]:
     """Qué buscar esta noche, en este orden:
 
-      1. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
+      1. los ROJOS de la última corrida terminada (de hace 2 días o menos) cuyo precio salió de la oficina y cuyo
+         resultado vigente es `ok` y tiene más de `pm_review_data_max_age_h` - 1 día (piso: 1 día; el más viejo primero),
+         con la MISMA consulta de ese resultado: la bandeja (R5) y el recálculo solo usan dato de menos de
+         `pm_review_data_max_age_h`, y el TTL de 15 días los dejaba sin dato fresco al tercer día. Con 72 h, cada rojo se
+         re-busca cada 2 noches. A lo sumo la MITAD de `limit` (el resto es para los otros grupos); no entra el que tuvo
+         un intento de cualquier estado hace menos de 20 h (un error no se re-paga esa noche) y la Mac NUNCA recibe este
+         grupo (nada de tráfico a ML desde la oficina por esto);
+      2. productos sin IDÉNTICO con precio en su última medición (`no_data` o `failed`) que la oficina
          todavía no buscó (habilitados antes que deshabilitados; los deshabilitados se miden por pedido de Nico y
          se buscan también);
-      2. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
+      3. los que la oficina buscó con una consulta que vino VACÍA y todavía tienen otra variante por probar (la
          siguiente, la noche siguiente);
-      3. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
-         idéntico y los que hoy tienen precio gracias a la oficina. Empiezan de nuevo por la primera variante.
+      4. los que ya tienen resultado de la oficina pero se está por vencer (el más viejo primero): los que siguen sin
+         idéntico empiezan de nuevo por la primera variante; los que hoy tienen precio gracias a la oficina se
+         refrescan con la consulta que lo ganó (con la primera podrían perderlo).
+
+    Con `with_lens` (solo Apify, si `pm_lens_enabled`; la Mac nunca recibe consultas Lens) el orden queda: rojos →
+    nunca buscados → siguiente variante de texto → refresco de los que tienen precio → **lens** → refresco de los sin
+    dato. El grupo lens son los sin IDÉNTICO con una consulta de Google Lens todavía sin buscar (ver pricing/ml_lens.py),
+    pasadas NEXT_VARIANT_AFTER desde su último resultado y sin variante de texto pendiente; el item lleva `"lens": True`.
+    Lens solo desplaza el refresco de los sin dato, que repetiría la primera variante y daría lo mismo.
+
+    Un producto sale UNA vez: si salió como rojo (1) no se repite en los otros grupos.
 
     **Cada item lleva UNA sola consulta**: una página de ML por producto por noche como tope. Y solo el id del producto:
     ni costos ni proveedor ni nada interno. Los productos cuyo último snapshot es viejo (ya no se miden) no entran.
@@ -422,6 +458,9 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
     variants = market_query.clamp_variants(runtime.get("pm_ml_query_variants"))
     refresh_after = max(ttl() - QUEUE_REFRESH_MARGIN, MIN_REFRESH_AGE)
     stale_before = now - refresh_after
+    max_age_h = min(max(int(runtime.get("pm_review_data_max_age_h")), _DATA_MAX_AGE_H[0]), _DATA_MAX_AGE_H[1])
+    red_after = max(timedelta(hours=max_age_h) - timedelta(days=1), timedelta(days=1))
+    red_before = now - red_after + RED_REFRESH_SLACK
     with Session(engine) as s:
         newest = select(func.max(MarketPriceSnapshot.id)).group_by(MarketPriceSnapshot.product_id)
         snaps = s.exec(
@@ -429,23 +468,51 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
                    MarketPriceSnapshot.product_name, MarketPriceSnapshot.product_enabled, MarketPriceSnapshot.captured_at)
             .where(MarketPriceSnapshot.id.in_(newest))  # type: ignore[union-attr]
         ).all()
+        # Todos los estados: los bloqueos y errores cuentan como intento para los rojos (RED_RETRY_AFTER).
         results = s.exec(
             select(MlWebResult.product_id, MlWebResult.fetched_at, MlWebResult.status, MlWebResult.query)
-            .where(MlWebResult.status.in_(RESULT_STATUSES))  # type: ignore[attr-defined]
         ).all()
+        reds: set[str] = set()
+        if claimer != CLAIM_OFICINA:
+            # La última corrida terminada, si terminó hace RED_RUN_MAX_AGE o menos (las corridas no se pisan: la de id
+            # más alto es la última en terminar). Si es más vieja, la subconsulta da NULL y no hay rojos.
+            last_run = (select(func.max(PriceMonitorRun.id))
+                        .where(PriceMonitorRun.status.in_(_RUN_FINISHED),  # type: ignore[attr-defined]
+                               PriceMonitorRun.finished_at >= now - RED_RUN_MAX_AGE)  # type: ignore[operator]
+                        .scalar_subquery())
+            # Solo con precio por la oficina: el dato de la API o de la web del servidor es de la hora de la corrida.
+            reds = set(s.exec(
+                select(MarketPriceSnapshot.product_id)
+                .where(MarketPriceSnapshot.run_id == last_run, MarketPriceSnapshot.color == semaforo.ROJO,
+                       MarketPriceSnapshot.match_origin == ORIGIN_OFICINA)
+            ).all())
         taken_by_others = _claimed_by_others(s, claimer, now, take_stale_oficina)
+        lens_rows = s.exec(
+            select(MlLensResult.product_id, MlLensResult.ran_at, MlLensResult.queries).where(MlLensResult.status == "ok")
+        ).all() if with_lens else []
     last_result: dict[str, tuple[datetime, str, str]] = {}
+    last_try: dict[str, datetime] = {}
     for pid, fetched, status, query in results:
-        if pid not in last_result or fetched > last_result[pid][0]:
+        if pid not in last_try or fetched > last_try[pid]:
+            last_try[pid] = fetched
+        if status in RESULT_STATUSES and (pid not in last_result or fetched > last_result[pid][0]):
             last_result[pid] = (fetched, status, query)
+    lens_pending = _lens_pending(lens_rows, results)
     still_measured = max((row[5] for row in snaps), default=now) - SNAPSHOT_MAX_AGE
 
+    red: list[tuple[Any, ...]] = []
     never: list[tuple[Any, ...]] = []
     next_variant: list[tuple[Any, ...]] = []
-    expiring: list[tuple[Any, ...]] = []
+    expiring_priced: list[tuple[Any, ...]] = []
+    lens: list[tuple[Any, ...]] = []
+    expiring_rest: list[tuple[Any, ...]] = []
     for pid, ml_status, origin, name, enabled, captured in snaps:
         if not name or captured < still_measured or pid in taken_by_others:
             continue
+        last = last_result.get(pid)
+        if (pid in reds and last is not None and last[1] == ST_OK and last[0] <= red_before
+                and last_try[pid] <= now - RED_RETRY_AFTER):
+            red.append((last[0], _sort_id(pid), pid, last[2]))
         by_oficina = ml_status == "ok" and origin == ORIGIN_OFICINA
         needs_search = ml_status in _NEEDS_SEARCH
         if not needs_search and not by_oficina:
@@ -453,24 +520,85 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
         plan = market_query.query_variants(name, variants)
         if not plan:
             continue
-        last = last_result.get(pid)
         if last is None:
             if needs_search:
                 never.append((enabled is False, _sort_id(pid), pid, plan[0]))
             continue
         fetched, status, used = last
-        if fetched <= stale_before:
-            expiring.append((fetched, _sort_id(pid), pid, plan[0]))
-        elif needs_search and status == ST_EMPTY and fetched <= now - NEXT_VARIANT_AFTER:
-            keys = [market_query._key(q) for q in plan]
-            at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
-            if at + 1 < len(plan):
-                next_variant.append((fetched, _sort_id(pid), pid, plan[at + 1]))
-    for group in (never, next_variant, expiring):
+        next_text = _next_text(plan, used) if needs_search and status == ST_EMPTY else None
+        pending = lens_pending.get(pid) if needs_search else None
+        waited = fetched <= now - NEXT_VARIANT_AFTER
+        if pending and next_text is None and waited:
+            lens.append((fetched, _sort_id(pid), pid, pending[0]))
+        elif fetched <= stale_before:
+            if by_oficina:
+                # Con la consulta que lo ganó; la Mac, solo si es de texto (nunca recibe una consulta de Google Lens).
+                text = claimer != CLAIM_OFICINA or market_query._key(used) in {market_query._key(q) for q in plan}
+                expiring_priced.append((fetched, _sort_id(pid), pid, used if used and text else plan[0]))
+            else:
+                expiring_rest.append((fetched, _sort_id(pid), pid, plan[0]))
+        elif next_text is not None and waited:
+            next_variant.append((fetched, _sort_id(pid), pid, next_text))
+    for group in (red, never, next_variant, expiring_priced, lens, expiring_rest):
         group.sort(key=lambda t: t[:2])
+    # Los rojos, a lo sumo la mitad: con 71 rojos viejos se comerían el cupo de Apify la primera noche. Los que no
+    # entran siguen en su grupo de siempre (si les toca) y vuelven mañana.
+    red = red[:max(limit // 2, 1)]
+    chosen = {t[2] for t in red}
 
-    return [{"product_id": pid, "queries": [query]}
-            for *_, pid, query in [*never, *next_variant, *expiring]][:limit]
+    if with_lens:
+        rest = [*never, *next_variant, *expiring_priced, *lens, *expiring_rest]
+    else:       # la cola de siempre: los que vencen, con y sin precio, mezclados por antigüedad
+        rest = [*never, *next_variant, *sorted([*expiring_priced, *expiring_rest], key=lambda t: t[:2])]
+    lens_ids = {t[2] for t in lens}
+    return [{"product_id": pid, "queries": [query], **({"lens": True} if pid in lens_ids else {})}
+            for *_, pid, query in [*red, *(t for t in rest if t[2] not in chosen)]][:limit]
+
+
+def _next_text(plan: list[str], used: str) -> str | None:
+    """La variante de texto que sigue a `used` en el plan, o None (se probaron todas o `used` no es del plan)."""
+    keys = [market_query._key(q) for q in plan]
+    at = keys.index(market_query._key(used)) if market_query._key(used) in keys else len(plan)
+    return plan[at + 1] if at + 1 < len(plan) else None
+
+
+def _lens_pending(lens_rows: Sequence[Any], results: Sequence[Any]) -> dict[str, list[str]]:
+    """Por producto, las consultas Lens que todavía no tienen un resultado ok / empty de después de lensear. Un
+    `error` no cuenta como buscada: se vuelve a ofrecer."""
+    if not lens_rows:
+        return {}
+    searched: dict[str, list[tuple[datetime, str]]] = {}
+    for pid, fetched, status, query in results:
+        if status in RESULT_STATUSES:
+            searched.setdefault(pid, []).append((fetched, market_query._key(query)))
+    out: dict[str, list[str]] = {}
+    for pid, ran_at, raw in lens_rows:
+        used = {key for fetched, key in searched.get(pid, ()) if fetched >= ran_at}
+        pending = [q for q in lens_queries(raw) if market_query._key(q) not in used]
+        if pending:
+            out[pid] = pending
+    return out
+
+
+def clean_query(text: object) -> str:
+    """Una consulta de Google Lens: solo letras, números y espacios, hasta 120 caracteres y con al menos 2 palabras; ""
+    si no. Sale de un slug de un tercero y llega al actor de Apify y al prompt del juez. La usa ml_lens al escribir y
+    la cola al leer (la tabla no es de fiar más que la entrada)."""
+    if not isinstance(text, str):
+        return ""
+    text = "".join(c if c.isalnum() else " " for c in text[: MAX_LENS_QUERY_CHARS * 2])
+    text = " ".join(text.split())[:MAX_LENS_QUERY_CHARS].strip()
+    return text if len(text.split()) >= 2 else ""
+
+
+def lens_queries(raw: str | None) -> list[str]:
+    """Las consultas de `ml_lens_result.queries`, re-saneadas con la misma regla con que se escribieron."""
+    try:
+        data = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    found = [clean_query(q.get("q")) for q in data[:4] if isinstance(q, dict)] if isinstance(data, list) else []
+    return [q for q in found if q]
 
 
 def _sort_id(pid: str) -> tuple[int, str]:
@@ -602,6 +730,8 @@ class FreshResult:
     query: str
     fetched_at: datetime
     candidates: list[MlCandidate]
+    # Al final y con default: hay quien lo construye por posición.
+    origin: str = ORIGIN_OFICINA
 
 
 def load_fresh(*, now: datetime | None = None) -> dict[str, FreshResult]:
@@ -624,7 +754,8 @@ def load_fresh(*, now: datetime | None = None) -> dict[str, FreshResult]:
         except ValueError:
             raw = []
         cands = sanitize_candidates(raw, limit) if r.status == ST_OK else []
-        out[r.product_id] = FreshResult(r.product_id, ST_OK if cands else ST_EMPTY, r.query, r.fetched_at, cands)
+        out[r.product_id] = FreshResult(r.product_id, ST_OK if cands else ST_EMPTY, r.query, r.fetched_at, cands,
+                                        r.origin or ORIGIN_OFICINA)
     return out
 
 
