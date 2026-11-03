@@ -654,6 +654,34 @@ def test_c8_el_orden_y_un_item_por_producto(lens):
     assert [p for p, _, _ in _q()] == ["1", "2", "6", "4", "3"]
 
 
+def test_c8_los_rojos_van_antes_con_su_tope_de_la_mitad_y_despues_lens(lens):
+    from app.db.models import PriceMonitorRun
+
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
+        s.add(run)
+        s.commit()
+        run_id = run.id
+        for pid in ("70", "71", "72"):
+            s.add(MarketPriceSnapshot(run_id=run_id, product_id=pid, ml_status="ok", product_name=LONG, color="rojo",
+                                      match_origin="oficina", match_state="igual"))
+        s.commit()
+    for pid in ("70", "71", "72"):
+        _text(pid, f"rojo {pid}", ago=timedelta(hours=int(pid)))          # el 72 tiene el dato más viejo
+    _snap("1", LONG)                                                          # nunca buscado
+    _snap("5", LONG)
+    _text("5", ago=timedelta(days=2))
+    _lens_row("5", ["q cinco"])
+    try:
+        assert _q(with_lens=True) == [("72", ["rojo 72"], False), ("71", ["rojo 71"], False), ("70", ["rojo 70"], False),
+                                      ("1", [market_query.query_variants(LONG, 3)[0]], False), ("5", ["q cinco"], True)]
+        assert [(i["product_id"], i.get("lens", False)) for i in oficina_ml.build_queue(4, with_lens=True)] == [
+            ("72", False), ("71", False), ("1", False), ("5", True)]                     # rojos: a lo sumo la mitad
+    finally:
+        _clear(PriceMonitorRun)
+
+
 def test_c9_la_mac_nunca_recibe_items_lens(lens):
     _snap("1", LONG)
     _text("1", ago=timedelta(days=8))
