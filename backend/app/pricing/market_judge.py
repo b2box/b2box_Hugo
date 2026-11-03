@@ -83,6 +83,8 @@ FAILURE_OUTCOMES = frozenset({OUTCOME_ERROR, OUTCOME_EMPTY, OUTCOME_UNREADABLE})
 OutcomeFn = Callable[[str, str], None]
 # Fichas de ML por consulta (el llamador no debería mandar más).
 MAX_CANDIDATES = 6
+# Publicaciones que una persona ya descartó para el producto, por consulta (las más nuevas).
+MAX_LESSONS = 8
 _MAX_OUR_PHOTOS = 2
 _MAX_TOKENS = 700
 
@@ -110,6 +112,11 @@ _SYSTEM = (
     + ", ".join(DIFFERENCES)
     + ". `reason` es una frase corta en español."
 )
+# Solo cuando hay lecciones: sin ellas el prompt queda igual que siempre.
+_LESSONS_RULE = (
+    " Si te paso publicaciones que una persona ya descartó para este producto, una "
+    "publicación que coincida con alguna de ellas en lo que dice su motivo va como \"diferente\"."
+)
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.I | re.M)
 
@@ -122,6 +129,16 @@ class JudgeCandidate:
     price_cents: int | None = None
     # Marca que declara la publicación (la web de ML la trae en el JSON-LD).
     brand: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class JudgeLesson:
+    """Una publicación que una persona sacó para este producto («No tiene nada que ver» /
+    «No es el mismo») y por qué (ver match_feedback.load_lessons)."""
+    ml_id: str
+    title: str
+    motive: str          # lo que se lee: "Otra marca"
+    note: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -298,15 +315,26 @@ def _image_parts(url: str | None, inline: Mapping[str, str] | None) -> list[dict
     return [{"type": "image_url", "image_url": {"url": src}}] if src else []
 
 
+def _lessons_text(lessons: Sequence[JudgeLesson]) -> str:
+    lines = ["Una persona ya descartó para este producto estas publicaciones (NO son el mismo ni parecidas):"]
+    for lesson in list(lessons)[:MAX_LESSONS]:
+        note = _one_line(lesson.note, 200)
+        lines.append(f"- «{_one_line(lesson.title, 160) or lesson.ml_id}» — motivo: "
+                     f"{_one_line(lesson.motive, 40)}{f' ({note})' if note else ''}")
+    return "\n".join(lines)
+
+
 def build_messages(
     our_name: str, our_image_urls: Sequence[str], candidates: Sequence[JudgeCandidate],
-    inline: Mapping[str, str] | None = None,
+    inline: Mapping[str, str] | None = None, lessons: Sequence[JudgeLesson] = (),
 ) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {"type": "text", "text": f"NUESTRO PRODUCTO: {our_name.strip()[:200]}"},
     ]
     for u in _our_photos(our_image_urls):
         content.extend(_image_parts(u, inline))
+    if lessons:
+        content.append({"type": "text", "text": _lessons_text(lessons)})
     content.append({"type": "text", "text": "PUBLICACIONES DE MERCADO LIBRE:"})
     for c in list(candidates)[:MAX_CANDIDATES]:
         price = f" · precio ARS {c.price_cents / 100:.0f}" if c.price_cents else ""
@@ -315,7 +343,7 @@ def build_messages(
         content.extend(_image_parts(c.image_url, inline))
     content.append({"type": "text", "text": "Respondé solo el JSON pedido."})
     return [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": _SYSTEM + _LESSONS_RULE if lessons else _SYSTEM},
         {"role": "user", "content": content},
     ]
 
@@ -502,9 +530,13 @@ async def judge(
     on_reserve: Callable[[Any], None] | None = None,
     counter_key: str = LLM_COUNTER_KEY,
     on_outcome: OutcomeFn | None = None,
+    lessons: Sequence[JudgeLesson] = (),
 ) -> JudgeResult | None:
     """Pregunta al modelo. None = sin veredicto (apagado, sin cupo, falló o no
     se entendió la respuesta). El llamador trata None como "sigue ambiguo".
+
+    `lessons`: lo que una persona ya descartó para este producto, con el motivo
+    (van en el prompt; sin lecciones el prompt es el de siempre).
 
     `on_reserve` corre en la transacción que reserva el cupo del día: la
     llamada queda contada aunque después falle (timeout, 5xx).
@@ -529,7 +561,7 @@ async def judge(
     client = client or make_client()
     request: dict[str, Any] = dict(
         model=s.pm_llm_model,
-        messages=build_messages(our_name, our_image_urls, candidates, inline),
+        messages=build_messages(our_name, our_image_urls, candidates, inline, lessons),
         temperature=0,
         max_tokens=_MAX_TOKENS,
     )

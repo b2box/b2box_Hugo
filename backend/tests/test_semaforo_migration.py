@@ -49,7 +49,7 @@ def test_old_semaforo_tables_get_the_new_columns_with_defaults(tmp_path, monkeyp
     run_cols = {c["name"] for c in inspect(engine).get_columns("price_monitor_run")}
     assert {"web_status", "web_searches", "web_bytes", "web_blocked", "n_web_ok", "n_con_similares",
             "n_est_verde", "n_est_amarillo", "n_est_rojo", "n_solo_diferentes"} <= run_cols
-    assert {"actor", "label", "previous_label"} <= {
+    assert {"actor", "label", "previous_label", "motive", "note"} <= {
         c["name"] for c in inspect(engine).get_columns("market_match_feedback")}
     with engine.connect() as conn:
         row = conn.execute(text(
@@ -68,8 +68,10 @@ def test_old_semaforo_tables_get_the_new_columns_with_defaults(tmp_path, monkeyp
         assert tuple(conn.execute(text(
             "SELECT n_est_verde, n_est_amarillo, n_est_rojo, n_solo_diferentes FROM price_monitor_run")
         ).one()) == (0, 0, 0, 0)
+        # …y sin motivo: no son lecciones para el juez.
         assert tuple(conn.execute(text(
-            "SELECT label, actor, previous_label FROM market_match_feedback")).one()) == (0, None, None)
+            "SELECT label, actor, previous_label, motive, note FROM market_match_feedback")).one()) == (
+            0, None, None, None, None)
 
     idx = {i["name"]: i for i in inspect(engine).get_indexes("market_match_feedback")}
     assert idx["ix_mmf_product_ml"]["unique"] in (1, True)

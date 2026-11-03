@@ -6,8 +6,9 @@ GET  /api/price-monitor/snapshots              → tabla paginada (run_id, color
                                                   match, origin, source, igual_in)
 GET  /api/price-monitor/products/{id}/history  → tendencia de un producto
 GET  /api/price-monitor/summary                → tarjeta de Salud
-POST /api/price-monitor/snapshots/{id}/not-same → "No es el mismo": saca una publicación,
-                                                  recalcula el snapshot y la excluye
+POST /api/price-monitor/snapshots/{id}/not-same → "No es el mismo" / "No tiene nada que ver": saca
+                                                  una publicación (con motivo), recalcula el
+                                                  snapshot, la excluye y le enseña al juez
 POST /api/price-monitor/snapshots/{id}/same     → "Es el mismo": promueve un similar o diferente
                                                   a idéntico (recalcula el color real)
 DELETE /api/price-monitor/products/{id}/not-same/{ml_id} → vuelve a considerarla (también
@@ -34,6 +35,7 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun
 from app.db.session import get_session
 from app.pricing import market_match, match_feedback, price_monitor, price_review, store_match
 from app.pricing.market_ml import ml_budget_status
+from app.pricing.price_review_digest import clean
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
@@ -388,6 +390,25 @@ async def product_history(
 
 class NotSameBody(BaseModel):
     ml_id: str = Field(min_length=3, max_length=24)
+    # Solo "No es el mismo" / "No tiene nada que ver": una clave de match_feedback.MOTIVES y
+    # una nota de una línea. Opcionales para los clientes de antes; la pantalla siempre los manda.
+    motive: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def _motive(body: NotSameBody) -> tuple[str | None, str | None]:
+    """El motivo y la nota, saneados (una línea, sin caracteres de control). 400 si la clave no
+    existe, si la nota es larga o si falta con "Otro"."""
+    note = clean(body.note, limit=len(body.note)) if body.note else None
+    if note and len(note) > match_feedback.NOTE_MAX:
+        raise HTTPException(400, f"la nota puede tener hasta {match_feedback.NOTE_MAX} caracteres")
+    if body.motive is None:
+        return None, note or None
+    if body.motive not in match_feedback.MOTIVES:
+        raise HTTPException(400, f"motivo inválido: {body.motive}")
+    if body.motive == match_feedback.MOTIVE_OTHER and not note:
+        raise HTTPException(400, "con «Otro» hay que contar el motivo en la nota")
+    return body.motive, note or None
 
 
 def _commit_correction(session: Session, snap: MarketPriceSnapshot, snapshot_id: int, added: bool,
@@ -421,22 +442,26 @@ async def not_the_same(
     snapshot_id: int = Path(..., ge=1, le=DB_INT_MAX),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """"No es el mismo": una persona dice que esta publicación de ML no es el
-    producto. Pasa a la lista de diferentes del snapshot (nada se descarta; con "Es
-    el mismo" se puede dar vuelta) y, si era idéntica, se recalculan el color real
-    y los contadores. Queda como diferente para ese producto en las próximas
-    corridas y se guarda como etiqueta (label 0) para calibrar, con quién la marcó.
-    No toca Vendure ni el precio nuestro.
+    """"No es el mismo" (idéntica) / "No tiene nada que ver" (similar): una persona dice
+    que esta publicación de ML no es el producto, y por qué (`motive`, `note`). Pasa a la
+    lista de diferentes del snapshot con ese motivo (nada se descarta; con "Es el mismo"
+    se puede dar vuelta); si era idéntica se recalculan el color real y los contadores, si
+    era similar el color estimado. Queda como diferente para ese producto en las próximas
+    corridas, el juez la recibe como ejemplo de lo que no es (si tiene motivo) y se guarda
+    como etiqueta (label 0) para calibrar, con quién la marcó. No toca Vendure ni el
+    precio nuestro.
 
     La corrección, el snapshot y los contadores se guardan en UNA transacción: o
     quedan los tres o ninguno. Apretarlo dos veces (o desde dos pestañas a la vez)
     no duplica nada."""
     if not match_feedback.valid_ml_id(body.ml_id):
         raise HTTPException(400, "ml_id inválido")
+    motive, note = _motive(body)
     snap = session.get(MarketPriceSnapshot, snapshot_id)
     if snap is None:
         raise HTTPException(404, "snapshot no encontrado")
-    removed = price_monitor.drop_listing(snap, body.ml_id)
+    removed = price_monitor.drop_listing(snap, body.ml_id, motive=match_feedback.MOTIVES.get(motive or ""),
+                                         note=note)
     if removed is None:
         already = body.ml_id in match_feedback.load_excluded().get(snap.product_id, frozenset())
         if not already:
@@ -445,7 +470,8 @@ async def not_the_same(
     actor = auth.session_username(request.cookies.get(auth.COOKIE_NAME))
     added = match_feedback.add_feedback(
         product_id=snap.product_id, ml_id=body.ml_id, entry=removed, snapshot_id=snapshot_id,
-        product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_NOT_SAME, session=session,
+        product_name=snap.product_name, actor=actor, label=match_feedback.LABEL_NOT_SAME,
+        motive=motive, note=note, session=session,
     )
     return _commit_correction(session, snap, snapshot_id, added, actor)
 

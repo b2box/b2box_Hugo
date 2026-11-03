@@ -4,8 +4,10 @@ Una persona mira una publicación de ML y corrige a Hugo en cualquiera de los do
 sentidos. Se guarda una fila en `market_match_feedback` (una por producto e id de
 ML, con `label`) y pasan dos cosas:
 
-  * "No es el mismo" (label 0, sobre un IGUAL): ese id queda como DIFERENTE para ese
-    producto en las próximas corridas (`load_excluded`);
+  * "No es el mismo" (label 0, sobre un IGUAL) o "No tiene nada que ver" (label 0, sobre
+    un SIMILAR), con un motivo de `MOTIVES` y una nota: ese id queda como DIFERENTE para
+    ese producto en las próximas corridas (`load_excluded`) y el juez recibe esas
+    publicaciones con su motivo como ejemplo de lo que NO es (`load_lessons`);
   * "Es el mismo" (label 1, sobre un SIMILAR o un DIFERENTE): queda como IGUAL para
     ese producto en las próximas corridas (`load_promoted`);
   * el snapshot donde se vio se recalcula (`price_monitor.drop_listing` y
@@ -28,6 +30,7 @@ from sqlmodel import Session, select
 
 from app.db.models import MarketMatchFeedback
 from app.db.session import engine
+from app.pricing.market_judge import JudgeLesson
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,19 @@ LABEL_NOT_SAME = 0
 LABEL_SAME = 1
 
 ML_ID = re.compile(r"^MLAU?\d{3,20}$", re.ASCII)
+
+# Por qué una persona sacó una publicación (clave que manda la pantalla → lo que se lee).
+MOTIVES = {
+    "otro_producto": "Es otro producto",
+    "medida": "Otra medida o tamaño",
+    "cantidad": "Otra cantidad o pack",
+    "material": "Otro material o calidad",
+    "marca": "Otra marca",
+    "repuesto": "Es un repuesto o accesorio",
+    "otro": "Otro",
+}
+MOTIVE_OTHER = "otro"      # con este la nota es obligatoria
+NOTE_MAX = 200
 
 
 def valid_ml_id(value: object) -> bool:
@@ -72,12 +88,38 @@ def load_promoted() -> dict[str, frozenset[str]]:
     return _load(LABEL_SAME)
 
 
+def load_lessons() -> dict[str, tuple[JudgeLesson, ...]]:
+    """{product_id: publicaciones que una persona sacó CON motivo, la más nueva primero}.
+    Van al juez de ese producto (las primeras market_judge.MAX_LESSONS) y dan el motivo que
+    se muestra en la card. Se lee una vez por corrida, como `load_excluded`; si la tabla no
+    se puede leer, la corrida sigue sin lecciones."""
+    try:
+        with Session(engine) as s:
+            rows = s.exec(
+                select(MarketMatchFeedback.product_id, MarketMatchFeedback.ml_id, MarketMatchFeedback.title,
+                       MarketMatchFeedback.motive, MarketMatchFeedback.note)
+                .where(MarketMatchFeedback.label == LABEL_NOT_SAME,
+                       MarketMatchFeedback.motive.is_not(None))  # type: ignore[union-attr]
+                .order_by(MarketMatchFeedback.created_at.desc(), MarketMatchFeedback.id.desc())  # type: ignore[union-attr]
+            ).all()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("No se pudieron leer las lecciones de market_match_feedback: %s", exc)
+        return {}
+    out: dict[str, list[JudgeLesson]] = {}
+    for product_id, ml_id, title, motive, note in rows:
+        out.setdefault(product_id, []).append(
+            JudgeLesson(ml_id=ml_id, title=title or "", motive=MOTIVES.get(motive, motive), note=note or ""))
+    return {pid: tuple(lessons) for pid, lessons in out.items()}
+
+
 def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
                  snapshot_id: int | None, product_name: str | None,
                  actor: str | None = None, label: int = LABEL_NOT_SAME,
+                 motive: str | None = None, note: str | None = None,
                  session: Session | None = None) -> bool:
     """Guarda la corrección ("No es el mismo", label 0; "Es el mismo", label 1).
-    `entry` es la publicación tal como estaba en el snapshot. False si ya estaba
+    `entry` es la publicación tal como estaba en el snapshot; `motive` (clave de MOTIVES) y
+    `note` ya vienen validados por la ruta. False si ya estaba
     con ese mismo label (idempotente: apretar dos veces no duplica); si estaba con
     el otro label se da vuelta (una persona cambió de opinión) y devuelve True.
 
@@ -95,7 +137,7 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
         title=(str(entry.get("title"))[:200] if entry.get("title") else None),
         permalink=(str(entry.get("permalink"))[:300] if entry.get("permalink") else None),
         snapshot_id=snapshot_id, product_name=(product_name or "")[:200] or None,
-        actor=(actor or "")[:120] or None,
+        actor=(actor or "")[:120] or None, motive=motive, note=note,
     )
 
     def _upsert(s: Session) -> bool:
@@ -110,6 +152,8 @@ def add_feedback(*, product_id: str, ml_id: str, entry: dict[str, Any] | None,
         # Cambió de opinión: se guarda la marca anterior para que "Deshacer" vuelva a ella.
         existing.previous_label = int(existing.label or 0)
         existing.label, existing.actor, existing.snapshot_id = int(label), row.actor, snapshot_id
+        if row.motive:      # "Es el mismo" no borra el motivo: si se deshace, la lección vuelve
+            existing.motive, existing.note = row.motive, row.note
         s.add(existing)
         return True
 

@@ -36,7 +36,7 @@ NEW_SNAPSHOT_COLS = {"product_enabled", "match_origin", "similar_count", "simila
                      "estimated_margin_pct", "estimated_median_cents", "estimated_listing_count", "estimated_from"}
 NEW_RUN_COLS = {"web_status", "web_searches", "web_bytes", "web_blocked", "n_web_ok", "n_con_similares",
                 "n_est_verde", "n_est_amarillo", "n_est_rojo", "n_solo_diferentes"}
-NEW_FEEDBACK_COLS = {"actor", "label", "previous_label"}
+NEW_FEEDBACK_COLS = {"actor", "label", "previous_label", "motive", "note"}
 
 
 @pytest.fixture
@@ -130,7 +130,8 @@ def test_an_old_postgres_gets_the_new_columns_the_new_table_and_naive_dates(pg):
             "unpriced_listings FROM market_price_snapshot ORDER BY id"))] == [(0, None, None, None, 0, None)] * 2
         assert tuple(c.execute(text("SELECT n_est_verde, n_est_amarillo, n_est_rojo, n_solo_diferentes "
                                     "FROM price_monitor_run")).one()) == (0, 0, 0, 0)
-        assert tuple(c.execute(text("SELECT label, actor FROM market_match_feedback")).one()) == (0, None)
+        assert tuple(c.execute(text("SELECT label, actor, motive, note FROM market_match_feedback")).one()) == (
+            0, None, None, None)
 
 
 def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
@@ -154,11 +155,14 @@ def test_the_orm_and_the_not_the_same_flow_work_on_postgres(pg, monkeypatch):
         s.commit()
         sid = snap.id
     assert match_feedback.add_feedback(product_id="11", ml_id="MLA901", entry=entry, snapshot_id=sid,
-                                       product_name="p") is True
+                                       product_name="p", motive="marca", note="es Stanley") is True
     assert match_feedback.add_feedback(product_id="11", ml_id="MLA901", entry=entry, snapshot_id=sid,
                                        product_name="p") is False                     # único (producto, ml_id)
     # la marca vieja (sin label) quedó como "No es el mismo" (0) y la nueva se suma
     assert match_feedback.load_excluded() == {"11": frozenset({"MLA555", "MLA901"})}
+    # solo la que tiene motivo es lección para el juez
+    assert match_feedback.load_lessons() == {
+        "11": (match_feedback.JudgeLesson("MLA901", "x", "Otra marca", "es Stanley"),)}
     with Session(pg) as s:
         snap = s.get(MarketPriceSnapshot, sid)
         assert price_monitor.drop_listing(snap, "MLA901")["ml_id"] == "MLA901"
