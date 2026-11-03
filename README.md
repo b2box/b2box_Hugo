@@ -787,9 +787,11 @@ backend/tools/oficina_ml_search.py
   **El bloqueo frena fallos, nunca a quien trae la key correcta**: detrás de un CDN la IP puede ser un borde compartido y un tercero no puede dejar
   sin cola al runner bloqueándola. La auth está declarada UNA vez, en el `APIRouter`: una ruta nueva no puede olvidarse de ella.
 - **La cola** (`GET /api/oficina/ml-queue?limit=N`, N de 1 a 500), en este orden: (1) los **rojos** de la última corrida terminada
-  con precio de la oficina cuyo resultado tiene más de `pm_review_data_max_age_h` - 1 día (piso 1 día, con media noche de tolerancia;
-  el más viejo primero), con la **misma consulta** de ese resultado: la bandeja (R5) y el recálculo solo usan dato de menos de
-  `pm_review_data_max_age_h`, así que con 72 h cada rojo se re-busca cada 2 noches; (2) los productos cuya última medición no tuvo un
+  (de hace 2 días o menos) con precio de la oficina cuyo resultado vigente es `ok` y tiene más de `pm_review_data_max_age_h` - 1 día
+  (piso 1 día, con media noche de tolerancia; el más viejo primero), con la **misma consulta** de ese resultado: la bandeja (R5) y
+  el recálculo solo usan dato de menos de `pm_review_data_max_age_h`, así que con 72 h cada rojo se re-busca cada 2 noches. Ocupan
+  **a lo sumo la mitad** de la cola, no entra el que tuvo un intento (de cualquier estado) hace menos de 20 h y **la Mac nunca los
+  recibe**: es solo para Apify; (2) los productos cuya última medición no tuvo un
   IDÉNTICO con precio (`no_data` o `failed`) y que la oficina todavía no buscó, habilitados antes que deshabilitados — **los
   deshabilitados se buscan también**: Nico pidió medirlos (`pm_include_disabled`) y su nombre viaja en la consulta, como el de
   cualquier otro producto del catálogo —; (3) los que la oficina buscó con una consulta **vacía** y todavía tienen otra variante

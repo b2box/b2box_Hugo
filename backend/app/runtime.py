@@ -963,7 +963,9 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         label="Bandeja: antigüedad máxima del dato (horas)",
         description=(
             "El dato de los idénticos tiene que ser más nuevo que esto. Las búsquedas de la Mac de la oficina pueden "
-            "tener días; la API y la web del servidor son de la hora de la corrida."
+            "tener días; la API y la web del servidor son de la hora de la corrida. También decide cada cuánto la cola "
+            "re-busca (y paga en Apify) los rojos con precio de la oficina: cuando su dato pasa esto menos 24 h (piso 24 h). "
+            "Bajarlo multiplica esas búsquedas."
         ),
         type="int", parser=int,
         default_attr="pm_review_data_max_age_h",

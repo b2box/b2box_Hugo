@@ -283,7 +283,7 @@ async def test_el_rojo_va_primero_con_su_consulta_y_el_cupo_sigue_mandando(env, 
     tope diario corta igual."""
     _snaps(3)
     with Session(engine) as s:
-        run = PriceMonitorRun(status="ok")
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
         s.add(run)
         s.commit()
         run_id = run.id

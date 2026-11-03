@@ -1014,6 +1014,7 @@ _COSTLY_SETTINGS = frozenset({
     "pm_yellow_min_pct",
     "pm_review_min_listings",
     "pm_review_min_sellers",
+    # Además decide cada cuánto la cola re-busca (y paga en Apify) los rojos: bajarlo multiplica esas búsquedas.
     "pm_review_data_max_age_h",
     "pm_review_max_price_ratio",
     # Recálculo al cambiar en Vendure: lecturas a Vendure por día (el admin de Vendure las paga) de la cola y del vigía de

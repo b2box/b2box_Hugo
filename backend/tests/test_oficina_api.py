@@ -394,7 +394,7 @@ def reds(api):
     with Session(engine) as s:
         for row in s.exec(select(PriceMonitorRun)).all():
             s.delete(row)
-        run = PriceMonitorRun(status="ok")
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
         s.add(run)
         s.commit()
         run_id = run.id
@@ -469,14 +469,14 @@ def test_the_color_is_the_one_of_the_last_finished_run(reds):
     _red(reds, "2", timedelta(hours=50), color="verde")
     for status in ("failed", "running"):                              # reventó a mitad / en curso: no cuentan
         with Session(engine) as s:
-            run = PriceMonitorRun(status=status)
+            run = PriceMonitorRun(status=status, finished_at=utcnow())
             s.add(run)
             s.commit()
             _snap("1", "ok", origin="oficina", run_id=run.id, color="verde")
             _snap("2", "ok", origin="oficina", run_id=run.id, color="rojo")
     assert _ids() == ["1"]
     with Session(engine) as s:
-        run = PriceMonitorRun(status="degraded")
+        run = PriceMonitorRun(status="degraded", finished_at=utcnow())
         s.add(run)
         s.commit()
         _snap("1", "ok", origin="oficina", run_id=run.id, color="verde")
@@ -490,9 +490,75 @@ def test_a_red_comes_out_once_and_the_limit_and_claims_still_count(reds):
     _red(reds, "2", timedelta(hours=50))
     _snap("3")
     assert _ids() == ["1", "2", "3"]
-    assert _ids(2) == ["1", "2"]
+    assert _ids(2) == ["1", "3"]                                     # los rojos, a lo sumo la mitad
     assert oficina_ml.claim(["1"], "oficina", timedelta(hours=1)) == ["1"]
     assert _ids(claimer="apify-x") == ["2", "3"]
+
+
+def test_the_reds_take_at_most_half_of_the_queue(reds):
+    """En prod (03-nov) hay 71 rojos con dato de 37 a 182 h: sin tope se comían el cupo de Apify la primera noche."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    for i in range(1, 6):
+        _red(reds, str(i), timedelta(hours=50 + i))                   # el 5 es el más viejo
+    for i in range(10, 14):
+        _snap(str(i))                                                 # nunca buscados
+    assert _ids(4) == ["5", "4", "10", "11"]
+    assert _ids(5) == ["5", "4", "10", "11", "12"]                    # mitad para abajo
+    assert _ids(1) == ["5"]                                           # con 1, al menos un rojo
+    assert _ids(50) == ["5", "4", "3", "2", "1", "10", "11", "12", "13"]
+
+
+def test_an_out_of_range_max_age_in_the_table_does_not_break_the_queue(reds):
+    _red(reds, "1", timedelta(hours=170))
+    _red(reds, "2", timedelta(hours=100))
+    for raw, expected in ((str(10**12), ["1"]),                       # acotado a 168 h (sin acotar: OverflowError)
+                          ("-5", ["1", "2"])):                        # acotado a 6 h: el piso deja 24 h
+        with Session(engine) as s:
+            s.merge(Setting(key="pm_review_data_max_age_h", value=raw))
+            s.commit()
+        runtime.invalidate()
+        assert _ids() == expected, raw
+
+
+def test_a_red_that_failed_last_night_is_not_paid_again_tonight(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    for pid in ("1", "2", "3"):
+        _red(reds, pid, timedelta(hours=50))
+    _result("1", timedelta(hours=3), status="error", n=0)             # Apify falló esta noche: no se re-paga
+    _result("2", timedelta(hours=21), status="blocked", n=0)          # falló anoche: hoy sí
+    assert _ids() == ["2", "3"]
+
+
+def test_if_the_last_finished_run_is_old_the_reds_wait(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    _snap("2")
+    for ago, expected in ((timedelta(days=2, hours=1), ["2"]),       # el semáforo está parado: sus rojos no dicen nada
+                          (timedelta(days=1, hours=23), ["1", "2"])):
+        with Session(engine) as s:
+            run = s.get(PriceMonitorRun, reds)
+            run.finished_at = utcnow() - ago
+            s.add(run)
+            s.commit()
+        assert _ids() == expected, ago
+
+
+def test_the_mac_never_gets_the_reds(reds):
+    """Regla del usuario: nada de tráfico a ML desde la Mac. Apify sí los recibe."""
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=50))
+    _snap("2")
+    assert _ids(claimer="apify-x") == ["1", "2"]
+    assert _ids(claimer=oficina_ml.CLAIM_OFICINA) == ["2"]
+    assert [i["product_id"] for i in oficina_ml.queue_for_oficina(10, take=False)] == ["2"]
+
+
+def test_a_red_whose_current_result_is_empty_is_not_searched_by_this_group(reds):
+    runtime.set_value("pm_review_data_max_age_h", 72)
+    _red(reds, "1", timedelta(hours=60))
+    _result("1", timedelta(hours=50), status="empty", n=0)            # el vigente vino vacío: no hay rojo que sostener
+    _red(reds, "2", timedelta(hours=50))
+    assert _ids() == ["2"]
 
 
 def test_a_skipped_run_does_not_hide_the_reds(reds):
@@ -500,7 +566,7 @@ def test_a_skipped_run_does_not_hide_the_reds(reds):
     runtime.set_value("pm_review_data_max_age_h", 72)
     _red(reds, "1", timedelta(hours=50))
     with Session(engine) as s:
-        s.add(PriceMonitorRun(status="skipped"))
+        s.add(PriceMonitorRun(status="skipped", finished_at=utcnow()))
         s.commit()
     assert _ids() == ["1"]
 
