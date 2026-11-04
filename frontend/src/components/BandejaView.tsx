@@ -228,7 +228,9 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
         </button>
       </div>
 
-      <p className="text-sm text-muted-foreground">{SECTION_META.bandeja?.desc}</p>
+      <p className="text-sm text-muted-foreground">
+        {SECTION_META.bandeja?.desc.replace("{horas}", summary ? String(summary.params.data_max_age_h) : "…")}
+      </p>
 
       {summary?.mode === 0 && (
         <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
