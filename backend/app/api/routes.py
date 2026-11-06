@@ -29,6 +29,7 @@ from app.db.session import engine, get_session
 from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_target_for
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
+from app.estimate.otapi_item import offer_id_from_url
 from app.pricing import luis_intake, radar_ml_supply
 from app.pricing.source_check import fetch_source_price
 from app.security import configured_api_keys, verify_admin_api_key, verify_api_key, verify_rate_limit
@@ -776,8 +777,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
                 product_link=payload.source_url,
             )
         else:
+            # El link solo si es de una oferta de 1688 (Paco resuelve el item por id); uno de otra tienda (KYD,
+            # TikTok, Amazon) no le sirve a Paco y va solo la foto, como hacía Luis.
             result = await paco_integration.submit(
-                valid_imgs[0], product_url=payload.source_url,
+                valid_imgs[0],
+                product_url=payload.source_url if offer_id_from_url(payload.source_url or "") else None,
             )
         response.paco_search_id = result.search_id
         response.paco_status = result.status
