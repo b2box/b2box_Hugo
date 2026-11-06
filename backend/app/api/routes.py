@@ -726,6 +726,13 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
+    if _event_source(payload) == "luis":
+        # Pestaña «Subidos a Vendure»: Google Lens ahora, la comparación cuando Paco lo suba. Vale para la consulta
+        # (dedup_only) y para el envío a Paco que Luis le pide a Hugo (Luis nunca le habla a Paco directo).
+        intake_id = luis_intake.record(payload.source_url, payload.name, payload.image_urls)
+        if intake_id is not None:
+            _background(luis_intake.lens_soon(intake_id))
+
     # Dedup-only: el caller pide solo el veredicto (Paco PRO desde su pipeline,
     # Luis para chequear antes de mandar a Paco por su cuenta). NO reenviamos ni
     # chequeamos idempotencia: el que llama decide qué hacer con el veredicto. El
@@ -742,11 +749,6 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
             # Una consulta no es algo para revisar a mano: queda archivada.
             dismissed=True,
         )
-        if _event_source(payload) == "luis":
-            # Para la pestaña «Subidos a Vendure»: Google Lens ahora, la comparación cuando Paco lo suba.
-            intake_id = luis_intake.record(payload.source_url, payload.name, payload.image_urls)
-            if intake_id is not None:
-                _background(luis_intake.lens_soon(intake_id))
         return response
 
     # Idempotencia: si este source_url ya se mandó a Paco DESDE ESTE CLIENTE y
