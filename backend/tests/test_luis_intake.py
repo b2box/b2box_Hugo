@@ -280,7 +280,7 @@ async def test_paco_subio_otro_link_de_1688_y_se_une_por_su_busqueda(fake_lens, 
 
     calls: list[str] = []
 
-    async def fake_status(sid):
+    async def fake_status(sid, timeout=10.0):  # noqa: ARG001
         calls.append(sid)
         return {"products": [{"rank": 1, "vendure_product_id": 77}]} if sid == "s-kyd" else {"products": []}
 
@@ -303,7 +303,7 @@ async def test_la_ficha_de_paco_no_se_relee_antes_de_tiempo(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_status(sid):
+    async def fake_status(sid, timeout=10.0):  # noqa: ARG001
         calls.append(sid)
         return {"products": []}
 
@@ -341,3 +341,63 @@ async def test_sync_recompara_cuando_lens_termina_despues_de_la_subida(fake_lens
     await luis_intake.lens_one(intake_id)
     assert await luis_intake.sync() == {luis_intake.COMPARED: 1}
     assert luis_intake.list_rows()[0]["color"] == semaforo.VERDE
+
+
+# ── Precio de ML desde el link de Lens ───────────────────────────────────────
+
+GOTO = "https://www.google.com/goto?url=CAESabc"
+ML_LINK = "https://articulo.mercadolibre.com.ar/MLA-835540788-transportadora-bolso-_JM"
+
+
+@pytest.fixture
+def ml_api(monkeypatch):
+    from app.ingest import meli
+
+    asked: list[str] = []
+
+    class FakeResolver:
+        def __init__(self, http):  # noqa: ARG002
+            pass
+
+        async def resolve(self, url):
+            return ML_LINK if url == GOTO else None
+
+    async def fake_fetch(url):
+        asked.append(url)
+        return [meli.MeliItem(id="MLA835540788", title="Transportadora Bolso", price_cents=5_322_760, currency="ARS")]
+
+    monkeypatch.setattr(ml_lens, "_Resolver", FakeResolver)
+    monkeypatch.setattr(meli, "enabled", lambda: True)
+    monkeypatch.setattr(meli, "fetch_from_url", fake_fetch)
+    return asked
+
+
+def _ml_without_price() -> dict:
+    return {"source_domain": "Mercado", "title": "Libre", "price": "", "currency": "", "link_is_redirect": True,
+            "url": GOTO, "page_url": GOTO}
+
+
+@pytest.mark.asyncio
+async def test_lens_sin_precio_entra_al_link_de_ml_y_toma_el_precio_de_la_api(fake_lens, ml_api):
+    _, state = fake_lens
+    state["items"] = _lens_item(_ml_without_price(), {"source_domain": "Bol", "url": "https://bol.com/x"})
+    intake_id = luis_intake.record(SOURCE_URL, "Transportadora", [PHOTO])
+    assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK
+    assert ml_api == [ML_LINK]
+    [item] = luis_intake.list_rows()
+    assert item["ml_median_cents"] == 5_322_760 and item["ml_matches"][0]["url"] == ML_LINK
+
+
+@pytest.mark.asyncio
+async def test_una_fila_que_quedo_sin_ml_con_la_version_vieja_se_relensea_una_vez(fake_lens, ml_api):
+    calls, state = fake_lens
+    state["items"] = _lens_item(_ml_without_price())
+    intake_id = luis_intake.record(SOURCE_URL, "Transportadora", [PHOTO])
+    with Session(engine) as s:
+        row = s.get(LuisIntake, intake_id)
+        row.lens_status, row.lens_version = luis_intake.LENS_EMPTY, None
+        s.commit()
+    assert luis_intake.backfill_from_audit() == [intake_id]
+    assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK
+    assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK and len(calls) == 1
+    assert luis_intake.backfill_from_audit() == []

@@ -37,6 +37,7 @@ from app.config import get_settings
 from app.db.models import AuditLog, LuisIntake
 from app.db.session import engine
 from app.estimate.otapi_item import offer_id_from_url
+from app.ingest import meli
 from app.ingest.apify_1688 import _json, _request_bounded, _Run, allowed_image_url
 from app.pricing import apify_ml_search as ams
 from app.pricing import daily_budget, ml_lens, price_monitor, price_review, semaforo
@@ -60,6 +61,11 @@ _ML_AR_HOSTS = ("mercadolibre.com.ar",)
 PACO_LOOKBACK_DAYS = 21
 PACO_RECHECK = timedelta(minutes=10)
 PACO_MAX_PER_EVENT = 60
+PACO_STATUS_TIMEOUT_S = 60.0                           # la ficha de Paco puede pesar MBs y Paco puede estar ocupado
+# Lens no trae el precio de ML: se abre el link (goto de Google) y el precio sale de la API de ML. Versión 2 = con ese
+# paso; las filas que quedaron «sin ML» con la versión 1 se vuelven a lensear una vez.
+LENS_VERSION = 2
+MAX_ML_LINKS = 5
 _SEARCH_ID_RE = re.compile(r"search_id=([A-Za-z0-9_-]{1,64})")
 
 
@@ -126,7 +132,10 @@ def backfill_from_audit(days: int = PACO_LOOKBACK_DAYS) -> list[int]:
         if intake_id is not None:
             need_lens.append(intake_id)
     with Session(engine) as s:
-        return [i for i in need_lens if (r := s.get(LuisIntake, i)) and r.lens_status == LENS_PENDING]
+        old = s.exec(select(LuisIntake.id).where(LuisIntake.lens_status == LENS_EMPTY)).all()
+        ids = list(dict.fromkeys([*need_lens, *old]))
+        return [i for i in ids if (r := s.get(LuisIntake, i))
+                and (r.lens_status in (LENS_PENDING, LENS_ERROR) or _old_empty(r))]
 
 
 async def lens_soon(intake_id: int) -> None:
@@ -143,7 +152,7 @@ async def lens_one(intake_id: int) -> str:
         row = s.get(LuisIntake, intake_id)
         if row is None:
             return "no_existe"
-        if row.lens_status in (LENS_OK, LENS_EMPTY):
+        if row.lens_status == LENS_OK or (row.lens_status == LENS_EMPTY and not _old_empty(row)):
             return row.lens_status
         image = row.image_url
     if not is_enabled():
@@ -171,15 +180,47 @@ async def lens_one(intake_id: int) -> str:
             if run.run_id:
                 await ams._abort(http, run, headers)
             items = None
-    usd = max(run.usage_usd, ml_lens._USD_PER_PHOTO)
+        usd = max(run.usage_usd, ml_lens._USD_PER_PHOTO)
+        item = ml_lens._by_input_index(items, 1).get(0) if items is not None else None
+        raw = ml_lens._matches(item)
+        matches = ml_matches(raw) or await ml_prices(http, raw)
     if items is None:
         _set_lens(intake_id, LENS_ERROR, [], usd)
         return LENS_ERROR
-    item = ml_lens._by_input_index(items, 1).get(0)
-    matches = ml_matches(ml_lens._matches(item))
     status = LENS_OK if matches else LENS_EMPTY
     _set_lens(intake_id, status, matches, usd)
     return status
+
+
+def _old_empty(row: LuisIntake) -> bool:
+    return row.lens_status == LENS_EMPTY and (row.lens_version or 1) < LENS_VERSION
+
+
+async def ml_prices(http: Any, raw_matches: list) -> list[dict[str, Any]]:
+    """Las publicaciones de ML Argentina que encontró Lens, con su precio: el goto de Google se abre sin seguirlo
+    (ml_lens._Resolver: solo a www.google.com/goto, el destino tiene que ser ML) y el precio sale de la API oficial de
+    ML (meli.fetch_from_url; si la publicación está bloqueada, el de su ficha de catálogo)."""
+    gotos = ml_lens._ml_gotos(raw_matches)
+    if not gotos or not meli.enabled():
+        return []
+    resolver = ml_lens._Resolver(http)
+    targets = await asyncio.gather(*(resolver.resolve(url) for _, url in gotos))
+    links: list[str] = []
+    for link in targets:
+        if isinstance(link, str) and _ml_host(link) and link not in links:
+            links.append(link)
+    out: list[dict[str, Any]] = []
+    for link in links[:MAX_ML_LINKS]:
+        try:
+            found = await meli.fetch_from_url(link)
+        except Exception as exc:  # noqa: BLE001
+            log.info("Luis/Lens: ML no devolvió el precio de un link (%s)", type(exc).__name__)
+            continue
+        item = next((i for i in found if i.price_cents and (i.currency or "ARS").upper() == "ARS"), None)
+        if item is not None:
+            out.append({"title": clean_line(item.title or "", 200), "price_cents": int(item.price_cents),
+                        "url": link})
+    return out
 
 
 class _HttpOnly:
@@ -253,6 +294,7 @@ def _set_lens(intake_id: int, status: str, matches: list[dict[str, Any]], usd: f
         if row is None:
             return
         row.lens_status, row.lens_ran_at, row.lens_usd = status, utcnow(), round(usd, 6)
+        row.lens_version = LENS_VERSION
         row.ml_matches = json.dumps(matches, ensure_ascii=False)
         row.ml_median_cents = semaforo.median_cents(prices) if prices else None
         s.add(row)
@@ -348,9 +390,10 @@ async def _uploads_by_paco() -> dict[str, int]:
     async def one(rid: int, sid: str) -> list[tuple[str, int]]:
         async with sem:
             try:
-                rec = await paco_integration.get_status(sid)
+                rec = await paco_integration.get_status(sid, timeout=PACO_STATUS_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001
-                log.info("Luis/Paco: no se pudo leer la búsqueda %s (%s)", sid, type(exc).__name__)
+                log.warning("Luis/Paco: no se pudo leer la búsqueda %s (%s: %s)", sid, type(exc).__name__,
+                            str(exc)[:120])
                 return []
         prods = rec.get("products") if isinstance(rec, dict) else None
         return [(str(p["vendure_product_id"]), rid) for p in (prods or [])
