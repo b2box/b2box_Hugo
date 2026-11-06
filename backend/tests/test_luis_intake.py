@@ -35,9 +35,11 @@ def env(monkeypatch):
     monkeypatch.setattr(get_settings(), "apify_token", "apify_api_TOKEN_de_prueba", raising=False)
     runtime.invalidate()
     yield
+    # Sin filas de Luis: si quedaran, los tests de los avisos de Vendure leerían Vendure para compararlas.
     with Session(engine) as s:
-        for row in s.exec(select(Setting)).all():
-            s.delete(row)
+        for model in (LuisIntake, Setting):
+            for row in s.exec(select(model)).all():
+                s.delete(row)
         s.commit()
     runtime.invalidate()
 
