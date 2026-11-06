@@ -962,6 +962,8 @@ class LuisIntake(SQLModel, table=True):
     lens_usd: float = Field(default=0.0)
     # Versión del paso de Lens que llenó la fila (luis_intake.LENS_VERSION); None = la primera, sin precio de ML.
     lens_version: int | None = None
+    # Foto que se pasó por Lens. Si sin_ml con la de 1688 y después llega la de Vendure, se relensea con esa.
+    lens_image: str | None = Field(default=None, max_length=2048)
     # JSON: [{"title", "price_cents", "url"}] — solo ML Argentina con precio en ARS.
     ml_matches: str = Field(default="[]")
     ml_median_cents: int | None = None

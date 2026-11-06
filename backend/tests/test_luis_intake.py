@@ -401,3 +401,22 @@ async def test_una_fila_que_quedo_sin_ml_con_la_version_vieja_se_relensea_una_ve
     assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK
     assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK and len(calls) == 1
     assert luis_intake.backfill_from_audit() == []
+
+
+@pytest.mark.asyncio
+async def test_sin_ml_con_la_foto_de_1688_se_relensea_una_vez_con_la_de_vendure(fake_lens, ml_api):
+    calls, state = fake_lens
+    state["items"] = _lens_item({"source_domain": "Bol", "url": "https://bol.com/x"})
+    intake_id = luis_intake.record(SOURCE_URL, "Transportadora", [PHOTO])
+    assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_EMPTY
+    assert luis_intake.backfill_from_audit() == []                       # sin foto de Vendure: no se repite
+    vendure_photo = "https://admin.b2-box.com/assets/preview/6f/x__preview.png"
+    with Session(engine) as s:
+        row = s.get(LuisIntake, intake_id)
+        row.vendure_image_url = vendure_photo
+        s.commit()
+    assert luis_intake.backfill_from_audit() == [intake_id]
+    state["items"] = _lens_item(_ml_without_price())
+    assert await luis_intake.lens_one(intake_id) == luis_intake.LENS_OK
+    assert calls == [[PHOTO], [vendure_photo]]
+    assert luis_intake.backfill_from_audit() == []
