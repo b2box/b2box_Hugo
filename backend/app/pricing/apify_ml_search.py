@@ -477,6 +477,12 @@ async def _actor_permission(http: httpx.AsyncClient, actor: str, headers: dict) 
     return level if isinstance(level, str) and len(level) <= 40 else ""
 
 
+def min_gap() -> timedelta | None:
+    """Tiempo mínimo entre dos búsquedas pagas del mismo producto (runtime `apify_meli_search_min_days`); None = sin tope."""
+    days = max(0, int(runtime.get("apify_meli_search_min_days")))
+    return timedelta(days=days) if days else None
+
+
 async def _run(report: RunReport, started: float) -> None:
     reason = disabled_reason()
     if reason:
@@ -511,7 +517,7 @@ async def _run(report: RunReport, started: float) -> None:
         # y así se sabe si quedó cola sin buscar por falta de cupo.
         queue = await asyncio.to_thread(
             oficina_ml.build_queue, min(left + batch_size, oficina_ml.MAX_QUEUE), claimer=claimer,
-            take_stale_oficina=True, with_lens=ml_lens.is_enabled())
+            take_stale_oficina=True, with_lens=ml_lens.is_enabled(), min_gap=min_gap())
         if not queue:
             report.reason = "la cola está vacía"
             return

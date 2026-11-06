@@ -316,6 +316,9 @@ class Settings(EnvSettings):
     )
     apify_meli_search_enabled: int = 0
     apify_meli_search_daily_max: int = 200
+    # Días mínimos entre dos búsquedas con Apify del mismo producto (cualquier estado y grupo de la cola:
+    # rojos, variantes, Lens). Runtime. 0 = sin tope (el comportamiento de antes).
+    apify_meli_search_min_days: int = 15
     # Google Lens en el semáforo (app/pricing/ml_lens.py): runtime, admin y auditados.
     pm_lens_enabled: int = 0
     pm_lens_daily_max: int = 30
@@ -493,6 +496,9 @@ class Settings(EnvSettings):
     # Un resultado de la oficina vale este tiempo; pasado esto el semáforo lo ignora y la
     # cola lo vuelve a pedir.
     oficina_result_ttl_days: int = Field(default=7, ge=1, le=90)
+    # La Mac de la oficina busca en ML solo con esto en 1. Desde el 20-oct ML la bloquea en la primera
+    # búsqueda de la noche: apagada, Hugo le da la cola vacía y no toca ML. Runtime.
+    oficina_ml_enabled: int = 0
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

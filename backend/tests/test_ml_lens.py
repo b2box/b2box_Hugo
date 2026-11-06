@@ -276,6 +276,8 @@ def _lens_audit() -> dict:
 
 
 async def test_una_noche_lens_genera_la_consulta_y_apify_la_busca_con_origen_lens(lens, monkeypatch):
+    # Prueba la re-busqueda antes de 15 dias: sin el tope de gasto por producto.
+    runtime.set_value("apify_meli_search_min_days", 0)
     pids = _eligible(3)
     world = World().install(monkeypatch)
 
@@ -721,6 +723,8 @@ def _next_night() -> None:
 async def test_d1_el_rojo_ganado_por_lens_se_rebusca_con_origen_lens(lens, monkeypatch):
     """D1: si el item busca la consulta Lens del producto (de ml_lens_result) se guarda como lens, aunque venga del
     grupo de rojos o del refresco, y no solo del grupo lens."""
+    # Prueba la re-busqueda antes de 15 dias: sin el tope de gasto por producto.
+    runtime.set_value("apify_meli_search_min_days", 0)
     from app.db.models import PriceMonitorRun
 
     runtime.set_value("pm_review_data_max_age_h", 72)

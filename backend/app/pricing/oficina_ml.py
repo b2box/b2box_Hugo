@@ -421,7 +421,8 @@ def _prune(s: Session, product_ids: set[str], now: datetime) -> None:
 
 
 def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None = None,
-                take_stale_oficina: bool = False, with_lens: bool = False) -> list[dict[str, Any]]:
+                take_stale_oficina: bool = False, with_lens: bool = False,
+                min_gap: timedelta | None = None) -> list[dict[str, Any]]:
     """Qué buscar esta noche, en este orden:
 
       1. los ROJOS de la última corrida terminada (de hace 2 días o menos) cuyo precio salió de la oficina y cuyo
@@ -450,6 +451,9 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
 
     **Cada item lleva UNA sola consulta**: una página de ML por producto por noche como tope. Y solo el id del producto:
     ni costos ni proveedor ni nada interno. Los productos cuyo último snapshot es viejo (ya no se miden) no entran.
+
+    Con `min_gap` (Apify, `apify_meli_search_min_days`) no entra ningún producto con un intento de cualquier estado
+    hace menos de eso, sea del grupo que sea: es el tope de gasto por producto (una búsqueda paga cada `min_gap`).
 
     Tampoco entran los que tiene reservados OTRO (`claim` vigente de alguien que no es `claimer`; sin `claimer`,
     de cualquiera). Armar la cola no reserva nada: eso lo hace quien la va a buscar. Con `take_stale_oficina` (Apify)
@@ -508,6 +512,8 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
     expiring_rest: list[tuple[Any, ...]] = []
     for pid, ml_status, origin, name, enabled, captured in snaps:
         if not name or captured < still_measured or pid in taken_by_others:
+            continue
+        if min_gap and pid in last_try and last_try[pid] > now - min_gap:
             continue
         last = last_result.get(pid)
         if (pid in reds and last is not None and last[1] == ST_OK and last[0] <= red_before
@@ -711,7 +717,10 @@ def release(claimer: str, product_ids: list[str] | None = None) -> int:
 
 def queue_for_oficina(limit: int, *, now: datetime | None = None, take: bool = True) -> list[dict[str, Any]]:
     """La cola que se le da a la Mac: lo que nadie más tiene reservado. Con `take` queda reservado para la oficina
-    (sin estirar lo que ya tenía: eso lo hacen sus lotes); sin `take` (--check, --dry-run) solo se mira."""
+    (sin estirar lo que ya tenía: eso lo hacen sus lotes); sin `take` (--check, --dry-run) solo se mira.
+    Con `oficina_ml_enabled` en 0 (default) la cola es vacía: la Mac no busca nada en ML."""
+    if not int(runtime.get("oficina_ml_enabled")):
+        return []
     now = now or utcnow()
     items = build_queue(limit, now=now, claimer=CLAIM_OFICINA)
     if not take:
