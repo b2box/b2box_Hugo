@@ -318,6 +318,7 @@ export const SECTION_ICON: Record<string, ComponentType<IconProps>> = {
   app_matches: IconSearch,
   app_requests: IconInbox,
   all: IconLayers,
+  subidos: IconTrafficLight,
   settings: IconSettings,
   salud: IconActivity,
   semaforo: IconTrafficLight,

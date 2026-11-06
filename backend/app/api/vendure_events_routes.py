@@ -16,6 +16,7 @@ mala, tope de body y validación estricta (Pydantic, `extra="forbid"`, ids solo 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -28,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.api.oficina_routes import _IpTable, _ip_key, _key_matches, _read_body, _window
 from app.config import get_settings
-from app.pricing import price_recalc
+from app.pricing import luis_intake, price_recalc
 from app.security import client_ip, weak_key_reason
 
 log = logging.getLogger(__name__)
@@ -122,6 +123,9 @@ class EventsIn(BaseModel):
     events: list[VendureEvent] = Field(max_length=MAX_EVENTS)
 
 
+# Referencias a las tareas de fondo (comparación de lo que mandó Luis).
+_TASKS: set[asyncio.Task] = set()
+
 @router.post("/events", status_code=202)
 async def vendure_events(request: Request) -> dict[str, Any]:
     """El body se lee DESPUÉS de la auth (dependencia del router) y con tope; inválido = 422."""
@@ -134,5 +138,9 @@ async def vendure_events(request: Request) -> dict[str, Any]:
     for ev in body.events:
         changes[ev.productId] = changes.get(ev.productId, False) or ev.type in ("tier", "variant")
     queued = price_recalc.notify(changes)
+    # Lo que mandó Luis y Paco acaba de subir: se compara con lo que trajo Google Lens (pestaña «Subidos a Vendure»).
+    task = asyncio.create_task(luis_intake.compare_products(list(changes)))
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
     log.info("vendure events: %d avisos, %d productos anotados (%s)", len(body.events), queued, client_ip(request))
     return {"queued": queued}

@@ -319,6 +319,10 @@ class Settings(EnvSettings):
     # Días mínimos entre dos búsquedas con Apify del mismo producto (cualquier estado y grupo de la cola:
     # rojos, variantes, Lens). Runtime. 0 = sin tope (el comportamiento de antes).
     apify_meli_search_min_days: int = 15
+    # Lo que manda Luis (pricing/luis_intake.py): Google Lens al recibirlo, para compararlo al subirlo a Vendure.
+    # ~USD 0,005 por foto con matches. Prendido y tope diario son runtime.
+    luis_lens_enabled: int = 1
+    luis_lens_daily_max: int = 150
     # Google Lens en el semáforo (app/pricing/ml_lens.py): runtime, admin y auditados.
     pm_lens_enabled: int = 0
     pm_lens_daily_max: int = 30

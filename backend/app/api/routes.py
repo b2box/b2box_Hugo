@@ -29,7 +29,7 @@ from app.db.session import engine, get_session
 from app.dedup.confirm_target import PLACEHOLDER_NEW, canonical_for, disable_target_for
 from app.dedup.orchestrator import CandidateInput, find_duplicate_in
 from app.integrations import paco as paco_integration
-from app.pricing import radar_ml_supply
+from app.pricing import luis_intake, radar_ml_supply
 from app.pricing.source_check import fetch_source_price
 from app.security import configured_api_keys, verify_admin_api_key, verify_api_key, verify_rate_limit
 from app.vendure import catalog as vendure_catalog
@@ -455,6 +455,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "agent": "hugo"}
 
 
+# Referencias a las tareas de fondo: sin esto el loop podría recolectarlas a mitad de camino.
+_TASKS: set[asyncio.Task] = set()
+
+
+def _background(coro: Any) -> None:
+    task = asyncio.create_task(coro)
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+
+
 def _event_source(payload: "VerifyRequest") -> str:
     """`source` tal como se guarda en AuditLog. Ya viene normalizado por el
     validador de VerifyRequest (lower, sin espacios, ≤ MAX_SOURCE_LEN, default "luis")."""
@@ -732,6 +742,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
             # Una consulta no es algo para revisar a mano: queda archivada.
             dismissed=True,
         )
+        if _event_source(payload) == "luis":
+            # Para la pestaña «Subidos a Vendure»: Google Lens ahora, la comparación cuando Paco lo suba.
+            intake_id = luis_intake.record(payload.source_url, payload.name, payload.image_urls)
+            if intake_id is not None:
+                _background(luis_intake.lens_soon(intake_id))
         return response
 
     # Idempotencia: si este source_url ya se mandó a Paco DESDE ESTE CLIENTE y

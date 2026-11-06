@@ -226,6 +226,17 @@ def _scope_conditions(enabled: str, match: str | None, origin: str | None,
     return conds
 
 
+@router.get("/luis-intake")
+async def list_luis_intake(
+    uploaded: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Pestaña «Subidos a Vendure»: lo que mandó Luis, lo que trajo Google Lens de ML y, si ya se subió, el color."""
+    from app.pricing import luis_intake
+    rows = await asyncio.to_thread(luis_intake.list_rows, limit, uploaded)
+    return {"items": rows}
+
+
 @router.get("/snapshots")
 async def list_snapshots(
     run_id: int | None = Query(None, ge=1, le=DB_INT_MAX),
