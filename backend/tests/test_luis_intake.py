@@ -328,3 +328,16 @@ def test_backfill_crea_filas_de_lo_ya_mandado_a_paco():
     with Session(engine) as s:
         [row] = s.exec(select(LuisIntake)).all()
     assert row.paco_search_id == "f71b3506d8a3" and need == [row.id]
+
+
+@pytest.mark.asyncio
+async def test_sync_recompara_cuando_lens_termina_despues_de_la_subida(fake_lens, monkeypatch):
+    from app.vendure import client as vendure_client
+
+    monkeypatch.setattr(vendure_client, "VendureClient", lambda: FakeVendure(1_500_000))
+    intake_id = luis_intake.record(SOURCE_URL, "Termo", [PHOTO])
+    await luis_intake.compare_products(["55"], client=FakeVendure(1_500_000))   # subido antes de Lens
+    assert luis_intake.list_rows()[0]["color"] == semaforo.SIN_DATO
+    await luis_intake.lens_one(intake_id)
+    assert await luis_intake.sync() == {luis_intake.COMPARED: 1}
+    assert luis_intake.list_rows()[0]["color"] == semaforo.VERDE
