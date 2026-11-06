@@ -222,3 +222,40 @@ async def test_sin_precio_en_vendure_queda_marcado(fake_lens):
 async def test_el_listado_filtra_los_subidos():
     luis_intake.record(SOURCE_URL, "Termo", [PHOTO])
     assert len(luis_intake.list_rows()) == 1 and luis_intake.list_rows(only_uploaded=True) == []
+
+
+@pytest.mark.asyncio
+async def test_cuando_luis_le_pide_a_hugo_que_mande_a_paco_tambien_deja_la_fila(monkeypatch):
+    async def fake_catalog(force=False, full=False):  # noqa: ARG001
+        return []
+
+    async def fake_find(candidate, existing):  # noqa: ARG001
+        return DedupVerdict(is_duplicate=False, confidence=0.0)
+
+    class _Result:
+        search_id = "paco-77"
+        status = "queued"
+
+    sent: list[str] = []
+
+    async def fake_submit(image_url, **kw):  # noqa: ARG001
+        sent.append(image_url)
+        return _Result()
+
+    started: list[int] = []
+
+    async def fake_soon(intake_id):
+        started.append(intake_id)
+
+    monkeypatch.setattr(routes.vendure_catalog, "get_catalog", fake_catalog)
+    monkeypatch.setattr(routes, "find_duplicate_in", fake_find)
+    monkeypatch.setattr(routes.paco_integration, "submit", fake_submit)
+    monkeypatch.setattr(routes.luis_intake, "lens_soon", fake_soon)
+    resp = await routes.verify(routes.VerifyRequest(name="Termo acero", source_url=SOURCE_URL, image_urls=[PHOTO],
+                                                    source="luis"))
+    for task in list(routes._TASKS):
+        await task
+    assert resp.paco_search_id == "paco-77" and sent == [PHOTO]
+    with Session(engine) as s:
+        [row] = s.exec(select(LuisIntake)).all()
+    assert row.offer_id == "700100" and started == [row.id]
