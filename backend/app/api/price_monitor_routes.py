@@ -226,6 +226,9 @@ def _scope_conditions(enabled: str, match: str | None, origin: str | None,
     return conds
 
 
+_SYNC_TASKS: set[asyncio.Task] = set()
+
+
 @router.get("/luis-intake")
 async def list_luis_intake(
     uploaded: bool = Query(False),
@@ -233,6 +236,10 @@ async def list_luis_intake(
 ) -> dict[str, Any]:
     """Pestaña «Subidos a Vendure»: lo que mandó Luis, lo que trajo Google Lens de ML y, si ya se subió, el color."""
     from app.pricing import luis_intake
+    # En segundo plano: une con Vendure lo que Paco ya subió (y crea filas de envíos viejos); se ve en el próximo refresco.
+    task = asyncio.create_task(luis_intake.sync())
+    _SYNC_TASKS.add(task)
+    task.add_done_callback(_SYNC_TASKS.discard)
     rows = await asyncio.to_thread(luis_intake.list_rows, limit, uploaded)
     return {"items": rows}
 

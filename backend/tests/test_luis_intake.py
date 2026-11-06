@@ -37,7 +37,7 @@ def env(monkeypatch):
     yield
     # Sin filas de Luis: si quedaran, los tests de los avisos de Vendure leerían Vendure para compararlas.
     with Session(engine) as s:
-        for model in (LuisIntake, Setting):
+        for model in (LuisIntake, AuditLog, Setting):
             for row in s.exec(select(model)).all():
                 s.delete(row)
         s.commit()
@@ -106,8 +106,18 @@ def test_record_es_idempotente_por_oferta_y_exige_link_de_1688_y_foto():
     first = luis_intake.record(SOURCE_URL, "Termo", [PHOTO])
     again = luis_intake.record("https://detail.1688.com/offer/700100.html?spm=x", "Termo acero", [PHOTO])
     assert first is not None and first == again
-    assert luis_intake.record("https://www.amazon.com/dp/1", "x", [PHOTO]) is None
     assert luis_intake.record(SOURCE_URL, "x", ["http://127.0.0.1/a.jpg"]) is None
+    assert luis_intake.record("javascript:alert(1)", "x", [PHOTO]) is None
+
+
+def test_un_producto_de_kyd_tambien_queda_y_guarda_la_busqueda_de_paco():
+    kyd = "https://kydschoice.com/products/filtro-cpl?variant=1"
+    first = luis_intake.record(kyd, "Filtro CPL", [PHOTO])
+    again = luis_intake.record("https://kydschoice.com/products/filtro-cpl", "Filtro CPL", [PHOTO], "abc123")
+    assert first is not None and first == again
+    with Session(engine) as s:
+        row = s.get(LuisIntake, first)
+    assert row.offer_id.startswith("u") and row.paco_search_id == "abc123"
 
 
 @pytest.mark.asyncio
@@ -259,3 +269,62 @@ async def test_cuando_luis_le_pide_a_hugo_que_mande_a_paco_tambien_deja_la_fila(
     with Session(engine) as s:
         [row] = s.exec(select(LuisIntake)).all()
     assert row.offer_id == "700100" and started == [row.id]
+
+
+# ── Unión por la búsqueda de Paco ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_paco_subio_otro_link_de_1688_y_se_une_por_su_busqueda(fake_lens, monkeypatch):
+    """Luis mandó algo de KYD; Paco lo buscó en 1688 y lo subió con SU link: la unión sale de la ficha de Paco."""
+    from app.integrations import paco as paco_integration
+
+    calls: list[str] = []
+
+    async def fake_status(sid):
+        calls.append(sid)
+        return {"products": [{"rank": 1, "vendure_product_id": 77}]} if sid == "s-kyd" else {"products": []}
+
+    monkeypatch.setattr(paco_integration, "get_status", fake_status)
+    intake_id = luis_intake.record("https://kydschoice.com/products/filtro", "Filtro", [PHOTO], "s-kyd")
+    await luis_intake.lens_one(intake_id)
+    other_1688 = "https://detail.1688.com/offer/985464993528.html"
+    counts = await luis_intake.compare_products(["77"], client=FakeVendure(1_500_000, source_url=other_1688))
+    assert counts == {luis_intake.COMPARED: 1} and calls == ["s-kyd"]
+    [item] = luis_intake.list_rows(only_uploaded=True)
+    assert item["vendure_product_id"] == "77" and item["color"] == semaforo.VERDE
+    # Ya unido: el próximo aviso (cambio de precio) no vuelve a leer Paco.
+    await luis_intake.compare_products(["77"], client=FakeVendure(3_500_000, source_url=other_1688))
+    assert calls == ["s-kyd"] and luis_intake.list_rows()[0]["color"] == semaforo.ROJO
+
+
+@pytest.mark.asyncio
+async def test_la_ficha_de_paco_no_se_relee_antes_de_tiempo(monkeypatch):
+    from app.integrations import paco as paco_integration
+
+    calls: list[str] = []
+
+    async def fake_status(sid):
+        calls.append(sid)
+        return {"products": []}
+
+    monkeypatch.setattr(paco_integration, "get_status", fake_status)
+    luis_intake.record("https://kydschoice.com/products/a", "A", [PHOTO], "s-a")
+    assert await luis_intake._uploads_by_paco() == {}
+    assert await luis_intake._uploads_by_paco() == {}
+    assert calls == ["s-a"]
+
+
+def test_backfill_crea_filas_de_lo_ya_mandado_a_paco():
+    with Session(engine) as s:
+        s.add(AuditLog(action="verify_passed_to_paco", source="luis", product_id="(nuevo)",
+                       detail="'Filtro' es nuevo. Hugo lo envió a Paco APP (search_id=f71b3506d8a3)",
+                       product_name="Filtro", product_image_url=PHOTO,
+                       product_source_url="https://kydschoice.com/products/filtro"))
+        s.add(AuditLog(action="verify_passed_to_paco", source="paco_pro", product_id="(nuevo)",
+                       detail="x (search_id=zzz)", product_name="Otro", product_image_url=PHOTO,
+                       product_source_url="https://detail.1688.com/offer/900900.html"))
+        s.commit()
+    need = luis_intake.backfill_from_audit()
+    with Session(engine) as s:
+        [row] = s.exec(select(LuisIntake)).all()
+    assert row.paco_search_id == "f71b3506d8a3" and need == [row.id]

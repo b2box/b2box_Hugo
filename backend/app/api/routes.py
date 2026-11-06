@@ -785,6 +785,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
             )
         response.paco_search_id = result.search_id
         response.paco_status = result.status
+        if not is_pro and _event_source(payload) == "luis":
+            # Para unirlo con Vendure: Paco sube el proveedor de 1688 que él eligió, no el link de Luis.
+            luis_intake.record(payload.source_url, payload.name, payload.image_urls, result.search_id)
         _record_verify(
             payload, verdict, action="verify_passed_to_paco",
             detail=(

@@ -946,7 +946,8 @@ def _events_are_not_deleted(_mapper, _connection, target) -> None:  # noqa: ANN0
 class LuisIntake(SQLModel, table=True):
     """Un producto que mandó Luis y no estaba en el catálogo (ver pricing/luis_intake.py): lo que trajo Google Lens de
     Mercado Libre al recibirlo y, cuando Paco lo sube a Vendure, nuestro precio contra esa mediana con su color.
-    Una fila por oferta de 1688 (offer id del link)."""
+    Una fila por producto de Luis: `offer_id` es el offer id si el link es de 1688, o "u" + hash del link si es de otra
+    tienda (KYD, TikTok, Amazon)."""
     __tablename__ = "luis_intake"
 
     id: int | None = Field(default=None, primary_key=True)
@@ -969,6 +970,10 @@ class LuisIntake(SQLModel, table=True):
     vendure_image_url: str | None = Field(default=None, max_length=2048)
     uploaded_at: datetime | None = None
     compared_at: datetime | None = None
+    # Búsqueda de Paco que Hugo lanzó para esta fila: Paco sube a Vendure el proveedor de 1688 que ÉL eligió (otro link
+    # que el de Luis, o uno de 1688 para algo que vino de KYD), así que la unión con Vendure sale de esa búsqueda.
+    paco_search_id: str | None = Field(default=None, max_length=64, index=True)
+    paco_checked_at: datetime | None = None
     our_price_cents: int | None = None
     margin_pct: float | None = None
     color: str | None = Field(default=None, max_length=16)
