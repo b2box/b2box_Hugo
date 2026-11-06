@@ -154,7 +154,7 @@ async def lens_one(intake_id: int) -> str:
             return "no_existe"
         if row.lens_status == LENS_OK or (row.lens_status == LENS_EMPTY and not _old_empty(row)):
             return row.lens_status
-        image = row.image_url
+        image = row.vendure_image_url or row.image_url      # la foto de Paco encuentra ML AR; la de 1688, sitios chinos
     if not is_enabled():
         _set_lens(intake_id, LENS_OFF, [], 0.0)
         return LENS_OFF
@@ -185,15 +185,18 @@ async def lens_one(intake_id: int) -> str:
         raw = ml_lens._matches(item)
         matches = ml_matches(raw) or await ml_prices(http, raw)
     if items is None:
-        _set_lens(intake_id, LENS_ERROR, [], usd)
+        _set_lens(intake_id, LENS_ERROR, [], usd, image)
         return LENS_ERROR
     status = LENS_OK if matches else LENS_EMPTY
-    _set_lens(intake_id, status, matches, usd)
+    _set_lens(intake_id, status, matches, usd, image)
     return status
 
 
 def _old_empty(row: LuisIntake) -> bool:
-    return row.lens_status == LENS_EMPTY and (row.lens_version or 1) < LENS_VERSION
+    """sin_ml que vale la pena repetir: de una versión vieja del paso, o hecho con otra foto que la de Vendure."""
+    if row.lens_status != LENS_EMPTY:
+        return False
+    return (row.lens_version or 1) < LENS_VERSION or bool(row.vendure_image_url and row.lens_image != row.vendure_image_url)
 
 
 async def ml_prices(http: Any, raw_matches: list) -> list[dict[str, Any]]:
@@ -287,14 +290,14 @@ def _ml_host(url: object) -> str | None:
     return host if any(host == h or host.endswith("." + h) for h in _ML_AR_HOSTS) else None
 
 
-def _set_lens(intake_id: int, status: str, matches: list[dict[str, Any]], usd: float) -> None:
+def _set_lens(intake_id: int, status: str, matches: list[dict[str, Any]], usd: float, image: str | None = None) -> None:
     prices = [m["price_cents"] for m in matches]
     with Session(engine) as s:
         row = s.get(LuisIntake, intake_id)
         if row is None:
             return
         row.lens_status, row.lens_ran_at, row.lens_usd = status, utcnow(), round(usd, 6)
-        row.lens_version = LENS_VERSION
+        row.lens_version, row.lens_image = LENS_VERSION, image
         row.ml_matches = json.dumps(matches, ensure_ascii=False)
         row.ml_median_cents = semaforo.median_cents(prices) if prices else None
         s.add(row)
