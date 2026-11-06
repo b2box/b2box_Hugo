@@ -118,6 +118,8 @@ async def test_la_reserva_de_la_mac_vence_y_apify_la_toma(env, monkeypatch):
 
 
 async def test_mac_viva_bloquea_a_apify_y_su_aviso_de_bloqueo_la_libera_esa_misma_noche(env, monkeypatch):
+    # Prueba la re-busqueda antes de 15 dias: sin el tope de gasto por producto.
+    runtime.set_value("apify_meli_search_min_days", 0)
     pids = _many(3)
     assert len(oficina_ml.queue_for_oficina(10)) == 3
     fake = FakeApify().install(monkeypatch)

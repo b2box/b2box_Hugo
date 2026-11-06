@@ -925,6 +925,10 @@ toma **la misma cola** (`oficina_ml.build_queue`) y busca con el actor `devcake/
   **atómico** antes de lanzarlo (`daily_budget.reserve_up_to`): dos corridas a la vez no se pasan del tope. Los dos se
   releen **en cada lote**: apagarlo o bajar el tope corta esa misma noche. Al agotarse el cupo la corrida termina
   `over_budget` y lo que falta queda para mañana.
+- **Una búsqueda paga por producto cada N días** (dashboard, `apify_meli_search_min_days`, default **15**, 0 = sin tope):
+  la cola de Apify no ofrece ningún producto con un intento (de cualquier estado) más nuevo que eso, sea rojo, variante
+  de texto o Lens. Es el tope de gasto por producto: ~USD 0,02 cada 15 días. Con el tope, los rojos ya no se re-buscan
+  cada 2 noches para la bandeja; la Mac de la oficina (gratis) no tiene este tope.
 - **Permisos del actor:** antes de cada noche Hugo lee `GET /v2/acts/{actor}` y exige
   `actorPermissionLevel = LIMITED_PERMISSIONS` (el actor no puede tocar otros recursos de la cuenta con nuestro token).
   Si es otro valor o no viene, no corre: queda `stopped` en el audit log y se avisa por el notifier (mail / webhook).

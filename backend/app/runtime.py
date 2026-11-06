@@ -534,6 +534,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=500, step=10, group="monitor",
     ),
     SettingMeta(
+        key="apify_meli_search_min_days",
+        label="Apify: días entre búsquedas del mismo producto",
+        description=(
+            "Apify no vuelve a buscar en ML un producto que ya buscó (con cualquier resultado) hace menos "
+            "de estos días: ni rojos, ni variantes, ni Lens. 15 = cada producto a lo sumo dos veces por mes "
+            "(~USD 0,02 cada vez). 0 = sin tope: los rojos se re-buscan cada 2 noches y las variantes cada noche."
+        ),
+        type="int", parser=int,
+        default_attr="apify_meli_search_min_days",
+        min=0, max=60, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="pm_lens_enabled",
         label="Google Lens en el semáforo (1 / 0)",
         description=(

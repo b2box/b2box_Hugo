@@ -316,6 +316,9 @@ class Settings(EnvSettings):
     )
     apify_meli_search_enabled: int = 0
     apify_meli_search_daily_max: int = 200
+    # Días mínimos entre dos búsquedas con Apify del mismo producto (cualquier estado y grupo de la cola:
+    # rojos, variantes, Lens). Runtime. 0 = sin tope (el comportamiento de antes).
+    apify_meli_search_min_days: int = 15
     # Google Lens en el semáforo (app/pricing/ml_lens.py): runtime, admin y auditados.
     pm_lens_enabled: int = 0
     pm_lens_daily_max: int = 30

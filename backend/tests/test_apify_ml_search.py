@@ -281,6 +281,8 @@ async def test_cupo_ya_gastado_por_otra_corrida(env, monkeypatch):
 async def test_el_rojo_va_primero_con_su_consulta_y_el_cupo_sigue_mandando(env, monkeypatch):
     """Un rojo de la oficina con dato viejo le gana el cupo a los nunca buscados, con la consulta de su resultado; el
     tope diario corta igual."""
+    # Prueba la re-busqueda antes de 15 dias: sin el tope de gasto por producto.
+    runtime.set_value("apify_meli_search_min_days", 0)
     _snaps(3)
     with Session(engine) as s:
         run = PriceMonitorRun(status="ok", finished_at=utcnow())
@@ -806,3 +808,60 @@ async def test_cobro_informado_de_mas_se_avisa_en_el_log_y_el_audit(env, monkeyp
 def test_ventas_del_texto_del_actor(text, expected):
     wire = ams.to_wire(_item("termo", 1, 1, sold_quantity_text=text))
     assert wire["sold_quantity"] == expected
+
+
+# ── Tope de gasto por producto: una búsqueda paga cada `apify_meli_search_min_days` ──
+
+def _result(pid: str, query: str, status: str, hours_ago: float) -> None:
+    with Session(engine) as s:
+        s.add(MlWebResult(product_id=pid, query=query, candidates="[]", n_candidates=0, status=status,
+                          fetched_at=(utcnow() - timedelta(hours=hours_ago)).replace(microsecond=0)))
+        s.commit()
+
+
+def test_min_gap_saca_de_la_cola_lo_buscado_hace_menos_de_15_dias(env):
+    pids = _snaps(3)
+    # 100: vacío hace 2 días con variante pendiente (sin tope se re-buscaría esta noche);
+    # 101: error hace 3 días; 102: nunca buscado.
+    _result(pids[0], NAMES[0].lower(), "empty", 48)
+    _result(pids[1], NAMES[1].lower(), "error", 72)
+    sin_tope = [i["product_id"] for i in oficina_ml.build_queue(10)]
+    assert pids[0] in sin_tope and pids[2] in sin_tope
+    con_tope = [i["product_id"] for i in oficina_ml.build_queue(10, min_gap=timedelta(days=15))]
+    assert con_tope == [pids[2]]
+    # Pasados los 15 días vuelve a entrar.
+    with Session(engine) as s:
+        for r in s.exec(select(MlWebResult)).all():
+            r.fetched_at = r.fetched_at - timedelta(days=15)
+            s.add(r)
+        s.commit()
+    assert pids[0] in [i["product_id"] for i in oficina_ml.build_queue(10, min_gap=timedelta(days=15))]
+
+
+def test_min_gap_tambien_frena_a_los_rojos(env):
+    _snaps(1)
+    with Session(engine) as s:
+        run = PriceMonitorRun(status="ok", finished_at=utcnow())
+        s.add(run)
+        s.commit()
+        run_id = run.id
+        s.add(MarketPriceSnapshot(run_id=run_id, product_id="200", ml_status="ok", product_name="Termo acero",
+                                  product_enabled=True, match_origin="oficina", color="rojo"))
+        s.commit()
+    _result("200", "termo de la vez pasada", "ok", 50)
+    try:
+        assert "200" in [i["product_id"] for i in oficina_ml.build_queue(10, claimer="apify-x")]
+        assert "200" not in [i["product_id"] for i in oficina_ml.build_queue(10, claimer="apify-x",
+                                                                              min_gap=timedelta(days=15))]
+    finally:
+        with Session(engine) as s:
+            s.delete(s.get(PriceMonitorRun, run_id))
+            s.commit()
+
+
+def test_min_gap_sale_del_runtime_con_15_por_defecto_y_0_lo_apaga(env):
+    assert ams.min_gap() == timedelta(days=15)
+    runtime.set_value("apify_meli_search_min_days", 0)
+    assert ams.min_gap() is None
+    runtime.set_value("apify_meli_search_min_days", 7)
+    assert ams.min_gap() == timedelta(days=7)
