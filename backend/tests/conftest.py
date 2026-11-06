@@ -24,6 +24,9 @@ os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 # Desde #30 el default del código es production (fail-closed). La suite corre en development salvo
 # que el test diga otra cosa: los que prueban production fijan HUGO_ENV o hugo_env explícitamente.
 os.environ.setdefault("HUGO_ENV", "development")
+# La Mac de la oficina viene apagada por defecto (ML la bloquea). La suite prueba su camino con ella prendida;
+# los tests del interruptor la apagan con runtime.set_value("oficina_ml_enabled", 0).
+os.environ.setdefault("OFICINA_ML_ENABLED", "1")
 
 
 def _engine_is_a_temp_sqlite(url) -> bool:

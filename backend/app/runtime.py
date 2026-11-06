@@ -567,6 +567,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=100, step=10, group="monitor",
     ),
     SettingMeta(
+        key="oficina_ml_enabled",
+        label="Mac de la oficina: buscar en ML (1 / 0)",
+        description=(
+            "1 = la Mac de la oficina recibe la cola de búsquedas de ML cada noche. 0 = Hugo le da la cola "
+            "vacía y la Mac no busca nada (ML la bloquea desde el 20-oct; lo busca Apify)."
+        ),
+        type="int", parser=int,
+        default_attr="oficina_ml_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
         key="oficina_result_ttl_days",
         label="Apify y oficina: días que vale un resultado de ML",
         description=(

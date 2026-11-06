@@ -496,6 +496,9 @@ class Settings(EnvSettings):
     # Un resultado de la oficina vale este tiempo; pasado esto el semáforo lo ignora y la
     # cola lo vuelve a pedir.
     oficina_result_ttl_days: int = Field(default=7, ge=1, le=90)
+    # La Mac de la oficina busca en ML solo con esto en 1. Desde el 20-oct ML la bloquea en la primera
+    # búsqueda de la noche: apagada, Hugo le da la cola vacía y no toca ML. Runtime.
+    oficina_ml_enabled: int = 0
 
     # ── DB local ───────────────────────────────────────────────
     database_url: str = Field(default="sqlite:///./hugo.db")

@@ -717,7 +717,10 @@ def release(claimer: str, product_ids: list[str] | None = None) -> int:
 
 def queue_for_oficina(limit: int, *, now: datetime | None = None, take: bool = True) -> list[dict[str, Any]]:
     """La cola que se le da a la Mac: lo que nadie más tiene reservado. Con `take` queda reservado para la oficina
-    (sin estirar lo que ya tenía: eso lo hacen sus lotes); sin `take` (--check, --dry-run) solo se mira."""
+    (sin estirar lo que ya tenía: eso lo hacen sus lotes); sin `take` (--check, --dry-run) solo se mira.
+    Con `oficina_ml_enabled` en 0 (default) la cola es vacía: la Mac no busca nada en ML."""
+    if not int(runtime.get("oficina_ml_enabled")):
+        return []
     now = now or utcnow()
     items = build_queue(limit, now=now, claimer=CLAIM_OFICINA)
     if not take:

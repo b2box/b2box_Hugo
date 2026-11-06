@@ -865,3 +865,22 @@ def test_min_gap_sale_del_runtime_con_15_por_defecto_y_0_lo_apaga(env):
     assert ams.min_gap() is None
     runtime.set_value("apify_meli_search_min_days", 7)
     assert ams.min_gap() == timedelta(days=7)
+
+
+# ── Interruptor de la Mac de la oficina ─────────────────────────────────────
+
+def test_mac_apagada_recibe_la_cola_vacia_y_no_reserva_nada(env):
+    _snaps(2)
+    runtime.set_value("oficina_ml_enabled", 0)
+    assert oficina_ml.queue_for_oficina(10) == []
+    with Session(engine) as s:
+        assert s.exec(select(MlWebClaim)).all() == []
+    # Apify sigue teniendo su cola.
+    assert len(oficina_ml.build_queue(10, claimer="apify-x")) == 2
+    runtime.set_value("oficina_ml_enabled", 1)
+    assert len(oficina_ml.queue_for_oficina(10)) == 2
+
+
+def test_la_mac_viene_apagada_por_defecto():
+    from app.config import Settings
+    assert Settings.model_fields["oficina_ml_enabled"].default == 0
