@@ -534,6 +534,26 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=500, step=10, group="monitor",
     ),
     SettingMeta(
+        key="luis_lens_enabled",
+        label="Luis: Google Lens al recibir un producto (1 / 0)",
+        description=(
+            "1 = cada producto nuevo que manda Luis pasa por Google Lens (~USD 0,005 la foto) y se guardan sus "
+            "publicaciones de Mercado Libre con precio; cuando Paco lo sube a Vendure se compara contra nuestro "
+            "precio en la pestaña «Subidos a Vendure». 0 = apagado."
+        ),
+        type="int", parser=int,
+        default_attr="luis_lens_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="luis_lens_daily_max",
+        label="Luis: fotos por día en Google Lens",
+        description="Tope de fotos por día (UTC) que pasan por Google Lens al recibirlas de Luis. Lo que no entra queda pendiente.",
+        type="int", parser=int,
+        default_attr="luis_lens_daily_max",
+        min=0, max=500, step=10, group="monitor",
+    ),
+    SettingMeta(
         key="apify_meli_search_min_days",
         label="Apify: días entre búsquedas del mismo producto",
         description=(

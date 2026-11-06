@@ -63,6 +63,7 @@ export default function Sidebar({
   const items: [string, { label: string; count: number | null }][] = [
     ...Object.entries(sections),
     ["semaforo", { label: "Semáforo", count: null }],
+    ["subidos", { label: "Subidos a Vendure", count: null }],
     ["bandeja", { label: "Bandeja de precios", count: pending }],
     ["seo_textos", { label: "Textos (SEO)", count: null }],
     ["vision_lab", { label: "Comparar visión", count: null }],

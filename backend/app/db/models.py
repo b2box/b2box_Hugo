@@ -941,3 +941,34 @@ def _events_are_not_edited(_mapper, _connection, target) -> None:  # noqa: ANN00
 @event.listens_for(PriceReviewEvent, "before_delete")
 def _events_are_not_deleted(_mapper, _connection, target) -> None:  # noqa: ANN001
     raise EventLogIsAppendOnly("price_review_event es de solo agregar: no se borra")
+
+
+class LuisIntake(SQLModel, table=True):
+    """Un producto que mandó Luis y no estaba en el catálogo (ver pricing/luis_intake.py): lo que trajo Google Lens de
+    Mercado Libre al recibirlo y, cuando Paco lo sube a Vendure, nuestro precio contra esa mediana con su color.
+    Una fila por oferta de 1688 (offer id del link)."""
+    __tablename__ = "luis_intake"
+
+    id: int | None = Field(default=None, primary_key=True)
+    offer_id: str = Field(max_length=32, unique=True, index=True)
+    source_url: str = Field(default="", max_length=2048)
+    name: str = Field(default="", max_length=300)
+    image_url: str = Field(default="", max_length=2048)
+    created_at: datetime = Field(default_factory=utcnow)
+    # pendiente | ok | sin_ml | error | apagado
+    lens_status: str = Field(default="pendiente", max_length=12)
+    lens_ran_at: datetime | None = None
+    lens_usd: float = Field(default=0.0)
+    # JSON: [{"title", "price_cents", "url"}] — solo ML Argentina con precio en ARS.
+    ml_matches: str = Field(default="[]")
+    ml_median_cents: int | None = None
+    # esperando_subida | comparado | sin_precio
+    status: str = Field(default="esperando_subida", max_length=20, index=True)
+    vendure_product_id: str | None = Field(default=None, max_length=64, index=True)
+    vendure_name: str | None = Field(default=None, max_length=300)
+    vendure_image_url: str | None = Field(default=None, max_length=2048)
+    uploaded_at: datetime | None = None
+    compared_at: datetime | None = None
+    our_price_cents: int | None = None
+    margin_pct: float | None = None
+    color: str | None = Field(default=None, max_length=16)

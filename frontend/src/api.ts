@@ -489,6 +489,30 @@ export interface ReviewItemsQuery {
   pageSize: number;
 }
 
+export interface LuisIntakeItem {
+  id: number;
+  offer_id: string;
+  source_url: string;
+  name: string;
+  image_url: string | null;
+  received_at: string | null;
+  lens_status: string;
+  ml_matches: { title: string; price_cents: number; url: string | null }[];
+  ml_median_cents: number | null;
+  vendure_product_id: string | null;
+  uploaded_at: string | null;
+  our_price_cents: number | null;
+  margin_pct: number | null;
+  color: string | null;
+  status: string;
+  compared_at: string | null;
+}
+
+export async function getLuisIntake(uploaded: boolean): Promise<{ items: LuisIntakeItem[] }> {
+  const params = new URLSearchParams({ uploaded: String(uploaded) });
+  return asJson<{ items: LuisIntakeItem[] }>(await apiFetch(`/api/price-monitor/luis-intake?${params}`));
+}
+
 export async function getReviewSummary(): Promise<PriceReviewSummary> {
   return asJson<PriceReviewSummary>(await apiFetch("/api/price-review/summary"));
 }
