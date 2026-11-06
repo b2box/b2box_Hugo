@@ -173,14 +173,14 @@ async def submit_pro(
     )
 
 
-async def get_status(search_id: str) -> dict[str, Any]:
+async def get_status(search_id: str, timeout: float = 10.0) -> dict[str, Any]:
     """Consulta el progreso de un search en Paco."""
     if not search_id:
         raise PacoError("search_id vacío")
     s = get_settings()
     url = f"{s.paco_url.rstrip('/')}{s.paco_status_path}/{search_id}"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=_headers())
 
     if resp.status_code >= 400:
