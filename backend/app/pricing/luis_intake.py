@@ -20,11 +20,13 @@ título pasa por clean_line. El token de Apify va solo en el header.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 from typing import Any
 
 from sqlmodel import Session, select
@@ -32,7 +34,7 @@ from sqlmodel import Session, select
 from app import runtime
 from app.clock import utcnow
 from app.config import get_settings
-from app.db.models import LuisIntake
+from app.db.models import AuditLog, LuisIntake
 from app.db.session import engine
 from app.estimate.otapi_item import offer_id_from_url
 from app.ingest.apify_1688 import _json, _request_bounded, _Run, allowed_image_url
@@ -53,6 +55,12 @@ _RUN_TIMEOUT_S = 240.0
 # "$ 12.999" · "ARS 12.999,50" · "$12,999.00": dígitos con separadores; el último separador con 1-2 dígitos es decimal.
 _PRICE_RE = re.compile(r"\d[\d.,\s]*")
 _ML_AR_HOSTS = ("mercadolibre.com.ar",)
+# Unión con Vendure por la búsqueda de Paco: cuántos días se sigue buscando, cada cuánto se vuelve a preguntar por una
+# fila y cuántas búsquedas se leen por aviso (cada ficha de Paco es un JSON que puede pesar MBs).
+PACO_LOOKBACK_DAYS = 21
+PACO_RECHECK = timedelta(minutes=10)
+PACO_MAX_PER_EVENT = 60
+_SEARCH_ID_RE = re.compile(r"search_id=([A-Za-z0-9_-]{1,64})")
 
 
 def is_enabled() -> bool:
@@ -66,23 +74,59 @@ def daily_max() -> int:
 # ─── 1. Al recibirlo de Luis ───────────────────────────────────────
 
 
-def record(source_url: str | None, name: str | None, image_urls: list[str] | None) -> int | None:
-    """Guarda (o refresca) la fila de esta oferta de 1688. None si el link no es de una oferta de 1688 o no hay foto
-    usable. Idempotente por offer id: Luis puede pedir /verify varias veces por el mismo producto."""
-    offer_id = offer_id_from_url(source_url or "")
+def intake_key(source_url: str | None) -> str | None:
+    """Clave de la fila: el offer id si es una oferta de 1688; si es otra tienda (KYD, TikTok, Amazon), "u" + hash del
+    link sin query ni fragmento. None si no es un link http(s)."""
+    url = (source_url or "").strip()
+    offer_id = offer_id_from_url(url)
+    if offer_id:
+        return offer_id
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc or len(url) > 2048:
+        return None
+    base = f"{parts.netloc.lower()}{parts.path.rstrip('/')}"
+    return "u" + hashlib.sha256(base.encode()).hexdigest()[:30]
+
+
+def record(source_url: str | None, name: str | None, image_urls: list[str] | None,
+           paco_search_id: str | None = None) -> int | None:
+    """Guarda (o refresca) la fila de este producto. None si el link no sirve o no hay foto usable. Idempotente por
+    producto: Luis puede pedir /verify varias veces por el mismo."""
+    key = intake_key(source_url)
     image = next((u for u in (image_urls or []) if allowed_image_url(u)), None)
-    if not offer_id or not image:
+    if not key or not image:
         return None
     with Session(engine, expire_on_commit=False) as s:
-        row = s.exec(select(LuisIntake).where(LuisIntake.offer_id == offer_id)).first()
+        row = s.exec(select(LuisIntake).where(LuisIntake.offer_id == key)).first()
         if row is None:
-            row = LuisIntake(offer_id=offer_id, source_url=(source_url or "")[:2048], image_url=image[:2048],
+            row = LuisIntake(offer_id=key, source_url=(source_url or "")[:2048], image_url=image[:2048],
                              name=clean_line(name or "", 300), lens_status=LENS_PENDING, status=WAITING)
             s.add(row)
         else:
             row.name = clean_line(name or "", 300) or row.name
+        if paco_search_id:
+            row.paco_search_id = paco_search_id[:64]
         s.commit()
         return row.id
+
+
+def backfill_from_audit(days: int = PACO_LOOKBACK_DAYS) -> list[int]:
+    """Filas para lo que Hugo ya mandó a Paco por Luis (antes de guardar el search_id o de aceptar links que no son de
+    1688). Devuelve las filas que todavía no tienen Lens, para correrlo."""
+    since = utcnow() - timedelta(days=days)
+    with Session(engine) as s:
+        events = s.exec(select(AuditLog).where(
+            AuditLog.action == "verify_passed_to_paco", AuditLog.source == "luis", AuditLog.created_at >= since,
+        ).order_by(AuditLog.id)).all()  # type: ignore[arg-type]
+    need_lens: list[int] = []
+    for ev in events:
+        m = _SEARCH_ID_RE.search(ev.detail or "")
+        intake_id = record(ev.product_source_url, ev.product_name,
+                           [ev.product_image_url] if ev.product_image_url else [], m.group(1) if m else None)
+        if intake_id is not None:
+            need_lens.append(intake_id)
+    with Session(engine) as s:
+        return [i for i in need_lens if (r := s.get(LuisIntake, i)) and r.lens_status == LENS_PENDING]
 
 
 async def lens_soon(intake_id: int) -> None:
@@ -231,9 +275,15 @@ async def compare_products(product_ids: list[str], client: Any = None) -> dict[s
         if client is None:
             from app.vendure.client import VendureClient
             client = VendureClient()
+        by_paco: dict[str, int] | None = None
         for pid in product_ids[:200]:
             try:
                 outcome = await _compare_one(client, pid, pending)
+                if outcome == "no_es_de_luis":
+                    if by_paco is None:
+                        by_paco = await _uploads_by_paco()
+                    if pid in by_paco:
+                        outcome = await _compare_one(client, pid, pending, intake_id=by_paco[pid])
             except Exception as exc:  # noqa: BLE001
                 log.warning("Luis/Vendure: el producto %s falló (%s)", pid, type(exc).__name__)
                 outcome = "error"
@@ -245,29 +295,79 @@ async def compare_products(product_ids: list[str], client: Any = None) -> dict[s
     return counts
 
 
-def _offers_waiting() -> set[str]:
-    """Offer ids de 1688 que mandó Luis (todos: un producto ya comparado se recompara si cambia su precio)."""
+def _offers_waiting() -> dict[str, int]:
+    """Clave -> fila de todo lo que mandó Luis (también lo ya comparado: se recompara si cambia su precio), más el id de
+    Vendure ya unido de cada fila (con prefijo "v:")."""
     with Session(engine) as s:
-        return set(s.exec(select(LuisIntake.offer_id)).all())
+        rows = s.exec(select(LuisIntake.id, LuisIntake.offer_id, LuisIntake.vendure_product_id)).all()
+    out: dict[str, int] = {}
+    for rid, key, vid in rows:
+        out[key] = rid
+        if vid:
+            out["v:" + vid] = rid
+    return out
 
 
-async def _compare_one(client: Any, pid: str, offers: set[str]) -> str:
+async def _compare_one(client: Any, pid: str, offers: dict[str, int], intake_id: int | None = None) -> str:
+    """Compara el producto `pid` con su fila: la que ya está unida a ese id, la del mismo link de 1688, o `intake_id`
+    (la que la búsqueda de Paco dice que lo subió)."""
+    row_id = intake_id or offers.get("v:" + pid)
     product = await client.get_product_priced(pid)
     if product is None:
         return "no_existe"
-    offer_id = offer_id_from_url(product.source_url or "")
-    if not offer_id or offer_id not in offers:
+    if row_id is None:
+        offer_id = offer_id_from_url(product.source_url or "")
+        row_id = offers.get(offer_id) if offer_id else None
+    if row_id is None:
         return "no_es_de_luis"
     our = semaforo.pick_our_price(product.priced_variants or [], int(runtime.get("pm_tier_policy")))
-    return await asyncio.to_thread(_save_comparison, offer_id, pid, product, our)
+    return await asyncio.to_thread(_save_comparison, row_id, pid, product, our)
 
 
-def _save_comparison(offer_id: str, pid: str, product: Any, our: semaforo.OurPrice | None) -> str:
+async def _uploads_by_paco() -> dict[str, int]:
+    """Id de Vendure -> fila, leyendo la ficha de Paco de cada búsqueda que todavía no se unió (las recientes, cada una
+    a lo sumo cada PACO_RECHECK). Paco guarda en la ficha el `vendure_product_id` de lo que subió."""
+    from app.integrations import paco as paco_integration
+
+    now = utcnow()
+    with Session(engine) as s:
+        rows = s.exec(select(LuisIntake).where(
+            LuisIntake.vendure_product_id.is_(None),  # type: ignore[union-attr]
+            LuisIntake.paco_search_id.is_not(None),  # type: ignore[union-attr]
+            LuisIntake.created_at >= now - timedelta(days=PACO_LOOKBACK_DAYS),
+        ).order_by(LuisIntake.id.desc())).all()  # type: ignore[union-attr]
+        due = [(r.id, r.paco_search_id) for r in rows
+               if r.paco_checked_at is None or now - r.paco_checked_at >= PACO_RECHECK][:PACO_MAX_PER_EVENT]
+        for r in rows:
+            if any(r.id == rid for rid, _ in due):
+                r.paco_checked_at = now
+                s.add(r)
+        s.commit()
+    sem = asyncio.Semaphore(4)
+
+    async def one(rid: int, sid: str) -> list[tuple[str, int]]:
+        async with sem:
+            try:
+                rec = await paco_integration.get_status(sid)
+            except Exception as exc:  # noqa: BLE001
+                log.info("Luis/Paco: no se pudo leer la búsqueda %s (%s)", sid, type(exc).__name__)
+                return []
+        prods = rec.get("products") if isinstance(rec, dict) else None
+        return [(str(p["vendure_product_id"]), rid) for p in (prods or [])
+                if isinstance(p, dict) and p.get("vendure_product_id")]
+
+    found: dict[str, int] = {}
+    for pairs in await asyncio.gather(*(one(rid, sid) for rid, sid in due)):
+        found.update(pairs)
+    return found
+
+
+def _save_comparison(row_id: int, pid: str, product: Any, our: semaforo.OurPrice | None) -> str:
     params = price_review.ReviewParams.from_runtime()
     commission = float(runtime.get("pm_ml_commission_pct"))
     shipping = int(runtime.get("pm_ml_shipping_cents"))
     with Session(engine) as s:
-        row = s.exec(select(LuisIntake).where(LuisIntake.offer_id == offer_id)).first()
+        row = s.get(LuisIntake, row_id)
         if row is None:
             return "no_es_de_luis"
         row.vendure_product_id = pid
@@ -289,6 +389,39 @@ def _save_comparison(offer_id: str, pid: str, product: Any, our: semaforo.OurPri
         s.add(row)
         s.commit()
         return row.status
+
+
+_SYNC_LOCK = asyncio.Lock()
+
+
+async def sync() -> dict[str, int]:
+    """Al abrir la pestaña: crea las filas de lo que Hugo ya mandó a Paco (con su Lens) y compara lo que Paco ya subió
+    a Vendure aunque el aviso de Vendure haya llegado antes de poder unirlo. Una sola a la vez; nunca lanza."""
+    if _SYNC_LOCK.locked():
+        return {}
+    async with _SYNC_LOCK:
+        try:
+            for intake_id in await asyncio.to_thread(backfill_from_audit):
+                await lens_soon(intake_id)
+            found = await _uploads_by_paco()
+            if not found:
+                return {}
+            pending = await asyncio.to_thread(_offers_waiting)
+            from app.vendure.client import VendureClient
+            client = VendureClient()
+            counts: dict[str, int] = {}
+            for pid, rid in found.items():
+                try:
+                    outcome = await _compare_one(client, pid, pending, intake_id=rid)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Luis/Vendure: el producto %s falló (%s)", pid, type(exc).__name__)
+                    outcome = "error"
+                counts[outcome] = counts.get(outcome, 0) + 1
+            log.info("Luis/sync: %s", counts)
+            return counts
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Luis/sync: se cortó (%s)", type(exc).__name__)
+            return {}
 
 
 # ─── 3. Para la pestaña ────────────────────────────────────────────
