@@ -401,9 +401,16 @@ async def sync() -> dict[str, int]:
         return {}
     async with _SYNC_LOCK:
         try:
-            for intake_id in await asyncio.to_thread(backfill_from_audit):
-                await lens_soon(intake_id)
+            need_lens = await asyncio.to_thread(backfill_from_audit)
+            sem = asyncio.Semaphore(5)
+
+            async def lens(intake_id: int) -> None:
+                async with sem:
+                    await lens_soon(intake_id)
+
+            await asyncio.gather(*(lens(i) for i in need_lens))
             found = await _uploads_by_paco()
+            found.update(await asyncio.to_thread(_stale_comparisons))
             if not found:
                 return {}
             pending = await asyncio.to_thread(_offers_waiting)
@@ -422,6 +429,14 @@ async def sync() -> dict[str, int]:
         except Exception as exc:  # noqa: BLE001
             log.warning("Luis/sync: se cortó (%s)", type(exc).__name__)
             return {}
+
+
+def _stale_comparisons() -> dict[str, int]:
+    """Filas ya unidas a Vendure cuyo Lens terminó después de la comparación: se recomparan con la mediana nueva."""
+    with Session(engine) as s:
+        rows = s.exec(select(LuisIntake).where(LuisIntake.vendure_product_id.is_not(None))).all()  # type: ignore[union-attr]
+    return {r.vendure_product_id: r.id for r in rows
+            if r.lens_ran_at and (r.compared_at is None or r.compared_at < r.lens_ran_at)}
 
 
 # ─── 3. Para la pestaña ────────────────────────────────────────────
