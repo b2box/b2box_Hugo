@@ -37,7 +37,7 @@ def _clean() -> None:
         for model in (RadarPrecheck, PriceFactorSample, MlWebResult, MlWebClaim):
             s.execute(delete(model))
         for key in (radar_precheck.COUNTER_KEY, radar_precheck.APIFY_COUNTER_KEY, radar_precheck.VENDURE_COUNTER_KEY,
-                    "radar_precheck_vendure_daily_max", "radar_precheck_enabled",
+                    "radar_precheck_vendure_daily_max", "pm_tier_policy", "radar_precheck_enabled",
                     "radar_precheck_daily_max", "radar_precheck_queue_share_pct", "radar_precheck_apify_daily_max"):
             row = s.get(Setting, key)
             if row is not None:
@@ -128,6 +128,9 @@ def test_submit_queues_and_get_reports_pending_then_listo(client, monkeypatch):
     async def no_neighbors(_url):
         return []
 
+    async def channel_min():
+        return None
+    monkeypatch.setattr(radar_precheck, "_min_purchase_cny", channel_min)
     counts = asyncio.run(radar_precheck.process_pending(["L1"], scorer=scorer, estimator=vendure_down,
                                                         neighbors=no_neighbors))
     assert counts == {"listo": 1}
@@ -327,7 +330,9 @@ async def test_search_pending_needs_the_switch_the_token_and_limited_permissions
 RECORDED_OK = {
     "status": "OK", "statusDetail": None, "channelCurrencyCode": "ARS",
     "scenarios": [{"label": "mid", "purchasePriceCny": 25.0, "boxQuantile": 0.5, "cbmPerUnit": 0.012, "kgPerUnit": 0.6,
-                   "prices": [{"quantity": 50, "netChannelPerUnit": 1_400_000, "invoiceChannelPerUnit": 1_694_000}]}],
+                   "prices": [{"quantity": 25, "netChannelPerUnit": 1_400_000, "invoiceChannelPerUnit": 1_694_000},
+                              {"quantity": 50, "netChannelPerUnit": 1_300_000, "invoiceChannelPerUnit": 1_573_000},
+                              {"quantity": 1000, "netChannelPerUnit": 1_100_000, "invoiceChannelPerUnit": 1_331_000}]}],
     "boxSource": "INPUT", "boxSampleSize": 0, "referenceProductCount": 3, "taxClassificationCode": "9617.00.10",
     "taxClassificationShare": 0.67, "isImoCargo": False, "isImoCargoShare": 0.0, "goodsKind": "resale",
     "salesVatPct": 21.0, "profileVersion": 4, "computedAt": "2026-11-08T12:00:00Z",
@@ -344,22 +349,34 @@ def test_estimate_input_matches_vendures_sdl():
     from tests.test_qa_estimate import VENDURE_SDL
 
     schema = build_schema(VENDURE_SDL)
-    full = radar_precheck.build_estimate_input(25.0, 50, 0.6, [20, 20, 30], ["7", "8"])
-    assert full == {"quantities": [50], "referenceProductIds": ["7", "8"],
+    full = radar_precheck.build_estimate_input(25.0, [25], 0.6, [20, 20, 30], ["7", "8"])
+    assert full == {"quantities": [25], "referenceProductIds": ["7", "8"],
                     "scenarios": [{"label": "mid", "purchasePriceCny": 25.0, "cbmPerUnit": 0.012, "kgPerUnit": 0.6}]}
     coerce_input_value(full, schema.get_type("EstimateImportPriceInput"))
-    no_dims = radar_precheck.build_estimate_input(25.0, 50, None, [20, 20, 30], [])
+    no_dims = radar_precheck.build_estimate_input(25.0, [25, 50, 1000], None, [20, 20, 30], [])
     assert no_dims["scenarios"][0] == {"label": "mid", "purchasePriceCny": 25.0, "boxQuantile": 0.5}
     coerce_input_value(no_dims, schema.get_type("EstimateImportPriceInput"))
 
 
-def test_read_estimate_takes_the_invoice_at_the_moq_or_nothing():
-    cents, how = radar_precheck.read_estimate(RECORDED_OK, 50)
-    assert cents == 1_694_000 and how["ncm"] == "9617.00.10" and how["medidas"] == "unidad"
-    assert radar_precheck.read_estimate(RECORDED_OK, 200)[0] is None             # otra cantidad: no se adivina
-    assert radar_precheck.read_estimate(RECORDED_NOT_READY, 50) == (None, {"vendure_status": "PRICING_CONFIG_NOT_READY"})
-    assert radar_precheck.read_estimate({**RECORDED_OK, "channelCurrencyCode": "USD"}, 50)[0] is None
-    assert radar_precheck.read_estimate(None, 50)[0] is None
+def test_tier_quantities_follow_pm_tier_policy():
+    # 25 CNY y compra mínima de 500 CNY → 20 unidades → 25 en la escalera de Vendure (el primer tramo).
+    assert radar_precheck.tier_quantities(25.0, 0, None) == [25]
+    assert radar_precheck.tier_quantities(25.0, 0, 1250) == [50]
+    assert radar_precheck.tier_quantities(600.0, 0, None) == [1]
+    # Tramo más barato: el primero y las cantidades de tramo del cotizador que lo superan (50 / 200 / 1000).
+    assert radar_precheck.tier_quantities(25.0, 1, None) == [25, 50, 200, 1000]
+    assert radar_precheck.tier_quantities(2.0, 1, None) == [250, 1000]
+
+
+def test_read_estimate_takes_the_tier_of_the_policy_or_nothing():
+    cents, how = radar_precheck.read_estimate(RECORDED_OK, [25], 0)
+    assert cents == 1_694_000 and how["cantidad"] == 25 and how["ncm"] == "9617.00.10" and how["medidas"] == "unidad"
+    cents, how = radar_precheck.read_estimate(RECORDED_OK, [25, 50, 1000], 1)
+    assert cents == 1_331_000 and how["cantidad"] == 1000 and how["politica_tramo"] == 1
+    assert radar_precheck.read_estimate(RECORDED_OK, [200], 0)[0] is None          # otra cantidad: no se adivina
+    assert radar_precheck.read_estimate(RECORDED_NOT_READY, [25]) == (None, {"vendure_status": "PRICING_CONFIG_NOT_READY"})
+    assert radar_precheck.read_estimate({**RECORDED_OK, "channelCurrencyCode": "USD"}, [25])[0] is None
+    assert radar_precheck.read_estimate(None, [25])[0] is None
 
 
 def _ready_row(client, ref: str) -> None:
@@ -379,9 +396,12 @@ async def _match(_our, _urls):
     return 0.95
 
 
-def test_vendure_estimate_is_the_main_path(client):
+def test_vendure_estimate_is_the_main_path_with_the_semaforo_tier(client, monkeypatch):
     import asyncio
 
+    async def channel_min():
+        return None                                   # el canal no fijó la suya: 500 CNY
+    monkeypatch.setattr(radar_precheck, "_min_purchase_cny", channel_min)
     _ready_row(client, "V1")
     seen: list[dict] = []
 
@@ -395,17 +415,32 @@ def test_vendure_estimate_is_the_main_path(client):
 
     assert asyncio.run(radar_precheck.process_pending(["V1"], scorer=_match, estimator=estimator,
                                                       neighbors=neighbors)) == {"listo": 1}
-    assert seen[0]["quantities"] == [50] and seen[0]["referenceProductIds"] == ["7", "8", "9"]
+    assert seen[0]["quantities"] == [25] and seen[0]["referenceProductIds"] == ["7", "8", "9"]   # pm_tier_policy 0
     assert seen[0]["scenarios"][0]["purchasePriceCny"] == 25.0 and seen[0]["scenarios"][0]["kgPerUnit"] == 0.6
     [v] = client.get("/radar/precheck", params={"refs": "V1"}, headers=AUTH).json()["items"]
     assert v["fuente_precio"] == "vendure_estimate" and v["precio_app_estimado_ars"] == 16_940.0
     assert v["factor"]["fuente_precio"] == "vendure_estimate" and v["factor"]["referencias_enviadas"] == 3
+    assert v["factor"]["cantidad"] == 25 and v["factor"]["moq_proveedor"] == 50
     assert v["color"] == "verde"                    # (30000·0,87 − 16940) / 16940 ≈ 54 %
     assert v["estimado"] is True
+    # Con pm_tier_policy = 1 (tramo más barato) se piden los tramos y se lee el más barato, como el semáforo.
+    runtime.set_value("pm_tier_policy", 1)
+    try:
+        _ready_row(client, "V2")
+        asyncio.run(radar_precheck.process_pending(["V2"], scorer=_match, estimator=estimator, neighbors=neighbors))
+    finally:
+        runtime.set_value("pm_tier_policy", 0)
+    assert seen[1]["quantities"] == [25, 50, 200, 1000]
+    [v2] = client.get("/radar/precheck", params={"refs": "V2"}, headers=AUTH).json()["items"]
+    assert v2["precio_app_estimado_ars"] == 13_310.0 and v2["factor"]["cantidad"] == 1000
 
 
-def test_vendure_not_ready_or_over_cap_falls_back_to_the_factor(client):
+def test_vendure_not_ready_or_over_cap_falls_back_to_the_factor(client, monkeypatch):
     import asyncio
+
+    async def channel_min():
+        return None
+    monkeypatch.setattr(radar_precheck, "_min_purchase_cny", channel_min)
 
     price_factor.upsert([PriceFactorSample(product_id=f"q{i}", tier_id="t", cny_unit=10.0, factura_unit_cents=600_000,
                                            fob_usd=100.0, factura_usd=300.0, cny_to_usd=0.14, usd_to_channel=1428.5714)

@@ -22,10 +22,12 @@ Cómo se mide (sin caminos nuevos hacia ML):
      producto deshabilitado). Solo los IGUAL con precio en pesos cuentan: mediana, cantidad, publicaciones y VENTAS
      (`sold_quantity` de la polycard de ML).
   3. Precio de la app ESTIMADO, camino PRINCIPAL: `estimateImportPrice` de Vendure (la fórmula real de la tienda, solo
-     lectura, `vendure_price`) con el precio de fábrica en CNY, la cantidad = MOQ, las medidas y el peso de la unidad
+     lectura, `vendure_price`) con el precio de fábrica en CNY, las cantidades del tramo que compara el semáforo
+     (`pm_tier_policy`, ver `tier_quantities`), las medidas y el peso de la unidad
      (`cbmPerUnit`/`kgPerUnit`; sin los dos, la caja típica de los vecinos) y los productos de referencia = vecinos CLIP de
      la foto (de ahí Vendure saca NCM, baterías y caja; la categoría NO es un parámetro de la query). Se toma la factura
-     por unidad (con IVA) del escenario `mid` a la cantidad del MOQ. RESPALDO, si Vendure falla, no está listo, pasa el
+     por unidad (con IVA) del escenario `mid` en ese tramo: así un verde del prechequeo es el mismo verde que dará el
+     semáforo al publicar. RESPALDO, si Vendure falla, no está listo, pasa el
      tope `radar_precheck_vendure_daily_max` o falta el precio: precio de fábrica × factor de desgloses reales de Vendure
      (`price_factor`). La respuesta dice cuál se usó (`fuente_precio`). P_max = `price_diagnosis.price_max_cents`; color y
      ganancia con `semaforo` (los mismos cortes y costos de ML).
@@ -316,10 +318,28 @@ NEIGHBORS = 10
 SCENARIO = "mid"
 
 
-def build_estimate_input(cny_unit: float, moq: int, peso_kg: float | None, medidas_cm: Sequence[float] | None,
-                         reference_ids: Sequence[str]) -> dict[str, Any]:
+def tier_quantities(cny_unit: float, tier_policy: int, min_purchase_cny: float | None) -> list[int]:
+    """Las cantidades que se le piden a Vendure, con el MISMO criterio de tramo que el semáforo (`pm_tier_policy`). PURA.
+
+    El primer tramo sale de la regla de compra mínima de Vendure (`price_diagnosis.minimum_quantity_for_cost`, el port de
+    engine/minimum-purchase.ts, con el `minimumPurchaseCny` del canal; 500 si no lo fijó).
+      * 0 = tramo mínimo → solo esa cantidad;
+      * 1 = tramo más barato → esa y las cantidades de tramo del cotizador (`estimate_tier_qty_1/2/3`) que la superan; se
+        lee la factura por unidad más baja."""
+    from app.pricing.price_diagnosis import DEFAULT_MIN_PURCHASE_CNY, minimum_quantity_for_cost
+
+    first = minimum_quantity_for_cost(cny_unit, float(min_purchase_cny or DEFAULT_MIN_PURCHASE_CNY)) or 1
+    if int(tier_policy) != semaforo.TIER_POLICY_CHEAPEST:
+        return [first]
+    extra = sorted({int(runtime.get(f"estimate_tier_qty_{i}") or 0) for i in (1, 2, 3)} - {0})
+    return [first, *[q for q in extra if q > first]]
+
+
+def build_estimate_input(cny_unit: float, quantities: Sequence[int], peso_kg: float | None,
+                         medidas_cm: Sequence[float] | None, reference_ids: Sequence[str]) -> dict[str, Any]:
     """El input de `estimateImportPrice` (contrato del SDL de Vendure). PURA. Un solo escenario (`mid`) con el precio de
-    fábrica; con peso Y medidas van las de la unidad, si no la caja mediana de los vecinos (`boxQuantile` 0,5)."""
+    fábrica; con peso Y medidas van las de la unidad, si no la caja mediana de los vecinos (`boxQuantile` 0,5). La
+    categoría no es un parámetro: Vendure clasifica por los productos de referencia (vecinos por foto)."""
     from app.estimate.pricing import BOX_QUANTILES
 
     scenario: dict[str, Any] = {"label": SCENARIO, "purchasePriceCny": float(cny_unit)}
@@ -328,16 +348,18 @@ def build_estimate_input(cny_unit: float, moq: int, peso_kg: float | None, medid
         scenario["kgPerUnit"] = float(peso_kg)
     else:
         scenario["boxQuantile"] = BOX_QUANTILES[SCENARIO]
-    return {"quantities": [max(1, int(moq))], "referenceProductIds": [str(x) for x in reference_ids][:NEIGHBORS],
-            "scenarios": [scenario]}
+    return {"quantities": [max(1, int(q)) for q in quantities],
+            "referenceProductIds": [str(x) for x in reference_ids][:NEIGHBORS], "scenarios": [scenario]}
 
 
-def read_estimate(raw: object, moq: int) -> tuple[int | None, dict[str, Any]]:
-    """Respuesta cruda de Vendure → (factura por unidad en centavos de ARS, cómo). PURA. None si no sirve."""
+def read_estimate(raw: object, quantities: Sequence[int], tier_policy: int = 0) -> tuple[int | None, dict[str, Any]]:
+    """Respuesta cruda de Vendure → (factura por unidad en centavos de ARS del tramo que pide la política, cómo). PURA.
+    Política 0: la de la primera cantidad (tramo mínimo); 1: la más baja (tramo más barato). None si no sirve."""
     from app.estimate import vendure_estimate
     from app.pricing import price_monitor
 
-    est = vendure_estimate.parse(raw, [max(1, int(moq))])
+    qs = [max(1, int(q)) for q in quantities]
+    est = vendure_estimate.parse(raw, qs)
     how: dict[str, Any] = {"vendure_status": est.status}
     if est.status != vendure_estimate.STATUS_OK:
         return None, how
@@ -345,16 +367,43 @@ def read_estimate(raw: object, moq: int) -> tuple[int | None, dict[str, Any]]:
         how["vendure_status"] = f"moneda {est.currency}"
         return None, how
     sc = next((x for x in est.scenarios if x.label == SCENARIO), None)
-    price = sc.prices.get(max(1, int(moq))) if sc is not None else None
-    if price is None:
+    prices = sc.prices if sc is not None else {}
+    if int(tier_policy) == semaforo.TIER_POLICY_CHEAPEST:
+        got = [(q, prices[q]) for q in qs if q in prices]
+        chosen = min(got, key=lambda t: t[1][1]) if got else None
+    else:
+        chosen = (qs[0], prices[qs[0]]) if qs[0] in prices else None
+    if chosen is None:
         how["vendure_status"] = "sin precio para la cantidad"
         return None, how
-    how.update({"cantidad": max(1, int(moq)), "neto_cents": price[0], "box_source": est.box_source,
-                "box_sample_size": est.box_sample_size, "referencias": est.reference_product_count,
-                "ncm": est.tax_classification_code, "iva_venta_pct": est.sales_vat_pct,
-                "perfil": est.profile_version, "calculado": est.computed_at,
+    qty, price = chosen
+    how.update({"politica_tramo": int(tier_policy), "cantidades": qs, "cantidad": qty, "neto_cents": price[0],
+                "box_source": est.box_source, "box_sample_size": est.box_sample_size,
+                "referencias": est.reference_product_count, "ncm": est.tax_classification_code,
+                "iva_venta_pct": est.sales_vat_pct, "perfil": est.profile_version, "calculado": est.computed_at,
                 "medidas": "unidad" if est.box_source == "INPUT" else "vecinos"})
     return price[1], how
+
+
+_channel_min: dict[str, Any] = {}
+CHANNEL_TTL = timedelta(hours=12)
+
+
+async def _min_purchase_cny() -> float | None:
+    """`minimumPurchaseCny` del canal (una lectura cada 12 h; None = Vendure usa 500)."""
+    now = utcnow()
+    if _channel_min.get("at") and now - _channel_min["at"] < CHANNEL_TTL:
+        return _channel_min.get("value")
+    try:
+        from app.vendure.client import VendureClient
+
+        ch = await VendureClient().get_channel_pricing()
+        value = ch.minimum_purchase_cny if ch is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.info("precheck: no se pudo leer la compra mínima del canal (%s): 500", type(exc).__name__)
+        value = None
+    _channel_min.update(at=now, value=value)
+    return value
 
 
 async def _clip_neighbors(image_url: str) -> list[str]:
@@ -379,7 +428,9 @@ async def vendure_price(row: RadarPrecheck, *, estimator: Any = None, neighbors:
     try:
         refs = await (neighbors or _clip_neighbors)(row.imagen_url)
         medidas = json.loads(row.medidas_cm) if row.medidas_cm else None
-        inp = build_estimate_input(row.precio_cny_moq, row.moq, row.peso_kg, medidas, refs)
+        policy = int(runtime.get("pm_tier_policy") or 0)
+        quantities = tier_quantities(row.precio_cny_moq, policy, await _min_purchase_cny())
+        inp = build_estimate_input(row.precio_cny_moq, quantities, row.peso_kg, medidas, refs)
         if estimator is None:
             from app.vendure.client import VendureClient
             estimator = VendureClient().estimate_import_price
@@ -387,8 +438,8 @@ async def vendure_price(row: RadarPrecheck, *, estimator: Any = None, neighbors:
     except Exception as exc:  # noqa: BLE001  (Vendure caído, timeout, schema: se usa el respaldo)
         log.info("precheck %s: estimateImportPrice falló (%s)", row.ref, type(exc).__name__)
         return None, {"vendure_status": f"error {type(exc).__name__}"}
-    cents, how = read_estimate(raw, row.moq)
-    how["referencias_enviadas"] = len(refs)
+    cents, how = read_estimate(raw, quantities, policy)
+    how.update(referencias_enviadas=len(refs), moq_proveedor=row.moq)
     return cents, how
 
 

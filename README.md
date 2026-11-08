@@ -1910,11 +1910,15 @@ ahora también da los vendidos del texto («+5mil vendidos») cuando `tracks` no
 vuelo); solo los IGUAL con precio en pesos cuentan. Sin el índice CLIP listo queda pendiente.
 
 **Precio de la app ESTIMADO**, camino principal: `estimateImportPrice` de Vendure (la fórmula real de la tienda, solo
-lectura; `radar_precheck.vendure_price`). Input (contrato `EstimateImportPriceInput`): `quantities: [moq]`,
+lectura; `radar_precheck.vendure_price`), con el MISMO tramo que el semáforo (`pm_tier_policy`): un verde del prechequeo es
+el verde que dará el semáforo al publicar. Input (contrato `EstimateImportPriceInput`): `quantities` = el primer tramo
+según la regla de compra mínima de Vendure (`minimumPurchaseCny` del canal, 500 si no lo fijó; port en
+`price_diagnosis.minimum_quantity_for_cost`) y, con `pm_tier_policy = 1`, también las cantidades `estimate_tier_qty_*` que
+lo superan (se lee la factura más baja; con 0, la del primer tramo),
 `referenceProductIds` = hasta 10 vecinos CLIP de la foto (de ahí Vendure saca NCM, baterías y caja típica) y un escenario
 `mid` con `purchasePriceCny` = `precio_cny_moq` y, si vienen peso Y medidas, `cbmPerUnit` + `kgPerUnit` (si no,
 `boxQuantile: 0.5`, la caja mediana de los vecinos). La categoría NO es un parámetro de la query. Se toma
-`invoiceChannelPerUnit` (con IVA) del escenario a la cantidad del MOQ, en ARS. Tope `radar_precheck_vendure_daily_max`
+`invoiceChannelPerUnit` (con IVA, ARS) del escenario en ese tramo; el MOQ del proveedor queda anotado en `factor`. Tope `radar_precheck_vendure_daily_max`
 (300/día ART), 20 s por consulta. Respaldo, si Vendure falla, no está listo (`PRICING_CONFIG_NOT_READY`, `NO_BOX_DATA`),
 pasa el tope o no trae precio: el factor de `pricing/price_factor.py`, `precio_cny_moq × mediana(factura / fob) × cambio`,
 con desgloses REALES de Vendure (`bulkPriceTierBreakdowns`) guardados en `price_factor_sample` (los que ya leyó la
