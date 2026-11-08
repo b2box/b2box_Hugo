@@ -11,6 +11,7 @@ import { fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format";
 import { SECTION_META } from "../sections";
 import { StoresPanel, safeHttpsUrl } from "./SourceCells";
 import { COLOR_META, FilterChip, ListingsPanel, REVIEW_REASON } from "./SemaforoView";
+import AprendizajeView from "./AprendizajeView";
 import type {
   DiagRule,
   MatchOrigin,
@@ -93,7 +94,7 @@ const EVENT_LABEL: Record<string, string> = {
   porton: "Portón de precio (lo subió Paco)",
   decision_activar: "Decidió activarlo",
   decision_activar_auto: "Hugo lo activó solo (verde firme)",
-  decision_inactivar_auto: "Hugo lo apagó solo (rojo firme prendido a mano)",
+  decision_inactivar_auto: "Hugo lo apagó solo (rojo firme)",
 };
 
 // La marca que deja en la ficha una reactivación automática que no se hizo por el tope del día (price_recalc.FLAG_NOT_RED).
@@ -176,6 +177,8 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [selected, setSelected] = useState<number | null>(null);
+  // «Aprendizaje»: las correcciones de las personas al semáforo y los ajustes por segmento que salen de ellas.
+  const [learning, setLearning] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -247,7 +250,9 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
       )}
       {summary && summary.mode === 2 && (
         <p className="p-2 rounded-md text-xs border bg-warning/10 border-warning/40 text-warning">
-          El modo automático todavía no existe: Hugo se comporta como en propuesta y no inactiva nada.
+          Modo automático: cuando la comparación con Mercado Libre es firme, Hugo apaga solo los rojos publicados y
+          activa los verdes que subió Paco (con topes diarios y Deshacer). Amarillo o sin dato quedan acá. Si una persona
+          hace lo contrario, Hugo no lo revierte: lo anota en «Aprendizaje».
         </p>
       )}
       {summary?.last_pass_error && (
@@ -277,8 +282,9 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
         {TABS.map((t) => (
           <FilterChip
             key={t.value}
-            active={tab === t.value}
+            active={!learning && tab === t.value}
             onClick={() => {
+              setLearning(false);
               setTab(t.value);
               setPage(0);
             }}
@@ -286,6 +292,9 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
             {t.label} <span className="num-tabular">{nfmt(summary?.groups[t.value] ?? 0)}</span>
           </FilterChip>
         ))}
+        <FilterChip active={learning} onClick={() => setLearning(true)}>
+          Aprendizaje
+        </FilterChip>
         <FilterChip active={false} onClick={onOpenSemaforo} className="border-dashed border-border text-muted-foreground">
           Rojos dudosos → Semáforo <span className="num-tabular">{nfmt(lp?.doubtful ?? 0)}</span>
         </FilterChip>
@@ -300,6 +309,10 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
         </div>
       </div>
 
+      {learning ? (
+        <AprendizajeView />
+      ) : (
+      <>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Causa probable</span>
         <FilterChip
@@ -373,6 +386,8 @@ export default function BandejaView({ onOpenSemaforo }: { onOpenSemaforo: () => 
             </Button>
           </div>
         </div>
+      )}
+      </>
       )}
     </section>
   );

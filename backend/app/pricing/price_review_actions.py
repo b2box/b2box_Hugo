@@ -17,11 +17,15 @@ la expone y no tiene Deshacer.
 Portón de precio (pm_mode = 2, pricing/price_gate.py), con el MISMO protocolo y actor `hugo:auto`:
 
     activar_auto    por_activar → activado (prende lo que subió Paco con verde firme)
-    inactivar_auto  propuesto / por_activar → en_revision (apaga un rojo firme que alguien prendió a mano)
+    inactivar_auto  propuesto / por_activar → en_revision (apaga un rojo firme publicado)
 
 y la decisión humana `activar` (por_activar → activado; «Descartar» = Despublicar sin escribir: ya está apagado). A
 diferencia de la reactivación del recálculo, las dos acciones del portón SÍ tienen Deshacer (una persona las puede volver
 atrás hasta 30 días después) y activar no exige que lo haya apagado Hugo: lo apagado es como lo subió Paco.
+
+La persona manda: si una decisión de una persona va contra el color del semáforo (Mantener o Activar un rojo, Despublicar un
+verde, Deshacer lo que Hugo hizo solo), `act` la anota en `semaforo_correcciones` (pricing/semaforo_correcciones.py): Hugo
+no vuelve a actuar solo sobre ese producto por un tiempo y el aprendizaje semanal la usa.
 
 Qué se puede desde cada estado lo manda `TRANSITIONS` (tabla 3.1 de los criterios); la pantalla muestra los botones que
 devuelve `available_actions`.
@@ -193,6 +197,7 @@ class _Move:
     before: dict[str, Any] = field(default_factory=dict)     # cómo estaban, con `state_since`: para volver atrás
     intent_id: int | None = None                             # el evento `intent` de esta escritura
     intent_at: datetime | None = None                        # y su hora: desde ahí vale «Hugo lo apagó»
+    undoes: str | None = None                                # con Deshacer: el `kind` de la acción que se deshace
 
 
 # ─── Validación ───────────────────────────────────────────────────
@@ -369,7 +374,8 @@ def _plan_undo(item: PriceReviewItem, now: datetime) -> _Move:
     if now - ev.at > UNDO_WINDOW:
         raise ActionError(409, "plazo_vencido", "Venció el plazo para deshacer (30 días).", item)
     # `state_since` es la hora del Deshacer, no la de antes: así la pasada sabe qué dato es anterior al cambio.
-    return _Move(DESHACER, item.state, str(ev.from_state), write, {**_parse(_payload(ev)["antes"]), "state_since": now})
+    return _Move(DESHACER, item.state, str(ev.from_state), write, {**_parse(_payload(ev)["antes"]), "state_since": now},
+                 undoes=ev.kind)
 
 
 async def act(item_id: int, action: str, actor: str, *, expected_state: str, motive_code: str | None = None,
@@ -403,10 +409,36 @@ async def act(item_id: int, action: str, actor: str, *, expected_state: str, mot
     mv.before = {"state_since": item.state_since, **{k: getattr(item, k) for k in mv.values if k != "state_since"}}
     _start(item, mv, actor, code, text, now)
     if mv.write is None:
-        return _result(item, wrote=False)
-    if hold is not None and mv.write:
-        raise _manual(item, mv, actor, *hold)     # sin leer ni escribir Vendure
-    return await _apply(item, mv, actor, client or VendureClient())
+        out = _result(item, wrote=False)
+    else:
+        if hold is not None and mv.write:
+            raise _manual(item, mv, actor, *hold)     # sin leer ni escribir Vendure
+        out = await _apply(item, mv, actor, client or VendureClient())
+    if actor != pr.ACTOR_AUTO:
+        await asyncio.to_thread(_note_correction, item, mv, actor, code, text, now)
+    return out
+
+
+# La persona manda (pricing/semaforo_correcciones.py): qué acción de la bandeja contradice al semáforo.
+_CORRECTION_OF = {MANTENER: "mantener", ACTIVAR: "activar", DESPUBLICAR: "inactivar"}
+_UNDO_CORRECTION_OF = {f"decision_{INACTIVAR_AUTO}": "activar", f"decision_{ACTIVAR_AUTO}": "inactivar"}
+# Motivo de Mantener → motivo de la corrección.
+_MOTIVE_OF = {"match_mal": "match_malo", "margen_aceptado": "precio_ok", "nicho": "estrategia", "volumen": "estrategia",
+              "otro": "otro"}
+
+
+def _note_correction(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text: str | None,
+                     now: datetime) -> None:
+    """Si la decisión de una persona va contra el color del semáforo (mantener o activar un rojo, apagar un verde, deshacer
+    lo que hizo Hugo solo), se anota la corrección: Hugo no vuelve a actuar solo sobre el producto por un tiempo y el
+    aprendizaje la usa. Nunca lanza."""
+    from app.pricing import semaforo_correcciones as corr   # lazy: corr importa price_review
+
+    decision = _UNDO_CORRECTION_OF.get(mv.undoes or "") if mv.action == DESHACER else _CORRECTION_OF.get(mv.action)
+    if decision is None:
+        return
+    corr.record_for_product(item.product_id, decision, actor=actor, origin=corr.ORIGIN_BANDEJA, now=now,
+                            motive=_MOTIVE_OF.get(code or ""), note=text)
 
 
 async def auto_reactivate(item_id: int, expected_state: str, client: VendureClient | None = None, *,

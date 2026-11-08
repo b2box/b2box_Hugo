@@ -381,7 +381,9 @@ async def test_without_deciders_nothing_can_be_decided_and_there_are_no_other_wr
     if openapi.status_code == 200:
         paths = {p: set(v) for p, v in openapi.json()["paths"].items() if p.startswith(BASE)}
         posts = {p for p, methods in paths.items() if methods != {"get"}}
-        assert posts == {f"{BASE}/items/{{item_id}}/{s}" for s in ("approve", "decision", "undo")}, paths
+        assert posts == {f"{BASE}/items/{{item_id}}/{s}" for s in ("approve", "decision", "undo")} | {
+            f"{BASE}/corrections/{{correction_id}}/motive", f"{BASE}/adjustments/run",
+            *(f"{BASE}/adjustments/{{adj_id}}/{s}" for s in ("approve", "reject", "undo"))}, paths
         assert all(paths[p] == {"post"} for p in posts), paths
 
 

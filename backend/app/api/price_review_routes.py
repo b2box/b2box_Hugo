@@ -10,6 +10,17 @@ POST /api/price-review/items/{id}/decision  → corregir | mantener | despublica
                                               {decision, expected_state, motive_code?, motive_text?}
 POST /api/price-review/items/{id}/undo      → Deshacer la última acción humana  {expected_state, motive_text?}
 
+La persona manda y el semáforo aprende (pricing/semaforo_correcciones.py y pricing/semaforo_aprende.py):
+
+GET  /api/price-review/corrections                  → correcciones humanas al semáforo (paginado)
+POST /api/price-review/corrections/{id}/motive      → por qué {motive, note?, ml_ids?}; con match_malo, las publicaciones
+                                                      van a «No es el mismo» (market_match_feedback)
+GET  /api/price-review/adjustments                  → ajustes por segmento (propuestos, aplicados y su historial)
+POST /api/price-review/adjustments/run              → buscar ajustes ahora (según pm_learn_mode)
+POST /api/price-review/adjustments/{id}/approve     → aplicar un ajuste propuesto
+POST /api/price-review/adjustments/{id}/reject      → rechazarlo
+POST /api/price-review/adjustments/{id}/undo        → deshacer un ajuste aplicado
+
 Los POST solo aceptan JSON validado y solo los puede hacer una persona de PRICE_REVIEW_DECIDERS (fail-closed). Todo lo
 que hacen (y lo único de la bandeja que escribe en Vendure) vive en `pricing/price_review_actions.py`. Errores: 400
 validación, 403 sin permiso, 404, 409 (el estado cambió, la acción no va desde ese estado, modo sombra, reactivar a mano,
@@ -22,6 +33,7 @@ Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Any, Literal
@@ -39,6 +51,8 @@ from app.db.models import MarketPriceSnapshot, PriceMonitorRun, PriceReviewEvent
 from app.db.session import get_session
 from app.notifier.email import parse_recipients
 from app.pricing import price_monitor, price_review, price_review_actions, store_match
+from app.pricing import semaforo_aprende as learn
+from app.pricing import semaforo_correcciones as corr
 
 router = APIRouter(prefix="/api/price-review", tags=["price-review"])
 
@@ -414,3 +428,74 @@ async def undo(body: ActionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
                actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
     """Vuelve al estado y al `enabled` de antes de la última acción humana (hasta 30 días). Sigue con `pm_mode = 0`."""
     return await _act(item_id, price_review_actions.DESHACER, actor, body)
+
+
+# ─── La persona manda y el semáforo aprende ───────────────────────
+
+
+@router.get("/corrections")
+async def list_corrections(page: int = Query(0, ge=0, le=PAGE_MAX),
+                           page_size: int = Query(PAGE_SIZE_DEFAULT, ge=1, le=PAGE_SIZE_MAX)) -> dict[str, Any]:
+    out = corr.list_corrections(page, page_size)
+    out["hold_days"] = corr.hold_days()
+    return out
+
+
+class CorrectionMotiveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    motive: Literal["precio_ok", "match_malo", "estrategia", "otro"]
+    note: str | None = Field(None, max_length=2_000)
+    ml_ids: list[str] = Field(default_factory=list, max_length=corr.MAX_BAD_IDS)
+
+
+@router.post("/corrections/{correction_id}/motive")
+async def correction_motive(body: CorrectionMotiveIn, correction_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                            actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    try:
+        return corr.set_motive(correction_id, body.motive, body.note, body.ml_ids, actor)
+    except corr.CorrectionError as exc:
+        raise HTTPException(exc.status, exc.detail()) from None
+
+
+@router.get("/adjustments")
+async def list_adjustments(request: Request) -> dict[str, Any]:
+    mode = learn.mode()
+    return {"mode": mode, "mode_label": {0: "apagado", 1: "propone", 2: "aplica solo"}.get(mode, str(mode)),
+            "can_decide": auth.review_decider(request) is not None,
+            "min_corrections": int(runtime.get("pm_learn_min_corrections")),
+            "max_shift_pts": float(runtime.get("pm_learn_max_shift_pts")),
+            "window_days": int(runtime.get("pm_learn_window_days")),
+            "items": learn.list_adjustments()}
+
+
+@router.post("/adjustments/run")
+async def run_adjustments(actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """Busca ajustes ahora (lo mismo que el job semanal, según `pm_learn_mode`)."""
+    out = await asyncio.to_thread(learn.run_learning)
+    return {**out, "by": actor}
+
+
+def _adjust(fn: Any, adj_id: int, actor: str) -> dict[str, Any]:
+    try:
+        return fn(adj_id, actor)
+    except learn.LearnError as exc:
+        raise HTTPException(exc.status, exc.detail()) from None
+
+
+@router.post("/adjustments/{adj_id}/approve")
+async def approve_adjustment(adj_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                             actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    return _adjust(learn.apply, adj_id, actor)
+
+
+@router.post("/adjustments/{adj_id}/reject")
+async def reject_adjustment(adj_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                            actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    return _adjust(learn.reject, adj_id, actor)
+
+
+@router.post("/adjustments/{adj_id}/undo")
+async def undo_adjustment(adj_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                          actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    return _adjust(learn.undo, adj_id, actor)

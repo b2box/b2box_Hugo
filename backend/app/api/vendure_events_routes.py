@@ -142,7 +142,7 @@ async def vendure_events(request: Request) -> dict[str, Any]:
     task = asyncio.create_task(luis_intake.compare_products(list(changes)))
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
-    # Portón de precio (solo con pm_mode = 2): un rojo firme que alguien prendió a mano vuelve a inactivo.
+    # Portón de precio (solo con pm_mode = 2): si una persona prendió un rojo o apagó un verde, se anota la corrección.
     price_gate.notify(list(changes))
     log.info("vendure events: %d avisos, %d productos anotados (%s)", len(body.events), queued, client_ip(request))
     return {"queued": queued}

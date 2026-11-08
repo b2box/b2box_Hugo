@@ -1066,3 +1066,74 @@ class PriceFactorSample(SQLModel, table=True):
     usd_to_channel: float | None = None
     source: str = Field(default="bandeja", max_length=16)
     captured_at: datetime = Field(default_factory=utcnow)
+
+
+class SemaforoCorreccion(SQLModel, table=True):
+    """Una persona hizo lo contrario de lo que decía el semáforo: prendió un producto que Hugo veía rojo, o apagó uno que
+    veía verde (en Vendure o desde la bandeja). Hugo no lo revierte: lo anota acá con los datos del cálculo de ese momento y
+    deja el producto fuera de las acciones automáticas por `pm_correction_hold_days` días (salvo que cambie su precio).
+    El aprendizaje semanal (pricing/semaforo_aprende.py) lee esta tabla para proponer cortes por segmento."""
+    __tablename__ = "semaforo_correcciones"
+    __table_args__ = (
+        Index("ix_sc_product_at", "product_id", "at"),
+        Index("ix_sc_at", "at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    product_name: str | None = Field(default=None, max_length=200)
+    at: datetime = Field(default_factory=utcnow)
+    # Quién: el email de la persona (bandeja) o «vendure» si se vio el cambio en Vendure sin saber quién fue.
+    actor: str = Field(default="vendure", max_length=120)
+    # De dónde salió: vendure (prendido/apagado a mano en Vendure) | bandeja (Mantener, Activar, Despublicar, Deshacer).
+    origin: str = Field(default="vendure", max_length=12)
+    # Lo que decía Hugo (verde | rojo), si era firme, y lo que hizo la persona (activar | inactivar | mantener).
+    hugo_color: str = Field(max_length=16)
+    hugo_firm: bool = Field(default=True)
+    human_decision: str = Field(max_length=16)
+    # Los datos del cálculo en ese momento.
+    snapshot_id: int | None = Field(default=None)
+    run_id: int | None = Field(default=None)
+    our_price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    ml_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    firm_listings: int | None = Field(default=None)       # n idénticos firmes
+    firm_sellers: int | None = Field(default=None)
+    margin_pct: float | None = Field(default=None)
+    price_ratio: float | None = Field(default=None)       # nuestro precio / mediana de ML
+    tier_used: str | None = Field(default=None, max_length=40)
+    category: str | None = Field(default=None, max_length=80)
+    # Por qué (opcional, lo completa una persona): precio_ok | match_malo | estrategia | otro. Con match_malo, las
+    # publicaciones que no eran el mismo producto van a `market_match_feedback` (`bad_ml_ids`, JSON).
+    motive: str | None = Field(default=None, max_length=24)
+    note: str | None = Field(default=None, max_length=500)
+    bad_ml_ids: str | None = Field(default=None)
+    # Hasta cuándo Hugo no actúa solo sobre el producto (si su precio sigue siendo `our_price_cents`).
+    hold_until: datetime | None = Field(default=None)
+
+
+class SemaforoAjuste(SQLModel, table=True):
+    """Un ajuste del semáforo por segmento que salió de las correcciones humanas. SOLO afecta las acciones automáticas
+    (pm_mode = 2): un caso que cae en el segmento y no pasa el corte ajustado va a la bandeja de Pao en vez de que Hugo lo
+    active o lo apague. La tabla es el historial: no se borra; cada fila dice qué cambió, por qué y con cuántas
+    correcciones, quién lo aprobó y si se deshizo."""
+    __tablename__ = "semaforo_ajustes"
+    __table_args__ = (Index("ix_sa_status", "status", "segment"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    segment: str = Field(max_length=80)                    # pocos_identicos | margen_borde | precio:alto | categoria:X …
+    direction: str = Field(max_length=8)                   # rojo (apagar solo) | verde (activar solo)
+    param: str = Field(max_length=24)                      # yellow_min | green_min | min_listings | max_price_ratio
+    old_value: float
+    new_value: float
+    n_corrections: int = Field(default=0)
+    n_direction: int = Field(default=0)                    # correcciones en ese sentido (para la proporción)
+    reason: str = Field(default="", max_length=500)
+    evidence: str | None = Field(default=None)             # JSON: ids de las correcciones
+    # propuesto | aplicado | rechazado | deshecho | reemplazado
+    status: str = Field(default="propuesto", max_length=12)
+    replaces_id: int | None = Field(default=None)          # el ajuste aplicado del mismo segmento que reemplazó
+    decided_by: str | None = Field(default=None, max_length=120)
+    decided_at: datetime | None = Field(default=None)
+    undone_by: str | None = Field(default=None, max_length=120)
+    undone_at: datetime | None = Field(default=None)

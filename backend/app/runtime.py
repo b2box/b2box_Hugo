@@ -619,9 +619,10 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
             "los rojos firmes entran a la bandeja de Pao y se manda el resumen diario; Hugo inactiva o reactiva en "
             "Vendure SOLO lo que decide una persona de PRICE_REVIEW_DECIDERS, salvo una cosa: reactiva solo lo que "
             "apagó él cuando se corrige en Vendure y deja de ser rojo firme (con tope diario). 2 = automático: lo de 1 "
-            "más el portón de precio para lo que sube Paco: verde firme → Hugo lo activa, rojo firme → queda inactivo, "
-            "amarillo o sin dato → bandeja de Pao, y un rojo firme prendido a mano vuelve a inactivo (con topes diarios "
-            "y Deshacer)."
+            "más lo automático cuando la comparación con Mercado Libre es firme: los rojos firmes publicados se apagan "
+            "solos y lo que sube Paco con verde firme se activa (rojo firme queda inactivo; amarillo o sin dato → "
+            "bandeja de Pao), con topes diarios y Deshacer. Si una persona prende un rojo o apaga un verde, Hugo no lo "
+            "revierte: lo anota como corrección y no lo toca solo por un tiempo."
         ),
         type="int", parser=int,
         default_attr="pm_mode",
@@ -642,8 +643,8 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         key="pm_gate_inactivations_daily_max",
         label="Portón: inactivaciones automáticas por día",
         description=(
-            "Con modo 2, cuántos rojos firmes prendidos a mano puede volver a apagar Hugo por día (hora de Argentina). "
-            "0 = nunca apaga solo."
+            "Con modo 2, cuántos rojos firmes publicados puede apagar Hugo por día (hora de Argentina), del peor margen "
+            "al mejor; el resto queda en la bandeja. 0 = nunca apaga solo."
         ),
         type="int", parser=int,
         default_attr="pm_gate_inactivations_daily_max",
@@ -652,7 +653,10 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
     SettingMeta(
         key="pm_gate_reads_daily_max",
         label="Portón: lecturas a Vendure por día",
-        description="Con modo 2, cuántas veces por día Hugo lee el estado de un producto al recibir un aviso de Vendure.",
+        description=(
+            "Con modo 2, cuántas veces por día Hugo lee el estado de un producto al recibir un aviso de Vendure (para "
+            "ver si una persona prendió un rojo o apagó un verde)."
+        ),
         type="int", parser=int,
         default_attr="pm_gate_reads_daily_max",
         min=0, max=2000, step=10, group="monitor",
@@ -664,6 +668,58 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="int", parser=int,
         default_attr="pm_gate_max_age_days",
         min=1, max=365, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_correction_hold_days",
+        label="La persona manda: días sin acciones automáticas",
+        description=(
+            "Si alguien prende a mano un producto que Hugo ve rojo (o apaga uno verde), Hugo no lo revierte: lo anota como "
+            "corrección y no lo vuelve a tocar solo durante estos días, salvo que cambie su precio."
+        ),
+        type="int", parser=int,
+        default_attr="pm_correction_hold_days",
+        min=1, max=365, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_learn_mode",
+        label="Aprendizaje del semáforo (0 apagado / 1 propone / 2 aplica solo)",
+        description=(
+            "Una vez por semana Hugo mira las correcciones de las personas y busca si se concentran en un tipo de caso "
+            "(pocos idénticos, margen apenas debajo del corte, un rango de precio, una categoría, matches dudosos). 1 = "
+            "propone un corte por segmento y lo muestra en la bandeja para que alguien lo apruebe. 2 = lo aplica solo. "
+            "Los ajustes solo cambian lo que Hugo hace SOLO (modo 2): lo que no pasa el corte ajustado va a la bandeja."
+        ),
+        type="int", parser=int,
+        default_attr="pm_learn_mode",
+        min=0, max=2, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_learn_min_corrections",
+        label="Aprendizaje: correcciones mínimas por segmento",
+        description="Cuántas correcciones en un mismo sentido y segmento hacen falta para proponer un ajuste.",
+        type="int", parser=int,
+        default_attr="pm_learn_min_corrections",
+        min=2, max=100, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_learn_max_shift_pts",
+        label="Aprendizaje: cuánto puede mover un corte (puntos)",
+        description=(
+            "Tope del ajuste de un corte de ganancia por segmento, en puntos porcentuales respecto del corte general "
+            "(por ejemplo 5: el amarillo de 10 % puede bajar hasta 5 % y el verde de 30 % subir hasta 35 % para ese "
+            "segmento). Si las correcciones piden más que eso, no se propone: el motivo es otro."
+        ),
+        type="float", parser=float,
+        default_attr="pm_learn_max_shift_pts",
+        min=0.5, max=20.0, step=0.5, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_learn_window_days",
+        label="Aprendizaje: días de correcciones que mira",
+        description="Solo cuentan las correcciones de estos últimos días.",
+        type="int", parser=int,
+        default_attr="pm_learn_window_days",
+        min=7, max=365, step=1, group="monitor",
     ),
     SettingMeta(
         key="pm_order_reds_first",

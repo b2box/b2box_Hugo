@@ -178,6 +178,10 @@ PATHS = ("/summary", "/items", "/items/{id}", "/items/{id}/approve", "/items/{id
 async def test_no_write_to_vendure_nor_to_paco_in_any_mode_through_the_whole_night_the_mail_and_every_endpoint(stack, mode):
     st = stack
     q.setting("pm_mode", mode)
+    if mode == 2:
+        # Con modo 2 Hugo apaga solo los rojos firmes publicados: con el tope de inactivaciones en 0 no escribe nada (ni
+        # lee el estado para escribir). Lo que sí escribe con tope está en test_semaforo_aprende.py.
+        q.setting("pm_gate_inactivations_daily_max", 0)
 
     # 1. la corrida nocturna real, dos noches seguidas (la pasada de la bandeja corre dentro)
     r1, r2 = await two_nights(st)
@@ -278,13 +282,17 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
     banned = {"disable_product", "enable_product", "_set_enabled", "set_enabled", "submit_pro", "submit", "get_status",
               "post", "put", "patch", "delete", "aiosmtplib"}
     for rel in ("pricing/price_review.py", "pricing/diagnosis_source.py", "pricing/price_diagnosis.py", "pricing/price_breakdown.py",
-                "api/price_review_routes.py", "pricing/price_recalc.py", "api/vendure_events_routes.py"):
+                "api/price_review_routes.py", "pricing/price_recalc.py", "api/vendure_events_routes.py",
+                "pricing/semaforo_correcciones.py", "pricing/semaforo_aprende.py"):
         used, imported = _names_used(ast.parse((root / rel).read_text()))
         assert not (banned & (used | imported)), (rel, banned & (used | imported))
         assert "paco" not in {m.split(".")[-1] for m in imported}, rel
     routes = (root / "api/price_review_routes.py").read_text()
     assert "@router.put" not in routes and "@router.delete" not in routes and "@router.patch" not in routes
+    # Más las de las correcciones y los ajustes del semáforo, que solo escriben en la base de Hugo (y en match_feedback).
     assert sorted(line.split('"')[1] for line in routes.splitlines() if line.startswith("@router.post")) == [
+        "/adjustments/run", "/adjustments/{adj_id}/approve", "/adjustments/{adj_id}/reject", "/adjustments/{adj_id}/undo",
+        "/corrections/{correction_id}/motive",
         "/items/{item_id}/approve", "/items/{item_id}/decision", "/items/{item_id}/undo"]
 
 
