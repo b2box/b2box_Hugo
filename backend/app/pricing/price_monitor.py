@@ -1549,6 +1549,14 @@ async def _review_pass(run_id: int, result: dict[str, Any] | None, products: lis
                 {"error": error_code(exc)}, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             log.exception("price_monitor #%s: no se pudo anotar el error de la pasada", run_id)
+    # Portón de precio (solo con pm_mode = 2): lo que subió Paco se activa, queda inactivo o va a la bandeja.
+    try:
+        from app.pricing import price_gate     # lazy: price_gate importa price_review
+
+        if price_gate.enabled():
+            await price_gate.process_run(run_id)
+    except Exception:  # noqa: BLE001
+        log.exception("price_monitor #%s: el portón de precio falló", run_id)
 
 
 def _make_web(run_id: int) -> tuple[market_ml_web.MlWebSource | None, str]:
@@ -1583,7 +1591,13 @@ async def _evaluate_catalog(run_id: int, trigger: str, products: list[VendurePro
     pending = [p for p in enabled if p.id not in done]
     last = _last_measured({p.id for p in pending})
     never = datetime.min
-    pending.sort(key=lambda p: last.get(p.id) or never)
+    if int(runtime.get("pm_order_reds_first") or 0):
+        # Cobertura: primero los activos que dieron rojo, después el resto de los activos y al final los apagados.
+        from app.pricing import coverage
+
+        pending = coverage.order_for_coverage(pending, last, coverage.last_colors(p.id for p in pending))
+    else:
+        pending.sort(key=lambda p: last.get(p.id) or never)
     _update_run(run_id, total_products=len(enabled), processed=len(done))
     log.info("price_monitor #%s (%s): %d productos (%d deshabilitados), %d ya hechos, %d pendientes",
              run_id, trigger, len(enabled), sum(1 for p in enabled if not p.enabled), len(done),

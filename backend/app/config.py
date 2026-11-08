@@ -561,8 +561,32 @@ class Settings(EnvSettings):
     # los snapshots; las decisiones quedan frenadas, Deshacer no). 1 = propuesta: llena la bandeja con los rojos
     # firmes y manda el resumen diario a Pao; Hugo inactiva o reactiva SOLO lo que decide una persona de
     # PRICE_REVIEW_DECIDERS, salvo la reactivación automática del recálculo (lo que apagó Hugo, se corrigió en Vendure y
-    # ya no es rojo firme). 2 = automático: TODAVÍA NO implementado, se comporta como 1 (y lo loguea).
+    # ya no es rojo firme). 2 = automático: lo de 1 más el PORTÓN DE PRECIO (pricing/price_gate.py) para lo que sube Paco
+    # (inactivo): verde firme → Hugo lo activa; rojo firme → queda inactivo; amarillo / sin dato → bandeja de Pao; y un
+    # rojo firme que alguien prende a mano vuelve a inactivo. Todo con topes diarios y Deshacer.
     pm_mode: int = 0
+    # Portón de precio (solo con pm_mode = 2). Topes por día (hora de Argentina) de escrituras y de lecturas a Vendure.
+    pm_gate_activations_daily_max: int = 10
+    pm_gate_inactivations_daily_max: int = 10
+    pm_gate_reads_daily_max: int = 100
+    # Solo lo que Paco subió hace estos días o menos (lo viejo lo decide una persona).
+    pm_gate_max_age_days: int = 30
+    # Semáforo de la noche: 1 = primero los activos que la última vez dieron rojo, después los demás activos y al final los
+    # apagados (dentro de cada grupo, el que se midió hace más tiempo). 0 = como siempre (el más viejo primero).
+    pm_order_reds_first: int = 0
+    # Prechequeo de Luis (POST /radar/precheck, pricing/radar_precheck.py). 0 = apagado (responde error «apagado»).
+    radar_precheck_enabled: int = 0
+    # Candidatos nuevos por día (hora de Argentina) que entran a la cola de búsqueda en ML.
+    radar_precheck_daily_max: int = 200
+    # Búsquedas de Apify por día (UTC) para los prechequeos: cupo PROPIO, aparte de `apify_meli_search_daily_max`.
+    radar_precheck_apify_daily_max: int = 50
+    # Respaldo: parte de la cola de la Mac de la oficina (en %) que pueden ocupar los prechequeos.
+    radar_precheck_queue_share_pct: int = 30
+    # Cuántos días vale un prechequeo ya medido (después se vuelve a buscar si Luis lo pide de nuevo).
+    radar_precheck_ttl_days: int = 15
+    # Lecturas por día de desgloses de Vendure de productos ACTIVOS para el factor del prechequeo (pricing/price_factor.py).
+    # 0 = apagado: el factor sale solo de los desgloses que ya leyó la bandeja (rojos: sesgado hacia arriba).
+    pm_factor_sample_daily_max: int = 0
     # Cortes del semáforo, en % de ganancia estimada del revendedor.
     pm_green_min_pct: float = 30.0
     pm_yellow_min_pct: float = 10.0

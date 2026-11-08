@@ -981,3 +981,86 @@ class LuisIntake(SQLModel, table=True):
     our_price_cents: int | None = None
     margin_pct: float | None = None
     color: str | None = Field(default=None, max_length=16)
+    # Portón de precio (pricing/price_gate.py, pm_mode = 2): qué hizo Hugo con lo que subió Paco. activado | bandeja |
+    # rojo_inactivo | None (todavía no pasó). `gate_reason` dice por qué; `gate_at` cuándo.
+    gate_status: str | None = Field(default=None, max_length=16)
+    gate_reason: str | None = Field(default=None, max_length=300)
+    gate_at: datetime | None = None
+
+
+class LlmUsage(SQLModel, table=True):
+    """Una llamada a un modelo de lenguaje o de visión (Claude, Gemini, Qwen, MiMo, OpenAI): modelo, tokens, costo estimado
+    y para qué se usó (app/llm_usage.py). Solo números y códigos: nunca el prompt ni la respuesta."""
+    __tablename__ = "llm_usage"
+    __table_args__ = (Index("ix_llm_usage_at", "at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=utcnow)
+    provider: str = Field(default="", max_length=24)
+    model: str = Field(default="", max_length=80)
+    purpose: str = Field(default="", max_length=40)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cost_usd: float = Field(default=0.0)
+    # True si el costo salió de la tabla de precios (o de un setting), no de la factura del proveedor.
+    cost_estimated: bool = Field(default=True)
+    ok: bool = Field(default=True)
+
+
+class RadarPrecheck(SQLModel, table=True):
+    """Prechequeo de Luis ANTES de pagar la búsqueda de Paco (pricing/radar_precheck.py): el candidato, la búsqueda en ML
+    por la cola de la oficina / Apify (id `pc-<id>` en `ml_web_result`) y el veredicto ESTIMADO del semáforo."""
+    __tablename__ = "radar_precheck"
+
+    id: int | None = Field(default=None, primary_key=True)
+    ref: str = Field(max_length=64, unique=True, index=True)
+    client: str | None = Field(default=None, max_length=40)
+    titulo_es: str = Field(default="", max_length=300)
+    titulo_zh: str = Field(default="", max_length=300)
+    imagen_url: str = Field(default="", max_length=2048)
+    precio_cny_moq: float = Field(default=0.0)
+    moq: int = Field(default=1)
+    peso_kg: float | None = None
+    medidas_cm: str | None = Field(default=None, max_length=60)   # JSON [l, a, h]
+    categoria: str | None = Field(default=None, max_length=80)
+    query: str = Field(default="", max_length=200)
+    created_at: datetime = Field(default_factory=utcnow)
+    requested_at: datetime = Field(default_factory=utcnow)
+    # pendiente | listo | error
+    estado: str = Field(default="pendiente", max_length=12, index=True)
+    color: str | None = Field(default=None, max_length=16)
+    ml_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    n_identicos: int = Field(default=0)
+    vendidos_total: int | None = None
+    publicaciones: int = Field(default=0)
+    precio_app_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    precio_max_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    margen_pct: float | None = None
+    motivo: str | None = Field(default=None, max_length=300)
+    # JSON: cómo se calculó el factor de precio (de dónde, n, mediana, cambio).
+    factor: str | None = Field(default=None, max_length=1000)
+    # JSON: los idénticos (título, precio, vendidos, link) para mostrar.
+    matches: str | None = Field(default=None)
+    medido_at: datetime | None = None
+    attempts: int = Field(default=0)
+
+
+class PriceFactorSample(SQLModel, table=True):
+    """Un desglose real de Vendure (`bulkPriceTierBreakdowns`) reducido a lo que necesita el prechequeo para estimar el precio
+    de la app sin otra fórmula: fábrica en yuanes por unidad, factura en pesos por unidad, factura/fob y valor por m³."""
+    __tablename__ = "price_factor_sample"
+    __table_args__ = (Index("ix_pfs_product_tier", "product_id", "tier_id", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    tier_id: str = Field(default="", max_length=64)
+    category: str | None = Field(default=None, max_length=80)
+    cny_unit: float = Field(default=0.0)
+    factura_unit_cents: int = Field(default=0, sa_column=Column(BigInteger, nullable=False))
+    fob_usd: float = Field(default=0.0)
+    factura_usd: float = Field(default=0.0)
+    total_cbm: float | None = None
+    cny_to_usd: float | None = None
+    usd_to_channel: float | None = None
+    source: str = Field(default="bandeja", max_length=16)
+    captured_at: datetime = Field(default_factory=utcnow)

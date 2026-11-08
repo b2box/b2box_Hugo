@@ -122,6 +122,22 @@ async def summary() -> dict[str, Any]:
     return price_monitor.summary()
 
 
+@router.get("/coverage")
+async def coverage_summary() -> dict[str, Any]:
+    """Cobertura del semáforo sobre el catálogo ACTIVO: cuántos activos, cuántos medidos (medición vigente), cuántos
+    verdes / amarillos / rojos / sin dato / no medibles, rojos firmes y los que faltan medir. Solo lectura. Los activos salen
+    del caché del catálogo de Vendure (el mismo de /verify); si no se puede leer, de la última medición."""
+    from app.pricing import coverage
+    from app.vendure import catalog as vendure_catalog
+
+    try:
+        products = await vendure_catalog.get_catalog()
+        active: set[str] | None = {p.id for p in products if p.enabled}
+    except Exception:  # noqa: BLE001
+        active = None
+    return await asyncio.to_thread(coverage.summary, active)
+
+
 @router.get("/runs")
 async def list_runs(
     limit: int = Query(20, ge=1, le=200),

@@ -12,8 +12,9 @@ Cada noche, DESPUÉS de cerrar la corrida del semáforo, `process_run(run_id)`:
     4. guarda el resumen en la corrida y escribe `review_at`.
 
 **La pasada NO escribe en Vendure** (ni `enabled` ni nada) y NO manda nada a Paco: inactiva o reactiva solo una persona de
-PRICE_REVIEW_DECIDERS, desde `price_review_actions`. `pm_mode = 2` (automático) todavía no existe: se comporta como 1 y lo
-loguea. Lo único que se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas
+PRICE_REVIEW_DECIDERS, desde `price_review_actions`. Con `pm_mode = 2` (automático) esta pasada hace lo mismo que con 1; lo
+automático es el portón de precio de lo que sube Paco (`pricing/price_gate.py`), que corre después y escribe por
+`price_review_actions` con actor `hugo:auto`. Lo único que se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas
 por noche.
 
 Rojo firme (sección 3.3 del diseño), TODAS tienen que cumplirse:
@@ -70,12 +71,18 @@ MANTENIDO = "mantenido"
 DESPUBLICADO = "despublicado"
 CORREGIDO = "corregido"
 CERRADO_AUTO = "cerrado_auto"
+# Portón de precio (pm_mode = 2, pricing/price_gate.py): lo que subió Paco inactivo y espera que Hugo o una persona lo
+# active. `por_activar` conserva `open_key` (una sola viva por producto) pero NO está en OPEN_STATES: no es un rojo, no
+# lleva diagnóstico a-e y la noche no la cierra por estar apagado (apagado es lo esperado). `activado` es cerrada.
+POR_ACTIVAR = "por_activar"
+ACTIVADO = "activado"
 # Abiertas: esperan a una persona. `mantenido` no está abierta pero conserva `open_key` (se sigue vigilando).
 OPEN_STATES = (PROPUESTO, EN_REVISION, CORRIGIENDO, BUSCANDO_PROV)
-CLOSED_STATES = (DESPUBLICADO, CORREGIDO, CERRADO_AUTO)
+CLOSED_STATES = (DESPUBLICADO, CORREGIDO, CERRADO_AUTO, ACTIVADO)
 STATE_LABEL = {
     PROPUESTO: "Propuesto", EN_REVISION: "En revisión", CORRIGIENDO: "Corrigiendo", BUSCANDO_PROV: "Buscando proveedor",
     MANTENIDO: "Mantenido", DESPUBLICADO: "Despublicado", CORREGIDO: "Corregido", CERRADO_AUTO: "Cerrado solo",
+    POR_ACTIVAR: "Por activar", ACTIVADO: "Activado",
 }
 
 # Veredicto de un snapshot.
@@ -113,7 +120,7 @@ REASONS = {
 
 
 def mode_label(mode: int) -> str:
-    return {0: "sombra", 1: "propuesta", 2: "automático (todavía como propuesta)"}.get(int(mode), str(mode))
+    return {0: "sombra", 1: "propuesta", 2: "automático (portón de precio)"}.get(int(mode), str(mode))
 
 
 # ─── Parámetros ───────────────────────────────────────────────────
@@ -220,7 +227,7 @@ NOT_RED = (semaforo.VERDE, semaforo.AMARILLO)
 
 
 def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | None = None,
-                  colors: tuple[str, ...] = (semaforo.ROJO,)) -> FirmVerdict:
+                  colors: tuple[str, ...] = (semaforo.ROJO,), *, ignore_enabled: bool = False) -> FirmVerdict:
     """R1 y R3-R7 sobre un snapshot. (R2 y R8 dependen de otras fichas y de otras noches: las mira `process_run`.)
 
     No rojo → `no_rojo`. Rojo al que le falla algo → `dudoso` con el primer motivo en el orden del diseño.
@@ -228,7 +235,10 @@ def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | No
 
     Con `colors=NOT_RED` es la misma puerta para un «no rojo» (verde o amarillo) con la misma calidad de dato: así se
     decide que un producto que apagó Hugo ya se puede reactivar solo. Ahí el producto apagado es lo esperado: R1 no mira
-    `enabled`. Un rojo devuelve `no_rojo`."""
+    `enabled`. Un rojo devuelve `no_rojo`.
+
+    `ignore_enabled` (portón de precio): un rojo de un producto apagado (lo que subió Paco, o lo que Hugo dejó inactivo)
+    también puede ser firme; R3-R7 son las mismas."""
     now = now or utcnow()
     v = FirmVerdict(NO_ROJO)
     if snap.color not in colors:
@@ -240,7 +250,7 @@ def evaluate_firm(snap: MarketPriceSnapshot, p: ReviewParams, now: datetime | No
 
     if snap.ml_status != price_monitor.OK:
         return doubt("solo_tiendas")                  # rojo sin dato de ML: sale de las tiendas
-    if snap.product_enabled is False and semaforo.ROJO in colors:
+    if snap.product_enabled is False and semaforo.ROJO in colors and not ignore_enabled:
         return doubt("deshabilitado")
     if not snap.our_price_cents or snap.our_price_cents <= 0:
         return doubt("recalculo")
@@ -508,9 +518,7 @@ def _plan(run_id: int, now: datetime | None) -> _Plan | None:
                      summary={"mode": requested, "mode_effective": mode, "nuevas": 0, "diag_reintentados": 0,
                               "consultas_vendure": 0})
         if requested >= 2:
-            log.warning("price_review #%s: pm_mode=2 (automático) todavía no está implementado: esta pasada se "
-                        "comporta como pm_mode=1 (propuesta) y no toca Vendure", run_id)
-            plan.summary["note"] = "pm_mode=2 todavía no implementado: se comportó como 1"
+            plan.summary["note"] = "pm_mode=2: la bandeja de rojos como en 1; el portón de precio corre después"
 
         plan.n_flipped = int(s.exec(
             select(func.count(MarketPriceSnapshot.id))  # type: ignore[arg-type]
@@ -659,6 +667,11 @@ def _refresh_open_item(s: Session, item: PriceReviewItem, snap: MarketPriceSnaps
     item.last_color, item.last_margin_pct = snap.color, snap.est_margin_pct
     if snap.ml_status == price_monitor.OK and snap.color == semaforo.ROJO:
         drop_flag(item, FLAG_NOT_RED)             # la noche lo midió rojo otra vez: el «ya no está en rojo» ya no vale
+    if item.state == POR_ACTIVAR:
+        # Portón de precio: apagado es lo esperado (lo subió Paco inactivo). Solo guarda el último dato; lo decide
+        # price_gate o una persona.
+        s.add(item)
+        return "updated"
     if snap.captured_at is not None and snap.captured_at < item.state_since:
         # Lo midió ANTES del último cambio de estado (la corrida de la madrugada y una decisión de la mañana): ese dato no
         # alcanza para cerrar ni para reabrir la ficha.

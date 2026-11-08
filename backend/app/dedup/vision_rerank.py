@@ -476,6 +476,10 @@ async def _ask(opts: Options, payload: _Payload) -> Verdict | None:
         log.warning("Proveedor de visión desconocido: %r", opts.provider)
         return None
     elapsed = int((time.monotonic() - started) * 1000)
+    if usage != _NO_USAGE:
+        from app import llm_usage   # lazy: el registro usa la base
+        await llm_usage.record_async(provider=opts.provider, model=opts.model, purpose="app_rerank",
+                                     input_tokens=usage[0], output_tokens=usage[1], ok=data is not None)
     return _parse_verdict(data, payload.candidates, opts, elapsed, usage)
 
 

@@ -343,6 +343,10 @@ def ingest(items: list[Any], *, now: datetime | None = None, origin: str = ORIGI
         known = set(s.exec(
             select(MarketPriceSnapshot.product_id).where(MarketPriceSnapshot.product_id.in_(ids)).distinct()  # type: ignore[attr-defined]
         ).all())
+        # Los prechequeos de Luis (`pc-<id>`, pricing/radar_precheck.py) también son de la cola.
+        from app.pricing import radar_precheck
+
+        known |= radar_precheck.known_ids([pid for pid in ids if pid not in known])
         taken = set(s.exec(
             select(MlWebResult.product_id, MlWebResult.fetched_at).where(MlWebResult.product_id.in_(ids))  # type: ignore[attr-defined]
         ).all())
@@ -557,8 +561,15 @@ def build_queue(limit: int, *, now: datetime | None = None, claimer: str | None 
     else:       # la cola de siempre: los que vencen, con y sin precio, mezclados por antigüedad
         rest = [*never, *next_variant, *sorted([*expiring_priced, *expiring_rest], key=lambda t: t[:2])]
     lens_ids = {t[2] for t in lens}
-    return [{"product_id": pid, "queries": [query], **({"lens": True} if pid in lens_ids else {})}
-            for *_, pid, query in [*red, *(t for t in rest if t[2] not in chosen)]][:limit]
+    # Prechequeos de Luis (pricing/radar_precheck.py, apagado por default): los busca Apify por su cuenta y con su cupo;
+    # la Mac de la oficina es el RESPALDO (adelante en su cola, hasta su parte). El job nocturno de Apify no los toma.
+    from app.pricing import radar_precheck
+
+    share = max(0, min(100, int(runtime.get("radar_precheck_queue_share_pct") or 0)))
+    pre = (radar_precheck.queue_entries(limit * share // 100, now=now, taken=taken_by_others)
+           if claimer == CLAIM_OFICINA else [])
+    return [*pre, *[{"product_id": pid, "queries": [query], **({"lens": True} if pid in lens_ids else {})}
+                    for *_, pid, query in [*red, *(t for t in rest if t[2] not in chosen)]]][:limit]
 
 
 def _next_text(plan: list[str], used: str) -> str | None:

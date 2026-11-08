@@ -124,10 +124,10 @@ async def test_summary_says_when_the_last_pass_failed(client):
     assert "se cayó" in client.get(BASE + "/summary").json()["last_pass_error"]
 
 
-async def test_summary_mode_2_is_shown_as_propuesta_for_now(client):
+async def test_summary_mode_2_is_automatic_with_the_price_gate(client):
     w.set_setting("pm_mode", 2)
     d = client.get(BASE + "/summary").json()
-    assert d["mode"] == 2 and d["mode_effective"] == 1 and "propuesta" in d["mode_label"]
+    assert d["mode"] == 2 and d["mode_effective"] == 2 and "portón" in d["mode_label"]
 
 
 # ─── listado ──────────────────────────────────────────────────────

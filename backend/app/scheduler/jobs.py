@@ -1120,3 +1120,48 @@ def register_jobs() -> None:
         id=price_recalc.WATCH_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )
+    # Prechequeo de Luis: mide lo que ya tiene búsqueda en ML (apagado por default: sale sin hacer nada).
+    scheduler.add_job(
+        radar_precheck_process,
+        IntervalTrigger(minutes=RADAR_PRECHECK_EVERY_MIN),
+        id=RADAR_PRECHECK_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # Muestras de desgloses de Vendure para el factor del prechequeo: 05:00 UTC (02:00 ART), antes del semáforo.
+    scheduler.add_job(
+        price_factor_refresh,
+        CronTrigger(hour=5, minute=0, timezone="UTC"),
+        id=PRICE_FACTOR_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
+
+
+RADAR_PRECHECK_JOB_ID = "radar_precheck_process"
+RADAR_PRECHECK_EVERY_MIN = 15
+PRICE_FACTOR_JOB_ID = "price_factor_refresh"
+
+
+async def radar_precheck_process() -> dict:
+    """Prechequeos de Luis: busca en ML con Apify lo pendiente (cupo propio) y mide lo que ya tiene búsqueda. Nunca lanza."""
+    from app.pricing import radar_precheck
+
+    return await radar_precheck.run_cycle()
+
+
+async def price_factor_refresh() -> dict[str, int]:
+    """Copia los desgloses de la bandeja a `price_factor_sample` y, si `pm_factor_sample_daily_max` > 0, lee una muestra
+    del catálogo activo (solo query). Nunca lanza."""
+    from app import runtime
+    from app.pricing import price_factor
+
+    out: dict[str, int] = {}
+    try:
+        out["bandeja"] = await asyncio.to_thread(price_factor.refresh_from_review_items)
+        reads = int(runtime.get("pm_factor_sample_daily_max") or 0)
+        if reads > 0:
+            out["muestreo"] = await price_factor.sample_catalog(reads)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("price_factor_refresh falló (%s)", type(exc).__name__)
+    log.info("price_factor_refresh: %s", out)
+    return out
+

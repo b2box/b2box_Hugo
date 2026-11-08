@@ -223,6 +223,37 @@ def _component(polycard: dict, component_id: str) -> dict:
     return {}
 
 
+# "+5mil vendidos", "+100 vendidos", "4.8 | +1.000 vendidos": las ventas que muestra la polycard cuando `tracks` no las trae.
+_SOLD_TEXT_RE = re.compile(r"\+?\s*(\d{1,3}(?:\.\d{3})+|\d{1,9})\s*(mil)?\s*vendid[oa]s?\b", re.IGNORECASE)
+
+
+def _texts(node: object, depth: int = 0) -> list[str]:
+    """Los `text` de un componente de la polycard (hasta 3 niveles, tope de 40)."""
+    out: list[str] = []
+    if depth > 3:
+        return out
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "text" and isinstance(value, str):
+                out.append(value[:200])
+            elif isinstance(value, (dict, list)):
+                out.extend(_texts(value, depth + 1))
+    elif isinstance(node, list):
+        for value in node[:20]:
+            out.extend(_texts(value, depth + 1))
+    return out[:40]
+
+
+def sold_from_components(polycard: dict) -> int | None:
+    """Ventas leídas del texto de la polycard ("+5mil vendidos" → 5000), o None. Solo si `tracks` no las trae."""
+    for text in _texts(polycard.get("components") or []):
+        m = _SOLD_TEXT_RE.search(text)
+        if m:
+            number = int(m.group(1).replace(".", "")) * (1000 if m.group(2) else 1)
+            return number if number <= 10**9 else None
+    return None
+
+
 def _clean_url(url: object) -> str:
     """El `url` de la polycard sin fragmento y con esquema."""
     if not isinstance(url, str) or not url.strip():
@@ -281,7 +312,8 @@ def _from_polycard(item: dict) -> MlCandidate | None:
         price_cents=_price_cents(price.get("value")),
         currency=currency.upper()[:8] if isinstance(currency, str) else None,
         seller=_clean_text(_component(pc, "seller").get("text"), 60),
-        sold_quantity=_int_or_none(tracks.get("sold_quantity")),
+        sold_quantity=(_int_or_none(tracks.get("sold_quantity")) if _int_or_none(tracks.get("sold_quantity")) is not None
+                       else sold_from_components(pc)),
         catalog_id=catalog if _REF.fullmatch(catalog) else "",
     )
 

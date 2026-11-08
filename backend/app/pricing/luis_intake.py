@@ -513,4 +513,5 @@ def _out(r: LuisIntake) -> dict[str, Any]:
         "ml_median_cents": r.ml_median_cents, "vendure_product_id": r.vendure_product_id,
         "uploaded_at": _iso(r.uploaded_at), "our_price_cents": r.our_price_cents, "margin_pct": r.margin_pct,
         "color": r.color, "status": r.status, "compared_at": _iso(r.compared_at),
+        "gate_status": r.gate_status, "gate_reason": r.gate_reason, "gate_at": _iso(r.gate_at),
     }
