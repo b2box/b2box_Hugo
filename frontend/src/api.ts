@@ -577,3 +577,126 @@ export function decideReview(
 export function undoReview(id: number, input: ReviewActionInput): Promise<ReviewActionResult> {
   return postReviewAction(id, "undo", { expected_state: input.expectedState, motive_text: input.motiveText ?? null });
 }
+
+// ─── La persona manda y el semáforo aprende ────────────────────────
+// Correcciones humanas al semáforo (alguien prendió un rojo o apagó un verde: Hugo no lo revierte) y los ajustes por
+// segmento que salen de ellas (propuestos, aplicados, con historial y Deshacer). Nada de esto escribe en Vendure.
+
+export type CorrectionMotive = "precio_ok" | "match_malo" | "estrategia" | "otro";
+
+export interface SemaforoCorrection {
+  id: number;
+  product_id: string;
+  product_name: string | null;
+  at: string;
+  actor: string;
+  origin: "vendure" | "bandeja" | string;
+  hugo_color: "rojo" | "verde" | string;
+  hugo_firm: boolean;
+  human_decision: string;
+  human_decision_label: string;
+  snapshot_id: number | null;
+  our_price_cents: number | null;
+  ml_median_cents: number | null;
+  firm_listings: number | null;
+  firm_sellers: number | null;
+  margin_pct: number | null;
+  price_ratio: number | null;
+  tier_used: string | null;
+  category: string | null;
+  motive: CorrectionMotive | null;
+  motive_label: string | null;
+  note: string | null;
+  bad_ml_ids: string[];
+  hold_until: string | null;
+  holding: boolean;
+  listings: { ml_id: string; title: string; permalink: string | null; median_cents: number | null; source: string | null }[];
+}
+
+export interface SemaforoCorrectionsResponse {
+  items: SemaforoCorrection[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  hold_days: number;
+  motives: { code: CorrectionMotive; label: string }[];
+}
+
+export interface SemaforoAdjustment {
+  id: number;
+  created_at: string;
+  segment: string;
+  segment_label: string;
+  direction: "rojo" | "verde" | string;
+  direction_label: string;
+  param: string;
+  param_label: string;
+  old_value: number;
+  new_value: number;
+  n_corrections: number;
+  n_direction: number;
+  reason: string;
+  evidence: number[];
+  status: "propuesto" | "aplicado" | "rechazado" | "deshecho" | "reemplazado" | string;
+  status_label: string;
+  replaces_id: number | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  undone_by: string | null;
+  undone_at: string | null;
+}
+
+export interface SemaforoAdjustmentsResponse {
+  mode: number;
+  mode_label: string;
+  can_decide: boolean;
+  min_corrections: number;
+  max_shift_pts: number;
+  window_days: number;
+  items: SemaforoAdjustment[];
+}
+
+async function postJson<T>(url: string, body?: unknown): Promise<T> {
+  const r = await apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = ((await r.json().catch(() => ({}))) as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+      const d = detail as { message: unknown; code?: unknown };
+      throw new ApiError(String(d.message), r.status, typeof d.code === "string" ? d.code : undefined);
+    }
+    throw new ApiError(detailText(detail, r.statusText), r.status);
+  }
+  return r.json() as Promise<T>;
+}
+
+export async function getCorrections(page: number): Promise<SemaforoCorrectionsResponse> {
+  return asJson<SemaforoCorrectionsResponse>(await apiFetch(`/api/price-review/corrections?page=${page}`));
+}
+
+export function setCorrectionMotive(
+  id: number,
+  input: { motive: CorrectionMotive; note?: string | null; mlIds?: string[] },
+): Promise<SemaforoCorrection> {
+  return postJson<SemaforoCorrection>(`/api/price-review/corrections/${id}/motive`, {
+    motive: input.motive,
+    note: input.note ?? null,
+    ml_ids: input.mlIds ?? [],
+  });
+}
+
+export async function getAdjustments(): Promise<SemaforoAdjustmentsResponse> {
+  return asJson<SemaforoAdjustmentsResponse>(await apiFetch("/api/price-review/adjustments"));
+}
+
+export function runAdjustments(): Promise<{ modo: number; propuestos?: number; aplicados?: number }> {
+  return postJson(`/api/price-review/adjustments/run`);
+}
+
+export function adjustmentAction(id: number, action: "approve" | "reject" | "undo"): Promise<SemaforoAdjustment> {
+  return postJson<SemaforoAdjustment>(`/api/price-review/adjustments/${id}/${action}`);
+}
