@@ -562,8 +562,9 @@ class Settings(EnvSettings):
     # firmes y manda el resumen diario a Pao; Hugo inactiva o reactiva SOLO lo que decide una persona de
     # PRICE_REVIEW_DECIDERS, salvo la reactivación automática del recálculo (lo que apagó Hugo, se corrigió en Vendure y
     # ya no es rojo firme). 2 = automático: lo de 1 más el PORTÓN DE PRECIO (pricing/price_gate.py) para lo que sube Paco
-    # (inactivo): verde firme → Hugo lo activa; rojo firme → queda inactivo; amarillo / sin dato → bandeja de Pao; y un
-    # rojo firme que alguien prende a mano vuelve a inactivo. Todo con topes diarios y Deshacer.
+    # (inactivo): verde firme → Hugo lo activa; rojo firme → queda inactivo; amarillo / sin dato → bandeja de Pao; y los
+    # rojos firmes PUBLICADOS se apagan solos. Si una persona prende un rojo o apaga un verde, Hugo no lo revierte: lo
+    # anota como corrección (pricing/semaforo_correcciones.py). Todo con topes diarios y Deshacer.
     pm_mode: int = 0
     # Portón de precio (solo con pm_mode = 2). Topes por día (hora de Argentina) de escrituras y de lecturas a Vendure.
     pm_gate_activations_daily_max: int = 10
@@ -571,6 +572,20 @@ class Settings(EnvSettings):
     pm_gate_reads_daily_max: int = 100
     # Solo lo que Paco subió hace estos días o menos (lo viejo lo decide una persona).
     pm_gate_max_age_days: int = 30
+    # La persona manda (pricing/semaforo_correcciones.py): si alguien prende un rojo o apaga un verde, Hugo no lo revierte y
+    # deja el producto fuera de las acciones automáticas estos días (salvo que cambie su precio).
+    pm_correction_hold_days: int = 60
+    # Aprendizaje semanal con las correcciones (pricing/semaforo_aprende.py). 0 = apagado; 1 = propone ajustes por segmento y
+    # los muestra en la bandeja para que alguien los apruebe; 2 = los aplica solo (con historial y Deshacer).
+    pm_learn_mode: int = 1
+    # Correcciones mínimas en un segmento (y en la ventana) para proponer un ajuste.
+    pm_learn_min_corrections: int = 5
+    # Cuánto puede mover un ajuste el corte de ganancia (puntos porcentuales) respecto del corte general.
+    pm_learn_max_shift_pts: float = 5.0
+    # Días de correcciones que mira el aprendizaje.
+    pm_learn_window_days: int = 90
+    # Cuándo corre el aprendizaje (crontab, UTC). Default: lunes 12:00 UTC (09:00 ART).
+    semaforo_learn_cron_utc: str = "0 12 * * 1"
     # Semáforo de la noche: 1 = primero los activos que la última vez dieron rojo, después los demás activos y al final los
     # apagados (dentro de cada grupo, el que se midió hace más tiempo). 0 = como siempre (el más viejo primero).
     pm_order_reds_first: int = 0

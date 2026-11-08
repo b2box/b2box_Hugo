@@ -21,6 +21,8 @@ from app.db.models import (
     PriceMonitorRun,
     PriceReviewEvent,
     PriceReviewItem,
+    SemaforoAjuste,
+    SemaforoCorreccion,
     Setting,
     StoreMatch,
     StoreMatchFeedback,
@@ -37,7 +39,7 @@ def reset_db() -> None:
     init_db()
     with Session(engine) as s:
         for model in (PriceReviewEvent, PriceReviewItem, MarketPriceSnapshot, PriceMonitorRun, Setting, StoreMatch,
-                      StoreMatchFeedback, MarketStore, MarketMatchFeedback):
+                      StoreMatchFeedback, MarketStore, MarketMatchFeedback, SemaforoCorreccion, SemaforoAjuste):
             s.execute(delete(model))
         s.commit()
     runtime.invalidate()

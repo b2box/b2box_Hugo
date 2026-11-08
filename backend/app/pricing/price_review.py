@@ -13,8 +13,9 @@ Cada noche, DESPUÉS de cerrar la corrida del semáforo, `process_run(run_id)`:
 
 **La pasada NO escribe en Vendure** (ni `enabled` ni nada) y NO manda nada a Paco: inactiva o reactiva solo una persona de
 PRICE_REVIEW_DECIDERS, desde `price_review_actions`. Con `pm_mode = 2` (automático) esta pasada hace lo mismo que con 1; lo
-automático es el portón de precio de lo que sube Paco (`pricing/price_gate.py`), que corre después y escribe por
-`price_review_actions` con actor `hugo:auto`. Lo único que se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas
+automático es el portón de precio (`pricing/price_gate.py`), que corre después: apaga solo las fichas `propuesto` de esta
+noche (rojos firmes publicados), decide lo que sube Paco y escribe por `price_review_actions` con actor `hugo:auto`. Si una
+persona lo contradice, no lo revierte (pricing/semaforo_correcciones.py). Lo único que se le pide a Vendure son lecturas (ver `diagnosis_source.ReadSource`), con tope duro de 150 consultas
 por noche.
 
 Rojo firme (sección 3.3 del diseño), TODAS tienen que cumplirse:

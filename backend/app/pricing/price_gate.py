@@ -1,29 +1,31 @@
-"""Portón de precio (`pm_mode = 2`): solo queda publicado lo que se vende en Argentina a buen precio.
+"""Portón de precio (`pm_mode = 2`): automático cuando el semáforo compara firme contra Mercado Libre, y la persona manda.
 
-Paco sube a Vendure SIEMPRE inactivo. Con `pm_mode = 2`, después de la corrida de la noche (y de la pasada de la bandeja),
-`process_run(run_id)` mira cada producto que subió Paco por Luis (`luis_intake` con `vendure_product_id`, subido hace
-`pm_gate_max_age_days` días o menos) con el snapshot de ESA corrida:
+Después de la corrida de la noche (y de la pasada de la bandeja), `process_run(run_id)` hace, con el snapshot de ESA
+corrida y los topes diarios `pm_gate_inactivations_daily_max` / `pm_gate_activations_daily_max`, ROJOS PRIMERO:
 
-    verde firme  → Hugo lo ACTIVA (ficha `por_activar` → `activado`, actor `hugo:auto`), con tope diario
-                   `pm_gate_activations_daily_max`. «Firme» = las mismas reglas que el rojo firme de la bandeja (R1, R3-R7:
-                   idénticos confirmados por foto + nombre o por una persona, dato de ML fresco, 3 publicaciones, 2
-                   vendedores, precio creíble) con el color al revés, más el piso de precio de la reactivación automática
-                   (nuestro precio / mediana >= 1 / `pm_review_max_price_ratio`).
-    rojo firme   → queda inactivo (`gate_status = rojo_inactivo`); si tenía una ficha `por_activar`, se cierra sola.
-    amarillo, sin dato o dudoso → bandeja de Pao: ficha `por_activar` con el motivo; Pao decide «Activar» o «Despublicar».
-                   Si una noche siguiente da verde firme, Hugo la activa por el mismo camino.
+  1. rojos firmes PUBLICADOS: cada ficha `propuesto` que abrió la pasada de esta noche (rojo firme con su racha, R1-R8)
+     se apaga sola (`inactivar_auto` → `en_revision`, actor `hugo:auto`, con Deshacer), del peor margen al mejor;
+  2. lo que subió Paco por Luis (`luis_intake` con `vendure_product_id`, subido hace `pm_gate_max_age_days` días o menos),
+     rojos primero:
 
-Y `on_vendure_events(ids)` (avisos de `POST /api/vendure/events`): si alguien PRENDE A MANO un producto que la última
-medición vio apagado y es rojo firme, Hugo lo vuelve a apagar (`inactivar_auto` → ficha `en_revision` con el motivo), con
-tope `pm_gate_inactivations_daily_max` y lecturas acotadas por `pm_gate_reads_daily_max`. La noche hace lo mismo con lo que
-el portón había dejado inactivo y aparece prendido.
+        verde firme  → Hugo lo ACTIVA (ficha `por_activar` → `activado`). «Firme» = las mismas reglas que el rojo firme
+                       de la bandeja (R1, R3-R7) con el color al revés, más el piso de precio de la reactivación automática.
+        rojo firme   → queda inactivo (`gate_status = rojo_inactivo`); si tenía una ficha `por_activar`, se cierra sola.
+        amarillo, sin dato o dudoso → bandeja de Pao: ficha `por_activar` con el motivo; Pao decide «Activar» o
+                       «Despublicar». Si una noche siguiente da verde firme, Hugo la activa por el mismo camino.
 
-Lo que NO hace: no toca productos que no subió Paco por Luis (salvo el caso «prendido a mano» de arriba), no pelea con una
-persona (si alguien decidió Mantener, Activar, Reactivar o Deshacer sobre el producto en los últimos 30 días, no escribe), no
-recalcula precios y no escribe en Vendure por su cuenta: toda escritura va por `price_review_actions` (intención, guardas,
-un solo intento, verificación, conciliación, evento, AuditLog y Deshacer).
+La persona manda (pricing/semaforo_correcciones.py): si alguien PRENDE A MANO un producto que Hugo ve rojo, o APAGA uno que
+ve verde (en Vendure, visto por la noche o por `on_vendure_events`; o desde la bandeja), Hugo NO lo revierte: lo anota en
+`semaforo_correcciones` y deja el producto fuera de las acciones automáticas `pm_correction_hold_days` días, salvo que
+cambie su precio. Además no pelea con una decisión de la bandeja reciente (Mantener, Activar, Reactivar o Deshacer en los
+últimos 30 días).
 
-Con `pm_mode` distinto de 2 no hace nada.
+Los ajustes aprendidos de las correcciones (pricing/semaforo_aprende.py, los «aplicados») solo frenan: un caso que cae en un
+segmento ajustado y no pasa el corte de ese segmento va a la bandeja en vez de que Hugo actúe solo.
+
+No recalcula precios y no escribe en Vendure por su cuenta: toda escritura va por `price_review_actions` (intención,
+guardas, un solo intento, verificación, conciliación, evento, AuditLog y Deshacer). Con `pm_mode` distinto de 2 no hace
+nada.
 """
 
 from __future__ import annotations
@@ -41,10 +43,18 @@ from sqlmodel import Session, select
 
 from app import runtime
 from app.clock import utcnow
-from app.db.models import LuisIntake, MarketPriceSnapshot, PriceReviewEvent, PriceReviewItem
+from app.db.models import (
+    AuditLog,
+    LuisIntake,
+    MarketPriceSnapshot,
+    PriceReviewEvent,
+    PriceReviewItem,
+)
 from app.db.session import engine
 from app.pricing import daily_budget, semaforo
 from app.pricing import price_review as pr
+from app.pricing import semaforo_aprende as learn
+from app.pricing import semaforo_correcciones as corr
 from app.pricing.safe_error import error_code
 
 log = logging.getLogger(__name__)
@@ -58,6 +68,8 @@ ACTIVAR = "activar"
 BANDEJA = "bandeja"
 ROJO = "rojo_inactivo"
 G_ACTIVADO, G_BANDEJA, G_ROJO, G_YA_ACTIVO = "activado", "bandeja", "rojo_inactivo", "ya_activo"
+# Una persona lo apagó después de que Hugo lo activara (corrección: Hugo no lo vuelve a prender).
+G_APAGADO_A_MANO = "apagado_a_mano"
 
 # Una persona decidió algo «a favor» del producto en este tiempo: Hugo no lo vuelve a apagar ni lo prende.
 HUMAN_HOLD = timedelta(days=30)
@@ -69,7 +81,10 @@ REASON_TEXT = {
     "sin_dato": "Sin dato: no hay idénticos con precio en Mercado Libre",
     "precio_bajo": "Verde firme, pero nuestro precio quedó demasiado bajo contra ML (revisar que no sea un error de carga)",
     "tope_del_dia": "Verde firme, pero se llegó al tope de activaciones del día: se activa mañana o a mano",
-    "rojo_prendido_a_mano": "Rojo firme y alguien lo prendió a mano: Hugo lo volvió a apagar",
+    "rojo_prendido_a_mano": "Rojo firme y una persona lo prendió a mano: Hugo no lo revierte (corrección anotada)",
+    "verde_apagado_a_mano": "Verde firme y una persona lo apagó a mano: Hugo no lo vuelve a prender (corrección anotada)",
+    "rojo_firme_publicado": "Rojo firme publicado: Hugo lo apagó solo (modo automático)",
+    "corregido": "Una persona corrigió al semáforo hace poco: Hugo no actúa solo sobre este producto",
 }
 
 
@@ -87,14 +102,18 @@ class GateDecision:
     def text(self) -> str:
         if self.reason in REASON_TEXT:
             return REASON_TEXT[self.reason]
+        if self.reason.startswith("ajuste:"):
+            return "Cae en un segmento ajustado por las correcciones de las personas: lo decide la bandeja"
         if self.reason.startswith(("verde_dudoso:", "rojo_dudoso:")):
             color, _, why = self.reason.partition("_dudoso:")
             return f"{color.capitalize()} pero dudoso: {pr.REASONS.get(why, why)}"
         return {"verde_firme": "Verde firme", "rojo_firme": "Rojo firme: queda inactivo"}.get(self.reason, self.reason)
 
 
-def classify(snap: MarketPriceSnapshot | None, params: pr.ReviewParams, now: datetime | None = None) -> GateDecision:
-    """Qué hace el portón con este snapshot. PURA (sin red, sin base)."""
+def classify(snap: MarketPriceSnapshot | None, params: pr.ReviewParams, now: datetime | None = None,
+             rules: list[learn.Rule] | None = None, category: str | None = None) -> GateDecision:
+    """Qué hace el portón con este snapshot. PURA (sin red, sin base). `rules` = los ajustes aprendidos aplicados: un caso
+    firme que cae en un segmento ajustado y no pasa su corte va a la bandeja (`ajuste:<id>`)."""
     if snap is None or snap.ml_status != "ok" or snap.color == semaforo.SIN_DATO:
         return GateDecision(BANDEJA, "sin_dato")
     now = now or utcnow()
@@ -104,13 +123,28 @@ def classify(snap: MarketPriceSnapshot | None, params: pr.ReviewParams, now: dat
             return GateDecision(BANDEJA, f"verde_dudoso:{v.reason}", v)
         if v.price_ratio is None or v.price_ratio < 1.0 / params.max_price_ratio:
             return GateDecision(BANDEJA, "precio_bajo", v)
+        rule = _learned_block(rules, learn.VERDE, snap, params, now, category)
+        if rule is not None:
+            return GateDecision(BANDEJA, f"ajuste:{rule.id}", v)
         return GateDecision(ACTIVAR, "verde_firme", v)
     if snap.color == semaforo.ROJO:
         v = pr.evaluate_firm(snap, params, now, ignore_enabled=True)
         if v.firm:
+            rule = _learned_block(rules, learn.ROJO, snap, params, now, category)
+            if rule is not None:
+                return GateDecision(BANDEJA, f"ajuste:{rule.id}", v)
             return GateDecision(ROJO, "rojo_firme", v)
         return GateDecision(BANDEJA, f"rojo_dudoso:{v.reason}", v)
     return GateDecision(BANDEJA, "amarillo")
+
+
+def _learned_block(rules: list[learn.Rule] | None, direction: str, snap: MarketPriceSnapshot, params: pr.ReviewParams,
+                   now: datetime, category: str | None) -> learn.Rule | None:
+    if not rules:
+        return None
+    f = corr.figures(snap, params, now)
+    f["category"] = category
+    return learn.blocking_rule(rules, direction, f, params)
 
 
 def red_firm(snap: MarketPriceSnapshot | None, params: pr.ReviewParams, now: datetime | None = None) -> bool:
@@ -138,19 +172,58 @@ def _human_hold(s: Session, product_id: str, now: datetime) -> bool:
         PriceReviewEvent.at >= now - HUMAN_HOLD).limit(1)).first() is not None
 
 
+def _human_said_no(s: Session, product_id: str, now: datetime) -> bool:
+    """¿Una persona lo despublicó desde la bandeja hace poco? Entonces Hugo no lo activa solo."""
+    return s.exec(select(PriceReviewEvent.id).where(
+        PriceReviewEvent.product_id == product_id, PriceReviewEvent.actor != pr.ACTOR_AUTO,
+        PriceReviewEvent.kind == "decision_despublicar", PriceReviewEvent.at >= now - HUMAN_HOLD).limit(1)).first() is not None
+
+
+def _held(s: Session, snap: MarketPriceSnapshot, now: datetime) -> bool:
+    """¿Hugo tiene que quedarse quieto con este producto? Una decisión reciente de la bandeja a su favor, o una corrección
+    humana vigente con el mismo precio."""
+    return _human_hold(s, snap.product_id, now) or corr.held(s, snap.product_id, snap.our_price_cents, now)
+
+
 def _writing(s: Session, product_id: str) -> bool:
     return any(ev.product_id == product_id for ev in pr.pending_intents(s))
 
 
+def _hugo_turned_off(s: Session, product_id: str, now: datetime) -> bool:
+    """¿Lo apagó Hugo (la bandeja, o el control de duplicados / BX sin foto en los últimos 2 días)? Entonces un apagado no
+    es una persona corrigiendo al semáforo."""
+    item = pr.open_item_for(s, product_id)
+    if item is not None and item.hugo_disabled is True:
+        return True
+    if _writing(s, product_id):
+        return True
+    return s.exec(select(AuditLog.id).where(
+        AuditLog.product_id == product_id,
+        AuditLog.action.in_(("duplicate_disabled", "bx_no_image_disabled", "price_review_disabled")),  # type: ignore[attr-defined]
+        AuditLog.created_at >= now - timedelta(days=2)).limit(1)).first() is not None
+
+
 def _candidates(now: datetime) -> list[LuisIntake]:
-    """Lo que subió Paco por Luis, reciente, que el portón todavía puede decidir."""
+    """Lo que subió Paco por Luis, reciente, que el portón todavía puede decidir (o que activó y hay que vigilar)."""
     max_age = timedelta(days=max(1, int(runtime.get("pm_gate_max_age_days") or 30)))
     with Session(engine, expire_on_commit=False) as s:
         rows = s.exec(select(LuisIntake).where(
             LuisIntake.vendure_product_id.is_not(None),  # type: ignore[union-attr]
             LuisIntake.uploaded_at >= now - max_age,  # type: ignore[operator]
         ).order_by(LuisIntake.id).limit(MAX_PER_RUN)).all()
-    return [r for r in rows if r.gate_status in (None, G_BANDEJA, G_ROJO)]
+    return [r for r in rows if r.gate_status in (None, G_BANDEJA, G_ROJO, G_ACTIVADO)]
+
+
+def _reds_first(rows: list[LuisIntake], run_id: int) -> list[LuisIntake]:
+    """Los candidatos con los rojos de esta corrida primero (si se corta la pasada, lo urgente ya se hizo)."""
+    ids = [str(r.vendure_product_id) for r in rows]
+    if not ids:
+        return rows
+    with Session(engine) as s:
+        reds = set(s.exec(select(MarketPriceSnapshot.product_id).where(
+            MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.color == semaforo.ROJO,
+            MarketPriceSnapshot.product_id.in_(ids))).all())  # type: ignore[attr-defined]
+    return sorted(rows, key=lambda r: (str(r.vendure_product_id) not in reds, r.id or 0))
 
 
 def _set_gate(intake_id: int | None, status: str, reason: str, now: datetime) -> None:
@@ -207,36 +280,94 @@ def _close_gate_item(item_id: int, note: str, code: str, now: datetime) -> None:
             s.commit()
 
 
+def _record(snap: MarketPriceSnapshot, decision: str, now: datetime) -> None:
+    """Una corrección vista en Vendure (no sabemos quién fue). Nunca lanza."""
+    try:
+        corr.record(snap, decision, actor=corr.ORIGIN_VENDURE, origin=corr.ORIGIN_VENDURE, now=now)
+    except Exception:
+        log.exception("portón: no se pudo anotar la corrección de %s", snap.product_id)
+
+
+def _bump(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
 # ─── La noche ─────────────────────────────────────────────────────
 
 
 async def process_run(run_id: int, *, now: datetime | None = None, client: Any = None) -> dict[str, int]:
-    """El portón sobre lo que subió Paco, con los snapshots de la corrida `run_id`. Nunca lanza; devuelve contadores."""
+    """El portón con los snapshots de la corrida `run_id`: primero los rojos firmes publicados, después lo que subió Paco
+    (rojos primero). Nunca lanza; devuelve contadores."""
     counts: dict[str, int] = {}
     if not enabled():
         return counts
     now = now or utcnow()
     params = pr.ReviewParams.from_runtime()
+    rules = await asyncio.to_thread(learn.active_rules)
+    try:
+        reds = await asyncio.to_thread(_published_reds, run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("portón #%s: no se pudieron leer los rojos publicados (%s)", run_id, error_code(exc))
+        reds = []
+    for snap in reds:
+        try:
+            outcome = await _published_red(snap, run_id, params, rules, now, client)
+        except Exception as exc:  # noqa: BLE001  (un producto no frena a los demás)
+            log.warning("portón #%s: el rojo publicado %s falló (%s)", run_id, snap.product_id, error_code(exc))
+            outcome = "error"
+        _bump(counts, outcome)
+        if not enabled():                      # interruptor de emergencia: bajar el modo corta la pasada
+            return counts
     try:
         rows = await asyncio.to_thread(_candidates, now)
+        rows = await asyncio.to_thread(_reds_first, rows, run_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("portón #%s: no se pudieron leer los candidatos (%s)", run_id, error_code(exc))
         return counts
     for row in rows:
         try:
-            outcome = await _one(row, run_id, params, now, client)
+            outcome = await _one(row, run_id, params, rules, now, client)
         except Exception as exc:  # noqa: BLE001  (un producto no frena a los demás)
             log.warning("portón #%s: el producto %s falló (%s)", run_id, row.vendure_product_id, error_code(exc))
             outcome = "error"
-        counts[outcome] = counts.get(outcome, 0) + 1
-        if not enabled():                      # interruptor de emergencia: bajar el modo corta la pasada
+        if outcome:
+            _bump(counts, outcome)
+        if not enabled():
             break
     if counts:
         log.info("portón #%s: %s", run_id, counts)
     return counts
 
 
-async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, now: datetime, client: Any) -> str:
+def _published_reds(run_id: int) -> list[MarketPriceSnapshot]:
+    """Los rojos publicados que la pasada de esta noche dejó en `propuesto` (rojo firme con su racha), del peor margen al
+    mejor."""
+    out: list[MarketPriceSnapshot] = []
+    with Session(engine, expire_on_commit=False) as s:
+        items = s.exec(select(PriceReviewItem).where(PriceReviewItem.state == pr.PROPUESTO,
+                                                     PriceReviewItem.last_run_id == run_id)
+                       .order_by(PriceReviewItem.id).limit(MAX_PER_RUN)).all()
+        for item in items:
+            snap = s.get(MarketPriceSnapshot, item.last_snapshot_id) if item.last_snapshot_id else None
+            if (snap is not None and snap.run_id == run_id and snap.product_enabled
+                    and snap.color == semaforo.ROJO and snap.review_flag == pr.FIRME):
+                out.append(snap)
+    return sorted(out, key=lambda sn: (sn.est_margin_pct if sn.est_margin_pct is not None else 0.0, sn.id or 0))
+
+
+async def _published_red(snap: MarketPriceSnapshot, run_id: int, params: pr.ReviewParams, rules: list[learn.Rule],
+                         now: datetime, client: Any) -> str:
+    with Session(engine) as s:
+        category = corr.category_of(s, snap.product_id)
+    decision = classify(snap, params, now, rules, category)
+    if decision.action != ROJO:
+        return "rojo_publicado_a_bandeja"          # un ajuste aprendido lo frena: lo decide Pao
+    done = await enforce_red(snap, "rojo_firme_publicado", run_id=run_id, now=now, client=client)
+    return "apagado" if done else "rojo_sin_escribir"
+
+
+async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: list[learn.Rule], now: datetime,
+               client: Any) -> str:
     pid = str(row.vendure_product_id)
     with Session(engine, expire_on_commit=False) as s:
         snap = _latest_snapshot(s, pid, run_id)
@@ -244,17 +375,32 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, now: datet
             return "sin_medicion"
         if _writing(s, pid):
             return "escribiendo"
-        hold = _human_hold(s, pid, now)
+        hold = _held(s, snap, now)
+        said_no = _human_said_no(s, pid, now)
         item = pr.open_item_for(s, pid)
+        category = corr.category_of(s, pid)
+        hugo_off = row.gate_status == G_ACTIVADO and not snap.product_enabled and _hugo_turned_off(s, pid, now)
+    if row.gate_status == G_ACTIVADO:
+        # Lo activó Hugo: solo se vigila. Si hoy está apagado y no lo apagó Hugo, lo apagó una persona: corrección.
+        if snap.product_enabled or hugo_off or (row.gate_at is not None and snap.captured_at < row.gate_at):
+            return ""
+        await asyncio.to_thread(_record, snap, corr.INACTIVAR, now)
+        text = REASON_TEXT["verde_apagado_a_mano"] if snap.color == semaforo.VERDE else \
+            "Una persona lo apagó después de que Hugo lo activara"
+        await asyncio.to_thread(_set_gate, row.id, G_APAGADO_A_MANO, text, now)
+        return "apagado_a_mano"
     if item is not None and item.state not in (pr.POR_ACTIVAR,):
         return "ficha_de_una_persona"                    # ya la tiene la bandeja de rojos (o mantenida): no se toca
-    decision = classify(snap, params, now)
+    decision = classify(snap, params, now, rules, category)
     if snap.product_enabled:
-        if decision.action == ROJO and row.gate_status in (G_ROJO, G_BANDEJA) and not hold:
-            done = await enforce_red(snap, "rojo_prendido_a_mano", run_id=run_id, now=now, client=client)
-            if done:
-                await asyncio.to_thread(_set_gate, row.id, G_ROJO, REASON_TEXT["rojo_prendido_a_mano"], now)
-            return "reapagado" if done else "rojo_prendido_sin_escribir"
+        if snap.color == semaforo.ROJO and row.gate_status in (G_ROJO, G_BANDEJA):
+            # La persona manda: alguien lo prendió con rojo. Hugo no lo revierte; lo anota y no lo toca por un tiempo.
+            await asyncio.to_thread(_record, snap, corr.ACTIVAR, now)
+            if item is not None and item.state == pr.POR_ACTIVAR:
+                await asyncio.to_thread(_close_gate_item, int(item.id), "Lo prendió una persona en Vendure.",  # type: ignore[arg-type]
+                                        "ya_activo", now)
+            await asyncio.to_thread(_set_gate, row.id, G_YA_ACTIVO, REASON_TEXT["rojo_prendido_a_mano"], now)
+            return "corregido_a_mano"
         if item is not None and item.state == pr.POR_ACTIVAR:
             await asyncio.to_thread(_close_gate_item, int(item.id), "Lo prendió una persona en Vendure.",  # type: ignore[arg-type]
                                     "ya_activo", now)
@@ -266,7 +412,9 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, now: datet
             await asyncio.to_thread(_close_gate_item, int(item.id), "Rojo firme: queda inactivo.", "rojo_firme", now)  # type: ignore[arg-type]
         await asyncio.to_thread(_set_gate, row.id, G_ROJO, decision.text, now)
         return "rojo_inactivo"
-    if decision.action == ACTIVAR and not hold:
+    if decision.action == ACTIVAR and (hold or said_no):
+        decision = GateDecision(BANDEJA, "corregido", decision.verdict)
+    if decision.action == ACTIVAR:
         item = await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
         if item is None or item.state != pr.POR_ACTIVAR:
             return "sin_ficha"
@@ -288,7 +436,7 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, now: datet
         await asyncio.to_thread(_set_gate, row.id, G_ACTIVADO, decision.text, now)
         await asyncio.to_thread(_mark_snapshot_enabled, int(snap.id))  # type: ignore[arg-type]
         return "activado"
-    # amarillo, sin dato, dudoso (o verde con una persona en el medio): a la bandeja de Pao.
+    # amarillo, sin dato, dudoso, ajuste aprendido o una persona en el medio: a la bandeja de Pao.
     await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
     await asyncio.to_thread(_set_gate, row.id, G_BANDEJA, decision.text, now)
     return "bandeja"
@@ -303,16 +451,17 @@ def _mark_snapshot_enabled(snap_id: int) -> None:
             s.commit()
 
 
-# ─── Rojo firme prendido a mano ───────────────────────────────────
+# ─── Apagar un rojo firme publicado ───────────────────────────────
 
 
 async def enforce_red(snap: MarketPriceSnapshot, reason: str, *, run_id: int | None = None,
                       now: datetime | None = None, client: Any = None) -> bool:
-    """Vuelve a apagar un rojo firme que alguien prendió a mano: ficha (la viva o una nueva `propuesto`) → `en_revision`
-    por `inactivar_auto`. True si Vendure quedó apagado por esta llamada. Con tope diario."""
+    """Apaga un rojo firme publicado: ficha (la viva o una nueva `propuesto`) → `en_revision` por `inactivar_auto`. True si
+    Vendure quedó apagado por esta llamada. Con tope diario. No hace nada si una persona corrigió al semáforo sobre este
+    producto (con este precio) o decidió algo a su favor en la bandeja hace poco."""
     now = now or utcnow()
     with Session(engine) as s:
-        if _human_hold(s, snap.product_id, now) or _writing(s, snap.product_id):
+        if _held(s, snap, now) or _writing(s, snap.product_id):
             return False
         current = pr.open_item_for(s, snap.product_id)
     if current is not None and current.state not in (pr.PROPUESTO, pr.POR_ACTIVAR):
@@ -343,8 +492,12 @@ async def enforce_red(snap: MarketPriceSnapshot, reason: str, *, run_id: int | N
     return bool(out.get("wrote"))
 
 
+# ─── Avisos de Vendure: ¿una persona corrigió al semáforo? ────────
+
+
 # Referencias a las tareas de fondo de los avisos.
 _TASKS: set[asyncio.Task] = set()
+PRENDIDO, APAGADO = "prendido", "apagado"
 
 
 def notify(product_ids: Iterable[str]) -> None:
@@ -359,20 +512,34 @@ def notify(product_ids: Iterable[str]) -> None:
     task.add_done_callback(_TASKS.discard)
 
 
-def _suspects(product_ids: list[str], now: datetime, params: pr.ReviewParams) -> list[MarketPriceSnapshot]:
-    """De los avisados: los que la última medición vio APAGADOS y son rojo firme (sin leer Vendure)."""
-    out: list[MarketPriceSnapshot] = []
+def _suspects(product_ids: list[str], now: datetime, params: pr.ReviewParams) -> list[tuple[MarketPriceSnapshot, str]]:
+    """De los avisados (sin leer Vendure), rojos primero: los que la última medición vio APAGADOS y en rojo firme (¿alguien
+    los prendió?) y los que vio PRENDIDOS y en verde firme (¿alguien los apagó?). Se salta lo que ya tiene una corrección
+    vigente con el mismo precio."""
+    reds: list[tuple[MarketPriceSnapshot, str]] = []
+    greens: list[tuple[MarketPriceSnapshot, str]] = []
     with Session(engine, expire_on_commit=False) as s:
         for pid in product_ids:
             snap = _latest_snapshot(s, pid)
-            if snap is not None and snap.product_enabled is False and red_firm(snap, params, now):
-                out.append(snap)
-    return out
+            if snap is None or corr.held(s, pid, snap.our_price_cents, now):
+                continue
+            if snap.product_enabled is False and red_firm(snap, params, now):
+                reds.append((snap, PRENDIDO))
+            elif snap.product_enabled is True and snap.color == semaforo.VERDE and pr.evaluate_firm(
+                    snap, params, now, colors=(semaforo.VERDE,)).firm:
+                greens.append((snap, APAGADO))
+    return reds + greens
+
+
+def _turned_off_by_hugo(product_id: str, now: datetime) -> bool:
+    with Session(engine) as s:
+        return _hugo_turned_off(s, product_id, now)
 
 
 async def on_vendure_events(product_ids: list[str], *, client: Any = None, now: datetime | None = None) -> dict[str, int]:
-    """Un aviso de Vendure sobre un producto que Hugo vio apagado y en rojo firme: se lee si quedó prendido (una lectura por
-    producto, con tope diario) y, si sí, se vuelve a apagar. Nunca lanza."""
+    """Un aviso de Vendure sobre un producto en rojo firme que Hugo vio apagado, o en verde firme que vio prendido: se lee
+    su estado (una lectura por producto, con tope diario `pm_gate_reads_daily_max`) y, si una persona hizo lo contrario del
+    semáforo, se anota la corrección (Hugo NO lo revierte). Nunca lanza."""
     counts: dict[str, int] = {}
     if not enabled():
         return counts
@@ -386,23 +553,32 @@ async def on_vendure_events(product_ids: list[str], *, client: Any = None, now: 
             from app.vendure.client import VendureClient
             client = VendureClient()
         cap = int(runtime.get("pm_gate_reads_daily_max") or 0)
-        for snap in suspects:
+        for snap, expect in suspects:
             if await asyncio.to_thread(daily_budget.reserve, READS_KEY, cap, None, None,
                                        daily_budget.today_art(now)) is None:
-                counts["tope_lecturas"] = counts.get("tope_lecturas", 0) + 1
+                _bump(counts, "tope_lecturas")
                 continue
             try:
                 is_on = await client.get_enabled_status(snap.product_id)
             except Exception as exc:  # noqa: BLE001
                 log.info("portón: no se pudo leer %s (%s)", snap.product_id, error_code(exc))
-                counts["error"] = counts.get("error", 0) + 1
+                _bump(counts, "error")
                 continue
-            if is_on is not True:
-                counts["sigue_apagado"] = counts.get("sigue_apagado", 0) + 1
+            if expect == PRENDIDO:
+                if is_on is not True:
+                    _bump(counts, "sigue_apagado")
+                    continue
+                await asyncio.to_thread(_record, snap, corr.ACTIVAR, now)
+                _bump(counts, "corregido_a_mano")
                 continue
-            done = await enforce_red(snap, "rojo_prendido_a_mano", now=now, client=client)
-            key = "reapagado" if done else "sin_escribir"
-            counts[key] = counts.get(key, 0) + 1
+            if is_on is not False:
+                _bump(counts, "sigue_prendido")
+                continue
+            if await asyncio.to_thread(_turned_off_by_hugo, snap.product_id, now):
+                _bump(counts, "apagado_por_hugo")
+                continue
+            await asyncio.to_thread(_record, snap, corr.INACTIVAR, now)
+            _bump(counts, "corregido_a_mano")
     except Exception as exc:  # noqa: BLE001
         log.warning("portón: los avisos de Vendure fallaron (%s)", error_code(exc))
     if counts:

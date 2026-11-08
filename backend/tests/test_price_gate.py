@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
-from app.db.models import AuditLog, LuisIntake
+from app.db.models import LuisIntake, SemaforoCorreccion
 from app.db.session import engine
 from app.pricing import price_gate
 from app.pricing import price_review as pr
@@ -41,6 +41,11 @@ def paco_upload(pid: str, *, status: str | None = None, uploaded_days_ago: float
         s.add(row)
         s.commit()
         return int(row.id)  # type: ignore[arg-type]
+
+
+def corrections() -> list[SemaforoCorreccion]:
+    with Session(engine) as s:
+        return list(s.exec(select(SemaforoCorreccion).order_by(SemaforoCorreccion.id)).all())  # type: ignore[arg-type]
 
 
 def intake(pid: str) -> LuisIntake:
@@ -178,49 +183,32 @@ async def test_old_uploads_and_products_paco_did_not_upload_are_left_alone(fake)
     assert fake.writes() == []
 
 
-# ─── rojo firme prendido a mano ──────────────────────────────────
+# ─── la persona manda: prendido o apagado a mano ─────────────────
 
 
-async def test_red_firm_turned_on_by_hand_goes_back_off_with_the_motive(fake):
+async def test_red_firm_turned_on_by_hand_is_not_reverted_and_is_recorded(fake):
     run = w.make_run()
     w.add_snap(run, "h1", color="rojo", enabled=False)        # la noche lo vio apagado y rojo firme
     fake.enabled["h1"] = True                                 # alguien lo prendió a mano
     counts = await price_gate.on_vendure_events(["h1"], now=w.NOW)
-    assert counts == {"reapagado": 1} and fake.enabled["h1"] is False
-    [item] = w.items()
-    assert item.state == pr.EN_REVISION and item.hugo_disabled is True
-    ks = kit.kinds(int(item.id))
-    assert "porton" in ks and "decision_inactivar_auto" in ks and "inactivado" in ks
-    with Session(engine) as s:
-        assert s.exec(select(AuditLog).where(AuditLog.product_id == "h1",
-                                             AuditLog.action == "price_review_disabled")).first() is not None
-    # Deshacer (una persona) lo prende de nuevo, y Hugo NO vuelve a pelear.
-    r = kit.post(kit.client(), int(item.id), "undo", expected_state=pr.EN_REVISION)
-    assert r.status_code == 200, r.text
-    assert fake.enabled["h1"] is True
-    assert await price_gate.on_vendure_events(["h1"], now=w.NOW) == {"sin_escribir": 1}
-    assert fake.enabled["h1"] is True
+    assert counts == {"corregido_a_mano": 1} and fake.enabled["h1"] is True
+    assert fake.writes() == [] and w.items() == []
+    [c] = corrections()
+    assert (c.product_id, c.hugo_color, c.hugo_firm, c.human_decision, c.origin) == ("h1", "rojo", True, "activar", "vendure")
+    assert c.ml_median_cents == 900_000 and c.firm_listings == 3 and c.our_price_cents == 1_000_000
+    assert c.hold_until == w.NOW + timedelta(days=60)
+    # Un segundo aviso no lo vuelve a leer ni duplica la corrección.
+    assert await price_gate.on_vendure_events(["h1"], now=w.NOW) == {}
+    assert len(corrections()) == 1
 
 
-async def test_events_ignore_green_still_off_and_kept_products(fake):
-    run = w.make_run()
-    w.add_snap(run, "e1", color="verde", prices=GREEN_PRICES, enabled=False)
-    w.add_snap(run, "e2", color="rojo", enabled=False)
-    w.add_snap(run, "e3", color="rojo", enabled=True)         # ya estaba prendido: eso es la bandeja de siempre
-    fake.enabled.update(e1=True, e2=False, e3=True)
-    assert await price_gate.on_vendure_events(["e1", "e2", "e3"], now=w.NOW) == {"sigue_apagado": 1}
-    assert fake.writes() == []
-
-
-async def test_inactivation_cap_and_reads_cap(fake):
-    w.set_setting("pm_gate_inactivations_daily_max", 0)
+async def test_reads_cap(fake):
+    w.set_setting("pm_gate_reads_daily_max", 0)
     run = w.make_run()
     w.add_snap(run, "k1", color="rojo", enabled=False)
     fake.enabled["k1"] = True
-    assert await price_gate.on_vendure_events(["k1"], now=w.NOW) == {"sin_escribir": 1}
-    w.set_setting("pm_gate_reads_daily_max", 0)
     assert await price_gate.on_vendure_events(["k1"], now=w.NOW) == {"tope_lecturas": 1}
-    assert fake.writes() == []
+    assert fake.writes() == [] and corrections() == []
 
 
 def test_humans_cannot_call_the_automatic_actions(fake):
