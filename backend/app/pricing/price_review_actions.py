@@ -14,6 +14,15 @@ corrigió en Vendure y ya no es rojo firme (pricing/price_recalc.py), corrigiend
 mismas guardas que «Ya lo corregí». Solo desde `corrigiendo` (una persona ya dijo «Corregir»). No es un botón: la API no
 la expone y no tiene Deshacer.
 
+Portón de precio (pm_mode = 2, pricing/price_gate.py), con el MISMO protocolo y actor `hugo:auto`:
+
+    activar_auto    por_activar → activado (prende lo que subió Paco con verde firme)
+    inactivar_auto  propuesto / por_activar → en_revision (apaga un rojo firme que alguien prendió a mano)
+
+y la decisión humana `activar` (por_activar → activado; «Descartar» = Despublicar sin escribir: ya está apagado). A
+diferencia de la reactivación del recálculo, las dos acciones del portón SÍ tienen Deshacer (una persona las puede volver
+atrás hasta 30 días después) y activar no exige que lo haya apagado Hugo: lo apagado es como lo subió Paco.
+
 Qué se puede desde cada estado lo manda `TRANSITIONS` (tabla 3.1 de los criterios); la pantalla muestra los botones que
 devuelve `available_actions`.
 
@@ -71,10 +80,18 @@ log = logging.getLogger(__name__)
 
 INACTIVAR, CORREGIR, MANTENER, DESPUBLICAR, REACTIVAR, DESHACER = (
     "inactivar", "corregir", "mantener", "despublicar", "reactivar", "deshacer")
-DECISIONS = (CORREGIR, MANTENER, DESPUBLICAR, REACTIVAR)
+ACTIVAR = "activar"
+DECISIONS = (CORREGIR, MANTENER, DESPUBLICAR, REACTIVAR, ACTIVAR)
 # La reactivación automática del recálculo: no es una decisión de una persona (no sale en `available_actions` ni en la API).
 REACTIVAR_AUTO = "reactivar_auto"
 AUTO_KIND = f"decision_{REACTIVAR_AUTO}"
+# Portón de precio (pm_mode = 2): solo `hugo:auto`. Estas dos sí se pueden deshacer.
+ACTIVAR_AUTO = "activar_auto"
+INACTIVAR_AUTO = "inactivar_auto"
+AUTO_ACTIONS = (REACTIVAR_AUTO, ACTIVAR_AUTO, INACTIVAR_AUTO)
+GATE_KINDS = {f"decision_{ACTIVAR_AUTO}", f"decision_{INACTIVAR_AUTO}"}
+# Activar no pide que lo haya apagado Hugo: lo subió Paco apagado.
+ACTIVATIONS = (ACTIVAR, ACTIVAR_AUTO)
 
 # (estado, acción) → (estado nuevo, qué tiene que quedar en Vendure: False apagado, True activo, None no se mira). Corregir
 # y Despublicar desde un estado «apagado por Hugo» también piden apagado: si alguien lo reactivó a mano, se vuelve a
@@ -94,10 +111,18 @@ TRANSITIONS: dict[tuple[str, str], tuple[str, bool | None]] = {
     (pr.BUSCANDO_PROV, MANTENER): (pr.MANTENIDO, True),
     (pr.BUSCANDO_PROV, DESPUBLICAR): (pr.DESPUBLICADO, False),
     (pr.CORRIGIENDO, REACTIVAR_AUTO): (pr.CORREGIDO, True),
+    # Portón de precio.
+    (pr.POR_ACTIVAR, ACTIVAR): (pr.ACTIVADO, True),
+    (pr.POR_ACTIVAR, DESPUBLICAR): (pr.DESPUBLICADO, None),
+    (pr.POR_ACTIVAR, ACTIVAR_AUTO): (pr.ACTIVADO, True),
+    (pr.POR_ACTIVAR, INACTIVAR_AUTO): (pr.EN_REVISION, False),
+    (pr.PROPUESTO, INACTIVAR_AUTO): (pr.EN_REVISION, False),
 }
 ACTION_LABEL = {
     INACTIVAR: "Inactivar y revisar", CORREGIR: "Corregir", MANTENER: "Mantener activo", DESPUBLICAR: "Despublicar",
     REACTIVAR: "Ya lo corregí: reactivar", DESHACER: "Deshacer", REACTIVAR_AUTO: "Hugo lo reactivó solo",
+    ACTIVAR: "Activar", ACTIVAR_AUTO: "Hugo lo activó solo (verde firme)",
+    INACTIVAR_AUTO: "Hugo lo apagó solo (rojo firme)",
 }
 MOTIVES: dict[str, dict[str, str]] = {
     CORREGIR: {"caja": "La caja", "tramos": "Los tramos", "cantidad": "La cantidad", "certificado": "El certificado",
@@ -113,8 +138,9 @@ TEXT_MIN, TEXT_MAX = 10, 500
 
 # Eventos que cambian el estado de la ficha. Deshacer solo vale si el último de estos es la acción de una persona.
 HUMAN_KINDS = {"aprobado", *(f"decision_{d}" for d in DECISIONS)}
-# La reactivación automática cambia el estado pero no es humana: después de ella no hay Deshacer.
-STATE_KINDS = HUMAN_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto", AUTO_KIND}
+# La reactivación automática cambia el estado pero no es humana: después de ella no hay Deshacer. Las del portón sí.
+UNDOABLE_KINDS = HUMAN_KINDS | GATE_KINDS
+STATE_KINDS = UNDOABLE_KINDS | {"propuesto", "deshacer", "reabierto", "cerrado_auto", AUTO_KIND, "porton"}
 # Vuelven la ficha a como estaba antes de la última acción (Vendure falló, reactivar a mano, conciliación): esa acción
 # no cuenta, y el intento fallido no le quita el Deshacer a la anterior.
 ROLLBACK_KINDS = {"vendure_error", "reactivar_a_mano", "intent_descartado"}
@@ -252,12 +278,12 @@ def last_human_action(events: Iterable[PriceReviewEvent]) -> tuple[PriceReviewEv
     standing: list[PriceReviewEvent] = []                 # los cambios de estado que siguen en pie
     for e in evs:
         if e.kind in ROLLBACK_KINDS:
-            if standing and standing[-1].kind in (*HUMAN_KINDS, "deshacer", AUTO_KIND):
+            if standing and standing[-1].kind in (*UNDOABLE_KINDS, "deshacer", AUTO_KIND):
                 standing.pop()                          # esa acción se volvió atrás: la ficha quedó como estaba
         elif e.kind in STATE_KINDS:
             standing.append(e)
     last = standing[-1] if standing else None
-    if last is None or last.kind not in HUMAN_KINDS or not _payload(last).get("antes"):
+    if last is None or last.kind not in UNDOABLE_KINDS or not _payload(last).get("antes"):
         return None
     wrote = [e for e in evs if (e.id or 0) > (last.id or 0) and e.kind in ("inactivado", "reactivado")]
     return last, (None if not wrote else not wrote[-1].enabled_after)
@@ -352,7 +378,7 @@ async def act(item_id: int, action: str, actor: str, *, expected_state: str, mot
     """Hace una acción sobre una ficha y devuelve `{item_id, state, version, wrote}`. Levanta `ActionError` (400, 404,
     409, 502) si no se hizo: la ficha queda como estaba. `hold` = (código, por qué): una reactivación que no se puede hacer
     sola (el piso de precio del recálculo) y queda «reactivar a mano» por el mismo camino que una guarda."""
-    if action not in ACTION_LABEL or (action == REACTIVAR_AUTO and actor != pr.ACTOR_AUTO):
+    if action not in ACTION_LABEL or (action in AUTO_ACTIONS and actor != pr.ACTOR_AUTO):
         raise ActionError(400, "accion_invalida", "Acción desconocida.")
     code, text = validate(action, motive_code, motive_text)
     item, pending = _load(item_id)
@@ -391,6 +417,15 @@ async def auto_reactivate(item_id: int, expected_state: str, client: VendureClie
     precio quedó demasiado bajo), la ficha vuelve a como estaba con `reactivar_a_mano` y levanta `ActionError`, como con
     una persona. Con `pm_mode = 0` no corre."""
     return await act(item_id, REACTIVAR_AUTO, pr.ACTOR_AUTO, expected_state=expected_state, client=client, hold=hold)
+
+
+async def auto_gate(item_id: int, action: str, expected_state: str, client: VendureClient | None = None) -> dict[str, Any]:
+    """Las acciones del portón de precio (pricing/price_gate.py): `activar_auto` o `inactivar_auto`, actor `hugo:auto`. Es
+    `act` tal cual (intención, guardas, un solo intento, verificación, conciliación, evento y AuditLog). Con `pm_mode` en 0
+    no corre (y el portón solo llama con 2)."""
+    if action not in (ACTIVAR_AUTO, INACTIVAR_AUTO):
+        raise ActionError(400, "accion_invalida", "Acción desconocida.")
+    return await act(item_id, action, pr.ACTOR_AUTO, expected_state=expected_state, client=client)
 
 
 def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text: str | None, now: datetime) -> None:
@@ -460,7 +495,7 @@ async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureCl
     if enabled is target:
         return _already(item, mv, actor, target)
     if target:
-        blocker = _reactivation_blocker(item, guard)
+        blocker = _reactivation_blocker(item, guard, mv.action)
         if blocker is not None:
             raise _manual(item, mv, actor, *blocker)
     if not _still_pending(item, mv):
@@ -541,9 +576,11 @@ def _manual(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -
     return ActionError(409, "reactivar_a_mano", f"Hay que reactivarlo a mano en Vendure: {why}.", item, reason=code)
 
 
-def _reactivation_blocker(item: PriceReviewItem, guard: ReviewGuard | None) -> tuple[str, str] | None:
-    """V-4: Hugo reactiva solo lo que apagó él, si nadie más lo apagó después y el portal de proveedores no lo frena."""
-    if item.hugo_disabled is not True:
+def _reactivation_blocker(item: PriceReviewItem, guard: ReviewGuard | None,
+                          action: str | None = None) -> tuple[str, str] | None:
+    """V-4: Hugo reactiva solo lo que apagó él, si nadie más lo apagó después y el portal de proveedores no lo frena.
+    Activar (portón de precio) no pide que lo haya apagado Hugo: lo subió Paco apagado; el resto de las guardas vale igual."""
+    if item.hugo_disabled is not True and action not in ACTIVATIONS:
         return "no_lo_apago_hugo", "no lo apagó Hugo"
     status = guard.approval_status if guard is not None else None
     if status not in APPROVAL_OK:

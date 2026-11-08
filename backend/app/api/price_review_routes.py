@@ -49,10 +49,11 @@ DB_INT_MAX = 2**31 - 1
 
 # Las pestañas de la pantalla → estados.
 GROUPS: dict[str, tuple[str, ...]] = {
-    "para_decidir": (price_review.PROPUESTO,),
+    # `por_activar`: lo que subió Paco y el portón de precio (pm_mode = 2) dejó para una persona (amarillo, sin dato).
+    "para_decidir": (price_review.PROPUESTO, price_review.POR_ACTIVAR),
     "en_proceso": (price_review.EN_REVISION, price_review.CORRIGIENDO, price_review.BUSCANDO_PROV),
     "mantenidos": (price_review.MANTENIDO,),
-    "cerrados": (price_review.DESPUBLICADO, price_review.CORREGIDO, price_review.CERRADO_AUTO),
+    "cerrados": (price_review.DESPUBLICADO, price_review.CORREGIDO, price_review.CERRADO_AUTO, price_review.ACTIVADO),
 }
 ALL_STATES = tuple(s for states in GROUPS.values() for s in states)
 CAUSES = ("a", "b", "c", "d", "e", "ninguna", "sin_dato", "pendiente")
@@ -241,7 +242,7 @@ async def summary(request: Request, session: Session = Depends(get_session)) -> 
     if latest is not None and latest.review_at is None and latest.review_summary:
         failure = (_loads(latest.review_summary) or {}).get("error")
     return {
-        "mode": mode, "mode_label": price_review.mode_label(mode), "mode_effective": min(mode, 1),
+        "mode": mode, "mode_label": price_review.mode_label(mode), "mode_effective": min(mode, 2),
         # Solo lectura para esta sesión: no está en PRICE_REVIEW_DECIDERS o la bandeja está en sombra.
         "read_only": not (auth.review_decider(request) and mode >= 1),
         "counts": {s: int(by_state.get(s, 0)) for s in ALL_STATES},
@@ -297,7 +298,7 @@ async def list_items(
         conds.append(PriceReviewItem.diag_status.in_(("pendiente", "parcial")))  # type: ignore[union-attr]
     elif cause:
         conds.append(PriceReviewItem.probable_cause == cause)
-    open_only = states is not None and all(s in price_review.OPEN_STATES for s in states)
+    open_only = states is not None and all(s in (*price_review.OPEN_STATES, price_review.POR_ACTIVAR) for s in states)
     order = (PriceReviewItem.state_since.asc(), PriceReviewItem.id.asc()) if open_only else (  # type: ignore[union-attr]
         PriceReviewItem.closed_at.desc(), PriceReviewItem.id.desc())  # type: ignore[union-attr]
     total = int(session.exec(select(func.count(PriceReviewItem.id)).where(*conds)).one() or 0)  # type: ignore[arg-type]
@@ -379,7 +380,7 @@ class ActionIn(BaseModel):
 
 
 class DecisionIn(ActionIn):
-    decision: Literal["corregir", "mantener", "despublicar", "reactivar"]
+    decision: Literal["corregir", "mantener", "despublicar", "reactivar", "activar"]
     motive_code: str | None = Field(None, max_length=24)
 
 
@@ -403,7 +404,8 @@ async def approve(body: ActionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
 @router.post("/items/{item_id}/decision")
 async def decision(body: DecisionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
                    actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
-    """Corregir, Mantener, Despublicar o «Ya lo corregí: reactivar» (tabla de transiciones en price_review_actions)."""
+    """Corregir, Mantener, Despublicar, «Ya lo corregí: reactivar» o Activar (lo que subió Paco y quedó «por activar»; tabla
+    de transiciones en price_review_actions)."""
     return await _act(item_id, body.decision, actor, body, body.motive_code)
 
 

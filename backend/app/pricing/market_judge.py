@@ -635,6 +635,10 @@ async def judge(
         cost_usd=estimate_cost(in_tok, out_tok, s.pm_llm_price_in_per_m, s.pm_llm_price_out_per_m),
         model=s.pm_llm_model, raw=text[:2000],
     )
+    from app import llm_usage   # lazy: el registro usa la base
+    await llm_usage.record_async(provider=llm_usage.provider_of_base_url(_base_host()), model=s.pm_llm_model,
+                                 purpose="semaforo_juez", input_tokens=in_tok, output_tokens=out_tok,
+                                 cost_usd=result.cost_usd)
     reasoning = _reasoning_tokens(usage)
     if reasoning > 0 or not text.strip():
         # Un modelo que piensa se come max_tokens razonando: el content llega

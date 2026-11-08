@@ -196,6 +196,11 @@ async def judge(query_image: str, thumbs: Sequence[tuple[str, str]], *,
     cost = market_judge.estimate_cost(int(getattr(usage, "prompt_tokens", 0) or 0),
                                       int(getattr(usage, "completion_tokens", 0) or 0),
                                       s.pm_llm_price_in_per_m, s.pm_llm_price_out_per_m)
+    from app import llm_usage   # lazy: el registro usa la base
+    await llm_usage.record_async(provider=llm_usage.provider_of_base_url(market_judge._base_host()),
+                                 model=s.pm_llm_model, purpose="estimado_juez",
+                                 input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                                 output_tokens=int(getattr(usage, "completion_tokens", 0) or 0), cost_usd=cost)
     outcome = parse(text, min(len(thumbs), MAX_CANDIDATES))
     if outcome is None:
         log.warning("estimado: respuesta del juez ilegible (%d caracteres)", len(text))

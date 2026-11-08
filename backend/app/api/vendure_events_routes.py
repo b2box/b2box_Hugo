@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.api.oficina_routes import _IpTable, _ip_key, _key_matches, _read_body, _window
 from app.config import get_settings
-from app.pricing import luis_intake, price_recalc
+from app.pricing import luis_intake, price_gate, price_recalc
 from app.security import client_ip, weak_key_reason
 
 log = logging.getLogger(__name__)
@@ -142,5 +142,7 @@ async def vendure_events(request: Request) -> dict[str, Any]:
     task = asyncio.create_task(luis_intake.compare_products(list(changes)))
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
+    # Portón de precio (solo con pm_mode = 2): un rojo firme que alguien prendió a mano vuelve a inactivo.
+    price_gate.notify(list(changes))
     log.info("vendure events: %d avisos, %d productos anotados (%s)", len(body.events), queued, client_ip(request))
     return {"queued": queued}

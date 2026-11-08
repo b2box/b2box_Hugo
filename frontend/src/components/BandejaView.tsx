@@ -90,6 +90,10 @@ const EVENT_LABEL: Record<string, string> = {
   decision_reactivar_auto: "Hugo lo reactivó solo (se corrigió en Vendure y ya no es rojo)",
   aviso_reactivar: "No se reactivó solo",
   rojo_tras_reactivar: "Volvió a dar rojo firme después de que Hugo lo reactivó solo",
+  porton: "Portón de precio (lo subió Paco)",
+  decision_activar: "Decidió activarlo",
+  decision_activar_auto: "Hugo lo activó solo (verde firme)",
+  decision_inactivar_auto: "Hugo lo apagó solo (rojo firme prendido a mano)",
 };
 
 // La marca que deja en la ficha una reactivación automática que no se hizo por el tope del día (price_recalc.FLAG_NOT_RED).
@@ -122,6 +126,8 @@ const STATE_BADGE: Record<string, BadgeProps["variant"]> = {
   despublicado: "destructive",
   corregido: "success",
   cerrado_auto: "success",
+  por_activar: "warning",
+  activado: "success",
 };
 
 // Los 10 componentes del precio, siempre con el mismo color.
@@ -456,7 +462,8 @@ export function DetailBody({ d, onChanged }: { d: PriceReviewDetail; onChanged: 
   const name = d.product.name || d.product.id;
   const snap = d.snapshot;
   const diag = d.diagnosis;
-  const closed = d.state === "cerrado_auto" || d.state === "corregido" || d.state === "despublicado";
+  const closed =
+    d.state === "cerrado_auto" || d.state === "corregido" || d.state === "despublicado" || d.state === "activado";
   const closedWhy =
     d.state === "cerrado_auto"
       ? d.events.find((e) => e.kind === "cerrado_auto")?.motive_text ?? "dejó de ser rojo"
@@ -807,7 +814,7 @@ function ActionModal({
           ? await approveReview(d.id, input)
           : isUndo
             ? await undoReview(d.id, input)
-            : await decideReview(d.id, action.code as "corregir" | "mantener" | "despublicar" | "reactivar", input);
+            : await decideReview(d.id, action.code as "corregir" | "mantener" | "despublicar" | "reactivar" | "activar", input);
       const extra =
         r.note === "ya_inactivo"
           ? " El producto ya estaba inactivo por otra razón: Hugo no lo tocó y la ficha se cerró."

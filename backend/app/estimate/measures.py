@@ -179,6 +179,11 @@ async def estimate_with_ai(photo_url: str, title: str, *,
     cost = market_judge.estimate_cost(int(getattr(usage, "prompt_tokens", 0) or 0),
                                       int(getattr(usage, "completion_tokens", 0) or 0),
                                       s.pm_llm_price_in_per_m, s.pm_llm_price_out_per_m)
+    from app import llm_usage   # lazy: el registro usa la base
+    await llm_usage.record_async(provider=llm_usage.provider_of_base_url(market_judge._base_host()),
+                                 model=s.pm_llm_model, purpose="estimado_medidas",
+                                 input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                                 output_tokens=int(getattr(usage, "completion_tokens", 0) or 0), cost_usd=cost)
     unit = parse_ai(text)
     if unit is None:
         log.warning("estimado: medidas de la IA ilegibles o fuera de rango (%d caracteres)", len(text))
@@ -344,6 +349,10 @@ async def estimate_with_gemini(photo_url: str, pictures: list[str], title: str,
     # gemini-2.5-flash: USD 0,30 / M de entrada, 2,50 / M de salida.
     cost = (int(usage.get("promptTokenCount") or 0) * 0.30
             + int(usage.get("candidatesTokenCount") or 0) * 2.50) / 1_000_000
+    from app import llm_usage   # lazy: el registro usa la base
+    await llm_usage.record_async(provider="gemini", model=s.estimate_gemini_model, purpose="estimado_medidas_gemini",
+                                 input_tokens=int(usage.get("promptTokenCount") or 0),
+                                 output_tokens=int(usage.get("candidatesTokenCount") or 0), cost_usd=cost)
     unit = parse_ai(out)
     if unit is None:
         log.warning("estimado: medidas de Gemini ilegibles o fuera de rango (%d caracteres)", len(out))

@@ -298,13 +298,11 @@ async def test_mode_0_keeps_marking_flags_so_the_streak_is_ready_when_it_is_swit
     assert [i.product_id for i in w.items()] == ["a"]
 
 
-async def test_mode_2_behaves_as_mode_1_and_says_so(caplog):
+async def test_mode_2_runs_the_red_tray_as_mode_1_and_says_the_gate_runs_after():
     w.set_setting("pm_mode", 2)
     prev, today = two_nights({"p1": {}})
-    with caplog.at_level(logging.WARNING, logger="app.pricing.price_review"):
-        summary = await pr.process_run(today, now=NOW)
-    assert "pm_mode=2" in caplog.text and "todavía no está implementado" in caplog.text
-    assert summary["mode"] == 2 and summary["mode_effective"] == 1 and "no implementado" in summary["note"]
+    summary = await pr.process_run(today, now=NOW)
+    assert summary["mode"] == 2 and summary["mode_effective"] == 1 and "portón" in summary["note"]
     [item] = w.items()
     assert item.state == "propuesto" and item.mode_at_open == 1
     assert json.loads(w.events("propuesto")[0].payload)["modo"] == 2

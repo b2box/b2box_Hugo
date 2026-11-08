@@ -618,12 +618,133 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
             "0 = sombra: mide y guarda, no llena la bandeja y frena las decisiones (Deshacer sigue). 1 = propuesta: "
             "los rojos firmes entran a la bandeja de Pao y se manda el resumen diario; Hugo inactiva o reactiva en "
             "Vendure SOLO lo que decide una persona de PRICE_REVIEW_DECIDERS, salvo una cosa: reactiva solo lo que "
-            "apagó él cuando se corrige en Vendure y deja de ser rojo firme (con tope diario). 2 = automático: TODAVÍA NO "
-            "IMPLEMENTADO; se comporta como 1."
+            "apagó él cuando se corrige en Vendure y deja de ser rojo firme (con tope diario). 2 = automático: lo de 1 "
+            "más el portón de precio para lo que sube Paco: verde firme → Hugo lo activa, rojo firme → queda inactivo, "
+            "amarillo o sin dato → bandeja de Pao, y un rojo firme prendido a mano vuelve a inactivo (con topes diarios "
+            "y Deshacer)."
         ),
         type="int", parser=int,
         default_attr="pm_mode",
         min=0, max=2, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_activations_daily_max",
+        label="Portón: activaciones automáticas por día",
+        description=(
+            "Con modo 2, cuántos productos subidos por Paco puede activar Hugo por día (hora de Argentina) por dar verde "
+            "firme. Pasado el tope quedan «por activar» en la bandeja hasta el día siguiente. 0 = nunca activa solo."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_activations_daily_max",
+        min=0, max=200, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_inactivations_daily_max",
+        label="Portón: inactivaciones automáticas por día",
+        description=(
+            "Con modo 2, cuántos rojos firmes prendidos a mano puede volver a apagar Hugo por día (hora de Argentina). "
+            "0 = nunca apaga solo."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_inactivations_daily_max",
+        min=0, max=200, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_reads_daily_max",
+        label="Portón: lecturas a Vendure por día",
+        description="Con modo 2, cuántas veces por día Hugo lee el estado de un producto al recibir un aviso de Vendure.",
+        type="int", parser=int,
+        default_attr="pm_gate_reads_daily_max",
+        min=0, max=2000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_max_age_days",
+        label="Portón: días desde que lo subió Paco",
+        description="El portón solo decide sobre lo que Paco subió hace estos días o menos; lo más viejo lo decide una persona.",
+        type="int", parser=int,
+        default_attr="pm_gate_max_age_days",
+        min=1, max=365, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_order_reds_first",
+        label="Semáforo: rojos primero",
+        description=(
+            "1 = la corrida de la noche mide primero los activos que dieron rojo, después los demás activos y al final los "
+            "apagados (si se acaba el cupo de ML, lo que queda afuera es lo menos urgente). 0 = el que se midió hace más "
+            "tiempo primero."
+        ),
+        type="int", parser=int,
+        default_attr="pm_order_reds_first",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_enabled",
+        label="Prechequeo de Luis (antes de Paco)",
+        description=(
+            "1 = POST /radar/precheck encola la búsqueda en ML (cola de la oficina / Apify) y estima el semáforo antes de "
+            "pagar la búsqueda de Paco. 0 = apagado: responde «error» con motivo «apagado»."
+        ),
+        type="int", parser=int,
+        default_attr="radar_precheck_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_daily_max",
+        label="Prechequeo: candidatos nuevos por día",
+        description="Tope de candidatos nuevos por día (hora de Argentina) que entran a la cola de búsqueda en ML.",
+        type="int", parser=int,
+        default_attr="radar_precheck_daily_max",
+        min=0, max=2000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_apify_daily_max",
+        label="Prechequeo: búsquedas de Apify por día",
+        description=(
+            "Búsquedas en Mercado Libre con Apify por día (UTC) para los prechequeos de Luis (~USD 0,02 cada una). Cupo "
+            "propio, aparte del de la búsqueda de la noche. Lo que no entra queda pendiente para mañana. 0 = no busca."
+        ),
+        type="int", parser=int,
+        default_attr="radar_precheck_apify_daily_max",
+        min=0, max=1000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_queue_share_pct",
+        label="Prechequeo: % de la cola de la oficina (respaldo)",
+        description="Parte de cada tanda de la cola de la Mac de la oficina que pueden ocupar los prechequeos (respaldo de Apify).",
+        type="int", parser=int,
+        default_attr="radar_precheck_queue_share_pct",
+        min=0, max=100, step=5, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_ttl_days",
+        label="Prechequeo: días que vale una medición",
+        description="Un prechequeo medido hace menos de estos días se devuelve tal cual; más viejo se vuelve a buscar.",
+        type="int", parser=int,
+        default_attr="radar_precheck_ttl_days",
+        min=1, max=90, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="radar_precheck_vendure_daily_max",
+        label="Prechequeo: consultas a estimateImportPrice por día",
+        description=(
+            "El precio de la app estimado sale de Vendure (estimateImportPrice, la fórmula de la tienda; solo lectura). "
+            "Tope por día (hora de Argentina); pasado el tope, o si Vendure falla, se usa el factor de respaldo. "
+            "0 = siempre el factor."
+        ),
+        type="int", parser=int,
+        default_attr="radar_precheck_vendure_daily_max",
+        min=0, max=5000, step=50, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_factor_sample_daily_max",
+        label="Prechequeo: desgloses de Vendure por día para el factor",
+        description=(
+            "Cuántos productos ACTIVOS por día lee Hugo (solo lectura, bulkPriceTierBreakdowns) para estimar el precio de "
+            "la app de un candidato de Luis. 0 = apagado: el factor sale solo de los desgloses de la bandeja (rojos)."
+        ),
+        type="int", parser=int,
+        default_attr="pm_factor_sample_daily_max",
+        min=0, max=150, step=5, group="monitor",
     ),
     SettingMeta(
         key="pm_green_min_pct",

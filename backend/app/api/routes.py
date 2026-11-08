@@ -448,6 +448,34 @@ class RadarMlSupplyRequest(BaseModel):
         return list(dict.fromkeys(clean))
 
 
+class PrecheckItem(BaseModel):
+    """Un candidato de Luis para el prechequeo (pricing/radar_precheck.py)."""
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
+    titulo_es: str = Field(min_length=1, max_length=300)
+    titulo_zh: str = Field(default="", max_length=300)
+    imagen_url: str = Field(min_length=8, max_length=2048)
+    precio_cny_moq: float = Field(gt=0, le=1_000_000)
+    moq: int = Field(default=1, ge=1, le=10_000_000)
+    peso_kg: float | None = Field(default=None, gt=0, le=10_000)
+    medidas_cm: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    categoria: str | None = Field(default=None, max_length=80)
+
+    @field_validator("medidas_cm", mode="after")
+    @classmethod
+    def _dims(cls, v: list[float] | None) -> list[float] | None:
+        if v is not None and any(not (0 < x <= 10_000) for x in v):
+            raise ValueError("cada medida tiene que estar entre 0 y 10.000 cm")
+        return v
+
+
+class PrecheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PrecheckItem] = Field(min_length=1, max_length=50)
+
+
 # ─── Endpoints ───────────────────────────────────────────────────
 
 
@@ -623,6 +651,47 @@ async def radar_ml_supply_endpoint(payload: RadarMlSupplyRequest) -> dict[str, A
     """Luis (radar): cuántas publicaciones tiene ML Argentina por palabra. Siempre 200: cada término dice si salió
     (`ok`) o por qué no (`error`). Puede tardar hasta ~4 min si hay términos sin caché (una corrida de Apify)."""
     return await radar_ml_supply.lookup(payload.terms)
+
+
+@router.post("/radar/precheck")
+async def radar_precheck_submit(payload: PrecheckRequest,
+                                client: str | None = Depends(verify_api_key)) -> dict[str, Any]:
+    """Luis: encola candidatos para saber si compiten en ML ANTES de pagar la búsqueda de Paco. Hasta 50 por pedido.
+    Responde enseguida `{ref, estado}` (pendiente | listo | error); el veredicto se pide con GET."""
+    from app.pricing import radar_precheck
+
+    refs = [it.ref for it in payload.items]
+    if len(set(refs)) != len(refs):
+        raise HTTPException(status_code=422, detail="hay refs repetidas en el pedido")
+    items = [it.model_dump() for it in payload.items]
+    out = await asyncio.to_thread(radar_precheck.submit, items, client)
+    if any(o["estado"] == radar_precheck.PENDIENTE for o in out):
+        # Busca con Apify ya (cupo propio); si no termina, lo toma el job de cada 15 min.
+        task = asyncio.create_task(radar_precheck.run_cycle())
+        _TASKS.add(task)
+        task.add_done_callback(_TASKS.discard)
+    return {"items": out}
+
+
+@router.get("/radar/precheck", dependencies=[Depends(verify_api_key)])
+async def radar_precheck_get(refs: str = Query(..., min_length=1, max_length=50 * 65)) -> dict[str, Any]:
+    """El veredicto ESTIMADO de cada ref (color, ML con ventas, precio de la app estimado, P_max, margen, motivo)."""
+    from app.pricing import radar_precheck
+
+    wanted = list(dict.fromkeys(r.strip() for r in refs.split(",") if r.strip()))
+    if not wanted or len(wanted) > radar_precheck.MAX_ITEMS or any(not radar_precheck.REF_RE.fullmatch(r) for r in wanted):
+        raise HTTPException(status_code=422, detail="refs: de 1 a 50, separadas por coma, [A-Za-z0-9_.:-]")
+    if radar_precheck.is_enabled():
+        await radar_precheck.process_pending(wanted, limit=len(wanted))
+    return {"items": await asyncio.to_thread(radar_precheck.lookup, wanted)}
+
+
+@router.get("/api/llm-usage")
+async def llm_usage_summary(days: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
+    """Gasto en modelos de lenguaje y de visión (Claude, Gemini, Qwen, MiMo, OpenAI): por día, por propósito y por modelo."""
+    from app import llm_usage
+
+    return await asyncio.to_thread(llm_usage.summary, days)
 
 
 @router.get("/radar/ml-supply/usage", dependencies=[Depends(verify_api_key)])

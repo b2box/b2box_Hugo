@@ -641,7 +641,9 @@ export type ReviewState =
   | "mantenido"
   | "despublicado"
   | "corregido"
-  | "cerrado_auto";
+  | "cerrado_auto"
+  | "por_activar"
+  | "activado";
 
 export type ReviewTab = "para_decidir" | "en_proceso" | "mantenidos" | "cerrados";
 export type ReviewCause = "a" | "b" | "c" | "d" | "e" | "ninguna" | "sin_dato";
@@ -799,7 +801,14 @@ export interface ReviewEvent {
   payload: Record<string, unknown> | null;
 }
 
-export type ReviewActionCode = "inactivar" | "corregir" | "mantener" | "despublicar" | "reactivar" | "deshacer";
+export type ReviewActionCode =
+  | "inactivar"
+  | "corregir"
+  | "mantener"
+  | "despublicar"
+  | "reactivar"
+  | "activar"
+  | "deshacer";
 
 // Un botón de la ficha. Lo arma el backend según el estado, la sesión y el modo: la pantalla no decide qué se puede.
 export interface ReviewAction {

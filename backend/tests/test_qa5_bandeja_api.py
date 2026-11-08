@@ -182,7 +182,7 @@ async def test_summary_numbers_agree_with_the_list(client, stack):
     assert s["last_pass"]["new"] == 4 and s["last_pass"]["firm"] == 4
     q.setting("pm_mode", 2)
     s2 = client.get(BASE + "/summary").json()
-    assert s2["mode"] == 2 and s2["mode_effective"] == 1 and "propuesta" in s2["mode_label"] + "propuesta"
+    assert s2["mode"] == 2 and s2["mode_effective"] == 2 and "automático" in s2["mode_label"]
 
 
 # ─── Detalle ─────────────────────────────────────────────────────────────────────────────────
