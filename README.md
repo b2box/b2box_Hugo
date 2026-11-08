@@ -1328,7 +1328,7 @@ la noche. Lo que hace con la bandeja está en [Cuando el producto cambia en Vend
 
 | Setting | Default | Qué hace |
 |---|---|---|
-| `pm_mode` | 0 | 0 sombra (solo marca los rojos; el recálculo de día solo se ve en el semáforo); 1 propuesta (llena la bandeja de Pao; en Vendure escribe solo lo que decide una persona y la reactivación automática del recálculo); 2 automático (todavía no existe: se comporta como 1). Solo lo cambia un admin (`DASHBOARD_ADMINS`) y queda en el audit log |
+| `pm_mode` | 0 | 0 sombra (solo marca los rojos; el recálculo de día solo se ve en el semáforo); 1 propuesta (llena la bandeja de Pao; en Vendure escribe solo lo que decide una persona y la reactivación automática del recálculo); 2 automático (lo de 1 más el [portón de precio](#portón-de-precio-pm_mode--2) para lo que sube Paco). Solo lo cambia un admin (`DASHBOARD_ADMINS`) y queda en el audit log |
 | `pm_green_min_pct` | 30 | ganancia mínima para verde |
 | `pm_yellow_min_pct` | 10 | ganancia mínima para amarillo |
 | `pm_ml_commission_pct` | 13 | comisión de ML, % de la mediana (a definir por Gabriel) |
@@ -1647,7 +1647,7 @@ Los productos con una ficha viva **se miden siempre**, aunque `pm_include_disabl
 saber si se arreglaron.
 
 `pm_mode`: **0** sombra (solo marca; las decisiones quedan frenadas, Deshacer no), **1** propuesta, **2** automático:
-*todavía no existe*, se comporta como 1 y lo loguea. Hay **una ficha viva por producto** (`open_key` único: abierta o
+la bandeja de rojos igual que 1, más el [portón de precio](#portón-de-precio-pm_mode--2). Hay **una ficha viva por producto** (`open_key` único: abierta o
 mantenida); las cerradas quedan de historial.
 
 ### Diagnóstico a-e
@@ -1824,8 +1824,9 @@ productos: eso sigue con las reglas de la noche y la decisión de una persona.
 **Registro.** `price_review_event` solo se agrega (el ORM rechaza editarlo o borrarlo; lo único que cambia es
 `notified_at`) y cada evento lleva quién lo hizo: un email o `hugo:auto`.
 
-**Qué sigue (no está hecho):** modo automático, topes y alertas (PR 4; la salida automática de `corrigiendo` ya está:
-la reactivación del recálculo), «Buscar
+**Qué sigue (no está hecho):** apagar SOLO los rojos firmes del catálogo entero (hoy el modo 2 apaga solo el rojo firme
+que alguien prendió a mano; ver el portón), alertas (la salida automática de `corrigiendo` ya está: la reactivación del
+recálculo), «Buscar
 otro proveedor» en Paco APP (PR 5; el estado `buscando_prov` ya existe pero ninguna ficha llega ahí), volver a medir un
 producto (PR 6).
 
@@ -1856,6 +1857,77 @@ El recálculo al cambiar en Vendure agrega tres columnas opcionales a `market_pr
 ALTER TABLE market_price_snapshot DROP COLUMN IF EXISTS recalc_at, DROP COLUMN IF EXISTS recalc_before, DROP COLUMN IF EXISTS recalc_flag;
 DELETE FROM settings WHERE key IN ('pm_recalc_daily_max', 'pm_recalc_reactivations_daily_max', 'pm_recalc_watch_daily_max', 'pm_recalc_reads', 'pm_recalc_reactivations', 'pm_recalc_watch_reads', 'vendure_review_requests_recalc');
 ```
+
+## Portón de precio (`pm_mode = 2`)
+
+Objetivo: que solo quede publicado lo que se vende en Argentina a buen precio. Paco sube SIEMPRE inactivo; con
+`pm_mode = 2`, después de la corrida de la noche (y de la pasada de la bandeja), `pricing/price_gate.py` mira lo que Paco
+subió por Luis (`luis_intake` con `vendure_product_id`, subido hace `pm_gate_max_age_days` días o menos, default 30):
+
+| Medición de esa noche | Qué hace Hugo |
+|---|---|
+| **verde firme**: R1 y R3-R7 del rojo firme con el color al revés (idénticos confirmados por foto + nombre o por una persona, dato de menos de 48 h, 3 publicaciones, 2 vendedores) y el piso de precio (nuestro / mediana >= 1 / `pm_review_max_price_ratio`) | lo **activa**: ficha `por_activar` → `activado` con `activar_auto` (actor `hugo:auto`), por `price_review_actions` (intención, `approvalStatus` vacío o `approved`, sin duplicado ni BX sin foto, un solo intento, verificación, conciliación, evento y `AuditLog`). Tope `pm_gate_activations_daily_max` (10/día ART); pasado el tope queda «por activar» |
+| **rojo firme** (aunque esté apagado) | queda **inactivo** (`gate_status = rojo_inactivo`), sin escribir |
+| amarillo, sin dato, verde o rojo dudoso, precio bajo | **bandeja de Pao**: ficha `por_activar` (pestaña «Para decidir») con el motivo; Pao decide **Activar** o **Despublicar** (no escribe: ya está apagado). Si una noche siguiente da verde firme, Hugo la activa |
+
+**Rojo firme prendido a mano.** Con cada aviso de Vendure (`POST /api/vendure/events`) Hugo mira los productos que la
+última medición vio APAGADOS y en rojo firme: lee si quedaron prendidos (tope `pm_gate_reads_daily_max`, 100/día) y, si sí,
+los vuelve a apagar con `inactivar_auto` → ficha `en_revision` con el evento `porton` («Rojo firme y alguien lo prendió a
+mano»). Tope `pm_gate_inactivations_daily_max` (10/día). La noche hace lo mismo con lo que el portón dejó inactivo.
+
+**No pelea con una persona.** Si en los últimos 30 días alguien decidió Mantener, Activar, Reactivar o Deshacer sobre el
+producto, el portón no escribe. Las dos acciones automáticas tienen **Deshacer** (30 días, como las de una persona): deshacer
+una activación vuelve la ficha a «por activar» y apaga; deshacer un apagado vuelve a `propuesto` y prende (y Hugo no lo
+vuelve a apagar). `luis_intake.gate_status` / `gate_reason` / `gate_at` se ven en la API de «Subidos a Vendure».
+
+Prender: dashboard → Configuración → «Modo de la bandeja» = 2. Volver a 1 corta el portón en la próxima vuelta (también a
+mitad de la pasada). Migración: columnas nuevas en `luis_intake` (`gate_status`, `gate_reason`, `gate_at`), estados nuevos de
+la ficha (`por_activar`, `activado`; entran en `VARCHAR(16)`).
+
+## Prechequeo de Luis (`POST /radar/precheck`, antes de Paco)
+
+Para que Luis no pague búsquedas en 1688 de productos que no compiten. Misma auth que `/radar/ml-supply` (`X-API-Key`).
+**Apagado por default** (`radar_precheck_enabled = 0`: responde `estado: "error"`, motivo `apagado`).
+
+- `POST /radar/precheck` `{items: [{ref, titulo_es, titulo_zh, imagen_url, precio_cny_moq, moq, peso_kg,
+  medidas_cm: [l, a, h] | null, categoria}]}` (1 a 50, refs únicas, campos de más → 422) → `{items: [{ref, estado}]}` con
+  `pendiente | listo | error`. Un candidato igual ya medido hace menos de `radar_precheck_ttl_days` (15) vuelve `listo` sin
+  gastar. Tope de candidatos nuevos por día: `radar_precheck_daily_max` (200, día ART).
+- `GET /radar/precheck?refs=a,b` → por ref `{ref, estado, color, ml: {mediana_ars, n_identicos, vendidos_total,
+  publicaciones}, precio_app_estimado_ars, precio_max_ars, margen_revendedor_pct, motivo, estimado: true, medido_at, factor}`.
+
+**Búsqueda en ML: Apify** (el camino vigente desde que ML bloquea a la oficina y al servidor): `radar_precheck.search_pending`
+usa `apify_ml_search.search_one` (actor `devcake/mercadolibre-scraper`, permisos limitados obligatorios), reserva cada
+`pc-<id>` con `oficina_ml.claim`, gasta su **cupo propio** `radar_precheck_apify_daily_max` (50/día UTC, aparte del de la
+noche), guarda por `oficina_ml.ingest` (origen `apify`, con los **vendidos** que trae el actor) y anota cada corrida en
+`apify_spend` (etiqueta `radar_precheck`). Corre al recibir el POST y cada 15 min (job `radar_precheck_process`). Respaldo:
+la Mac de la oficina recibe los pendientes en su cola (`radar_precheck_queue_share_pct`, 30 %) si está prendida; el job
+nocturno de Apify no los toma. La búsqueda web del servidor (Camoufox) no se usa para esto. La polycard de la web de ML
+ahora también da los vendidos del texto («+5mil vendidos») cuando `tracks` no los trae.
+
+**Mismo producto**: CLIP + nombre como el semáforo (`market_match.score_candidates`; la foto del candidato se embebe al
+vuelo); solo los IGUAL con precio en pesos cuentan. Sin el índice CLIP listo queda pendiente.
+
+**Precio de la app ESTIMADO** (`pricing/price_factor.py`, sin otra fórmula de importación): `precio_cny_moq × mediana(factura
+/ fob) × cambio`, con desgloses REALES de Vendure (`bulkPriceTierBreakdowns`) guardados en `price_factor_sample`: los que ya
+leyó la bandeja (job `price_factor_refresh`, 02:00 ART) y, si `pm_factor_sample_daily_max` > 0 (default 0), una muestra
+diaria del catálogo activo (solo `query`). Por categoría si hay >= 20 casos de esa categoría; si no, global; con medidas, se
+queda con los casos de valor de fábrica por m³ parecido (×/÷ 2) si hay >= 20. El cambio es la mediana de los 20 desgloses
+más nuevos. `factor` en la respuesta dice de dónde salió, la `n` y la mediana. **Ojo:** los desgloses de la bandeja son de
+rojos (factura/fob alto): hasta prender el muestreo, el precio estimado tiende a quedar alto. `precio_max_ars` = P_max de
+`price_diagnosis.price_max_cents`; color y ganancia con `semaforo` (mismos cortes, comisión y envío).
+
+## Cobertura del semáforo y gasto en IA
+
+- `GET /api/price-monitor/coverage` (sesión del dashboard): activos del catálogo (caché de Vendure; si no se puede leer, la
+  última medición), medidos con dato de 7 días o menos, verdes / amarillos / rojos / sin dato / no medibles, rojos firmes y
+  los que faltan medir. La corrida de la noche ya mide TODO el catálogo (activos siempre); con `pm_order_reds_first = 1`
+  (default 0) arranca por los activos que dieron rojo, después el resto de los activos y al final los apagados, así lo que
+  deja afuera el cupo de ML es lo menos urgente.
+- `GET /api/llm-usage?days=30` (sesión del dashboard): cada llamada a un modelo (juez del semáforo, juez y medidas del
+  estimado con Qwen / MiMo / Gemini, rerank de visión del app con Claude / OpenAI) deja una fila en `llm_usage` (proveedor,
+  modelo, tokens, costo estimado, para qué; nunca el prompt). Costo: el que calculó quien llama (precios `PM_LLM_PRICE_*`) o
+  la tabla de `app/llm_usage.py`. Resumen por día, propósito y modelo.
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
 
@@ -2201,6 +2273,8 @@ cuenta fichas de catálogo con techo 10.000.
 - `GET  /health` — liveness probe (lo usa el healthcheck de Docker)
 - `POST /verify` — Paco/Luis preguntan si un candidato es duplicado
 - `POST /radar/ml-supply`, `GET /radar/ml-supply/usage` — radar de Luis: oferta en ML por palabra y su gasto (ver su sección)
+- `POST /radar/precheck`, `GET /radar/precheck?refs=` — prechequeo de Luis antes de Paco (ver su sección)
+- `GET /api/price-monitor/coverage`, `GET /api/llm-usage` — cobertura del semáforo y gasto en IA (sesión del dashboard)
 - `POST /audit?target=all|duplicates|prices` — auditoría on-demand
 - `GET  /products/{id}/check` — chequea un producto puntual (precio fuente)
 - `GET  /audit-log?limit=N` — últimas N acciones (para dashboard)
