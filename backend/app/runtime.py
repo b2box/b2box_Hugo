@@ -724,6 +724,18 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=90, step=1, group="monitor",
     ),
     SettingMeta(
+        key="radar_precheck_vendure_daily_max",
+        label="Prechequeo: consultas a estimateImportPrice por día",
+        description=(
+            "El precio de la app estimado sale de Vendure (estimateImportPrice, la fórmula de la tienda; solo lectura). "
+            "Tope por día (hora de Argentina); pasado el tope, o si Vendure falla, se usa el factor de respaldo. "
+            "0 = siempre el factor."
+        ),
+        type="int", parser=int,
+        default_attr="radar_precheck_vendure_daily_max",
+        min=0, max=5000, step=50, group="monitor",
+    ),
+    SettingMeta(
         key="pm_factor_sample_daily_max",
         label="Prechequeo: desgloses de Vendure por día para el factor",
         description=(

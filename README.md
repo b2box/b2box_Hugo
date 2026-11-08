@@ -1894,7 +1894,8 @@ Para que Luis no pague búsquedas en 1688 de productos que no compiten. Misma au
   `pendiente | listo | error`. Un candidato igual ya medido hace menos de `radar_precheck_ttl_days` (15) vuelve `listo` sin
   gastar. Tope de candidatos nuevos por día: `radar_precheck_daily_max` (200, día ART).
 - `GET /radar/precheck?refs=a,b` → por ref `{ref, estado, color, ml: {mediana_ars, n_identicos, vendidos_total,
-  publicaciones}, precio_app_estimado_ars, precio_max_ars, margen_revendedor_pct, motivo, estimado: true, medido_at, factor}`.
+  publicaciones}, precio_app_estimado_ars, fuente_precio, precio_max_ars, margen_revendedor_pct, motivo, estimado: true,
+  medido_at, factor}`.
 
 **Búsqueda en ML: Apify** (el camino vigente desde que ML bloquea a la oficina y al servidor): `radar_precheck.search_pending`
 usa `apify_ml_search.search_one` (actor `devcake/mercadolibre-scraper`, permisos limitados obligatorios), reserva cada
@@ -1908,14 +1909,21 @@ ahora también da los vendidos del texto («+5mil vendidos») cuando `tracks` no
 **Mismo producto**: CLIP + nombre como el semáforo (`market_match.score_candidates`; la foto del candidato se embebe al
 vuelo); solo los IGUAL con precio en pesos cuentan. Sin el índice CLIP listo queda pendiente.
 
-**Precio de la app ESTIMADO** (`pricing/price_factor.py`, sin otra fórmula de importación): `precio_cny_moq × mediana(factura
-/ fob) × cambio`, con desgloses REALES de Vendure (`bulkPriceTierBreakdowns`) guardados en `price_factor_sample`: los que ya
-leyó la bandeja (job `price_factor_refresh`, 02:00 ART) y, si `pm_factor_sample_daily_max` > 0 (default 0), una muestra
-diaria del catálogo activo (solo `query`). Por categoría si hay >= 20 casos de esa categoría; si no, global; con medidas, se
-queda con los casos de valor de fábrica por m³ parecido (×/÷ 2) si hay >= 20. El cambio es la mediana de los 20 desgloses
-más nuevos. `factor` en la respuesta dice de dónde salió, la `n` y la mediana. **Ojo:** los desgloses de la bandeja son de
-rojos (factura/fob alto): hasta prender el muestreo, el precio estimado tiende a quedar alto. `precio_max_ars` = P_max de
-`price_diagnosis.price_max_cents`; color y ganancia con `semaforo` (mismos cortes, comisión y envío).
+**Precio de la app ESTIMADO**, camino principal: `estimateImportPrice` de Vendure (la fórmula real de la tienda, solo
+lectura; `radar_precheck.vendure_price`). Input (contrato `EstimateImportPriceInput`): `quantities: [moq]`,
+`referenceProductIds` = hasta 10 vecinos CLIP de la foto (de ahí Vendure saca NCM, baterías y caja típica) y un escenario
+`mid` con `purchasePriceCny` = `precio_cny_moq` y, si vienen peso Y medidas, `cbmPerUnit` + `kgPerUnit` (si no,
+`boxQuantile: 0.5`, la caja mediana de los vecinos). La categoría NO es un parámetro de la query. Se toma
+`invoiceChannelPerUnit` (con IVA) del escenario a la cantidad del MOQ, en ARS. Tope `radar_precheck_vendure_daily_max`
+(300/día ART), 20 s por consulta. Respaldo, si Vendure falla, no está listo (`PRICING_CONFIG_NOT_READY`, `NO_BOX_DATA`),
+pasa el tope o no trae precio: el factor de `pricing/price_factor.py`, `precio_cny_moq × mediana(factura / fob) × cambio`,
+con desgloses REALES de Vendure (`bulkPriceTierBreakdowns`) guardados en `price_factor_sample` (los que ya leyó la
+bandeja, job `price_factor_refresh` 02:00 ART, y si `pm_factor_sample_daily_max` > 0 una muestra diaria del catálogo
+activo); por categoría con >= 20 casos, si no global; con medidas, casos de valor por m³ parecido si hay >= 20. Ojo: los de
+la bandeja son rojos (factura/fob alto). La respuesta dice cuál se usó (`fuente_precio: "vendure_estimate" | "factor"`) y
+`factor` trae el detalle (NCM, origen de la caja y referencias de Vendure, o fuente, n y mediana del factor).
+`precio_max_ars` = P_max de `price_diagnosis.price_max_cents`; color y ganancia con `semaforo` (mismos cortes, comisión y
+envío).
 
 ## Cobertura del semáforo y gasto en IA
 

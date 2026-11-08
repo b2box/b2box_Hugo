@@ -584,6 +584,9 @@ class Settings(EnvSettings):
     radar_precheck_queue_share_pct: int = 30
     # Cuántos días vale un prechequeo ya medido (después se vuelve a buscar si Luis lo pide de nuevo).
     radar_precheck_ttl_days: int = 15
+    # Consultas por día (hora de Argentina) a `estimateImportPrice` de Vendure para el precio estimado del prechequeo.
+    # Pasado el tope (o si Vendure falla) se usa el factor de respaldo.
+    radar_precheck_vendure_daily_max: int = 300
     # Lecturas por día de desgloses de Vendure de productos ACTIVOS para el factor del prechequeo (pricing/price_factor.py).
     # 0 = apagado: el factor sale solo de los desgloses que ya leyó la bandeja (rojos: sesgado hacia arriba).
     pm_factor_sample_daily_max: int = 0

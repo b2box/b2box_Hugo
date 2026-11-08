@@ -1034,11 +1034,13 @@ class RadarPrecheck(SQLModel, table=True):
     vendidos_total: int | None = None
     publicaciones: int = Field(default=0)
     precio_app_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    # De dónde salió `precio_app_cents`: vendure_estimate (estimateImportPrice, la fórmula de la tienda) | factor (respaldo).
+    fuente_precio: str | None = Field(default=None, max_length=20)
     precio_max_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     margen_pct: float | None = None
     motivo: str | None = Field(default=None, max_length=300)
-    # JSON: cómo se calculó el factor de precio (de dónde, n, mediana, cambio).
-    factor: str | None = Field(default=None, max_length=1000)
+    # JSON: cómo se calculó el precio de la app (fuente_precio y, según el caso, lo que devolvió Vendure o el factor).
+    factor: str | None = Field(default=None)
     # JSON: los idénticos (título, precio, vendidos, link) para mostrar.
     matches: str | None = Field(default=None)
     medido_at: datetime | None = None

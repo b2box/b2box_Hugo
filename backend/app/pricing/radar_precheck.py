@@ -21,8 +21,14 @@ Cómo se mide (sin caminos nuevos hacia ML):
      semáforo (CLIP + nombre, `market_match.score_candidates`; la foto del candidato se embebe al vuelo, como la de un
      producto deshabilitado). Solo los IGUAL con precio en pesos cuentan: mediana, cantidad, publicaciones y VENTAS
      (`sold_quantity` de la polycard de ML).
-  3. Precio de la app ESTIMADO = precio de fábrica × factor de los desgloses reales de Vendure (`price_factor`); P_max =
-     la cuenta de `price_diagnosis.price_max_cents`; color y ganancia con `semaforo` (los mismos cortes y costos de ML).
+  3. Precio de la app ESTIMADO, camino PRINCIPAL: `estimateImportPrice` de Vendure (la fórmula real de la tienda, solo
+     lectura, `vendure_price`) con el precio de fábrica en CNY, la cantidad = MOQ, las medidas y el peso de la unidad
+     (`cbmPerUnit`/`kgPerUnit`; sin los dos, la caja típica de los vecinos) y los productos de referencia = vecinos CLIP de
+     la foto (de ahí Vendure saca NCM, baterías y caja; la categoría NO es un parámetro de la query). Se toma la factura
+     por unidad (con IVA) del escenario `mid` a la cantidad del MOQ. RESPALDO, si Vendure falla, no está listo, pasa el
+     tope `radar_precheck_vendure_daily_max` o falta el precio: precio de fábrica × factor de desgloses reales de Vendure
+     (`price_factor`). La respuesta dice cuál se usó (`fuente_precio`). P_max = `price_diagnosis.price_max_cents`; color y
+     ganancia con `semaforo` (los mismos cortes y costos de ML).
 
 Todo lo que vuelve dice `estimado: true`: no es el semáforo firme (no hay precio real de Vendure).
 """
@@ -127,6 +133,7 @@ def submit(items: Sequence[dict[str, Any]], client: str | None = None, *, now: d
             row.requested_at, row.estado, row.attempts = now.replace(microsecond=0), PENDIENTE, 0
             row.color = row.motivo = row.factor = row.matches = None
             row.ml_median_cents = row.precio_app_cents = row.precio_max_cents = row.vendidos_total = None
+            row.fuente_precio = None
             row.margen_pct, row.n_identicos, row.publicaciones, row.medido_at = None, 0, 0, None
             s.add(row)
             s.commit()
@@ -300,6 +307,91 @@ async def run_cycle() -> dict[str, Any]:
     return {"busqueda": searched, "medicion": measured}
 
 
+# ─── 2c. Precio de la app con la fórmula de Vendure ───────────────
+
+FUENTE_VENDURE, FUENTE_FACTOR = "vendure_estimate", "factor"
+VENDURE_COUNTER_KEY = "radar_precheck_vendure"
+VENDURE_TIMEOUT_S = 20.0
+NEIGHBORS = 10
+SCENARIO = "mid"
+
+
+def build_estimate_input(cny_unit: float, moq: int, peso_kg: float | None, medidas_cm: Sequence[float] | None,
+                         reference_ids: Sequence[str]) -> dict[str, Any]:
+    """El input de `estimateImportPrice` (contrato del SDL de Vendure). PURA. Un solo escenario (`mid`) con el precio de
+    fábrica; con peso Y medidas van las de la unidad, si no la caja mediana de los vecinos (`boxQuantile` 0,5)."""
+    from app.estimate.pricing import BOX_QUANTILES
+
+    scenario: dict[str, Any] = {"label": SCENARIO, "purchasePriceCny": float(cny_unit)}
+    if peso_kg and medidas_cm and len(medidas_cm) == 3 and all(v > 0 for v in medidas_cm):
+        scenario["cbmPerUnit"] = medidas_cm[0] * medidas_cm[1] * medidas_cm[2] / 1_000_000.0
+        scenario["kgPerUnit"] = float(peso_kg)
+    else:
+        scenario["boxQuantile"] = BOX_QUANTILES[SCENARIO]
+    return {"quantities": [max(1, int(moq))], "referenceProductIds": [str(x) for x in reference_ids][:NEIGHBORS],
+            "scenarios": [scenario]}
+
+
+def read_estimate(raw: object, moq: int) -> tuple[int | None, dict[str, Any]]:
+    """Respuesta cruda de Vendure → (factura por unidad en centavos de ARS, cómo). PURA. None si no sirve."""
+    from app.estimate import vendure_estimate
+    from app.pricing import price_monitor
+
+    est = vendure_estimate.parse(raw, [max(1, int(moq))])
+    how: dict[str, Any] = {"vendure_status": est.status}
+    if est.status != vendure_estimate.STATUS_OK:
+        return None, how
+    if est.currency != price_monitor.CURRENCY:
+        how["vendure_status"] = f"moneda {est.currency}"
+        return None, how
+    sc = next((x for x in est.scenarios if x.label == SCENARIO), None)
+    price = sc.prices.get(max(1, int(moq))) if sc is not None else None
+    if price is None:
+        how["vendure_status"] = "sin precio para la cantidad"
+        return None, how
+    how.update({"cantidad": max(1, int(moq)), "neto_cents": price[0], "box_source": est.box_source,
+                "box_sample_size": est.box_sample_size, "referencias": est.reference_product_count,
+                "ncm": est.tax_classification_code, "iva_venta_pct": est.sales_vat_pct,
+                "perfil": est.profile_version, "calculado": est.computed_at,
+                "medidas": "unidad" if est.box_source == "INPUT" else "vecinos"})
+    return price[1], how
+
+
+async def _clip_neighbors(image_url: str) -> list[str]:
+    """Los productos del catálogo más parecidos por foto (como el cotizador rápido)."""
+    from app.dedup import catalog_index, image_embed
+
+    if not (image_embed.available() and catalog_index.is_ready()):
+        return []
+    vec = await image_embed.embed_url(image_url)
+    return [p.id for p, _s, _u in catalog_index.search(vec, top_k=NEIGHBORS)] if vec is not None else []
+
+
+async def vendure_price(row: RadarPrecheck, *, estimator: Any = None, neighbors: Any = None,
+                        now: datetime | None = None) -> tuple[int | None, dict[str, Any]]:
+    """El precio de la app con `estimateImportPrice`. (None, motivo) si no se pudo: quien llama usa el factor."""
+    import asyncio
+
+    cap = int(runtime.get("radar_precheck_vendure_daily_max") or 0)
+    if await asyncio.to_thread(daily_budget.reserve, VENDURE_COUNTER_KEY, cap, None, None,
+                               daily_budget.today_art(now)) is None:
+        return None, {"vendure_status": "tope diario"}
+    try:
+        refs = await (neighbors or _clip_neighbors)(row.imagen_url)
+        medidas = json.loads(row.medidas_cm) if row.medidas_cm else None
+        inp = build_estimate_input(row.precio_cny_moq, row.moq, row.peso_kg, medidas, refs)
+        if estimator is None:
+            from app.vendure.client import VendureClient
+            estimator = VendureClient().estimate_import_price
+        raw = await asyncio.wait_for(estimator(inp), timeout=VENDURE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001  (Vendure caído, timeout, schema: se usa el respaldo)
+        log.info("precheck %s: estimateImportPrice falló (%s)", row.ref, type(exc).__name__)
+        return None, {"vendure_status": f"error {type(exc).__name__}"}
+    cents, how = read_estimate(raw, row.moq)
+    how["referencias_enviadas"] = len(refs)
+    return cents, how
+
+
 # ─── 3. Medir (puro) ──────────────────────────────────────────────
 
 
@@ -316,7 +408,7 @@ def verdict(*, matches: Sequence[MlCandidate], publicaciones: int, precio_app_ce
     if median is None:
         motivo = "Sin idénticos con precio en Mercado Libre" if publicaciones else "Mercado Libre no devolvió publicaciones"
     elif precio_app_cents is None:
-        motivo = "Hay idénticos, pero no se pudo estimar nuestro precio (faltan desgloses de Vendure)"
+        motivo = "Hay idénticos, pero no se pudo estimar nuestro precio (Vendure no lo estimó y faltan desgloses para el factor)"
         color = semaforo.SIN_DATO
     else:
         motivo = (f"{len(prices)} idéntico(s); mediana ML vs nuestro precio estimado"
@@ -360,7 +452,7 @@ def _due(refs: Sequence[str] | None, limit: int) -> list[tuple[RadarPrecheck, Ml
 
 
 async def process_pending(refs: Sequence[str] | None = None, *, limit: int = 50, scorer: Any = None,
-                          now: datetime | None = None) -> dict[str, int]:
+                          now: datetime | None = None, estimator: Any = None, neighbors: Any = None) -> dict[str, int]:
     """Mide los pendientes que ya tienen búsqueda en ML. Nunca lanza. Sin CLIP listo quedan pendientes (no se inventa)."""
     import asyncio
 
@@ -394,15 +486,20 @@ async def process_pending(refs: Sequence[str] | None = None, *, limit: int = 50,
                 counts["error"] = counts.get("error", 0) + 1
                 continue
             matches = [d.candidate for d in decisions if d.verdict == market_match.MATCH]
-            medidas = json.loads(row.medidas_cm) if row.medidas_cm else None
-            factor = price_factor.compute(samples, cny_unit=row.precio_cny_moq, category=row.categoria,
-                                          medidas_cm=medidas)
-            app_cents = price_factor.estimate_cents(factor, row.precio_cny_moq)
+            app_cents, how = await vendure_price(row, estimator=estimator, neighbors=neighbors, now=now)
+            if app_cents is not None:
+                how = {"fuente_precio": FUENTE_VENDURE, "estimado": True, **how}
+            else:                                    # respaldo: el factor de desgloses reales de Vendure
+                medidas = json.loads(row.medidas_cm) if row.medidas_cm else None
+                factor = price_factor.compute(samples, cny_unit=row.precio_cny_moq, category=row.categoria,
+                                              medidas_cm=medidas)
+                app_cents = price_factor.estimate_cents(factor, row.precio_cny_moq)
+                how = {"fuente_precio": FUENTE_FACTOR, "vendure": how, **factor.how}
             v = verdict(matches=matches, publicaciones=len(cands), precio_app_cents=app_cents,
                         commission_pct=float(g("pm_ml_commission_pct")), shipping_cents=int(g("pm_ml_shipping_cents")),
                         green_min=float(g("pm_green_min_pct")), yellow_min=float(g("pm_yellow_min_pct")),
                         min_listings=int(g("pm_review_min_listings")))
-            await asyncio.to_thread(_save, int(row.id), v, app_cents, factor.how, matches, now)  # type: ignore[arg-type]
+            await asyncio.to_thread(_save, int(row.id), v, app_cents, how, matches, now)  # type: ignore[arg-type]
             counts["listo"] = counts.get("listo", 0) + 1
     except Exception as exc:  # noqa: BLE001
         log.warning("precheck: se cortó (%s)", type(exc).__name__)
@@ -418,8 +515,9 @@ def _save(row_id: int, v: dict[str, Any], app_cents: int | None, how: dict[str, 
         row.estado, row.color, row.ml_median_cents = LISTO, v["color"], v["ml_median_cents"]
         row.n_identicos, row.vendidos_total, row.publicaciones = v["n_identicos"], v["vendidos_total"], v["publicaciones"]
         row.precio_app_cents, row.precio_max_cents, row.margen_pct = app_cents, v["precio_max_cents"], v["margen_pct"]
+        row.fuente_precio = how.get("fuente_precio") if app_cents is not None else None
         row.motivo = v["motivo"][:300]
-        row.factor = json.dumps(how, ensure_ascii=False)[:1000]
+        row.factor = json.dumps(how, ensure_ascii=False, default=str)
         row.matches = json.dumps([{"titulo": c.name, "precio_cents": c.price_cents, "vendidos": c.sold_quantity,
                                    "link": c.permalink} for c in list(matches)[:MATCHES_KEPT]], ensure_ascii=False)
         row.medido_at = now
@@ -462,7 +560,8 @@ def to_wire(row: RadarPrecheck | None, ref: str) -> dict[str, Any]:
         "ref": row.ref, "estado": row.estado, "color": row.color if row.estado == LISTO else None,
         "ml": {"mediana_ars": _pesos(row.ml_median_cents), "n_identicos": row.n_identicos,
                "vendidos_total": row.vendidos_total, "publicaciones": row.publicaciones},
-        "precio_app_estimado_ars": _pesos(row.precio_app_cents), "precio_max_ars": _pesos(row.precio_max_cents),
+        "precio_app_estimado_ars": _pesos(row.precio_app_cents), "fuente_precio": row.fuente_precio,
+        "precio_max_ars": _pesos(row.precio_max_cents),
         "margen_revendedor_pct": row.margen_pct, "motivo": row.motivo, "estimado": True,
         "medido_at": _iso(row.medido_at), "factor": how,
     }

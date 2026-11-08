@@ -36,7 +36,8 @@ def _clean() -> None:
     with Session(engine) as s:
         for model in (RadarPrecheck, PriceFactorSample, MlWebResult, MlWebClaim):
             s.execute(delete(model))
-        for key in (radar_precheck.COUNTER_KEY, radar_precheck.APIFY_COUNTER_KEY, "radar_precheck_enabled",
+        for key in (radar_precheck.COUNTER_KEY, radar_precheck.APIFY_COUNTER_KEY, radar_precheck.VENDURE_COUNTER_KEY,
+                    "radar_precheck_vendure_daily_max", "radar_precheck_enabled",
                     "radar_precheck_daily_max", "radar_precheck_queue_share_pct", "radar_precheck_apify_daily_max"):
             row = s.get(Setting, key)
             if row is not None:
@@ -121,7 +122,14 @@ def test_submit_queues_and_get_reports_pending_then_listo(client, monkeypatch):
         return 0.95 if "D_3" not in urls[0] else 0.1
 
     import asyncio
-    counts = asyncio.run(radar_precheck.process_pending(["L1"], scorer=scorer))
+    async def vendure_down(_inp):
+        raise RuntimeError("Vendure caído")
+
+    async def no_neighbors(_url):
+        return []
+
+    counts = asyncio.run(radar_precheck.process_pending(["L1"], scorer=scorer, estimator=vendure_down,
+                                                        neighbors=no_neighbors))
     assert counts == {"listo": 1}
     got = client.get("/radar/precheck", params={"refs": "L1,nada"}, headers=AUTH).json()["items"]
     assert got[1]["estado"] == "error"
@@ -131,6 +139,7 @@ def test_submit_queues_and_get_reports_pending_then_listo(client, monkeypatch):
     assert v["precio_app_estimado_ars"] == pytest.approx(25 * 3 * 200, rel=1e-3)     # 15.000
     assert v["color"] == "amarillo"                              # (21000·0,87 − 15000) / 15000 ≈ 21,8 %
     assert v["precio_max_ars"] == pytest.approx(21_000 * 0.87 / 1.10, rel=1e-3)
+    assert v["fuente_precio"] == "factor" and v["factor"]["vendure"]["vendure_status"] == "error RuntimeError"
     assert v["factor"]["fuente"] == "global" and v["factor"]["n"] == 20 and v["factor"]["mediana_factura_fob"] == 3.0
     assert v["medido_at"]
 
@@ -310,3 +319,116 @@ async def test_search_pending_needs_the_switch_the_token_and_limited_permissions
             return None
 
     assert await radar_precheck.search_pending(http=Http()) == {"actor_sin_permisos_limitados": 1}
+
+
+# ─── estimateImportPrice de Vendure (camino principal) ────────────
+
+# Respuesta grabada con la forma exacta del contrato (`importPriceEstimateTypes`, PR b2box#1115; ver test_qa_estimate.py).
+RECORDED_OK = {
+    "status": "OK", "statusDetail": None, "channelCurrencyCode": "ARS",
+    "scenarios": [{"label": "mid", "purchasePriceCny": 25.0, "boxQuantile": 0.5, "cbmPerUnit": 0.012, "kgPerUnit": 0.6,
+                   "prices": [{"quantity": 50, "netChannelPerUnit": 1_400_000, "invoiceChannelPerUnit": 1_694_000}]}],
+    "boxSource": "INPUT", "boxSampleSize": 0, "referenceProductCount": 3, "taxClassificationCode": "9617.00.10",
+    "taxClassificationShare": 0.67, "isImoCargo": False, "isImoCargoShare": 0.0, "goodsKind": "resale",
+    "salesVatPct": 21.0, "profileVersion": 4, "computedAt": "2026-11-08T12:00:00Z",
+}
+RECORDED_NOT_READY = {"status": "PRICING_CONFIG_NOT_READY", "statusDetail": "MISSING_CNY_TO_USD_RATE",
+                      "channelCurrencyCode": "ARS", "scenarios": [], "boxSource": "NONE", "boxSampleSize": 0,
+                      "referenceProductCount": 0, "isImoCargo": False, "goodsKind": "resale", "salesVatPct": 21.0,
+                      "computedAt": "2026-11-08T12:00:00Z"}
+
+
+def test_estimate_input_matches_vendures_sdl():
+    from graphql import build_schema, coerce_input_value
+
+    from tests.test_qa_estimate import VENDURE_SDL
+
+    schema = build_schema(VENDURE_SDL)
+    full = radar_precheck.build_estimate_input(25.0, 50, 0.6, [20, 20, 30], ["7", "8"])
+    assert full == {"quantities": [50], "referenceProductIds": ["7", "8"],
+                    "scenarios": [{"label": "mid", "purchasePriceCny": 25.0, "cbmPerUnit": 0.012, "kgPerUnit": 0.6}]}
+    coerce_input_value(full, schema.get_type("EstimateImportPriceInput"))
+    no_dims = radar_precheck.build_estimate_input(25.0, 50, None, [20, 20, 30], [])
+    assert no_dims["scenarios"][0] == {"label": "mid", "purchasePriceCny": 25.0, "boxQuantile": 0.5}
+    coerce_input_value(no_dims, schema.get_type("EstimateImportPriceInput"))
+
+
+def test_read_estimate_takes_the_invoice_at_the_moq_or_nothing():
+    cents, how = radar_precheck.read_estimate(RECORDED_OK, 50)
+    assert cents == 1_694_000 and how["ncm"] == "9617.00.10" and how["medidas"] == "unidad"
+    assert radar_precheck.read_estimate(RECORDED_OK, 200)[0] is None             # otra cantidad: no se adivina
+    assert radar_precheck.read_estimate(RECORDED_NOT_READY, 50) == (None, {"vendure_status": "PRICING_CONFIG_NOT_READY"})
+    assert radar_precheck.read_estimate({**RECORDED_OK, "channelCurrencyCode": "USD"}, 50)[0] is None
+    assert radar_precheck.read_estimate(None, 50)[0] is None
+
+
+def _ready_row(client, ref: str) -> None:
+    runtime.set_value("radar_precheck_enabled", 1)
+    radar_precheck.submit([item(ref)], "luis")
+    with Session(engine) as s:
+        row = s.exec(select(RadarPrecheck).where(RadarPrecheck.ref == ref)).one()
+        pid = radar_precheck.queue_id(int(row.id))
+    cands = [{"id": f"MLA{i}", "name": "Organizador giratorio cocina", "image_urls": [f"https://http2.mlstatic.com/D_{i}.jpg"],
+              "permalink": f"https://articulo.mercadolibre.com.ar/MLA-{i}-x", "price_cents": 3_000_000, "currency": "ARS",
+              "seller": f"S{i}", "sold_quantity": 100} for i in range(1, 4)]
+    oficina_ml.ingest([{"product_id": pid, "query": "x", "status": "ok", "fetched_at": utcnow().isoformat() + "Z",
+                        "candidates": cands}])
+
+
+async def _match(_our, _urls):
+    return 0.95
+
+
+def test_vendure_estimate_is_the_main_path(client):
+    import asyncio
+
+    _ready_row(client, "V1")
+    seen: list[dict] = []
+
+    async def estimator(inp):
+        seen.append(inp)
+        return RECORDED_OK
+
+    async def neighbors(url):
+        assert url == IMG
+        return ["7", "8", "9"]
+
+    assert asyncio.run(radar_precheck.process_pending(["V1"], scorer=_match, estimator=estimator,
+                                                      neighbors=neighbors)) == {"listo": 1}
+    assert seen[0]["quantities"] == [50] and seen[0]["referenceProductIds"] == ["7", "8", "9"]
+    assert seen[0]["scenarios"][0]["purchasePriceCny"] == 25.0 and seen[0]["scenarios"][0]["kgPerUnit"] == 0.6
+    [v] = client.get("/radar/precheck", params={"refs": "V1"}, headers=AUTH).json()["items"]
+    assert v["fuente_precio"] == "vendure_estimate" and v["precio_app_estimado_ars"] == 16_940.0
+    assert v["factor"]["fuente_precio"] == "vendure_estimate" and v["factor"]["referencias_enviadas"] == 3
+    assert v["color"] == "verde"                    # (30000·0,87 − 16940) / 16940 ≈ 54 %
+    assert v["estimado"] is True
+
+
+def test_vendure_not_ready_or_over_cap_falls_back_to_the_factor(client):
+    import asyncio
+
+    price_factor.upsert([PriceFactorSample(product_id=f"q{i}", tier_id="t", cny_unit=10.0, factura_unit_cents=600_000,
+                                           fob_usd=100.0, factura_usd=300.0, cny_to_usd=0.14, usd_to_channel=1428.5714)
+                         for i in range(20)])
+
+    async def not_ready(_inp):
+        return RECORDED_NOT_READY
+
+    async def neighbors(_url):
+        return []
+
+    _ready_row(client, "F1")
+    asyncio.run(radar_precheck.process_pending(["F1"], scorer=_match, estimator=not_ready, neighbors=neighbors))
+    [v] = client.get("/radar/precheck", params={"refs": "F1"}, headers=AUTH).json()["items"]
+    assert v["fuente_precio"] == "factor" and v["precio_app_estimado_ars"] == pytest.approx(15_000, rel=1e-3)
+    assert v["factor"]["vendure"]["vendure_status"] == "PRICING_CONFIG_NOT_READY"
+
+    runtime.set_value("radar_precheck_vendure_daily_max", 0)
+
+    async def never(_inp):
+        raise AssertionError("pasado el tope no se consulta a Vendure")
+
+    _ready_row(client, "F2")
+    asyncio.run(radar_precheck.process_pending(["F2"], scorer=_match, estimator=never, neighbors=neighbors))
+    [v] = client.get("/radar/precheck", params={"refs": "F2"}, headers=AUTH).json()["items"]
+    assert v["fuente_precio"] == "factor" and v["factor"]["vendure"]["vendure_status"] == "tope diario"
