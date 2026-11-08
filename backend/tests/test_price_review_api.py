@@ -84,11 +84,16 @@ def test_every_endpoint_needs_a_dashboard_session():
 
 
 def test_the_routes_are_the_three_reads_and_the_three_decisions():
-    """K-2: las lecturas de siempre más los 3 POST de las decisiones (que delegan en price_review_actions)."""
+    """K-2: las lecturas de siempre más los 3 POST de las decisiones (que delegan en price_review_actions), y las de la
+    persona manda / el semáforo aprende (correcciones y ajustes: ninguna escribe en Vendure)."""
     methods = {(r.path, m) for r in routes.router.routes for m in r.methods}
     assert methods == {(BASE + "/summary", "GET"), (BASE + "/items", "GET"), (BASE + "/items/{item_id}", "GET"),
                        (BASE + "/items/{item_id}/approve", "POST"), (BASE + "/items/{item_id}/decision", "POST"),
-                       (BASE + "/items/{item_id}/undo", "POST")}
+                       (BASE + "/items/{item_id}/undo", "POST"),
+                       (BASE + "/corrections", "GET"), (BASE + "/corrections/{correction_id}/motive", "POST"),
+                       (BASE + "/adjustments", "GET"), (BASE + "/adjustments/run", "POST"),
+                       (BASE + "/adjustments/{adj_id}/approve", "POST"), (BASE + "/adjustments/{adj_id}/reject", "POST"),
+                       (BASE + "/adjustments/{adj_id}/undo", "POST")}
 
 
 # ─── resumen ──────────────────────────────────────────────────────

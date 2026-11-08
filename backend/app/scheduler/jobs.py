@@ -902,6 +902,24 @@ async def price_review_reconcile() -> None:
         log.exception("price_review_reconcile falló: %s", type(exc).__name__)
 
 
+SEMAFORO_LEARN_JOB_ID = "semaforo_learn"
+_SEMAFORO_LEARN_DEFAULT_CRON = "0 12 * * 1"
+
+
+async def semaforo_learn() -> dict | None:
+    """El semáforo aprende de las correcciones humanas (pricing/semaforo_aprende.py): con `pm_learn_mode` 1 propone
+    ajustes por segmento, con 2 los aplica, con 0 no hace nada. Un fallo se loguea; la semana siguiente vuelve a probar."""
+    from app.pricing import semaforo_aprende     # lazy: no cargar la bandeja al importar los jobs
+
+    try:
+        result = await asyncio.to_thread(semaforo_aprende.run_learning)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("semaforo_learn falló: %s", type(exc).__name__)
+        return None
+    _mark_job_run(SEMAFORO_LEARN_JOB_ID)
+    return result
+
+
 def _price_review_digest_trigger(expr: str) -> CronTrigger:
     try:
         return CronTrigger.from_crontab(expr, timezone="UTC")
@@ -1093,6 +1111,20 @@ def register_jobs() -> None:
         id=PRICE_REVIEW_DIGEST_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
         **digest_kwargs,
+    )
+    # El semáforo aprende de las correcciones humanas: semanal (lunes 09:00 ART por default). Sin recuperación al arrancar:
+    # una semana sin correr no se nota y un deploy no tiene que disparar propuestas.
+    try:
+        learn_trigger = CronTrigger.from_crontab(
+            getattr(s, "semaforo_learn_cron_utc", None) or _SEMAFORO_LEARN_DEFAULT_CRON, timezone="UTC")
+    except ValueError as exc:
+        log.error("SEMAFORO_LEARN_CRON_UTC inválido (%s); uso %r", exc, _SEMAFORO_LEARN_DEFAULT_CRON)
+        learn_trigger = CronTrigger.from_crontab(_SEMAFORO_LEARN_DEFAULT_CRON, timezone="UTC")
+    scheduler.add_job(
+        semaforo_learn,
+        learn_trigger,
+        id=SEMAFORO_LEARN_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
     )
     scheduler.add_job(
         price_review_reconcile,
