@@ -41,6 +41,9 @@ BASE = "/api/price-review"
 @pytest.fixture
 def fake(monkeypatch):
     f = kit.setup(monkeypatch, mode=2)
+    # Portón de lo que sube Paco, sin el paso del catálogo apagado ni la guarda de medidas (ver test_measures_check.py).
+    w.set_setting("pm_gate_catalog_greens", 0)
+    w.set_setting("pm_gate_measures_check", 0)
     with Session(engine) as s:
         s.execute(delete(LuisIntake))
         s.execute(delete(PriceFactorSample))

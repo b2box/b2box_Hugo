@@ -1912,7 +1912,8 @@ en este orden: largo, ancho, alto (cm), peso (kg), unidades por caja (ej.
 `masterBoxLength,masterBoxWidth,masterBoxHeight,masterBoxWeight,unitsPerMasterBox`). Vacío = la IA la ve «no cargada».
 Si el schema no tiene alguno de esos campos, se apaga sola (se avisa una vez) y el resto de la consulta de precios sigue.
 
-**Revisión de los deshabilitados.** Después de cada corrida, si la IA está configurada, Hugo revisa las medidas de los
+**Revisión de los deshabilitados.** Todos los días a las 14:00 UTC (11:00 ART, job `measures_check_disabled`, después de
+la corrida de la noche), si la IA está configurada, Hugo revisa las medidas de los
 deshabilitados que faltan o cambiaron (hasta el tope del día). Solo opina: no escribe en Vendure. Dashboard → Semáforo →
 «Portón y medidas de los deshabilitados» (lo peor primero) o `GET /api/price-monitor/measures?verdict=mal`,
 `GET /api/price-monitor/measures/summary`; «Revisar medidas con IA» = `POST /api/price-monitor/measures/run` (admin).

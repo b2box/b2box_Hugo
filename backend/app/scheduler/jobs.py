@@ -1166,11 +1166,34 @@ def register_jobs() -> None:
         id=PRICE_FACTOR_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )
+    # Medidas de los deshabilitados con la IA barata (pricing/measures_check.py): 14:00 UTC (11:00 ART), después de la
+    # corrida de la noche. Solo opina, no escribe en Vendure; lo que el portón ya chequeó no se vuelve a pagar.
+    scheduler.add_job(
+        measures_check_disabled,
+        CronTrigger(hour=14, minute=0, timezone="UTC"),
+        id=MEASURES_CHECK_JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
 
 
 RADAR_PRECHECK_JOB_ID = "radar_precheck_process"
 RADAR_PRECHECK_EVERY_MIN = 15
 PRICE_FACTOR_JOB_ID = "price_factor_refresh"
+MEASURES_CHECK_JOB_ID = "measures_check_disabled"
+
+
+async def measures_check_disabled() -> dict[str, int]:
+    """Revisa con la IA barata las medidas de los deshabilitados que faltan o cambiaron (tope diario). Nunca lanza."""
+    from app import runtime
+    from app.pricing import market_judge, measures_check
+
+    if not market_judge.enabled() or int(runtime.get("pm_measures_check_daily_max") or 0) <= 0:
+        return {}
+    try:
+        return await measures_check.run_disabled()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("measures_check_disabled falló (%s)", type(exc).__name__)
+        return {"error": 1}
 
 
 async def radar_precheck_process() -> dict:
