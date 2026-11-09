@@ -239,6 +239,12 @@ class OurSpecs:
     box_width: float | None = None
     box_height: float | None = None
     box_weight: float | None = None
+    # Caja master (opcional: solo si VENDURE_MASTER_BOX_FIELDS dice qué custom fields son).
+    master_length: float | None = None
+    master_width: float | None = None
+    master_height: float | None = None
+    master_weight: float | None = None
+    master_units: float | None = None
 
     @property
     def dims_cm(self) -> tuple[float, ...]:
@@ -255,7 +261,9 @@ class OurSpecs:
             ("length", self.length), ("width", self.width), ("height", self.height),
             ("weight", self.weight), ("box_length", self.box_length),
             ("box_width", self.box_width), ("box_height", self.box_height),
-            ("box_weight", self.box_weight)) if v}
+            ("box_weight", self.box_weight), ("master_length", self.master_length),
+            ("master_width", self.master_width), ("master_height", self.master_height),
+            ("master_weight", self.master_weight), ("master_units", self.master_units)) if v}
 
 
 _SPEC_FIELDS = {"length": "length", "width": "width", "height": "height", "weight": "weight",
@@ -263,12 +271,28 @@ _SPEC_FIELDS = {"length": "length", "width": "width", "height": "height", "weigh
                 "boxHeight": "box_height", "boxWeight": "box_weight"}
 
 
+_MASTER_KEYS = ("master_length", "master_width", "master_height", "master_weight", "master_units")
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def master_box_fields() -> dict[str, str]:
+    """{custom field de Vendure: clave de OurSpecs} de la caja master, según `VENDURE_MASTER_BOX_FIELDS` (largo, ancho,
+    alto, peso, unidades). Vacío si no está configurado; un nombre que no es un identificador GraphQL se ignora."""
+    from app.config import get_settings  # lazy: market_specs se usa también en tests puros
+
+    raw = (get_settings().vendure_master_box_fields or "").strip()
+    if not raw:
+        return {}
+    names = [n.strip() for n in raw.split(",")]
+    return {n: k for n, k in zip(names, _MASTER_KEYS) if n and _FIELD_NAME.match(n)}
+
+
 def our_specs_from_custom_fields(custom: Mapping | None) -> OurSpecs | None:
     """customFields de la variante de Vendure → OurSpecs, o None si no hay nada."""
     if not isinstance(custom, Mapping):
         return None
     values: dict[str, float] = {}
-    for src, dst in _SPEC_FIELDS.items():
+    for src, dst in {**_SPEC_FIELDS, **master_box_fields()}.items():
         v = custom.get(src)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
             values[dst] = float(v)

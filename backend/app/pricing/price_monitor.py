@@ -1557,6 +1557,15 @@ async def _review_pass(run_id: int, result: dict[str, Any] | None, products: lis
             await price_gate.process_run(run_id)
     except Exception:  # noqa: BLE001
         log.exception("price_monitor #%s: el portón de precio falló", run_id)
+    # Medidas de los deshabilitados con la IA barata (pricing/measures_check.py): solo opina, no escribe en Vendure. Lo
+    # que el portón ya chequeó no se vuelve a pagar (cache por medidas).
+    try:
+        from app.pricing import market_judge, measures_check
+
+        if market_judge.enabled() and int(runtime.get("pm_measures_check_daily_max") or 0) > 0:
+            await measures_check.run_disabled()
+    except Exception:  # noqa: BLE001
+        log.exception("price_monitor #%s: la revisión de medidas falló", run_id)
 
 
 def _make_web(run_id: int) -> tuple[market_ml_web.MlWebSource | None, str]:

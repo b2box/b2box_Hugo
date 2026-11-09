@@ -13,6 +13,11 @@ POST /api/price-monitor/snapshots/{id}/same     → "Es el mismo": promueve un s
                                                   a idéntico (recalcula el color real)
 DELETE /api/price-monitor/products/{id}/not-same/{ml_id} → vuelve a considerarla (también
                                                   /products/{id}/feedback/{ml_id}: sirve para las dos marcas)
+POST /api/price-monitor/gate/apply-now          → (admin) el portón ya, con la última corrida: activa los verdes
+                                                  firmes y apaga los rojos firmes publicados (sin esperar la racha)
+GET  /api/price-monitor/measures                → revisión de medidas (producto / caja / master) con IA
+GET  /api/price-monitor/measures/summary        → cuántos ok / dudoso / mal / sin medidas
+POST /api/price-monitor/measures/run            → (admin) revisa ya los deshabilitados que faltan
 
 Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 """
@@ -20,6 +25,7 @@ Viven bajo /api/ → el middleware de auth exige sesión del dashboard.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Any
 
@@ -37,6 +43,8 @@ from app.pricing import market_match, match_feedback, price_monitor, price_revie
 from app.pricing.market_ml import ml_budget_status
 from app.pricing.market_ml_web import clean_line
 from app.pricing.semaforo import COLORS, NO_MEDIBLE, SIN_DATO
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/price-monitor", tags=["price-monitor"])
 
@@ -571,3 +579,125 @@ async def undo_feedback(
     if result is None:
         raise HTTPException(404, "esa publicación no estaba marcada")
     return result
+
+
+# ─── Portón ya («Aplicar ahora») ──────────────────────────────────
+
+
+def _last_finished_run(session: Session) -> PriceMonitorRun | None:
+    return session.exec(
+        select(PriceMonitorRun)
+        .where(PriceMonitorRun.status.in_((price_monitor.RUN_OK, price_monitor.RUN_DEGRADED)))  # type: ignore[attr-defined]
+        .order_by(PriceMonitorRun.id.desc())  # type: ignore[union-attr]
+        .limit(1)
+    ).first()
+
+
+@router.post("/gate/apply-now", status_code=202)
+async def gate_apply_now(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Corre el portón de precio YA sobre la última corrida terminada: activa los verdes firmes apagados (lo de Paco y,
+    con `pm_gate_catalog_greens`, todo el catálogo; con la guarda de medidas) y apaga los rojos firmes publicados AUNQUE no
+    tengan la racha de 2 noches. Mismo protocolo, mismos topes diarios y Deshacer que la noche. Solo un administrador y
+    con `pm_mode = 2`."""
+    from app.pricing import price_gate
+
+    user = auth.require_admin(request)
+    if not price_gate.enabled():
+        raise HTTPException(409, "El portón solo corre en modo automático: poné «Modo de la bandeja» = 2.")
+    if price_gate.gate_lock.locked():
+        raise HTTPException(409, "El portón ya está corriendo.")
+    run = _last_finished_run(session)
+    if run is None or run.id is None:
+        raise HTTPException(409, "Todavía no hay una corrida del semáforo terminada.")
+    run_id = int(run.id)
+    task = asyncio.create_task(_apply_now(run_id, user))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return {"status": "scheduled", "run_id": run_id,
+            "activations_daily_max": int(runtime.get("pm_gate_activations_daily_max") or 0),
+            "inactivations_daily_max": int(runtime.get("pm_gate_inactivations_daily_max") or 0)}
+
+
+async def _apply_now(run_id: int, user: str) -> None:
+    from app.pricing import price_gate
+
+    counts = await price_gate.process_run(run_id, immediate_reds=True)
+    log.info("portón «Aplicar ahora» (%s) sobre #%s: %s", user, run_id, counts)
+    _last_apply.clear()
+    _last_apply.update({"run_id": run_id, "by": user, "at": utcnow().isoformat(), "counts": counts})
+
+
+# Resultado de la última «Aplicar ahora» de este proceso (para mostrarlo en el dashboard).
+_last_apply: dict[str, Any] = {}
+
+
+@router.get("/gate/apply-now")
+async def gate_apply_now_status() -> dict[str, Any]:
+    from app.pricing import price_gate
+
+    return {"running": price_gate.gate_lock.locked(), "last": _last_apply or None}
+
+
+# ─── Medidas con IA ───────────────────────────────────────────────
+
+MEASURE_VERDICTS = ("ok", "dudoso", "mal", "sin_medidas", "error")
+
+
+@router.get("/measures/summary")
+async def measures_summary() -> dict[str, Any]:
+    from app.pricing import measures_check
+
+    out = await asyncio.to_thread(measures_check.summary)
+    out["running"] = measures_check._running.locked()
+    return out
+
+
+@router.get("/measures")
+async def measures_list(
+    verdict: str | None = Query(None, max_length=12),
+    enabled: str = Query("disabled", max_length=8),
+    q: str | None = Query(None, max_length=120),
+    page: int = Query(1, ge=1, le=PAGE_MAX),
+    page_size: int = Query(PAGE_SIZE_DEFAULT, ge=1, le=PAGE_SIZE_MAX),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """La revisión de medidas por producto, lo peor primero (mal, dudoso, sin medidas, error, ok)."""
+    from app.db.models import MeasuresCheck
+    from app.pricing import measures_check
+
+    if verdict is not None and verdict not in MEASURE_VERDICTS:
+        raise HTTPException(400, f"verdict debe ser uno de {', '.join(MEASURE_VERDICTS)}")
+    if enabled not in ENABLED_FILTERS:
+        raise HTTPException(400, f"enabled debe ser uno de {', '.join(ENABLED_FILTERS)}")
+    conds: list[Any] = []
+    if verdict:
+        conds.append(MeasuresCheck.verdict == verdict)
+    if enabled == "disabled":
+        conds.append(MeasuresCheck.product_enabled == False)  # noqa: E712
+    elif enabled == "enabled":
+        conds.append(MeasuresCheck.product_enabled == True)  # noqa: E712
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        conds.append(or_(MeasuresCheck.product_name.ilike(like), MeasuresCheck.product_code.ilike(like),  # type: ignore[union-attr]
+                         MeasuresCheck.product_id == q.strip()))
+    order = case({"mal": 0, "dudoso": 1, "sin_medidas": 2, "error": 3}, value=MeasuresCheck.verdict, else_=4)
+    total = session.exec(select(func.count()).select_from(MeasuresCheck).where(*conds)).one()
+    rows = session.exec(select(MeasuresCheck).where(*conds)
+                        .order_by(order, MeasuresCheck.checked_at.desc())  # type: ignore[union-attr]
+                        .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"total": int(total), "page": page, "page_size": page_size,
+            "items": [measures_check.as_dict(r) for r in rows]}
+
+
+@router.post("/measures/run", status_code=202)
+async def measures_run(request: Request) -> dict[str, Any]:
+    """Revisa ya los productos deshabilitados que faltan o cambiaron (hasta el tope del día). Solo un administrador."""
+    from app.pricing import measures_check
+
+    auth.require_admin(request)
+    if measures_check._running.locked():
+        raise HTTPException(409, "La revisión de medidas ya está corriendo.")
+    task = asyncio.create_task(measures_check.run_disabled())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return {"status": "scheduled"}

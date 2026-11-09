@@ -1137,3 +1137,33 @@ class SemaforoAjuste(SQLModel, table=True):
     decided_at: datetime | None = Field(default=None)
     undone_by: str | None = Field(default=None, max_length=120)
     undone_at: datetime | None = Field(default=None)
+
+
+class MeasuresCheck(SQLModel, table=True):
+    """¿Las medidas del producto, de la caja individual y de la caja master tienen sentido con el producto?
+    (pricing/measures_check.py). Una fila por producto: la última revisión. Primero reglas puras (la caja más chica que el
+    producto, la master que no entra las unidades…) y, si pasan, una IA barata (el modelo del juez: MiMo) con la foto, el
+    nombre y las medidas. Se vuelve a mirar cuando cambian las medidas o el nombre (`specs_hash`)."""
+    __tablename__ = "measures_check"
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64, unique=True, index=True)
+    product_name: str | None = Field(default=None)
+    product_code: str | None = Field(default=None)
+    product_image_url: str | None = Field(default=None)
+    product_enabled: bool | None = Field(default=None)
+    checked_at: datetime = Field(default_factory=utcnow)
+    specs_hash: str = Field(default="", max_length=64)
+    specs: str | None = Field(default=None)                # JSON: las medidas que se revisaron
+    # ok | dudoso | mal | sin_medidas | error
+    verdict: str = Field(default="error", max_length=12)
+    # producto / caja / master: ok | dudoso | mal | sin_dato
+    product_verdict: str | None = Field(default=None, max_length=12)
+    box_verdict: str | None = Field(default=None, max_length=12)
+    master_verdict: str | None = Field(default=None, max_length=12)
+    source: str = Field(default="reglas", max_length=12)   # reglas | ia
+    problems: str | None = Field(default=None)             # JSON: lista de problemas en texto
+    motive: str | None = Field(default=None, max_length=500)
+    expected: str | None = Field(default=None)             # JSON: lo que la IA estima que debería ser
+    model: str | None = Field(default=None, max_length=80)
+    cost_usd: float = Field(default=0.0)

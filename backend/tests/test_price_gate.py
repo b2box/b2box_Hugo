@@ -24,6 +24,10 @@ YELLOW_PRICES = (1_350_000, 1_380_000, 1_400_000)   # ~20 % → amarillo
 @pytest.fixture
 def fake(monkeypatch):
     f = kit.setup(monkeypatch, mode=2)
+    # Estos tests son del portón de lo que sube Paco: sin el paso del catálogo apagado ni la guarda de medidas (tienen
+    # los suyos más abajo y en test_measures_check.py).
+    w.set_setting("pm_gate_catalog_greens", 0)
+    w.set_setting("pm_gate_measures_check", 0)
     with Session(engine) as s:
         s.execute(delete(LuisIntake))
         s.commit()

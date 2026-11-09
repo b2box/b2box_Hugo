@@ -1098,6 +1098,11 @@ _COSTLY_SETTINGS = frozenset({
     # lo que apagó él cuando se corrigió en Vendure (eso ya toca Vendure sin una persona); con 0 todo eso se frena. El 2
     # (automático, todavía no implementado) sería el que apaga solo.
     "pm_mode",
+    # Prenden productos en Vendure solos (todo el catálogo apagado) o sacan la guarda de medidas antes de prenderlos, y
+    # el tope de la IA de medidas gasta plata.
+    "pm_gate_catalog_greens",
+    "pm_gate_measures_check",
+    "pm_measures_check_daily_max",
     # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la
     # vigilancia de lo que se decidió mantener.
     "pm_review_worse_pct",

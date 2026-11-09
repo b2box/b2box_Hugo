@@ -1884,6 +1884,47 @@ Prender: dashboard → Configuración → «Modo de la bandeja» = 2. Volver a 1
 mitad de la pasada). Migración: columnas nuevas en `luis_intake` (`gate_status`, `gate_reason`, `gate_at`), estados nuevos de
 la ficha (`por_activar`, `activado`; entran en `VARCHAR(16)`).
 
+### Todo el catálogo apagado y la guarda de medidas
+
+Con `pm_gate_catalog_greens = 1` (default) el portón no se limita a lo que subió Paco: **cualquier producto
+deshabilitado** que la corrida midió en **verde firme** se activa solo, por el mismo protocolo (`activar_auto`, ficha
+`por_activar` → `activado`, Deshacer) y con el mismo tope `pm_gate_activations_daily_max`, del mejor margen al peor. No
+prende lo que apagó el control de duplicados o de BX sin foto, ni lo que una persona despublicó desde la bandeja o apagó
+viéndolo verde con el mismo precio (aunque haya pasado el `pm_correction_hold_days`). Un verde dudoso del catálogo no abre
+ficha: la bandeja no se llena con el catálogo viejo.
+
+**Guarda de medidas** (`pm_gate_measures_check = 1`, default): antes de activar solo un verde (de Paco o del catálogo),
+`pricing/measures_check.py` revisa que las medidas del **producto**, de la **caja individual** y de la **caja master**
+tengan sentido con el producto:
+
+1. reglas puras (gratis): el producto no entra en su caja, la caja pesa menos que el producto, la caja tiene más de 10
+   veces su volumen, la master no entra las unidades que dice o pesa menos que ellas, lados o pesos imposibles;
+2. si pasan, una **IA barata** (el modelo del juez, `PM_LLM_*`; con Xiaomi MiMo `mimo-v2.6-flash` cuesta ~USD 0,0002
+   por producto) mira la foto, el nombre y las tres medidas y responde `ok | dudoso | mal | sin_dato` por nivel.
+
+`mal`, `dudoso`, sin medidas o sin chequear (IA apagada, tope del día) → el verde va a la bandeja de Pao con el motivo en
+vez de activarse (fail-closed). El resultado queda en `measures_check` (una fila por producto) y se reusa mientras no
+cambien las medidas ni el nombre (30 días como máximo). Tope diario de la IA: `pm_measures_check_daily_max` (300, día
+UTC); cada llamada queda en `llm_usage` con el propósito `medidas_catalogo`.
+
+**Caja master.** Hugo lee la caja master de la variante solo si `VENDURE_MASTER_BOX_FIELDS` dice qué custom fields son,
+en este orden: largo, ancho, alto (cm), peso (kg), unidades por caja (ej.
+`masterBoxLength,masterBoxWidth,masterBoxHeight,masterBoxWeight,unitsPerMasterBox`). Vacío = la IA la ve «no cargada».
+Si el schema no tiene alguno de esos campos, se apaga sola (se avisa una vez) y el resto de la consulta de precios sigue.
+
+**Revisión de los deshabilitados.** Después de cada corrida, si la IA está configurada, Hugo revisa las medidas de los
+deshabilitados que faltan o cambiaron (hasta el tope del día). Solo opina: no escribe en Vendure. Dashboard → Semáforo →
+«Portón y medidas de los deshabilitados» (lo peor primero) o `GET /api/price-monitor/measures?verdict=mal`,
+`GET /api/price-monitor/measures/summary`; «Revisar medidas con IA» = `POST /api/price-monitor/measures/run` (admin).
+
+**«Aplicar ahora»** (`POST /api/price-monitor/gate/apply-now`, admin, `pm_mode = 2`): corre el portón YA con la última
+corrida terminada: activa los verdes firmes apagados (con la guarda de medidas) y apaga los rojos firmes publicados
+**aunque no tengan todavía la racha de 2 noches** (R1, R3-R7). Mismos topes diarios (subirlos en Configuración si hay que
+mover muchos de una), mismo protocolo y Deshacer. La noche sigue esperando la racha. Una pasada del portón a la vez.
+
+Migración: tabla nueva `measures_check` (la crea `init_db`). Volver atrás: `DROP TABLE IF EXISTS measures_check;` y
+`DELETE FROM settings WHERE key IN ('pm_gate_catalog_greens', 'pm_gate_measures_check', 'pm_measures_check_daily_max', 'measures_check_llm');`
+
 ## Prechequeo de Luis (`POST /radar/precheck`, antes de Paco)
 
 Para que Luis no pague búsquedas en 1688 de productos que no compiten. Misma auth que `/radar/ml-supply` (`X-API-Key`).
@@ -2486,4 +2527,7 @@ Ver `.env.example`. Las críticas:
   e `INSTALL_BROWSER=true` (build) — el navegador (Camoufox) que usan /verify, /app/lookup
   y la búsqueda web de ML del semáforo. **Sin `BROWSER_PROXY` la búsqueda web queda apagada.**
 - `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo
-  (opcionales: `PM_LLM_IMAGE_MODE`, `PM_LLM_EXTRA_BODY`; ver "Juez IA").
+  (opcionales: `PM_LLM_IMAGE_MODE`, `PM_LLM_EXTRA_BODY`; ver "Juez IA"). El mismo modelo revisa las medidas antes de
+  que el portón active solo un verde (ver «Todo el catálogo apagado y la guarda de medidas»).
+- `VENDURE_MASTER_BOX_FIELDS` — custom fields de la caja master en la variante (largo, ancho, alto, peso, unidades;
+  separados por coma). Vacío = no se lee.

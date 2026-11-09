@@ -21,6 +21,7 @@ import { IconExternalLink, IconRefresh, IconSearch, IconTrafficLight } from "../
 import { fmtArs, fmtPct, fmtTime, isUnreachableImage, nfmt } from "../lib/format";
 import { SECTION_META } from "../sections";
 import { CheapestCell, SourceCell, SourceFilters, SourceHeads, StoresPanel } from "./SourceCells";
+import { MeasuresPanel } from "./MeasuresPanel";
 import type {
   ColorFilter,
   ListingSpecs,
@@ -441,6 +442,8 @@ export default function SemaforoView({ initialReview = null }: { initialReview?:
       </div>
 
       <p className="text-sm text-muted-foreground">{SECTION_META.semaforo?.desc}</p>
+
+      <MeasuresPanel />
 
       {feedback && (
         <p

@@ -670,6 +670,41 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=1, max=365, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_gate_catalog_greens",
+        label="Portón: activar los verdes firmes de todo el catálogo apagado",
+        description=(
+            "Con modo 2: 1 = además de lo que subió Paco, cualquier producto DESHABILITADO que dé verde firme contra ML se "
+            "activa solo (mismo tope de activaciones por día, del mejor margen al peor). No prende lo apagado por "
+            "duplicado o BX sin foto, ni lo que una persona despublicó o apagó viéndolo verde. 0 = solo lo de Paco."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_catalog_greens",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_measures_check",
+        label="Portón: chequear las medidas con IA antes de activar",
+        description=(
+            "1 = antes de activar solo un verde, una IA barata (el modelo del juez, MiMo) mira si las medidas del producto, "
+            "de la caja individual y de la caja master tienen sentido con el producto. Si no cierran, faltan o no se "
+            "pudieron chequear, va a la bandeja de Pao en vez de activarse. 0 = se activa sin mirar las medidas."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_measures_check",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_measures_check_daily_max",
+        label="Chequeo de medidas: llamadas a la IA por día",
+        description=(
+            "Tope diario (UTC) de productos que la IA revisa (portón y tanda de deshabilitados). Con MiMo cada uno cuesta "
+            "~USD 0,0002. Lo que no se pudo chequear por el tope no se activa solo ese día. 0 = no se llama a la IA."
+        ),
+        type="int", parser=int,
+        default_attr="pm_measures_check_daily_max",
+        min=0, max=5000, step=50, group="monitor",
+    ),
+    SettingMeta(
         key="pm_correction_hold_days",
         label="La persona manda: días sin acciones automáticas",
         description=(

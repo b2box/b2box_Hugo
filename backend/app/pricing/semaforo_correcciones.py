@@ -186,6 +186,14 @@ def held(s: Session, product_id: str, our_price_cents: int | None, now: datetime
     return any(p is None or our_price_cents is None or int(p) == int(our_price_cents) for p in rows)
 
 
+def ever_turned_off(s: Session, product_id: str, our_price_cents: int | None) -> bool:
+    """¿Una persona apagó alguna vez este producto viéndolo Hugo en verde, con este mismo precio (sin importar cuándo)?
+    El portón sobre el catálogo apagado no lo prende solo: alguien ya dijo que no con estos números."""
+    rows = s.exec(select(SemaforoCorreccion.our_price_cents).where(
+        SemaforoCorreccion.product_id == product_id, SemaforoCorreccion.human_decision == INACTIVAR)).all()
+    return any(p is None or our_price_cents is None or int(p) == int(our_price_cents) for p in rows)
+
+
 # ─── Por qué (lo completa una persona) ────────────────────────────
 
 

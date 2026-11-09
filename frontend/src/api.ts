@@ -285,6 +285,68 @@ export async function runPriceMonitor(): Promise<Response> {
   return apiFetch("/api/price-monitor/run", { method: "POST" });
 }
 
+// Portón «Aplicar ahora» (admin, modo 2): activa los verdes firmes apagados y apaga los rojos firmes publicados con la
+// última corrida. Devuelve la Response cruda: 403/409 son avisos para la UI.
+export async function applyGateNow(): Promise<Response> {
+  return apiFetch("/api/price-monitor/gate/apply-now", { method: "POST" });
+}
+
+export interface GateApplyStatus {
+  running: boolean;
+  last: { run_id: number; by: string; at: string; counts: Record<string, number> } | null;
+}
+
+export async function getGateApplyStatus(): Promise<GateApplyStatus> {
+  return asJson(await apiFetch("/api/price-monitor/gate/apply-now"));
+}
+
+// Revisión de medidas (producto / caja individual / caja master) con la IA barata.
+export type MeasuresVerdict = "ok" | "dudoso" | "mal" | "sin_medidas" | "error";
+
+export interface MeasuresItem {
+  product_id: string;
+  product_name: string | null;
+  product_code: string | null;
+  image_url: string | null;
+  enabled: boolean | null;
+  checked_at: string | null;
+  verdict: MeasuresVerdict;
+  product_verdict: string | null;
+  box_verdict: string | null;
+  master_verdict: string | null;
+  source: string;
+  problems: string[];
+  motive: string | null;
+  specs: Record<string, number>;
+  model: string | null;
+  cost_usd: number;
+}
+
+export interface MeasuresSummary {
+  total: number;
+  by_verdict: Record<MeasuresVerdict, number>;
+  cost_usd: number;
+  ia_enabled: boolean;
+  guard_enabled: boolean;
+  used_today: number;
+  daily_max: number;
+  running: boolean;
+}
+
+export async function getMeasuresSummary(): Promise<MeasuresSummary> {
+  return asJson(await apiFetch("/api/price-monitor/measures/summary"));
+}
+
+export async function getMeasures(verdict: MeasuresVerdict | null, page = 1): Promise<{ total: number; items: MeasuresItem[] }> {
+  const params = new URLSearchParams({ page: String(page), page_size: "25", enabled: "disabled" });
+  if (verdict) params.set("verdict", verdict);
+  return asJson(await apiFetch("/api/price-monitor/measures?" + params));
+}
+
+export async function runMeasuresCheck(): Promise<Response> {
+  return apiFetch("/api/price-monitor/measures/run", { method: "POST" });
+}
+
 // "No es el mismo" (idéntica) / "No tiene nada que ver" (similar): saca la publicación del
 // snapshot (que se recalcula) y la excluye para ese producto en las próximas corridas. El
 // motivo y la nota le enseñan al juez. Devuelve el snapshot actualizado.

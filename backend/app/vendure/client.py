@@ -29,7 +29,7 @@ from gql.transport.exceptions import TransportError, TransportQueryError
 from gql.transport.httpx import HTTPXAsyncTransport
 
 from app.config import get_settings
-from app.pricing.market_specs import our_specs_from_custom_fields
+from app.pricing.market_specs import master_box_fields, our_specs_from_custom_fields
 from app.pricing.price_breakdown import BREAKDOWN_SELECTION, TierBreakdown, parse_tier_breakdowns
 from app.pricing.semaforo import PricedVariant, PriceTier
 
@@ -78,6 +78,15 @@ _VARIANT_REVIEW_FIELDS = "sourcingMode minQuantityOverride"
 _DIM_FIELD_NAMES = frozenset(_VARIANT_DIM_FIELDS.split())
 _REVIEW_FIELD_NAMES = frozenset({*_VARIANT_REVIEW_FIELDS.split(), "price"})
 _CANNOT_QUERY = re.compile(r'Cannot query field "(\w+)"')
+
+
+def _variant_custom_fields() -> str:
+    """Custom fields de la variante que piden las lecturas de precio: medidas, caja master (si está configurada) y los
+    del diagnóstico, salvo lo que el schema ya dijo que no tiene."""
+    master = " ".join(master_box_fields()) if VendureClient._dims_supported and VendureClient._master_supported else ""
+    return " ".join(p for p in (
+        _VARIANT_DIM_FIELDS if VendureClient._dims_supported else "", master,
+        _VARIANT_REVIEW_FIELDS if VendureClient._review_supported else "") if p).strip()
 
 
 # ─── DTOs ──────────────────────────────────────────────────────────
@@ -243,6 +252,8 @@ class VendureClient:
     # Lo mismo para lo que suma la bandeja de revisión a la MISMA selección de precios: el costo por
     # tramo (`bulkPriceTiers.price`) y los custom fields `sourcingMode` / `minQuantityOverride`.
     _review_supported: bool = True
+    # Caja master (VENDURE_MASTER_BOX_FIELDS): se apaga sola si el schema no tiene alguno de esos campos.
+    _master_supported: bool = True
 
     # Último bearer renovado, compartido entre TODAS las instancias del proceso.
     # Sin esto, cada VendureClient() nuevo pagaba un login completo.
@@ -403,9 +414,7 @@ class VendureClient:
             # ML. Son columnas de la misma fila: no suman queries del lado de Vendure.
             # Lo mismo el costo por tramo, el modo de abastecimiento y la mínima propia
             # que usa el diagnóstico de la bandeja de revisión.
-            custom = " ".join(
-                (_VARIANT_DIM_FIELDS if VendureClient._dims_supported else "",
-                 _VARIANT_REVIEW_FIELDS if VendureClient._review_supported else "")).strip()
+            custom = _variant_custom_fields()
             custom_block = f" customFields {{ {custom} }}" if custom else ""
             tier_cost = " price" if VendureClient._review_supported else ""
             variant_block = (
@@ -680,6 +689,11 @@ class VendureClient:
             return False
         found = _CANNOT_QUERY.search(text)
         name = found.group(1) if found else ""
+        if VendureClient._master_supported and name and name in master_box_fields():
+            VendureClient._master_supported = False
+            log.warning("Vendure no tiene los campos de la caja master (VENDURE_MASTER_BOX_FIELDS: %s): se piden los "
+                        "precios sin ella", name[:64])
+            return True
         if name in _REVIEW_FIELD_NAMES and VendureClient._review_supported:
             VendureClient._review_supported = False
             what = "el costo por tramo / sourcingMode / minQuantityOverride"
@@ -890,8 +904,7 @@ class VendureClient:
         """UNA variante con su precio, tramos (costo en yuanes incluido), medidas y modo de
         abastecimiento: lo mismo que baja el listado nocturno, para cuando ese listado no está a
         mano. None si la variante no existe."""
-        custom = " ".join((_VARIANT_DIM_FIELDS if VendureClient._dims_supported else "",
-                           _VARIANT_REVIEW_FIELDS if VendureClient._review_supported else "")).strip()
+        custom = _variant_custom_fields()
         custom_block = f" customFields {{ {custom} }}" if custom else ""
         tier_cost = " price" if VendureClient._review_supported else ""
         query = self._read_query(

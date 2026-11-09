@@ -572,6 +572,19 @@ class Settings(EnvSettings):
     pm_gate_reads_daily_max: int = 100
     # Solo lo que Paco subió hace estos días o menos (lo viejo lo decide una persona).
     pm_gate_max_age_days: int = 30
+    # Portón sobre TODO el catálogo apagado (no solo lo que subió Paco por Luis): un producto deshabilitado que da verde
+    # firme contra ML se activa solo (mismo protocolo, mismo tope de activaciones). 0 = solo lo de Luis.
+    pm_gate_catalog_greens: int = 1
+    # Antes de activar solo, una IA barata (el modelo del juez, PM_LLM_*: MiMo) mira si las medidas del producto, de la
+    # caja individual y de la caja master tienen sentido con el producto (pricing/measures_check.py). 1 = obligatorio:
+    # medidas que no cierran, o sin chequear, van a la bandeja en vez de activarse. 0 = no se chequea.
+    pm_gate_measures_check: int = 1
+    # Tope diario (UTC) de llamadas a la IA del chequeo de medidas.
+    pm_measures_check_daily_max: int = 300
+    # Custom fields de la CAJA MASTER en la variante de Vendure, separados por coma y en este orden: largo, ancho, alto
+    # (cm), peso (kg), unidades por caja master. Vacío = Hugo no la lee (la IA la ve como «no cargada»). Si el schema no
+    # tiene alguno, se apaga solo y se avisa una vez. Ej: "masterBoxLength,masterBoxWidth,masterBoxHeight,masterBoxWeight,unitsPerMasterBox"
+    vendure_master_box_fields: str = ""
     # La persona manda (pricing/semaforo_correcciones.py): si alguien prende un rojo o apaga un verde, Hugo no lo revierte y
     # deja el producto fuera de las acciones automáticas estos días (salvo que cambie su precio).
     pm_correction_hold_days: int = 60
