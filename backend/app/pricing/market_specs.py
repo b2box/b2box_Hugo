@@ -245,6 +245,7 @@ class OurSpecs:
     master_height: float | None = None
     master_weight: float | None = None
     master_units: float | None = None
+    master_cbm: float | None = None
 
     @property
     def dims_cm(self) -> tuple[float, ...]:
@@ -263,7 +264,8 @@ class OurSpecs:
             ("box_width", self.box_width), ("box_height", self.box_height),
             ("box_weight", self.box_weight), ("master_length", self.master_length),
             ("master_width", self.master_width), ("master_height", self.master_height),
-            ("master_weight", self.master_weight), ("master_units", self.master_units)) if v}
+            ("master_weight", self.master_weight), ("master_units", self.master_units),
+            ("master_cbm", self.master_cbm)) if v}
 
 
 _SPEC_FIELDS = {"length": "length", "width": "width", "height": "height", "weight": "weight",
@@ -271,13 +273,13 @@ _SPEC_FIELDS = {"length": "length", "width": "width", "height": "height", "weigh
                 "boxHeight": "box_height", "boxWeight": "box_weight"}
 
 
-_MASTER_KEYS = ("master_length", "master_width", "master_height", "master_weight", "master_units")
+_MASTER_KEYS = ("master_length", "master_width", "master_height", "master_weight", "master_units", "master_cbm")
 _FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 def master_box_fields() -> dict[str, str]:
     """{custom field de Vendure: clave de OurSpecs} de la caja master, según `VENDURE_MASTER_BOX_FIELDS` (largo, ancho,
-    alto, peso, unidades). Vacío si no está configurado; un nombre que no es un identificador GraphQL se ignora."""
+    alto, peso, piezas por caja y CBM). Vacío si no está configurado; un nombre que no es un identificador GraphQL se ignora."""
     from app.config import get_settings  # lazy: market_specs se usa también en tests puros
 
     raw = (get_settings().vendure_master_box_fields or "").strip()

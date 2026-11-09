@@ -1907,10 +1907,12 @@ vez de activarse (fail-closed). El resultado queda en `measures_check` (una fila
 cambien las medidas ni el nombre (30 días como máximo). Tope diario de la IA: `pm_measures_check_daily_max` (300, día
 UTC); cada llamada queda en `llm_usage` con el propósito `medidas_catalogo`.
 
-**Caja master.** Hugo lee la caja master de la variante solo si `VENDURE_MASTER_BOX_FIELDS` dice qué custom fields son,
-en este orden: largo, ancho, alto (cm), peso (kg), unidades por caja (ej.
-`masterBoxLength,masterBoxWidth,masterBoxHeight,masterBoxWeight,unitsPerMasterBox`). Vacío = la IA la ve «no cargada».
-Si el schema no tiene alguno de esos campos, se apaga sola (se avisa una vez) y el resto de la consulta de precios sigue.
+**Caja master.** Hugo lee la caja master de los custom fields de la variante que dice `VENDURE_MASTER_BOX_FIELDS`, en
+este orden: largo, ancho, alto (cm), peso bruto (kg), piezas por caja y CBM. Default: los de Vendure,
+`ctnLength,ctnWidth,ctnHeight,ctnGrossWeight,pcsPerCtn,cbmPerCtn`. Las reglas suman: el CBM cargado tiene que coincidir
+con largo × ancho × alto (±15 %) y, si faltan los lados, el CBM sirve para ver si entran las piezas. Vacío = no se lee (la
+IA la ve «no cargada»). Si el schema no tiene alguno de esos campos, se apaga sola (se avisa una vez) y el resto de la
+consulta de precios sigue.
 
 **Revisión de los deshabilitados.** Todos los días a las 14:00 UTC (11:00 ART, job `measures_check_disabled`, después de
 la corrida de la noche), si la IA está configurada, Hugo revisa las medidas de los
@@ -2530,5 +2532,5 @@ Ver `.env.example`. Las críticas:
 - `PM_LLM_BASE_URL`, `PM_LLM_API_KEY`, `PM_LLM_MODEL` — juez IA opcional del semáforo
   (opcionales: `PM_LLM_IMAGE_MODE`, `PM_LLM_EXTRA_BODY`; ver "Juez IA"). El mismo modelo revisa las medidas antes de
   que el portón active solo un verde (ver «Todo el catálogo apagado y la guarda de medidas»).
-- `VENDURE_MASTER_BOX_FIELDS` — custom fields de la caja master en la variante (largo, ancho, alto, peso, unidades;
-  separados por coma). Vacío = no se lee.
+- `VENDURE_MASTER_BOX_FIELDS` — custom fields de la caja master en la variante (largo, ancho, alto, peso bruto, piezas,
+  CBM; separados por coma). Default `ctnLength,ctnWidth,ctnHeight,ctnGrossWeight,pcsPerCtn,cbmPerCtn`. Vacío = no se lee.

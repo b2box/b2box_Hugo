@@ -109,7 +109,7 @@ def test_rules_check_the_master_box():
     too_light = levels(master_length=50, master_width=40, master_height=30, master_weight=1, master_units=20)
     assert any("la master pesa" in p for _, p in measures_check.rule_problems(too_light))
     no_units = levels(master_length=50, master_width=40, master_height=30, master_weight=12)
-    assert any("unidades" in p for _, p in measures_check.rule_problems(no_units))
+    assert any("piezas" in p for _, p in measures_check.rule_problems(no_units))
 
 
 def test_parse_ai_only_accepts_the_closed_json():
@@ -289,3 +289,25 @@ def test_master_box_fields_are_read_only_when_configured(monkeypatch):
     assert vclient.VendureClient._drop_unsupported_field(Exception('Cannot query field "mKg" on type "X"'))
     assert vclient.VendureClient._master_supported is False and vclient.VendureClient._dims_supported is True
     assert "mLen" not in vclient._variant_custom_fields()
+
+
+def test_master_cbm_must_match_its_sides_and_can_stand_in_for_them():
+    ok = levels(master_length=50, master_width=40, master_height=30, master_weight=12, master_units=20,
+                master_cbm=0.06)
+    assert measures_check.rule_problems(ok) == []
+    wrong = levels(master_length=50, master_width=40, master_height=30, master_weight=12, master_units=20,
+                   master_cbm=0.6)
+    assert any("CBM" in p and "no coincide" in p for _, p in measures_check.rule_problems(wrong))
+    only_cbm = levels(master_weight=12, master_units=500, master_cbm=0.06)
+    assert any("no entran 500 cajas" in p for _, p in measures_check.rule_problems(only_cbm))
+    assert "0.06 m³, 20 piezas" in ok.master_text()
+
+
+def test_default_master_fields_are_the_vendure_ctn_ones(monkeypatch):
+    monkeypatch.setattr(get_settings(), "vendure_master_box_fields",
+                        type(get_settings()).model_fields["vendure_master_box_fields"].default)
+    custom = {"ctnLength": 50, "ctnWidth": 40, "ctnHeight": 30, "ctnGrossWeight": 12.5, "pcsPerCtn": 24,
+              "cbmPerCtn": 0.06}
+    got = market_specs.our_specs_from_custom_fields(custom).as_dict()
+    assert got == {"master_length": 50, "master_width": 40, "master_height": 30, "master_weight": 12.5,
+                   "master_units": 24, "master_cbm": 0.06}

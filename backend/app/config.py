@@ -582,9 +582,9 @@ class Settings(EnvSettings):
     # Tope diario (UTC) de llamadas a la IA del chequeo de medidas.
     pm_measures_check_daily_max: int = 300
     # Custom fields de la CAJA MASTER en la variante de Vendure, separados por coma y en este orden: largo, ancho, alto
-    # (cm), peso (kg), unidades por caja master. Vacío = Hugo no la lee (la IA la ve como «no cargada»). Si el schema no
-    # tiene alguno, se apaga solo y se avisa una vez. Ej: "masterBoxLength,masterBoxWidth,masterBoxHeight,masterBoxWeight,unitsPerMasterBox"
-    vendure_master_box_fields: str = ""
+    # (cm), peso bruto (kg), piezas por caja y, opcional, CBM por caja. Vacío = Hugo no la lee (la IA la ve como «no
+    # cargada»). Si el schema no tiene alguno, se apaga sola y se avisa una vez.
+    vendure_master_box_fields: str = "ctnLength,ctnWidth,ctnHeight,ctnGrossWeight,pcsPerCtn,cbmPerCtn"
     # La persona manda (pricing/semaforo_correcciones.py): si alguien prende un rojo o apaga un verde, Hugo no lo revierte y
     # deja el producto fuera de las acciones automáticas estos días (salvo que cambie su precio).
     pm_correction_hold_days: int = 60

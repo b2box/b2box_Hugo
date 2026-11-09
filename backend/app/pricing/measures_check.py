@@ -58,6 +58,8 @@ _MIN_CM, _MAX_CM = 0.2, 250.0
 _MAX_KG = 200.0
 _FIT_TOL = 1.05            # el producto puede asomar 5 % (redondeos al cargar)
 _BOX_MAX_VOLUME_RATIO = 10.0
+_CBM_TOL = 0.15            # el CBM cargado vs largo × ancho × alto de la master
+_MAX_CBM = 3.0             # una caja de cartón de exportación, no un pallet
 
 _SYSTEM = (
     "Sos un despachante de importación desde China que revisa fichas de productos. Te pasan la foto y el nombre de un "
@@ -117,17 +119,38 @@ class Levels:
     product: Level
     box: Level
     master: Level
-    units: int | None                # unidades por caja master
+    units: int | None                # piezas por caja master
+    cbm: float | None = None         # CBM cargado de la caja master (m³)
 
     @classmethod
     def from_specs(cls, specs: dict[str, float]) -> Levels:
         u = specs.get("master_units")
+        cbm = specs.get("master_cbm")
         return cls(_level(specs, ""), _level(specs, "box_"), _level(specs, "master_"),
-                   int(round(u)) if u and u >= 1 else None)
+                   int(round(u)) if u and u >= 1 else None, cbm if cbm and cbm > 0 else None)
+
+    @property
+    def master_loaded(self) -> bool:
+        return self.master.loaded or self.cbm is not None
+
+    @property
+    def master_volume(self) -> float | None:
+        """cm³ de la master: de sus lados o, si no están, del CBM cargado."""
+        if self.master.volume:
+            return self.master.volume
+        return self.cbm * 1_000_000 if self.cbm else None
+
+    def master_text(self) -> str:
+        if not self.master_loaded:
+            return "no cargada"
+        text = self.master.text() if self.master.loaded else "sin medidas"
+        if self.cbm:
+            text += f", {_n(self.cbm)} m³"
+        return text + (f", {self.units} piezas" if self.units else ", sin cantidad de piezas")
 
     @property
     def any_loaded(self) -> bool:
-        return self.product.loaded or self.box.loaded or self.master.loaded
+        return self.product.loaded or self.box.loaded or self.master_loaded
 
 
 def _fits(inner: Level, outer: Level) -> bool:
@@ -150,18 +173,28 @@ def rule_problems(lv: Levels) -> list[tuple[str, str]]:
             out.append(("caja", f"la caja ({b.text()}) tiene {b.volume / p.volume:.0f} veces el volumen del producto"))
     if p.weight and b.weight and b.weight < p.weight * 0.95:
         out.append(("caja", f"la caja pesa {_n(b.weight)} kg y el producto solo {_n(p.weight)} kg"))
-    if m.loaded:
+    if lv.master_loaded:
         if b.complete and m.complete and not _fits(b, m):
             out.append(("master", f"la caja individual ({b.text()}) no entra en la master ({m.text()})"))
+        if lv.cbm and m.complete:
+            calc = (m.volume or 0) / 1_000_000
+            if abs(calc - lv.cbm) / max(calc, lv.cbm) > _CBM_TOL:
+                out.append(("master", f"el CBM de la master ({_n(lv.cbm)} m³) no coincide con sus medidas "
+                                      f"({m.text()} = {_n(calc)} m³)"))
+        if lv.cbm and lv.cbm > _MAX_CBM:
+            out.append(("master", f"el CBM de la master es imposible ({_n(lv.cbm)} m³)"))
+        mv = lv.master_volume
         if lv.units:
-            if b.volume and m.volume and m.volume < b.volume * lv.units * 0.9:
-                out.append(("master", f"en la master ({m.text()}) no entran {lv.units} cajas de {b.text()}"))
+            unit = b if b.volume else p
+            if unit.volume and mv and mv < unit.volume * lv.units * 0.9:
+                out.append(("master", f"en la master ({lv.master_text()}) no entran {lv.units} "
+                                      f"{'cajas' if unit is b else 'productos'} de {unit.text()}"))
             unit_w = b.weight or p.weight
             if unit_w and m.weight and m.weight < unit_w * lv.units * 0.9:
                 out.append(("master", f"la master pesa {_n(m.weight)} kg y {lv.units} unidades pesan "
                                       f"{_n(unit_w * lv.units)} kg"))
-        elif m.complete:
-            out.append(("master", "la caja master no dice cuántas unidades lleva"))
+        elif m.complete or lv.cbm:
+            out.append(("master", "la caja master no dice cuántas piezas lleva"))
     return out
 
 
@@ -218,9 +251,7 @@ def _safe(text: str | None, limit: int = 200) -> str:
 
 
 def build_messages(image: str | None, name: str, lv: Levels) -> list[dict[str, Any]]:
-    master = lv.master.text() if lv.master.loaded else "no cargada"
-    if lv.master.loaded:
-        master += f", {lv.units} unidades" if lv.units else ", sin cantidad de unidades"
+    master = lv.master_text()
     data = (f"Nombre: [DATOS]{_safe(name)}[/DATOS]\n"
             f"PRODUCTO: {lv.product.text() if lv.product.loaded else 'no cargado'}\n"
             f"CAJA INDIVIDUAL: {lv.box.text() if lv.box.loaded else 'no cargada'}\n"
@@ -327,7 +358,7 @@ async def check_snapshot(snap: MarketPriceSnapshot, *, force: bool = False, clie
     if not (lv.product.loaded or lv.box.loaded):
         return await asyncio.to_thread(_save, snap, {
             **base, "verdict": SIN_MEDIDAS, "source": "reglas", "product_verdict": SIN_DATO, "box_verdict": SIN_DATO,
-            "master_verdict": SIN_DATO if not lv.master.loaded else None,
+            "master_verdict": SIN_DATO if not lv.master_loaded else None,
             "problems": json.dumps(["La variante no tiene medidas del producto ni de la caja cargadas"]),
             "motive": "Sin medidas del producto ni de la caja"})
     problems = rule_problems(lv)
@@ -337,7 +368,7 @@ async def check_snapshot(snap: MarketPriceSnapshot, *, force: bool = False, clie
             **base, "verdict": MAL, "source": "reglas",
             "product_verdict": MAL if "producto" in bad else None,
             "box_verdict": MAL if "caja" in bad else None,
-            "master_verdict": MAL if "master" in bad else (None if lv.master.loaded else SIN_DATO),
+            "master_verdict": MAL if "master" in bad else (None if lv.master_loaded else SIN_DATO),
             "problems": json.dumps([p for _, p in problems], ensure_ascii=False),
             "motive": problems[0][1][:_MAX_MOTIVE]})
     verdict, cost, err = await ask_ai(snap.product_name or "", snap.product_image_url, lv, client=client)

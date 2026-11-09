@@ -181,7 +181,8 @@ export function MeasuresPanel() {
                 <td className="py-1 pr-2 whitespace-nowrap">{specsText(it.specs, "box_")}</td>
                 <td className="py-1 pr-2 whitespace-nowrap">
                   {specsText(it.specs, "master_")}
-                  {it.specs.master_units ? ` · ${it.specs.master_units} u.` : ""}
+                  {it.specs.master_units ? ` · ${it.specs.master_units} pzas` : ""}
+                  {it.specs.master_cbm ? ` · ${it.specs.master_cbm} m³` : ""}
                 </td>
                 <td className="py-1 text-muted-foreground">{it.motive || it.problems.join("; ") || "—"}</td>
               </tr>
