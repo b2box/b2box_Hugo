@@ -637,7 +637,7 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="int", parser=int,
         default_attr="pm_gate_activations_daily_max",
-        min=0, max=200, step=1, group="monitor",
+        min=0, max=2000, step=1, group="monitor",
     ),
     SettingMeta(
         key="pm_gate_inactivations_daily_max",
@@ -679,6 +679,31 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         ),
         type="int", parser=int,
         default_attr="pm_gate_catalog_greens",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_gate_catalog_activations_daily_max",
+        label="Portón: activaciones por día del catálogo apagado",
+        description=(
+            "Con modo 2, cuántos productos DESHABILITADOS del catálogo (no subidos por Paco) puede activar Hugo por día "
+            "(hora de Argentina) por dar verde firme con medidas bien, del mejor margen al peor. Aparte del tope de lo "
+            "que sube Paco. 0 = no activa el catálogo apagado."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_catalog_activations_daily_max",
+        min=0, max=2000, step=10, group="monitor",
+    ),
+    SettingMeta(
+        key="pm_autopilot",
+        label="Piloto automático al arrancar",
+        description=(
+            "1 = la primera vez que arranca con esto, Hugo pasa solo a modo 2 (automático) y, a los 12 minutos de cada "
+            "arranque, corre el portón con la última corrida si tiene menos de 40 h: activa los verdes firmes con medidas "
+            "bien y apaga los rojos firmes publicados, con los topes del día. Una vez por corrida. 0 = no hace nada al "
+            "arrancar (la noche sigue igual)."
+        ),
+        type="int", parser=int,
+        default_attr="pm_autopilot",
         min=0, max=1, step=1, group="monitor",
     ),
     SettingMeta(

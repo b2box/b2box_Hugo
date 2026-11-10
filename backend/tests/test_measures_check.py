@@ -311,3 +311,60 @@ def test_default_master_fields_are_the_vendure_ctn_ones(monkeypatch):
     got = market_specs.our_specs_from_custom_fields(custom).as_dict()
     assert got == {"master_length": 50, "master_width": 40, "master_height": 30, "master_weight": 12.5,
                    "master_units": 24, "master_cbm": 0.06}
+
+
+# ─── Verdes dudosos, tope propio y piloto automático ──────────────
+
+
+async def test_catalog_green_that_is_not_firm_waits_in_the_tray(fake, ai):
+    run = w.make_run()
+    w.add_snap(run, "cg20", color="verde", prices=GREEN_PRICES, enabled=False, specs=specs(),
+               sources=("llm", "llm", "llm"))                      # verde, pero sin idénticos confirmados por foto
+    fake.enabled["cg20"] = False
+    assert await price_gate.process_run(run, now=w.NOW) == {"catalogo_verde_dudoso_a_bandeja": 1}
+    assert fake.writes() == [] and [i.state for i in w.items()] == [pr.POR_ACTIVAR]
+
+
+async def test_catalog_has_its_own_daily_cap(fake, ai):
+    w.set_setting("pm_gate_activations_daily_max", 0)                 # el de Paco no frena al catálogo
+    w.set_setting("pm_gate_catalog_activations_daily_max", 1)
+    run = w.make_run()
+    for pid in ("cg21", "cg22"):
+        w.add_snap(run, pid, color="verde", prices=GREEN_PRICES, enabled=False, specs=specs())
+        fake.enabled[pid] = False
+    counts = await price_gate.process_run(run, now=w.NOW)
+    assert counts == {"catalogo_activado": 1, "catalogo_tope": 1} and fake.writes() == [True]
+
+
+async def test_autopilot_turns_on_mode_2_once_and_runs_the_gate_once_per_fresh_run(fake, ai):
+    from app import runtime
+    from app.scheduler import jobs
+
+    w.set_setting("pm_mode", 1)
+    run = w.make_run()
+    w.add_snap(run, "cg23", color="verde", prices=GREEN_PRICES, enabled=False, specs=specs())
+    w.add_snap(run, "cg24", color="rojo", enabled=True, specs=specs())
+    fake.enabled.update({"cg23": False, "cg24": True})
+    out = await jobs.autopilot_kickoff(now=w.NOW + timedelta(hours=2))
+    assert out["pm_mode"] == {"antes": 1, "ahora": 2} and int(runtime.get("pm_mode")) == 2
+    assert out["porton"] == {"apagado": 1, "catalogo_activado": 1}
+    assert fake.enabled == {"cg23": True, "cg24": False}
+    again = await jobs.autopilot_kickoff(now=w.NOW + timedelta(hours=3))
+    assert "ya la pasó" in again["porton"] and "pm_mode" not in again
+    # Si una persona baja el modo, el piloto no lo vuelve a subir.
+    w.set_setting("pm_mode", 1)
+    third = await jobs.autopilot_kickoff(now=w.NOW + timedelta(hours=4))
+    assert int(runtime.get("pm_mode")) == 1 and third["porton"] == "pm_mode distinto de 2"
+
+
+async def test_autopilot_waits_for_a_fresh_run_and_can_be_turned_off(fake, ai):
+    from app.scheduler import jobs
+
+    run = w.make_run()
+    w.add_snap(run, "cg25", color="verde", prices=GREEN_PRICES, enabled=False, specs=specs())
+    fake.enabled["cg25"] = False
+    stale = await jobs.autopilot_kickoff(now=w.NOW + timedelta(hours=50))
+    assert "vieja" in stale["porton"] and fake.writes() == []
+    w.set_setting("pm_autopilot", 0)
+    assert await jobs.autopilot_kickoff(now=w.NOW) == {"apagado": True}
+    assert fake.writes() == []

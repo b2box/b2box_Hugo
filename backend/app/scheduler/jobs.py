@@ -27,7 +27,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -902,6 +902,70 @@ async def price_review_reconcile() -> None:
         log.exception("price_review_reconcile falló: %s", type(exc).__name__)
 
 
+AUTOPILOT_JOB_ID = "autopilot_kickoff"
+_AUTOPILOT_AFTER_START = timedelta(minutes=12)        # después de la conciliación (11 min)
+_AUTOPILOT_MODE_MARKER = "_meta:autopilot:mode_set"
+_AUTOPILOT_RUN_PREFIX = "_meta:autopilot:run:"
+_AUTOPILOT_MAX_RUN_AGE = timedelta(hours=40)          # el portón pide datos de < 48 h
+
+
+async def autopilot_kickoff(now: datetime | None = None) -> dict[str, Any]:
+    """Piloto automático al arrancar (`pm_autopilot = 1`), para no tener que tocar nada:
+
+      1. UNA sola vez en la vida de la base: si `pm_mode` está en 0 o 1, lo pasa a 2 (automático) y lo deja anotado
+         (`_meta:autopilot:mode_set`, con el valor de antes). Si después alguien lo baja a mano, no lo vuelve a subir.
+      2. Con `pm_mode = 2` y una corrida del semáforo terminada hace menos de 40 h que el piloto todavía no pasó: corre el
+         portón con ella como «Aplicar ahora» (verdes firmes con medidas bien → se activan; verdes que no son firmes o con
+         medidas que no cierran → revisión; rojos firmes publicados → se apagan), con los topes del día. Después revisa las
+         medidas de los deshabilitados que falten. Una vez por corrida (marca `_meta:autopilot:run:<id>`).
+
+    Nunca lanza; devuelve qué hizo."""
+    from app import runtime
+    from app.db.models import PriceMonitorRun
+    from app.pricing import market_judge, measures_check, price_gate, price_monitor
+
+    out: dict[str, Any] = {}
+    try:
+        if int(runtime.get("pm_autopilot") or 0) != 1:
+            return {"apagado": True}
+        now = now or utcnow()
+        if _get_meta(_AUTOPILOT_MODE_MARKER) is None:
+            before = int(runtime.get("pm_mode") or 0)
+            if before < 2:
+                runtime.set_value("pm_mode", 2)
+                log.warning("piloto automático: pm_mode %s → 2 (automático). Se hace una sola vez; bajarlo a mano lo "
+                            "deja bajado.", before)
+            _set_meta(_AUTOPILOT_MODE_MARKER, json.dumps({"antes": before, "at": now.isoformat()}))
+            out["pm_mode"] = {"antes": before, "ahora": 2}
+        if not price_gate.enabled():
+            out["porton"] = "pm_mode distinto de 2"
+            return out
+        with Session(engine) as s:
+            run = s.exec(select(PriceMonitorRun)
+                         .where(PriceMonitorRun.status.in_((price_monitor.RUN_OK, price_monitor.RUN_DEGRADED)))  # type: ignore[attr-defined]
+                         .order_by(PriceMonitorRun.id.desc()).limit(1)).first()  # type: ignore[union-attr]
+        if run is None or run.id is None:
+            out["porton"] = "sin corrida terminada"
+            return out
+        finished = run.finished_at or run.started_at
+        if finished is None or now - finished > _AUTOPILOT_MAX_RUN_AGE:
+            out["porton"] = f"la corrida #{run.id} es vieja: espera la de la noche"
+            return out
+        marker = f"{_AUTOPILOT_RUN_PREFIX}{run.id}"
+        if _get_meta(marker) is not None:
+            out["porton"] = f"la corrida #{run.id} ya la pasó el piloto"
+            return out
+        _set_meta(marker, now.isoformat())
+        out["porton"] = await price_gate.process_run(int(run.id), now=now, immediate_reds=True)
+        log.info("piloto automático: portón con la corrida #%s: %s", run.id, out["porton"])
+        if market_judge.enabled() and int(runtime.get("pm_measures_check_daily_max") or 0) > 0:
+            out["medidas"] = await measures_check.run_disabled()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("piloto automático falló: %s", type(exc).__name__)
+        out["error"] = type(exc).__name__
+    return out
+
+
 SEMAFORO_LEARN_JOB_ID = "semaforo_learn"
 _SEMAFORO_LEARN_DEFAULT_CRON = "0 12 * * 1"
 
@@ -1130,6 +1194,13 @@ def register_jobs() -> None:
         price_review_reconcile,
         DateTrigger(run_date=now + _RECONCILE_AFTER_START),
         id=PRICE_REVIEW_RECONCILE_JOB_ID,
+        replace_existing=True, max_instances=1,
+    )
+    # Piloto automático (pm_autopilot): después de la conciliación, el portón con la última corrida fresca.
+    scheduler.add_job(
+        autopilot_kickoff,
+        DateTrigger(run_date=now + _AUTOPILOT_AFTER_START),
+        id=AUTOPILOT_JOB_ID,
         replace_existing=True, max_instances=1,
     )
     # Mantener el catálogo caliente: refresca un poco antes de que expire el TTL

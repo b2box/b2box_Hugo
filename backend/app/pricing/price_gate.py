@@ -14,9 +14,10 @@ corrida y los topes diarios `pm_gate_inactivations_daily_max` / `pm_gate_activat
         amarillo, sin dato o dudoso → bandeja de Pao: ficha `por_activar` con el motivo; Pao decide «Activar» o
                        «Despublicar». Si una noche siguiente da verde firme, Hugo la activa por el mismo camino.
   3. el resto del catálogo APAGADO (`pm_gate_catalog_greens = 1`): un producto deshabilitado que esta corrida midió en
-     verde firme se activa solo, por el mismo camino y con el mismo tope de activaciones del día (del mejor margen al
-     peor). No se prende lo que apagó el control de duplicados o de BX sin foto, ni lo que una persona despublicó o apagó
-     viéndolo verde con el mismo precio. Un verde dudoso del catálogo no abre ficha (no llena la bandeja).
+     verde firme se activa solo, por el mismo camino y con su propio tope diario (`pm_gate_catalog_activations_daily_max`),
+     del mejor margen al peor. No se prende lo que apagó el control de duplicados o de BX sin foto, ni lo que una persona
+     despublicó o apagó viéndolo verde con el mismo precio. Un verde que no es firme (dudoso, precio bajo, ajuste
+     aprendido) queda en revisión: ficha `por_activar` en la bandeja de Pao.
 
 Antes de cualquier activación automática (2 y 3), con `pm_gate_measures_check = 1`, una IA barata revisa que las medidas
 del producto, de la caja individual y de la caja master tengan sentido con el producto (pricing/measures_check.py). Si no
@@ -69,6 +70,7 @@ from app.pricing.safe_error import error_code
 log = logging.getLogger(__name__)
 
 ACTIVATIONS_KEY = "pm_gate_activations"
+CATALOG_ACTIVATIONS_KEY = "pm_gate_catalog_activations"
 INACTIVATIONS_KEY = "pm_gate_inactivations"
 READS_KEY = "pm_gate_reads"
 
@@ -566,9 +568,8 @@ def _human_ever_said_no(s: Session, product_id: str, our_price_cents: int | None
 async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.ReviewParams, rules: list[learn.Rule],
                          now: datetime, client: Any) -> str:
     """Un producto apagado del catálogo con verde: si es verde firme y las medidas cierran, Hugo lo ACTIVA (ficha
-    `por_activar` → `activado`, mismo protocolo y mismo tope diario que lo de Luis). Un verde firme con medidas que no
-    cierran va a la bandeja de Pao con el motivo. Lo demás (verde dudoso) no abre ficha: no se llena la bandeja con el
-    catálogo viejo."""
+    `por_activar` → `activado`, mismo protocolo, tope propio del catálogo). Un verde firme con medidas que no cierran, o un
+    verde que no es firme, queda en revisión (bandeja de Pao) con el motivo."""
     pid = snap.product_id
     with Session(engine, expire_on_commit=False) as s:
         if _writing(s, pid):
@@ -583,6 +584,10 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
         return "ficha_de_una_persona"
     decision = classify(snap, params, now, rules, category)
     if decision.action != ACTIVAR:
+        if decision.reason.startswith(("verde_dudoso:", "precio_bajo", "ajuste:")):
+            # Verde pero no firme: no se sube solo, queda en revisión (bandeja de Pao) con el motivo.
+            await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
+            return "verde_dudoso_a_bandeja"
         return "no_firme"
     decision = await _measures_guard(snap, decision)
     if decision.action != ACTIVAR:
@@ -591,8 +596,8 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
     item = await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
     if item is None or item.state != pr.POR_ACTIVAR:
         return "sin_ficha"
-    cap = int(runtime.get("pm_gate_activations_daily_max") or 0)
-    if await asyncio.to_thread(daily_budget.reserve, ACTIVATIONS_KEY, cap, None, None,
+    cap = int(runtime.get("pm_gate_catalog_activations_daily_max") or 0)
+    if await asyncio.to_thread(daily_budget.reserve, CATALOG_ACTIVATIONS_KEY, cap, None, None,
                                daily_budget.today_art(now)) is None:
         return "tope"
     from app.pricing import (

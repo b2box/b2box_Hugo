@@ -1101,6 +1101,8 @@ _COSTLY_SETTINGS = frozenset({
     # Prenden productos en Vendure solos (todo el catálogo apagado) o sacan la guarda de medidas antes de prenderlos, y
     # el tope de la IA de medidas gasta plata.
     "pm_gate_catalog_greens",
+    "pm_gate_catalog_activations_daily_max",
+    "pm_autopilot",
     "pm_gate_measures_check",
     "pm_measures_check_daily_max",
     # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la

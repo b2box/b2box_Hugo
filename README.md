@@ -1884,6 +1884,20 @@ Prender: dashboard → Configuración → «Modo de la bandeja» = 2. Volver a 1
 mitad de la pasada). Migración: columnas nuevas en `luis_intake` (`gate_status`, `gate_reason`, `gate_at`), estados nuevos de
 la ficha (`por_activar`, `activado`; entran en `VARCHAR(16)`).
 
+### Piloto automático (sin tocar nada)
+
+Con `pm_autopilot = 1` (default), a los 12 minutos de cada arranque (job `autopilot_kickoff`):
+
+1. **Una sola vez en la vida de la base**: si `pm_mode` está en 0 o 1, lo pasa a **2** y lo anota en
+   `_meta:autopilot:mode_set` con el valor de antes. Si después alguien lo baja a mano, el piloto no lo vuelve a subir.
+2. Si la última corrida del semáforo terminó hace menos de 40 h y el piloto todavía no la pasó: corre el portón con ella
+   como «Aplicar ahora» (verdes firmes con medidas bien → activos; verdes no firmes o con medidas que no cierran →
+   revisión; rojos firmes publicados → apagados) y revisa las medidas de los deshabilitados que falten. Si la corrida es
+   vieja, espera a la de la noche, que hace lo mismo (los rojos, con la racha de 2 noches).
+
+Los deshabilitados del catálogo tienen su propio tope, `pm_gate_catalog_activations_daily_max` (600 por día ART), así
+cientos se ponen al día en un día sin tocar Configuración. Apagarlo: `pm_autopilot = 0` en Configuración.
+
 ### Todo el catálogo apagado y la guarda de medidas
 
 Con `pm_gate_catalog_greens = 1` (default) el portón no se limita a lo que subió Paco: **cualquier producto
@@ -1904,7 +1918,7 @@ tengan sentido con el producto:
 
 `mal`, `dudoso`, sin medidas o sin chequear (IA apagada, tope del día) → el verde va a la bandeja de Pao con el motivo en
 vez de activarse (fail-closed). El resultado queda en `measures_check` (una fila por producto) y se reusa mientras no
-cambien las medidas ni el nombre (30 días como máximo). Tope diario de la IA: `pm_measures_check_daily_max` (300, día
+cambien las medidas ni el nombre (30 días como máximo). Tope diario de la IA: `pm_measures_check_daily_max` (1.000, día
 UTC); cada llamada queda en `llm_usage` con el propósito `medidas_catalogo`.
 
 **Caja master.** Hugo lee la caja master de los custom fields de la variante que dice `VENDURE_MASTER_BOX_FIELDS`, en

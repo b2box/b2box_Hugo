@@ -575,12 +575,19 @@ class Settings(EnvSettings):
     # Portón sobre TODO el catálogo apagado (no solo lo que subió Paco por Luis): un producto deshabilitado que da verde
     # firme contra ML se activa solo (mismo protocolo, mismo tope de activaciones). 0 = solo lo de Luis.
     pm_gate_catalog_greens: int = 1
+    # Tope propio (por día ART) de activaciones del catálogo apagado: aparte del de lo que sube Paco, para poder poner al
+    # día cientos de deshabilitados en un día sin tocar Configuración.
+    pm_gate_catalog_activations_daily_max: int = 600
+    # Puesta en marcha automática (scheduler/jobs.py `autopilot_kickoff`): 1 = al arrancar, Hugo pasa SOLO a modo
+    # automático una vez (pm_mode = 2) y corre el portón con la última corrida fresca (verdes firmes con medidas bien →
+    # se activan; rojos firmes publicados → se apagan). 0 = no hace nada al arrancar.
+    pm_autopilot: int = 1
     # Antes de activar solo, una IA barata (el modelo del juez, PM_LLM_*: MiMo) mira si las medidas del producto, de la
     # caja individual y de la caja master tienen sentido con el producto (pricing/measures_check.py). 1 = obligatorio:
     # medidas que no cierran, o sin chequear, van a la bandeja en vez de activarse. 0 = no se chequea.
     pm_gate_measures_check: int = 1
     # Tope diario (UTC) de llamadas a la IA del chequeo de medidas.
-    pm_measures_check_daily_max: int = 300
+    pm_measures_check_daily_max: int = 1000
     # Custom fields de la CAJA MASTER en la variante de Vendure, separados por coma y en este orden: largo, ancho, alto
     # (cm), peso bruto (kg), piezas por caja y, opcional, CBM por caja. Vacío = Hugo no la lee (la IA la ve como «no
     # cargada»). Si el schema no tiene alguno, se apaga sola y se avisa una vez.
