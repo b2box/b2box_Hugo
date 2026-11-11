@@ -1886,7 +1886,7 @@ la ficha (`por_activar`, `activado`; entran en `VARCHAR(16)`).
 
 ### Piloto automático (sin tocar nada)
 
-Con `pm_autopilot = 1` (default), a los 12 minutos de cada arranque (job `autopilot_kickoff`):
+Apagado por default (`pm_autopilot = 0`). Con `pm_autopilot = 1`, a los 12 minutos de cada arranque (job `autopilot_kickoff`):
 
 1. **Una sola vez en la vida de la base**: si `pm_mode` está en 0 o 1, lo pasa a **2** y lo anota en
    `_meta:autopilot:mode_set` con el valor de antes. Si después alguien lo baja a mano, el piloto no lo vuelve a subir.
@@ -1896,7 +1896,7 @@ Con `pm_autopilot = 1` (default), a los 12 minutos de cada arranque (job `autopi
    vieja, espera a la de la noche, que hace lo mismo (los rojos, con la racha de 2 noches).
 
 Los deshabilitados del catálogo tienen su propio tope, `pm_gate_catalog_activations_daily_max` (600 por día ART), así
-cientos se ponen al día en un día sin tocar Configuración. Apagarlo: `pm_autopilot = 0` en Configuración.
+cientos se ponen al día en un día sin tocar Configuración. Prenderlo: `pm_autopilot = 1` en Configuración (o `PM_AUTOPILOT=1`).
 
 ### Lo que no vendemos: freno antes de cualquier activación
 
@@ -2719,6 +2719,9 @@ Ver `.env.example`. Las críticas:
 - `MOTOR_EVENTOS_URL`, `MOTOR_EVENTOS_KEY` — a dónde se avisan los cambios de estado de un producto con hilo (opcional; las
   dos o ninguna; la clave va en la cabecera `x-radar-key`). `FAST_READY_ENABLED` (0), `FAST_READY_DAILY_MAX` (20) y
   `FAST_READY_APIFY_DAILY_MAX` (20) son los defaults de la vía rápida (también en Configuración).
+- `ADMIN_AI_USAGE_URL`, `ADMIN_AI_USAGE_KEY` — Gastos de IA de la nube (`ai-usage-ingest`, las mismas que Paco): cada 15 min se manda
+  lo nuevo de `llm_usage` y `apify_spend` (`app/ai_usage_report.py`). Opcional; las dos o ninguna; la URL tiene que ser https.
+  `HUGO_AI_USAGE_FEATURE` (default `hugo`) es el nombre con el que aparece.
 - `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
   32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
   `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el

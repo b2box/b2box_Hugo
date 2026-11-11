@@ -340,6 +340,7 @@ async def test_autopilot_turns_on_mode_2_once_and_runs_the_gate_once_per_fresh_r
     from app import runtime
     from app.scheduler import jobs
 
+    w.set_setting("pm_autopilot", 1)
     w.set_setting("pm_mode", 1)
     run = w.make_run()
     w.add_snap(run, "cg23", color="verde", prices=GREEN_PRICES, enabled=False, specs=specs())
@@ -360,6 +361,7 @@ async def test_autopilot_turns_on_mode_2_once_and_runs_the_gate_once_per_fresh_r
 async def test_autopilot_waits_for_a_fresh_run_and_can_be_turned_off(fake, ai):
     from app.scheduler import jobs
 
+    w.set_setting("pm_autopilot", 1)
     run = w.make_run()
     w.add_snap(run, "cg25", color="verde", prices=GREEN_PRICES, enabled=False, specs=specs())
     fake.enabled["cg25"] = False

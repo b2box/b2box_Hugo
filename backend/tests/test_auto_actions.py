@@ -132,7 +132,7 @@ def test_el_endpoint_es_solo_para_un_administrador_y_no_escribe(fake):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["days"] == 3 and body["items"] == [] and body["totals"]["activados"] == 0
-    assert body["modo"] == {"pm_mode": 2, "pm_autopilot": 1, "prohibidos_gate": 1}
+    assert body["modo"] == {"pm_mode": 2, "pm_autopilot": 0, "prohibidos_gate": 1}
     assert body["lista_prohibidos"]["fuente"] == "archivo" and body["lista_prohibidos"]["completa"] is True
     assert body["piloto_automatico"] == {"modo_cambiado": None, "corridas": []}
     assert fake.mutations == []
