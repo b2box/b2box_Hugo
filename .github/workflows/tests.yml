@@ -1,0 +1,81 @@
+# Corre la suite en cada pull request y en cada push a main.
+#
+#   lock      backend/uv.lock al día con pyproject.toml (lo mismo que exige el build de Docker)
+#   tests     la suite de backend, partida en 4 tandas parejas que corren en paralelo
+#             (backend/scripts/ci_shard.py reparte los archivos; cada archivo cae en una sola tanda)
+#   frontend  el dashboard compila (tsc + vite build)
+#
+# Las dependencias salen SIEMPRE de backend/uv.lock (`uv sync --locked`), como en la imagen: si la suite pasa acá, pasa
+# con las mismas versiones que corren en producción. No necesita ninguna credencial: todo lo externo está simulado.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.8"          # la misma que fija backend/Dockerfile
+  PYTHON_VERSION: "3.11"        # la misma que la imagen
+  # La suite fuerza su propia SQLite temporal (tests/conftest.py); esto solo evita leer un entorno real.
+  VENDURE_API_URL: "https://example.invalid/admin-api"
+  HUGO_ENV: "development"
+
+jobs:
+  lock:
+    name: lock al día
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - run: bash backend/scripts/check_lock.sh
+
+  tests:
+    name: suite (tanda ${{ matrix.shard }} de 4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - name: Dependencias (exactas, del lock)
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Suite
+        run: |
+          python backend/scripts/ci_shard.py 4 ${{ matrix.shard }} > shard-files.txt
+          echo "Archivos en esta tanda: $(wc -l < shard-files.txt)"
+          xargs backend/.venv/bin/python -m pytest -q -p no:cacheprovider --durations=15 < shard-files.txt
+
+  frontend:
+    name: dashboard compila
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - working-directory: frontend
+        run: npm run build

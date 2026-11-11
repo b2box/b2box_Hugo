@@ -2169,6 +2169,18 @@ que apunta a `backend/tests` con `asyncio_mode=auto`). Solo necesitan
 `VENDURE_API_URL` en el entorno (alcanza `https://example.invalid/admin-api`) o
 un `backend/.env`; no tocan red ni Vendure.
 
+**CI** (`.github/workflows/tests.yml`): en cada pull request y en cada push a `main` corren tres cosas en paralelo:
+
+- `lock al día`: `backend/scripts/check_lock.sh` (el mismo chequeo que hace el build de Docker);
+- `suite`: toda la suite de backend, con las dependencias exactas del lock (`uv sync --locked --extra dev`), partida en
+  **4 tandas** parejas. `python backend/scripts/ci_shard.py 4 <n>` lista los archivos de la tanda `n`: cada archivo cae
+  en una sola tanda, así que las 4 juntas son la suite entera. Para reproducir una tanda en local:
+  `python backend/scripts/ci_shard.py 4 2 | xargs python -m pytest -q`;
+- `dashboard compila`: `npm ci && npm run build` en `frontend/`.
+
+No usa ninguna credencial. La única prueba que sale a la red es `test_net_guard.py::test_allows_public_https`, que
+resuelve `example.com` por DNS (en una máquina sin DNS falla; en el runner de GitHub pasa).
+
 ## Dependencias y lock
 
 `backend/pyproject.toml` dice qué rangos acepta la app; `backend/uv.lock` fija la
