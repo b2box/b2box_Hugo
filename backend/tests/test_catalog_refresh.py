@@ -177,6 +177,36 @@ async def test_invalidate_then_get_is_incremental(fake_vendure):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("uptime", [1.0, 42.0, 299.0])
+async def test_invalidate_tambien_invalida_en_una_maquina_recien_prendida(fake_vendure, monkeypatch, uptime):
+    """`time.monotonic()` cuenta desde que arrancó la máquina. Con menos de un TTL de uptime, «cargado en 0.0» todavía
+    parecía fresco e `invalidate()` no invalidaba nada (así falló la suite en el primer runner limpio de CI)."""
+    clock = SimpleNamespace(monotonic=lambda: uptime)
+    monkeypatch.setattr(catalog, "time", clock)
+    await catalog.get_catalog()
+    assert fake_vendure.full_calls == 1
+    await catalog.get_catalog()                              # fresco: no vuelve a preguntar
+    assert (fake_vendure.full_calls, fake_vendure.incremental_calls) == (1, 0)
+    catalog.invalidate()
+    await catalog.get_catalog()
+    assert fake_vendure.incremental_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_con_el_cache_invalidado_y_vendure_caido_devuelve_lo_que_tiene(fake_vendure, monkeypatch):
+    """La edad de un cache invalidado no se puede calcular: igual se usa, sin romper."""
+    await catalog.get_catalog()
+    catalog.invalidate()
+
+    async def boom(_client):
+        raise RuntimeError("Vendure caído")
+
+    monkeypatch.setattr(catalog, "_refresh", boom)
+    products = await catalog.get_catalog()
+    assert {p.id for p in products} == {"1", "2"}
+
+
+@pytest.mark.asyncio
 async def test_graphql_rejection_falls_back_to_full(fake_vendure, monkeypatch):
     """Si Vendure rechaza el filtro updatedAt (schema distinto), no nos quedamos
     con cache viejo: se hace full como antes."""

@@ -189,8 +189,13 @@ def test_el_doble_clic_nunca_deja_dos_corridas_a_la_vez(monkeypatch, client):
 
     async def main():
         resp = await go()
-        for _ in range(200):                         # esperar a que termine lo que haya arrancado
-            await asyncio.sleep(0)
+        # Esperar a que termine lo que haya arrancado, POR TIEMPO (hasta 20 s) y no por vueltas del loop: la corrida
+        # trabaja en hilos, y en una máquina más lenta 200 vueltas vacías pasaban antes de que terminara (la prueba
+        # miraba la base con la corrida todavía en curso).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 20.0
+        while loop.time() < deadline:
+            await asyncio.sleep(0.01)
             if not text_audit.text_audit_lock.locked():
                 await asyncio.sleep(0.05)
                 if not text_audit.text_audit_lock.locked():

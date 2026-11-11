@@ -1,0 +1,105 @@
+# Corre la suite en cada pull request y en cada push a main.
+#
+#   lock        backend/uv.lock al día con pyproject.toml (lo mismo que exige el build de Docker)
+#   tests       la suite de backend ENTERA, en una sola corrida y en su orden natural (el mismo que `pytest` en local)
+#   frontend    el dashboard compila (tsc + vite build)
+#   quarantine  las pocas pruebas de backend/tests/ci_quarantine.txt (dependen de la máquina): se ven, pero no frenan
+#
+# Por qué NO se parte en tandas: hay pruebas que dependen de lo que dejó en la base la prueba anterior (la suite comparte
+# una SQLite). Partir por archivos las reordena y hace fallar cosas que no tienen que ver con el cambio. Se probó en la
+# primera versión de este workflow. Para partirla hay que aislar esas pruebas primero.
+#
+# Las dependencias salen SIEMPRE de backend/uv.lock (`uv sync --locked`), como en la imagen: si la suite pasa acá, pasa
+# con las mismas versiones que corren en producción. No necesita ninguna credencial: todo lo externo está simulado.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.8"          # la misma que fija backend/Dockerfile
+  PYTHON_VERSION: "3.11"        # la misma que la imagen
+  # La suite fuerza su propia SQLite temporal (tests/conftest.py); esto solo evita leer un entorno real.
+  VENDURE_API_URL: "https://example.invalid/admin-api"
+  HUGO_ENV: "development"
+
+jobs:
+  lock:
+    name: lock al día
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - run: bash backend/scripts/check_lock.sh
+
+  tests:
+    name: suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - name: Dependencias (exactas, del lock)
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Suite
+        run: |
+          # Lo que está en cuarentena corre aparte (job «cuarentena») y no frena este check.
+          set -f   # los ids llevan corchetes ([defecto-11]): que el shell no los tome como comodines
+          DESELECT=$(grep -vE '^[[:space:]]*(#|$)' backend/tests/ci_quarantine.txt | sed 's/^/--deselect=/' | tr '\n' ' ')
+          backend/.venv/bin/python -m pytest -q -p no:cacheprovider --durations=25 $DESELECT
+
+  quarantine:
+    name: cuarentena (no frena)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - name: Dependencias (exactas, del lock)
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Pruebas en cuarentena (backend/tests/ci_quarantine.txt)
+        run: |
+          grep -vE '^[[:space:]]*(#|$)' backend/tests/ci_quarantine.txt > quarantine.txt || true
+          if [ -s quarantine.txt ]; then
+            xargs backend/.venv/bin/python -m pytest -q -p no:cacheprovider < quarantine.txt
+          else
+            echo "No hay pruebas en cuarentena."
+          fi
+
+  frontend:
+    name: dashboard compila
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - working-directory: frontend
+        run: npm run build

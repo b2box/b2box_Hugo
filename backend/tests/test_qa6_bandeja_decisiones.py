@@ -16,7 +16,6 @@ from datetime import timedelta
 
 os.environ.setdefault("VENDURE_API_URL", "https://example.invalid/admin-api")
 
-import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 from app.clock import utcnow  # noqa: E402
@@ -28,6 +27,7 @@ from app.pricing import price_review as pr  # noqa: E402
 from app.pricing import price_review_actions as actions  # noqa: E402
 from app.vendure.client import VendureClient  # noqa: E402
 from tests import review_decide as k  # noqa: E402
+from tests.review_fixtures import _httpx as httpx  # noqa: E402  (el httpx que usa el transport de gql: ver abajo)
 from tests import review_world as w  # noqa: E402
 
 GABRIEL = "gabriel@b2box.pro"

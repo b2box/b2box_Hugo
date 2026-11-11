@@ -61,8 +61,12 @@ from app.vendure.client import VendureClient, VendureProduct
 
 log = logging.getLogger(__name__)
 
+# «Nunca / vencido». NO es 0.0: `time.monotonic()` cuenta desde que arrancó la MÁQUINA, así que en una recién prendida
+# (menos de un TTL de uptime) `monotonic() - 0.0 < ttl` daba «fresco» y `invalidate()` no invalidaba nada.
+_NEVER = float("-inf")
+
 _cache: list[VendureProduct] = []
-_loaded_at: float = 0.0      # último refresh OK (full o incremental), monotonic
+_loaded_at: float = _NEVER   # último refresh OK (full o incremental), monotonic
 _full_at: float | None = None  # último refresh FULL OK, monotonic (None = nunca / forzado)
 _watermark: str | None = None  # max updatedAt visto en el cache (ISO-8601)
 _lock = asyncio.Lock()
@@ -316,7 +320,7 @@ def invalidate() -> None:
     `updatedAt`, así que el refresh incremental lo trae.)
     """
     global _loaded_at
-    _loaded_at = 0.0
+    _loaded_at = _NEVER
 
 
 async def get_catalog(force: bool = False, full: bool = False) -> list[VendureProduct]:
@@ -347,7 +351,8 @@ async def get_catalog(force: bool = False, full: bool = False) -> list[VendurePr
             # mejor que tirar el lookup entero con un 502. Sin cache previo no
             # hay nada que devolver: ahí sí se propaga.
             if _cache:
-                age = int(time.monotonic() - _loaded_at)
+                # -1 = el cache estaba invalidado (no hay una edad que informar).
+                age = int(time.monotonic() - _loaded_at) if _loaded_at != _NEVER else -1
                 log.warning(
                     "Vendure no respondió (%s: %s); uso catálogo cacheado de hace %ds (%d productos)",
                     type(exc).__name__, exc, age, len(_cache),

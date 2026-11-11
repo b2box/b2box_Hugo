@@ -1,0 +1,23 @@
+# Pruebas en cuarentena en CI: una por línea, con el id de pytest relativo a la raíz del repo.
+#
+# Lo que está acá NO frena el check de la suite: corre aparte, en el job «cuarentena», que muestra su resultado pero no
+# pone la PR en rojo. Es para pruebas cuyo resultado depende de la máquina (cómo se intercalan las tareas, cuántos
+# núcleos tiene) y no del código. Cada línea lleva arriba por qué está y qué haría falta para sacarla. La lista tiene que
+# tender a vacía: una prueba que nadie mira no protege nada.
+
+# Compara una corrida entera del semáforo contra un archivo dorado, con 4 productos a la vez. En el runner de GitHub el
+# caso [defecto-11] hizo una búsqueda web menos que el dorado; en local pasa siempre. SOLO ese caso está acá: los otros
+# 11 de la misma prueba siguen frenando, porque es la única regresión de corrida entera que protege al semáforo.
+# Para sacarla: que la corrida de la prueba sea determinista (un producto a la vez o un orden fijo de las búsquedas).
+backend/tests/test_qa3_regresion_e8209e1.py::test_origin_main_dump_or_compare[defecto-11]
+
+# Tres pedidos casi simultáneos no pueden dejar más de una corrida. Si la primera corrida termina antes de que arranque
+# el segundo pedido (máquina rápida) hay dos corridas legítimas y la prueba falla; si la máquina es lenta, a veces mira la
+# base con la corrida todavía en curso. En GitHub falló en 3 de 7 corridas, con tres síntomas distintos; en local pasa.
+# Para sacarla: que la prueba controle el orden (frenar la primera corrida hasta que lleguen los otros pedidos).
+backend/tests/test_qa4_seo_api.py::test_el_doble_clic_nunca_deja_dos_corridas_a_la_vez
+
+# Compara dos horas tomadas con el reloj real y espera una diferencia exacta en segundos: si entre una y otra el reloj
+# cruza un segundo, da 1 de más. Falló 1 vez en 7 corridas en GitHub (y en local con la máquina cargada).
+# Para sacarla: fijar el reloj en la prueba.
+backend/tests/test_qa3_oficina_hugo.py::test_history_keeps_five_per_product_and_never_drops_the_newest
