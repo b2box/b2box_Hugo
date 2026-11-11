@@ -31,6 +31,7 @@ def fake(monkeypatch):
         s.execute(delete(LuisIntake))
         s.commit()
     yield f
+    w.reset_db()                    # deja los settings y la bandeja como estaban: otras pruebas comparten la base
     with Session(engine) as s:
         s.execute(delete(LuisIntake))
         s.commit()
