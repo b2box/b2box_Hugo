@@ -1,0 +1,999 @@
+{
+ "regla": 2,
+ "lista": "la lista canónica de lo que no vendemos (app/prohibidos.yaml es su copia)",
+ "como_se_corre": "examinar(es, zh): dos textos separados, en ese orden; null = ese texto no esta",
+ "campos": {
+  "espera": "categoria que frena, o null",
+  "estado": "prohibido | ok | sin_texto"
+ },
+ "aviso": "COPIA de los vectores compartidos del comparador v2: NO editar. Si uno parece mal, se discute; no se saca.",
+ "vectores": [
+  {
+   "es": "Proteina whey 1kg + shaker de regalo",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tabla A: el accesorio de regalo no perdona"
+  },
+  {
+   "es": "Alimento para perros bolsa 15kg",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "tabla A: el consumible en su envase"
+  },
+  {
+   "es": "Shampoo con dispensador",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "tabla A"
+  },
+  {
+   "es": "pastillas para dormir organizador semanal",
+   "zh": null,
+   "espera": "medicamentos",
+   "estado": "prohibido",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Proteínas en polvo",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "Creatinas",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "Insecticidas",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "ácidos",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "tabla A: plural con tilde"
+  },
+  {
+   "es": "perfumes árabes",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "cremas",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "labiales",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "tabla A: plural en -es"
+  },
+  {
+   "es": "vapers",
+   "zh": null,
+   "espera": "tabaco y vapeo",
+   "estado": "prohibido",
+   "nota": "tabla A: plural"
+  },
+  {
+   "es": "Pistolas de balines",
+   "zh": null,
+   "espera": "armas",
+   "estado": "prohibido",
+   "nota": "tabla A: plural dentro de una frase"
+  },
+  {
+   "es": null,
+   "zh": "蛋白 粉",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tabla A: chino con un espacio en el medio"
+  },
+  {
+   "es": "ｖｉｔａｍｉｎａ",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tabla A: ancho completo (NFKC)"
+  },
+  {
+   "es": "Proteína whey 1 kg + shaker de regalo",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Vaso mezclador + creatina 300 g",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Shaker con proteína de regalo",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: 'con' delante del consumible"
+  },
+  {
+   "es": "Dispensador de jabón con jabón líquido incluido",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Alimento balanceado bolsa 20kg",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29: se vende por peso"
+  },
+  {
+   "es": "Café en grano bolsa 1 kg",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Coffee 1kg bag whole beans",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29: un numero corta"
+  },
+  {
+   "es": "Jabón líquido para manos 500 ml dispensador",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: preposicion despues del consumible"
+  },
+  {
+   "es": null,
+   "zh": "蛋白粉 1kg 送摇摇杯",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: proteina con un shaker de regalo"
+  },
+  {
+   "es": null,
+   "zh": "咖啡豆 500g 咖啡机用",
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Shaker y proteína",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: la 'y' une accesorio y consumible"
+  },
+  {
+   "es": "Organizador y maquillaje",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29"
+  },
+  {
+   "es": "premios para perros",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29: 'premios' son golosinas"
+  },
+  {
+   "es": "Herbicidas",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Fungicidas",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Fertilizantes",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Colagenos hidrolizados",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Melatoninas",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Antibioticos",
+   "zh": null,
+   "espera": "medicamentos",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Shampoos",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Jabones artesanales",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: plural en -es"
+  },
+  {
+   "es": "Desodorantes",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Labiales mate",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: plural"
+  },
+  {
+   "es": "Armas de fuego",
+   "zh": null,
+   "espera": "armas",
+   "estado": "prohibido",
+   "nota": "PR 29: frase"
+  },
+  {
+   "es": "Protectores solares",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "PR 29: plural en las dos palabras"
+  },
+  {
+   "es": "vitamina c 1000mg 60 capsulas",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "whey protein isolate 2kg",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "保健品 维生素 片",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "kit de pesticida concentrado",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "acido clorhidrico 1 litro",
+   "zh": null,
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "农药 杀虫剂",
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "jeringa descartable 5ml x100",
+   "zh": null,
+   "espera": "medicamentos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "vape desechable 5000 puff",
+   "zh": null,
+   "espera": "tabaco y vapeo",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "电子烟 一次性",
+   "espera": "tabaco y vapeo",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "pistola airsoft 9mm resorte",
+   "zh": null,
+   "espera": "armas",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "encendedor de bencina recargable",
+   "zh": null,
+   "espera": "inflamables y aerosoles",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "cafe molido 500g",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "jabon liquido 1 litro",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "base de maquillaje liquida",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "pastillas de vitamina c",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "main: gana la primera categoria de la lista"
+  },
+  {
+   "es": "termometro clinico digital",
+   "zh": null,
+   "espera": "medicamentos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "狗粮 10kg",
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "洗发水 500ml",
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "Protein Powder 2kg",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "Dog Food Premium",
+   "zh": null,
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "Shampoo anticaspa",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "main"
+  },
+  {
+   "es": "Proteína whey 1 kg",
+   "zh": "摇摇杯",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "PR 29: el accesorio de un texto no perdona al otro"
+  },
+  {
+   "es": "frasco 500g",
+   "zh": "咖啡",
+   "espera": "comida y bebida",
+   "estado": "prohibido",
+   "nota": "PR 29: sin accesorio que lo explique, la palabra sola frena"
+  },
+  {
+   "es": "mochila escolar",
+   "zh": "保健品",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "alcanza con que un texto lo diga"
+  },
+  {
+   "es": "ｖｉｔａｍｉｎａ ｃ",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "NFKC"
+  },
+  {
+   "es": "Ｐｒｏｔｅｉｎａ ｗｈｅｙ １ｋｇ ＋ ｓｈａｋｅｒ",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "NFKC: el '＋' de ancho completo tambien corta"
+  },
+  {
+   "es": null,
+   "zh": "保 健 品 礼盒",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "chino con espacios entre todos los caracteres"
+  },
+  {
+   "es": null,
+   "zh": "杀 虫 剂",
+   "espera": "quimicos",
+   "estado": "prohibido",
+   "nota": "chino con espacios"
+  },
+  {
+   "es": "ＳＨＡＭＰＯＯ ５００ｍｌ",
+   "zh": null,
+   "espera": "limpieza y cosmetica",
+   "estado": "prohibido",
+   "nota": "NFKC + mayusculas"
+  },
+  {
+   "es": "Creatína Monohidrato",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "tilde donde no va"
+  },
+  {
+   "es": "VITAMINAS Y MINERALES",
+   "zh": null,
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "mayusculas"
+  },
+  {
+   "es": "12345",
+   "zh": "维生素",
+   "espera": "suplementos",
+   "estado": "prohibido",
+   "nota": "un texto son solo numeros y el otro lo dice"
+  },
+  {
+   "es": "Dispensador de jabon",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Dispensador automático de jabón líquido",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Molinillo de cafe",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Organizador de maquillaje",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Pastillero semanal",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A: 'pastillero' no es 'pastillas'"
+  },
+  {
+   "es": "Termómetro de cocina",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A: la excepcion contiene la palabra"
+  },
+  {
+   "es": "Pistola de silicona",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Pistola de pintura",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Botella térmica 500ml",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Vaso shaker",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "tabla A"
+  },
+  {
+   "es": "Shaker para proteína",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Dispensador automático de jabón",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Molinillo manual de café",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Organizador acrílico grande con tapa para maquillaje",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: hasta 6 palabras en el medio"
+  },
+  {
+   "es": "Soap dispenser 500ml",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Coffee bean grinder",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Pet food storage container",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Bolsa térmica para comida",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Contenedor de alimento para perros 15 kg",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": null,
+   "zh": "蛋白粉摇摇杯",
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: shaker de proteina"
+  },
+  {
+   "es": null,
+   "zh": "硅胶模具 糖果",
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: molde para caramelos"
+  },
+  {
+   "es": "trofeo premio deportivo",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: no se inventan singulares"
+  },
+  {
+   "es": "Taza Mezcladora Automática Eléctrica para Café y Bebidas",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: se vende en la App"
+  },
+  {
+   "es": "Molinillo de café y especias manual",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Dispensador de jabón y shampoo para ducha",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Organizador de maquillaje y cremas",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Lonchera térmica para comida y bebida",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Shaker para proteína y creatina",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "Soap and shampoo dispenser",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29"
+  },
+  {
+   "es": "cafe",
+   "zh": "磨豆机 手动",
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: un texto solo nombra el consumible y el otro es el accesorio"
+  },
+  {
+   "es": "proteina",
+   "zh": "摇摇杯 600ml",
+   "espera": null,
+   "estado": "ok",
+   "nota": "PR 29: idem"
+  },
+  {
+   "es": "pistola de silicona caliente 40w",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pistola de masaje muscular",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "glue gun",
+   "zh": "热熔胶枪",
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pistola de agua para niños",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "cremallera metalica 20cm",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main: 'crema' adentro de otra palabra no frena"
+  },
+  {
+   "es": "encendedor usb recargable sin gas",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "jeringa de silicona para reposteria",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "mochila escolar impermeable",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "organizador de cocina acrilico",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "auriculares bluetooth deportivos",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "molinillo de cafe manual",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "dispensador de jabon automatico",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "organizador de maquillaje acrilico",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pastillero semanal 7 dias",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "termometro de cocina digital",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "coffee grinder manual",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "soap dispenser 300ml",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "makeup organizer",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "kitchen thermometer",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "protein shaker bottle",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pet food storage container",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pistola de pintura electrica",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": "pistola lanza burbujas juguete",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "喷枪 电动",
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "热熔胶枪",
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "食品级硅胶 铲子",
+   "espera": null,
+   "estado": "ok",
+   "nota": "main: 'grado alimenticio'"
+  },
+  {
+   "es": null,
+   "zh": "糖果色 收纳盒",
+   "espera": null,
+   "estado": "ok",
+   "nota": "main: 'color caramelo'"
+  },
+  {
+   "es": "placido domingo cd",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "'acido' adentro de otra palabra no frena"
+  },
+  {
+   "es": "Multitool pliers",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "main"
+  },
+  {
+   "es": null,
+   "zh": "蛋白粉 摇摇杯",
+   "espera": null,
+   "estado": "ok",
+   "nota": "chino: accesorio pegado, con un espacio en el medio"
+  },
+  {
+   "es": "Ｏｒｇａｎｉｚａｄｏｒ ｄｅ ｍａｑｕｉｌｌａｊｅ",
+   "zh": null,
+   "espera": null,
+   "estado": "ok",
+   "nota": "NFKC: el accesorio escrito en ancho completo sigue pasando"
+  },
+  {
+   "es": "mochila escolar",
+   "zh": "厨房收纳盒",
+   "espera": null,
+   "estado": "ok",
+   "nota": "dos textos limpios"
+  },
+  {
+   "es": "",
+   "zh": null,
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  },
+  {
+   "es": null,
+   "zh": null,
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  },
+  {
+   "es": "12345",
+   "zh": null,
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  },
+  {
+   "es": "   ",
+   "zh": "",
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  },
+  {
+   "es": "601101644004370",
+   "zh": "—",
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  },
+  {
+   "es": "+ / , ;",
+   "zh": null,
+   "espera": null,
+   "estado": "sin_texto",
+   "nota": "no hay nada que revisar"
+  }
+ ]
+}

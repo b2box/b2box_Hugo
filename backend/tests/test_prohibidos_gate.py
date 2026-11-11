@@ -313,7 +313,43 @@ def test_restaurar_duplicados_con_el_freno_apagado_no_lee_nombres(fake, restore)
     assert restore()["restored"] == 1 and fake.count("ProductName") == 0
 
 
+# ─── La regla v2 en el portón ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("pid, name, original", [
+    ("v1", "Proteína whey 1 kg + shaker de regalo", "x"),          # el accesorio de regalo ya no perdona
+    ("v2", "Creatinas monohidrato 300 g", "x"),                    # plural
+    ("v3", "ｖｉｔａｍｉｎａ C 1000", "x"),                           # ancho completo
+    ("v4", "Vaso mezclador deportivo", "蛋白 粉 1kg 送摇摇杯"),     # lo dice el título original, con espacios y regalo
+    ("v5", "Shampoo con dispensador", "x"),
+])
+async def test_lo_que_antes_se_esquivaba_ahora_no_se_activa(fake, pid, name, original):
+    run = green(fake, pid, name, original=original)
+    assert await price_gate.process_run(run, now=w.NOW) == {"bandeja": 1}
+    assert fake.writes() == []
+
+
+@pytest.mark.parametrize("pid, name", [
+    ("w1", "Dispensador automático de jabón líquido"), ("w2", "Organizador de maquillaje"), ("w3", "Pastillero semanal"),
+    ("w4", "Termómetro de cocina"), ("w5", "Pistola de silicona"), ("w6", "Vaso shaker"), ("w7", "Botella térmica 500ml"),
+])
+async def test_los_accesorios_siguen_activandose(fake, pid, name):
+    run = green(fake, pid, name)
+    assert await price_gate.process_run(run, now=w.NOW) == {"activado": 1}
+
+
 # ─── Sin nombre, Hugo solo no activa ───────────────────────────────
+
+
+async def test_un_nombre_que_son_solo_numeros_no_es_un_nombre(fake):
+    fake.enabled["sn2"] = False
+    fake.names["sn2"] = "12345"
+    item_id = w.make_item("sn2", pr.POR_ACTIVAR, open_key="sn2", product_name="+ / ,")
+    with pytest.raises(actions.ActionError) as exc:
+        await actions.auto_gate(item_id, actions.ACTIVAR_AUTO, pr.POR_ACTIVAR)
+    assert exc.value.extra["reason"] == "sin_nombre_prohibidos" and fake.writes() == []
+
+
 
 
 async def test_la_accion_automatica_sin_ningun_nombre_no_activa(fake):
@@ -439,8 +475,9 @@ def _audit_actions() -> list[tuple[str, bool]]:
 
 async def test_verify_informa_el_motivo_y_por_defecto_reenvia_como_siempre(verify_env):
     out = await routes.verify(_payload())
-    assert out.prohibido == {"categoria": "suplementos", "palabra": "vitaminas",
-                             "motivo": "no vendemos suplementos (vitaminas)"}
+    # La palabra que se informa es la de la lista («vitamina»), aunque el nombre la traiga en plural.
+    assert out.prohibido == {"categoria": "suplementos", "palabra": "vitamina",
+                             "motivo": "no vendemos suplementos (vitamina)"}
     assert out.paco_search_id == "s-1" and len(FakePaco.submitted) == 1
 
 

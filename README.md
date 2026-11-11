@@ -1937,10 +1937,24 @@ categoría se toma del archivo (una respuesta 200 con una sola categoría no ree
 código rigen siempre. Dentro de una categoría que la nube sí trae mandan sus palabras: ahí es donde una persona corrige
 la lista.
 
-La comparación es la del radar de productos, con sus excepciones: sin tildes ni mayúsculas, **palabra entera** en español
-e inglés («crema» no frena «cremallera»), pedazo de texto en chino, y `excepto` desactiva la categoría para los accesorios
-(«molinillo de café», «dispensador de jabón», «pistola de silicona»). `app/prohibidos.yaml` es una **copia** de la lista
-canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista canónica>`.
+La comparación es la **regla v2** del radar de productos, portada tal cual:
+
+- NFKC, sin tildes ni mayúsculas (`ｖｉｔａｍｉｎａ` es vitamina); en chino, sin los espacios del medio (`蛋白 粉` es 蛋白粉);
+- **palabra entera** en español e inglés («crema» no frena «cremallera»), **con sus plurales** («Creatinas», «Insecticidas»);
+  pedazo de texto en chino;
+- una excepción (`excepto`) perdona **solo la palabra prohibida que tiene pegada**: el accesorio y su consumible tienen que
+  nombrar una sola cosa («molinillo de café», «dispensador de jabón», «termómetro de cocina»). Ya no apaga la categoría
+  entera: «Proteína whey 1 kg + shaker de regalo» y «Shampoo con dispensador» frenan;
+- cada nombre del producto (el de la tienda, el de la ficha, el título original) se lee por separado: el accesorio de uno
+  no perdona la palabra prohibida de otro;
+- tres respuestas: `prohibido`, `ok` y `sin_texto` (nombre vacío, o solo números y signos).
+
+`backend/tests/prohibidos_vectores.json` es una copia de los 141 casos compartidos por todos los sistemas que usan
+la lista; `test_prohibidos_vectores.py` los corre contra la lista real y exige el 100 %. `app/prohibidos.yaml` es una
+**copia** de la lista canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista
+canónica>`. Lo que la regla NO resuelve es de la lista, no del comparador: hoy siguen frenando, por ejemplo, «Pastillas
+de freno», «Termómetro infrarrojo» y «Fuente de chocolate» (falta la excepción), y pasan «Perfume recargable» y «Bebida
+energizante botella 500 ml» (hay una excepción de más). Para los primeros está la anulación por producto de arriba.
 
 **Duplicados contando inactivos y tiempos.** Con `include_disabled`, de lo inactivo no cuenta lo que el control de
 duplicados ya apagó (es la copia de un producto que sigue en el catálogo, y contra ese sí se compara); lo demás inactivo
