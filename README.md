@@ -2169,17 +2169,16 @@ que apunta a `backend/tests` con `asyncio_mode=auto`). Solo necesitan
 `VENDURE_API_URL` en el entorno (alcanza `https://example.invalid/admin-api`) o
 un `backend/.env`; no tocan red ni Vendure.
 
-**CI** (`.github/workflows/tests.yml`): en cada pull request y en cada push a `main` corren tres cosas en paralelo:
+**CI** (`.github/workflows/tests.yml`): en cada pull request y en cada push a `main` corren en paralelo:
 
 - `lock al día`: `backend/scripts/check_lock.sh` (el mismo chequeo que hace el build de Docker);
-- `suite`: toda la suite de backend, con las dependencias exactas del lock (`uv sync --locked --extra dev`), partida en
-  **4 tandas** parejas. `python backend/scripts/ci_shard.py 4 <n>` lista los archivos de la tanda `n`: cada archivo cae
-  en una sola tanda, así que las 4 juntas son la suite entera. Para reproducir una tanda en local:
-  `python backend/scripts/ci_shard.py 4 2 | xargs python -m pytest -q`;
-- `dashboard compila`: `npm ci && npm run build` en `frontend/`.
-
+- `suite`: toda la suite de backend, con las dependencias exactas del lock (`uv sync --locked --extra dev`), en **una
+  sola corrida y en su orden natural** (el mismo que `pytest` en local). No se parte en tandas: hay pruebas que dependen
+  de lo que dejó en la base la anterior (la suite comparte una SQLite), y partir por archivos las reordena y hace fallar
+  cosas que no tienen que ver con el cambio. Para partirla hay que aislar esas pruebas primero;
+- `dashboard compila`: `npm ci && npm run build` en `frontend/`;
 - `cuarentena (no frena)`: las pruebas listadas en `backend/tests/ci_quarantine.txt`, cuyo resultado depende de la
-  máquina y no del código. Corren y se ve si pasan, pero no ponen la PR en rojo; las tandas las saltean. Cada una dice en
+  máquina y no del código. Corren y se ve si pasan, pero no ponen la PR en rojo; la suite las saltea. Cada una dice en
   ese archivo por qué está y qué hace falta para sacarla. La lista tiene que tender a vacía.
 
 No usa ninguna credencial. La única prueba que sale a la red es `test_net_guard.py::test_allows_public_https`, que
