@@ -36,6 +36,10 @@ intento queda en la tabla `fast_ready` con sus tiempos: `GET /api/price-monitor/
 y en cuánto (el objetivo es menos de 5 minutos desde el aviso de la subida). El gasto de Apify va a `apify_spend` (etiqueta
 `fast_ready`).
 
+Un producto a medio subir (sin precio, sin foto) o que no se pudo medir en ese momento (el índice de fotos todavía no está
+listo, no queda cupo de Mercado Libre) no se guarda: queda `pendiente` y un aviso posterior lo reintenta, hasta 3 veces.
+Lo que ya se midió o ya está en la bandeja ni se anota: casi todos los avisos de Vendure son de productos de siempre.
+
 La cola vive en memoria: si el proceso se reinicia, lo que estaba ahí lo toma la corrida de la noche.
 """
 

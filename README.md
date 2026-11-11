@@ -2019,8 +2019,10 @@ nunca medidos, sin ficha viva y que vienen de una subida (link de proveedor de 1
 a la vez y nunca con la corrida de la noche en curso. Primero la API de Mercado Libre (gratis); si no da un idéntico con
 precio, **una** búsqueda web con el actor de Apify de la noche (~USD 0,02), con cupo propio. El juez por IA no se usa (un
 idéntico confirmado solo por el juez no es «firme»). El snapshot se guarda en la última corrida terminada: el producto
-aparece hoy en el semáforo y la noche siguiente se vuelve a medir. Un producto a medio subir (sin precio o sin foto) se
-reintenta con el próximo aviso, hasta 3 veces. Cada intento tiene un tope de 270 s.
+aparece hoy en el semáforo y la noche siguiente se vuelve a medir. Un producto a medio subir (sin precio o sin foto), o
+que no se pudo medir en ese momento (el índice de fotos todavía no está listo después de un reinicio, o no queda cupo de
+Mercado Libre), no se guarda: se reintenta con el próximo aviso, hasta 3 veces. Los avisos de productos ya medidos o que
+ya están en la bandeja (alguien editó un producto de siempre) ni se anotan. Cada intento tiene un tope de 270 s.
 
 | Setting | Default | Qué es |
 |---|---|---|
