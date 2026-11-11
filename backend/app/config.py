@@ -589,6 +589,18 @@ class Settings(EnvSettings):
     # automático una vez (pm_mode = 2) y corre el portón con la última corrida fresca (verdes firmes con medidas bien →
     # se activan; rojos firmes publicados → se apagan). 0 = no hace nada al arrancar.
     pm_autopilot: int = 1
+    # Vía rápida (pricing/fast_ready.py): 1 = cuando Vendure avisa de un producto recién subido, Hugo lo mide en el
+    # momento y, si da verde firme con medidas revisadas, sin duplicado y fuera de la lista de lo que no vendemos, lo deja
+    # en la bandeja como «listo para publicar» (no lo activa). 0 = apagada: se mide en la corrida de la noche.
+    fast_ready_enabled: int = 0
+    # Productos que la vía rápida mide por día (hora de Argentina).
+    fast_ready_daily_max: int = 20
+    # Búsquedas web de Mercado Libre pagas (Apify) por día para la vía rápida. 0 = solo la API de ML (gratis).
+    fast_ready_apify_daily_max: int = 20
+    # Tablero del motor (app/motor_eventos.py): a dónde se avisa cada cambio de estado de un producto con hilo. Las dos o
+    # ninguna. Solo entorno.
+    motor_eventos_url: str = ""
+    motor_eventos_key: str = ""
     # Lo que no vendemos (app/prohibidos.py): químicos, suplementos, medicamentos, vapeo, armas, inflamables, comida y
     # cosmética. 1 = ninguna activación (el portón, el recálculo, una persona desde la bandeja, la restauración de
     # duplicados) prende un producto cuyo nombre cae en la lista: queda en la bandeja con el motivo. Y si no se pudo

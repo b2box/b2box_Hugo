@@ -110,6 +110,8 @@ const EVENT_LABEL: Record<string, string> = {
 
 // La marca que deja en la ficha una reactivación automática que no se hizo por el tope del día (price_recalc.FLAG_NOT_RED).
 const FLAG_NOT_RED = "ya_no_rojo";
+// La vía rápida (pricing/fast_ready.py) lo midió al subirse y pasó todo: falta que una persona lo publique.
+const FLAG_READY = "porton:listo_para_publicar";
 
 // El evento `recalculado`: «mejoró: $X → $Y · Rojo → Verde · ratio 1,28 → 0,77».
 function recalcText(p: Record<string, unknown>): string {
@@ -438,6 +440,9 @@ export function ItemRow({ it, onOpen }: { it: PriceReviewItemRow; onOpen: () => 
       </td>
       <td className="px-3 py-2 whitespace-nowrap">
         <Badge variant={STATE_BADGE[it.state] ?? "default"}>{it.state_label}</Badge>
+        {it.flags.includes(FLAG_READY) && it.state === "por_activar" && (
+          <span className="block text-[11px] text-success mt-0.5">listo para publicar</span>
+        )}
         {it.flags.includes("oficina") && (
           <span className="block text-[11px] text-muted-foreground mt-0.5">dato de la oficina</span>
         )}

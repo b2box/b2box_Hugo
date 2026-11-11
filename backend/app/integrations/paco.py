@@ -52,7 +52,7 @@ def _headers() -> dict[str, str]:
     return h
 
 
-async def submit(image_url: str, product_url: str | None = None) -> PacoSubmitResult:
+async def submit(image_url: str, product_url: str | None = None, hilo: str | None = None) -> PacoSubmitResult:
     """Envía image_url a Paco y devuelve el search_id.
 
     `product_url` es el link de origen (1688) cuando lo conocemos: los productos
@@ -61,6 +61,9 @@ async def submit(image_url: str, product_url: str | None = None) -> PacoSubmitRe
     parsea la URL él mismo (detail/m.1688.com/offer/NNN, ?offerId=, ?num_iid=).
     Es opcional y aditivo: si Paco no lo soporta, ignora el campo y busca por
     imagen como siempre.
+
+    `hilo` (opcional): el hilo del producto en el tablero del motor
+    (app/motor_eventos.py). Se reenvía tal cual para que la búsqueda lo guarde.
     """
     if not image_url:
         raise PacoError("image_url vacío")
@@ -72,6 +75,8 @@ async def submit(image_url: str, product_url: str | None = None) -> PacoSubmitRe
     payload = {"image_url": image_url, "source": "hugo"}
     if product_url:
         payload["product_url"] = product_url
+    if hilo:
+        payload["hilo"] = hilo
 
     # Paco puede tardar 1-2 min en responder el submit (procesa + devuelve id).
     async with httpx.AsyncClient(timeout=180.0) as client:

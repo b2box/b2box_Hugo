@@ -399,3 +399,59 @@ async def test_case_variants_share_idempotency(monkeypatch):
     out = await routes.verify(_payload(source=" LUIS "))
     assert out.paco_status == "already_sent"
     assert len(FakePaco.submitted) == 1
+
+
+# ─── El hilo del producto (tablero del motor) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_el_hilo_se_guarda_y_se_reenvia_al_buscar_proveedor(monkeypatch):
+    from app.db.models import LuisIntake
+
+    sent: list[dict] = []
+
+    async def submit(image_url, product_url=None, hilo=None):
+        sent.append({"image_url": image_url, "product_url": product_url, "hilo": hilo})
+        return routes.paco_integration.PacoSubmitResult(search_id="s-9", status="queued", raw={})
+
+    monkeypatch.setattr(routes.paco_integration, "submit", submit)
+    _catalog(monkeypatch, [])
+    url = "https://detail.1688.com/offer/909090.html"
+    out = await routes.verify(_payload(source_url=url, image_urls=["https://cbu01.alicdn.com/img/1.jpg"],
+                                       hilo="  luis-4521  "))
+    assert out.paco_search_id == "s-9"
+    assert sent == [{"image_url": "https://cbu01.alicdn.com/img/1.jpg", "product_url": url, "hilo": "luis-4521"}]
+    with Session(engine) as s:
+        row = s.exec(select(LuisIntake).where(LuisIntake.source_url == url)).one()
+        assert row.hilo == "luis-4521" and row.paco_search_id == "s-9"
+        s.delete(row)
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_sin_hilo_o_con_uno_que_no_sirve_todo_sigue_como_siempre(monkeypatch):
+    """`FakePaco.submit` no acepta `hilo`: si se mandara de más, reventaría."""
+    _catalog(monkeypatch, [])
+    for hilo in (None, "", "x" * 129, 123):
+        FakePaco.submitted = []
+        out = await routes.verify(_payload(source="orders", source_url=None, hilo=hilo))
+        assert out.paco_search_id == "s-1" and len(FakePaco.submitted) == 1
+        assert routes.VerifyRequest(hilo=hilo).hilo is None
+
+
+@pytest.mark.asyncio
+async def test_un_duplicado_con_hilo_avisa_al_tablero(monkeypatch):
+    class FakeVendure:
+        async def get_product_full(self, pid):
+            return {"id": pid}
+
+    got: list[dict] = []
+    monkeypatch.setattr(routes, "VendureClient", FakeVendure)
+    monkeypatch.setattr(routes.motor_eventos, "avisar", lambda *evs: got.extend(e for e in evs if e))
+    _catalog(monkeypatch, [_prod("8", enabled=True)])
+    out = await routes.verify(_payload(hilo="luis-1", dedup_only=True))
+    assert out.is_duplicate is True
+    assert [(e["hilo"], e["paso"], e["estado"], e["ref"]) for e in got] == [("luis-1", "duplicado", "frenado", "8")]
+    got.clear()
+    await routes.verify(_payload(dedup_only=True))                 # sin hilo no hay a quién atribuirlo
+    assert got == []

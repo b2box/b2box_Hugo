@@ -986,6 +986,43 @@ class LuisIntake(SQLModel, table=True):
     gate_status: str | None = Field(default=None, max_length=16)
     gate_reason: str | None = Field(default=None, max_length=300)
     gate_at: datetime | None = None
+    # El hilo del producto en el tablero del motor (app/motor_eventos.py): llega en `/verify` y viaja con el producto.
+    hilo: str | None = Field(default=None, max_length=128)
+
+
+class FastReady(SQLModel, table=True):
+    """Un intento de la vía rápida (pricing/fast_ready.py): un producto recién subido, medido en el momento. Una fila por
+    producto: qué resultó (`listo` = quedó en la bandeja para publicar con un click), por qué, con qué números y en cuánto
+    tiempo desde el primer aviso de la subida. Solo números y códigos."""
+    __tablename__ = "fast_ready"
+    __table_args__ = (Index("ix_fast_ready_seen", "first_seen_at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64, unique=True, index=True)
+    product_name: str | None = Field(default=None, max_length=200)
+    product_code: str | None = Field(default=None, max_length=64)
+    first_seen_at: datetime = Field(default_factory=utcnow)
+    attempts: int = Field(default=0)
+    # pendiente | listo | no_listo | omitido | error
+    status: str = Field(default="pendiente", max_length=12)
+    reason: str | None = Field(default=None, max_length=40)
+    reason_text: str | None = Field(default=None, max_length=300)
+    measured_at: datetime | None = None
+    finished_at: datetime | None = None
+    seconds_to_finish: float | None = None
+    color: str | None = Field(default=None, max_length=16)
+    margin_pct: float | None = None
+    our_price_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    ml_median_cents: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    listing_count: int | None = None
+    seller_count: int | None = None
+    match_origin: str | None = Field(default=None, max_length=16)
+    snapshot_id: int | None = None
+    run_id: int | None = None
+    item_id: int | None = None
+    apify_usd: float = Field(default=0.0)
+    measures_usd: float = Field(default=0.0)
+    hilo: str | None = Field(default=None, max_length=128)
 
 
 class ProhibidoAnulado(SQLModel, table=True):

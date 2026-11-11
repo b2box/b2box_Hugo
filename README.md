@@ -1995,6 +1995,54 @@ SELECT e.at, e.product_id, i.product_name, e.kind, e.payload, e.run_id
  ORDER BY e.at DESC;
 ```
 
+### Vía rápida: «listo para publicar» en minutos (apagada por defecto)
+
+La activación solo corre de noche: un producto subido a las 15:00 se medía a las 03:00. Con `fast_ready_enabled = 1`
+(default **0**), cuando Vendure avisa de un producto recién subido (`POST /api/vendure/events`), `pricing/fast_ready.py`
+lo mide **en el momento** y, si pasa todo, lo deja en la bandeja como **«listo para publicar»**. **No lo activa**: no
+escribe en Vendure. Lo publica una persona con «Activar» (un click, con las guardas de siempre) o, si el modo automático
+está prendido (`pm_mode = 2`), el portón de la noche como cualquier otro verde firme.
+
+Queda «listo» solo si:
+
+1. no cae en la lista de lo que no vendemos (y la lista completa se pudo cargar);
+2. no es duplicado de otro producto del catálogo, **contando los inactivos**;
+3. da **verde firme** contra Mercado Libre con las mismas reglas del portón (`price_gate.classify`);
+4. está aprobado (o sin estado) en el portal de proveedores;
+5. sus medidas fueron revisadas por la IA y cierran. Acá el chequeo es obligatorio aunque `pm_gate_measures_check` esté
+   en 0: «listo» quiere decir «medidas aprobadas».
+
+Lo que no llega a «listo» no abre ficha: queda anotado con el motivo y lo toma la corrida de la noche, como hoy.
+
+Cómo mide: espera ~45 s desde el último aviso del producto (el que sube manda varios seguidos); solo productos apagados,
+nunca medidos, sin ficha viva y que vienen de una subida (link de proveedor de 1688 o unidos a lo que mandó el radar); uno
+a la vez y nunca con la corrida de la noche en curso. Primero la API de Mercado Libre (gratis); si no da un idéntico con
+precio, **una** búsqueda web con el actor de Apify de la noche (~USD 0,02), con cupo propio. El juez por IA no se usa (un
+idéntico confirmado solo por el juez no es «firme»). El snapshot se guarda en la última corrida terminada: el producto
+aparece hoy en el semáforo y la noche siguiente se vuelve a medir. Un producto a medio subir (sin precio o sin foto) se
+reintenta con el próximo aviso, hasta 3 veces. Cada intento tiene un tope de 270 s.
+
+| Setting | Default | Qué es |
+|---|---|---|
+| `fast_ready_enabled` | 0 | El interruptor. Necesita la bandeja prendida (`pm_mode` 1 o 2) |
+| `fast_ready_daily_max` | 20 | Productos medidos por día (hora de Argentina). Pasado el tope, los mide la noche |
+| `fast_ready_apify_daily_max` | 20 | Búsquedas pagas por día (aparte del cupo de la noche). 0 = solo la API de ML |
+
+`GET /api/price-monitor/fast-ready?days=7` (solo un administrador; solo lee): cada intento con su resultado y su motivo,
+cuántos quedaron «listos», **en cuánto tiempo desde el aviso de la subida** (mediana, máximo y cuántos en menos de 5
+minutos, que es el objetivo) y lo gastado (Apify y la IA de medidas). El gasto de Apify va además a `apify_spend`
+(etiqueta `fast_ready`). Tabla nueva: `fast_ready` (se crea sola al arrancar).
+
+### Un hilo por producto (tablero del motor)
+
+`POST /verify` acepta un `hilo` opcional (texto de hasta 128 caracteres que nace en el radar). Hugo lo guarda
+(`luis_intake.hilo`), lo reenvía al buscar proveedor (`hilo` en el pedido de búsqueda, también en un reintento) y, si
+están `MOTOR_EVENTOS_URL` y `MOTOR_EVENTOS_KEY`, avisa cada cambio de estado de ese producto (`app/motor_eventos.py`):
+`duplicado` y `prohibido` al contestar `/verify`, `medido` y `listo` desde la vía rápida, `publicado` cuando una activación
+queda confirmada en Vendure y `error` si no pudo mandar a buscar. El aviso va en segundo plano, con tope de 5 s y de a 200
+eventos; si falla se anota en el log y se sigue. Sin hilo, sin URL o sin clave no se manda nada y todo funciona como
+siempre. El motivo es un código o una frase fija: nunca un mail, un link ni un proveedor.
+
 ### Todo el catálogo apagado y la guarda de medidas
 
 Con `pm_gate_catalog_greens = 1` (default) el portón no se limita a lo que subió Paco: **cualquier producto
@@ -2658,6 +2706,9 @@ Ver `.env.example`. Las críticas:
 - `MOTOR_PROHIBIDOS_URL`, `MOTOR_PROHIBIDOS_KEY` — la lista de lo que no vendemos en la nube (opcional; las dos o
   ninguna). Sin ellas se usa `app/prohibidos.yaml`. `PROHIBIDOS_GATE` (1) y `PROHIBIDOS_VERIFY` (0) son los defaults de
   los dos interruptores (también en Configuración).
+- `MOTOR_EVENTOS_URL`, `MOTOR_EVENTOS_KEY` — a dónde se avisan los cambios de estado de un producto con hilo (opcional; las
+  dos o ninguna; la clave va en la cabecera `x-radar-key`). `FAST_READY_ENABLED` (0), `FAST_READY_DAILY_MAX` (20) y
+  `FAST_READY_APIFY_DAILY_MAX` (20) son los defaults de la vía rápida (también en Configuración).
 - `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
   32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
   `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el

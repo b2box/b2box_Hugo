@@ -928,7 +928,25 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
                      run_id=mv.audit.get("corrida"))
         s.add(_audit_row(item, mv, actor, target, now))
         s.commit()
+    if target:
+        _announce_published(item.product_id, actor)
     return True
+
+
+def _announce_published(product_id: str, actor: str) -> None:
+    """Tablero del motor: el producto quedó publicado (solo si llegó con hilo). Nunca lanza ni espera. El motivo dice si
+    fue Hugo solo o una persona, nunca quién."""
+    try:
+        from app import motor_eventos
+
+        if motor_eventos.configurado() is None:
+            return
+        hilo = motor_eventos.hilo_de_producto(product_id)
+        motor_eventos.avisar(motor_eventos.evento(
+            hilo, "publicado", "ok", ref=product_id,
+            motivo="lo activó Hugo solo" if actor == pr.ACTOR_AUTO else "lo activó una persona desde la bandeja"))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("price_review: no se pudo avisar la publicación de %s (%s)", product_id, error_code(exc))
 
 
 def _audit_row(item: PriceReviewItem, mv: _Move, actor: str, target: bool, now: datetime, extra: str = "") -> AuditLog:

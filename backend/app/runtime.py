@@ -720,6 +720,38 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1, step=1, group="monitor",
     ),
     SettingMeta(
+        key="fast_ready_enabled",
+        label="Vía rápida: «listo para publicar» en minutos",
+        description=(
+            "1 = cuando Vendure avisa de un producto recién subido (apagado), Hugo lo mide contra Mercado Libre en el "
+            "momento y, si da verde firme con medidas revisadas, sin duplicado y fuera de la lista de lo que no vendemos, "
+            "lo deja en la bandeja como «listo para publicar». NO lo activa: lo publica una persona con un click. "
+            "0 = apagada (se mide en la corrida de la noche). Necesita la bandeja prendida (modo 1 o 2)."
+        ),
+        type="int", parser=int,
+        default_attr="fast_ready_enabled",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="fast_ready_daily_max",
+        label="Vía rápida: productos por día",
+        description="Tope de productos que la vía rápida mide por día (hora de Argentina). Pasado el tope, los mide la noche.",
+        type="int", parser=int,
+        default_attr="fast_ready_daily_max",
+        min=0, max=500, step=5, group="monitor",
+    ),
+    SettingMeta(
+        key="fast_ready_apify_daily_max",
+        label="Vía rápida: búsquedas pagas por día",
+        description=(
+            "Búsquedas web de Mercado Libre con Apify (una por producto, cuando la API de ML no alcanza) que la vía "
+            "rápida puede pagar por día. Cupo propio, aparte del de la noche. 0 = solo la API de ML."
+        ),
+        type="int", parser=int,
+        default_attr="fast_ready_apify_daily_max",
+        min=0, max=500, step=5, group="monitor",
+    ),
+    SettingMeta(
         key="prohibidos_gate",
         label="Lo que no vendemos: frenar antes de activar",
         description=(

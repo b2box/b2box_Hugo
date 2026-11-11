@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, func, select
 
-from app import runtime
+from app import motor_eventos, runtime
 from app.auth import require_admin
 from app.clock import utcnow
 from app.db.models import AuditLog, PriceHistory
@@ -404,6 +404,17 @@ class VerifyRequest(BaseModel):
     # Comparar también contra los productos INACTIVOS de Vendure (lo que se subió y todavía nadie publicó). Default
     # False: como siempre, solo contra lo habilitado. Lo usa quien está por SUBIR un producto, para no subirlo dos veces.
     include_disabled: bool = False
+    # El hilo del producto en el tablero del motor (app/motor_eventos.py): un texto de hasta 128 caracteres que nace en el
+    # radar. Opcional: se guarda, se reenvía al buscar proveedor y con él se avisan los cambios de estado. Uno que no
+    # sirve (vacío, demasiado largo) se ignora sin rechazar el pedido.
+    hilo: str | None = None
+
+    @field_validator("hilo", mode="before")
+    @classmethod
+    def _clean_hilo(cls, v: Any) -> str | None:
+        from app import motor_eventos
+
+        return motor_eventos.limpiar_hilo(v)
 
 
 # Orígenes que van a Paco PRO (b2box_sourcing) en vez de Paco APP.
@@ -588,6 +599,8 @@ def _verify_ctx_json(payload: "VerifyRequest") -> str:
     }
     if len(text) > MAX_TEXT_SPECS_STORED:
         ctx["text_specs_truncated"] = True
+    if payload.hilo:
+        ctx["hilo"] = payload.hilo                # un reintento a Paco lleva el mismo hilo
     if payload.dedup_only:
         # Marca de "este evento NO pasó por Hugo hacia Paco": retry-paco lo rechaza
         # (el que consultó manda a Paco por su cuenta) y el dashboard no ofrece el botón.
@@ -837,6 +850,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
                     "first_variant_price_cents": cached.first_variant_price_cents,
                     "variant_count": cached.variant_count,
                 }
+        motor_eventos.avisar(motor_eventos.evento(
+            payload.hilo, "duplicado", "frenado", ref=verdict.candidate_id,
+            motivo=f"ya está en el catálogo ({', '.join(verdict.matched_by)})"))
         _record_verify(
             payload, verdict, action="duplicate_flagged",
             detail=(
@@ -856,6 +872,8 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         if int(runtime.get("prohibidos_verify") or 0) == 1:
             if not payload.dedup_only:
                 response.paco_status = "prohibido"
+            motor_eventos.avisar(motor_eventos.evento(payload.hilo, "prohibido", "frenado",
+                                                      motivo=f"no vendemos {banned.categoria}"))
             _record_verify(
                 payload, verdict, action="verify_prohibido",
                 detail=f"'{short_name}' no se mandó a buscar: {banned.motivo}",
@@ -866,7 +884,7 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     if _event_source(payload) == "luis":
         # Pestaña «Subidos a Vendure»: Google Lens ahora, la comparación cuando Paco lo suba. Vale para la consulta
         # (dedup_only) y para el envío a Paco que Luis le pide a Hugo (Luis nunca le habla a Paco directo).
-        intake_id = luis_intake.record(payload.source_url, payload.name, payload.image_urls)
+        intake_id = luis_intake.record(payload.source_url, payload.name, payload.image_urls, hilo=payload.hilo)
         if intake_id is not None:
             _background(luis_intake.lens_soon(intake_id))
 
@@ -918,12 +936,14 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
             result = await paco_integration.submit(
                 valid_imgs[0],
                 product_url=payload.source_url if offer_id_from_url(payload.source_url or "") else None,
+                **({"hilo": payload.hilo} if payload.hilo else {}),
             )
         response.paco_search_id = result.search_id
         response.paco_status = result.status
         if not is_pro and _event_source(payload) == "luis":
             # Para unirlo con Vendure: Paco sube el proveedor de 1688 que él eligió, no el link de Luis.
-            luis_intake.record(payload.source_url, payload.name, payload.image_urls, result.search_id)
+            luis_intake.record(payload.source_url, payload.name, payload.image_urls, result.search_id,
+                               hilo=payload.hilo)
         _record_verify(
             payload, verdict, action="verify_passed_to_paco",
             detail=(
@@ -934,6 +954,8 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     except paco_integration.PacoError as exc:
         response.paco_error = str(exc)
         log.warning("Paco submit falló: %s", exc)
+        motor_eventos.avisar(motor_eventos.evento(payload.hilo, "error", "error",
+                                                  motivo="no se pudo mandar a buscar proveedor"))
         _record_verify(
             payload, verdict, action="paco_failed",
             detail=f"'{short_name}' es nuevo, pero Paco no respondió. Error: {str(exc)[:120]}",
@@ -1174,6 +1196,10 @@ _COSTLY_SETTINGS = frozenset({
     "pm_autopilot",
     "pm_gate_measures_check",
     "pm_measures_check_daily_max",
+    # Vía rápida: mide productos recién subidos en el momento (gasta cupo de ML y búsquedas pagas de Apify).
+    "fast_ready_enabled",
+    "fast_ready_daily_max",
+    "fast_ready_apify_daily_max",
     # Sacan el freno de lo que no vendemos antes de activar o de mandar a buscar proveedor.
     "prohibidos_gate",
     "prohibidos_verify",
@@ -1369,8 +1395,10 @@ async def retry_paco(
                 product_link=entry.product_source_url,
             )
         else:
+            hilo = motor_eventos.limpiar_hilo(ctx.get("hilo"))
             result = await paco_integration.submit(
                 entry.product_image_url, product_url=entry.product_source_url,
+                **({"hilo": hilo} if hilo else {}),
             )
         new_detail = (
             f"Reintento manual exitoso. '{(entry.product_name or '?')[:60]}' "
