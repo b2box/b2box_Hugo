@@ -111,6 +111,14 @@ def world(monkeypatch):
         for model in (FastReady, LuisIntake):
             s.execute(delete(model))
         s.commit()
+    w.reset_db()                    # deja los settings y la bandeja como estaban: otras pruebas comparten la base
+
+
+@pytest.fixture
+def clean_after():
+    """Para las pruebas que arman su propio mundo: lo mismo, al terminar."""
+    yield
+    w.reset_db()
 
 
 def row(pid: str) -> FastReady:
@@ -462,7 +470,7 @@ async def test_el_endpoint_es_solo_para_un_administrador(world):
 # ─── La medición de verdad (sin los dobles de arriba) ──────────────
 
 
-async def test_la_medicion_prueba_la_api_y_despues_una_busqueda_paga(monkeypatch):
+async def test_la_medicion_prueba_la_api_y_despues_una_busqueda_paga(monkeypatch, clean_after):
     kit.setup(monkeypatch, mode=1)
     from app.dedup import catalog_index
 
@@ -488,7 +496,7 @@ async def test_la_medicion_prueba_la_api_y_despues_una_busqueda_paga(monkeypatch
     assert calls == [{"api": True, "oficina": {}, "judge": 0}, {"api": False, "oficina": {"m1": fresh}, "judge": 0}]
 
 
-async def test_si_la_api_alcanza_no_se_paga_la_busqueda(monkeypatch):
+async def test_si_la_api_alcanza_no_se_paga_la_busqueda(monkeypatch, clean_after):
     kit.setup(monkeypatch, mode=1)
     from app.dedup import catalog_index
 
@@ -511,7 +519,7 @@ async def test_si_la_api_alcanza_no_se_paga_la_busqueda(monkeypatch):
     assert snap.ml_status == price_monitor.OK and usd == 0.0 and searched == []
 
 
-async def test_la_busqueda_paga_tiene_cupo_propio_y_deja_su_gasto(monkeypatch):
+async def test_la_busqueda_paga_tiene_cupo_propio_y_deja_su_gasto(monkeypatch, clean_after):
     kit.setup(monkeypatch, mode=1)
     from app.config import get_settings
     from app.pricing import apify_ml_search as ams
