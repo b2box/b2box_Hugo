@@ -9,3 +9,14 @@
 # caso [defecto-11] hizo una búsqueda web menos que el dorado (las demás combinaciones pasaron); en local pasa siempre.
 # Para sacarla: que la corrida de la prueba sea determinista (un producto a la vez o un orden fijo de las búsquedas).
 backend/tests/test_qa3_regresion_e8209e1.py::test_origin_main_dump_or_compare
+
+# Tres pedidos casi simultáneos no pueden dejar más de una corrida. Si la primera corrida termina antes de que arranque
+# el segundo pedido (máquina rápida) hay dos corridas legítimas y la prueba falla; si la máquina es lenta, a veces mira la
+# base con la corrida todavía en curso. En GitHub falló en 3 de 7 corridas, con tres síntomas distintos; en local pasa.
+# Para sacarla: que la prueba controle el orden (frenar la primera corrida hasta que lleguen los otros pedidos).
+backend/tests/test_qa4_seo_api.py::test_el_doble_clic_nunca_deja_dos_corridas_a_la_vez
+
+# Compara dos horas tomadas con el reloj real y espera una diferencia exacta en segundos: si entre una y otra el reloj
+# cruza un segundo, da 1 de más. Falló 1 vez en 7 corridas en GitHub (y en local con la máquina cargada).
+# Para sacarla: fijar el reloj en la prueba.
+backend/tests/test_qa3_oficina_hugo.py::test_history_keeps_five_per_product_and_never_drops_the_newest
