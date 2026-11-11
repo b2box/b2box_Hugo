@@ -16,6 +16,7 @@ import base64
 import io
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.config import get_settings
 
@@ -53,6 +54,33 @@ def to_card_data_url(raw: bytes) -> str | None:
     out = io.BytesIO()
     card.save(out, "WEBP", quality=_WEBP_QUALITY)
     return "data:image/webp;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+
+
+PURPOSE = "estimado_foto"
+
+
+async def _record_usage(data: dict[str, Any] | None, *, ok: bool) -> None:
+    """Deja la llamada en `llm_usage` (propósito `estimado_foto`). El costo: el que informa el endpoint en `usage.cost`
+    si viene; si no, `ESTIMATE_PHOTO_USD_PER_IMAGE` por foto devuelta (0 si no devolvió foto), marcado como estimado por
+    la tabla. Nunca lanza."""
+    try:
+        from app import llm_usage  # lazy: el registro usa la base
+
+        s = get_settings()
+        host = (urlsplit(s.pm_llm_base_url.strip()).hostname or "").lower()
+        usage = (data or {}).get("usage") if isinstance(data, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        reported = usage.get("cost")
+        if isinstance(reported, (int, float)) and not isinstance(reported, bool) and reported >= 0:
+            cost = float(reported)
+        else:
+            cost = float(getattr(s, "estimate_photo_usd_per_image", 0.0) or 0.0) if ok else 0.0
+        await llm_usage.record_async(
+            provider=llm_usage.provider_of_base_url(host), model=s.estimate_photo_model,
+            purpose=PURPOSE, input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0), cost_usd=cost, ok=ok)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("estimado: no se pudo registrar el uso de la foto limpia (%s)", type(exc).__name__)
 
 
 def _image_from(data: dict[str, Any]) -> bytes | None:
@@ -101,4 +129,5 @@ async def clean(offer_image_url: str, *, client: Any | None = None) -> str | Non
         log.warning("estimado: limpiar la foto devolvió HTTP %s", r.status_code)
         return None
     raw = _image_from(data)
+    await _record_usage(data, ok=raw is not None)
     return to_card_data_url(raw) if raw else None

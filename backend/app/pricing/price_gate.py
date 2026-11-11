@@ -19,7 +19,12 @@ corrida y los topes diarios `pm_gate_inactivations_daily_max` / `pm_gate_activat
      despublicó o apagó viéndolo verde con el mismo precio. Un verde que no es firme (dudoso, precio bajo, ajuste
      aprendido) queda en revisión: ficha `por_activar` en la bandeja de Pao.
 
-Antes de cualquier activación automática (2 y 3), con `pm_gate_measures_check = 1`, una IA barata revisa que las medidas
+Antes de cualquier activación automática (2 y 3), con `prohibidos_gate = 1`, se mira la lista de lo que no vendemos
+(app/prohibidos.py): un verde firme cuyo nombre cae en la lista NO se activa y va a la bandeja de Pao con el motivo; y si
+la lista completa no se pudo cargar (ni la de la nube ni el archivo), Hugo no activa nada solo. Va antes de las medidas
+para no gastar la IA en algo que igual no se vende.
+
+Después, con `pm_gate_measures_check = 1`, una IA barata revisa que las medidas
 del producto, de la caja individual y de la caja master tengan sentido con el producto (pricing/measures_check.py). Si no
 cierran, no hay medidas o no se pudieron chequear, el verde va a la bandeja de Pao con el motivo en vez de activarse.
 
@@ -82,6 +87,9 @@ G_ACTIVADO, G_BANDEJA, G_ROJO, G_YA_ACTIVO = "activado", "bandeja", "rojo_inacti
 # Una persona lo apagó después de que Hugo lo activara (corrección: Hugo no lo vuelve a prender).
 G_APAGADO_A_MANO = "apagado_a_mano"
 
+# El filtro de lo que no vendemos (los mismos códigos que price_review_actions.PROHIBIDO / SIN_LISTA).
+NOT_SOLD, NO_LIST = "prohibido", "sin_lista_prohibidos"
+
 # Una persona decidió algo «a favor» del producto en este tiempo: Hugo no lo vuelve a apagar ni lo prende.
 HUMAN_HOLD = timedelta(days=30)
 _PRO_ACTIVE_KINDS = ("decision_mantener", "decision_activar", "decision_reactivar", "deshacer")
@@ -96,6 +104,8 @@ REASON_TEXT = {
     "verde_apagado_a_mano": "Verde firme y una persona lo apagó a mano: Hugo no lo vuelve a prender (corrección anotada)",
     "rojo_firme_publicado": "Rojo firme publicado: Hugo lo apagó solo (modo automático)",
     "corregido": "Una persona corrigió al semáforo hace poco: Hugo no actúa solo sobre este producto",
+    "prohibido": "Verde firme, pero el nombre cae en la lista de lo que no vendemos: no se activa",
+    "sin_lista_prohibidos": "Verde firme, pero no se pudo cargar la lista de lo que no vendemos: Hugo no activa nada solo",
 }
 
 
@@ -258,6 +268,7 @@ def _ensure_item(snap: MarketPriceSnapshot, state: str, decision: GateDecision, 
     with Session(engine, expire_on_commit=False) as s:
         current = pr.open_item_for(s, snap.product_id)
         if current is not None:
+            _note_not_sold(s, current, decision, now, run_id)
             return current
         v = decision.verdict
         item = PriceReviewItem(
@@ -284,6 +295,18 @@ def _ensure_item(snap: MarketPriceSnapshot, state: str, decision: GateDecision, 
                      payload={"color": snap.color, "margen_pct": snap.est_margin_pct, "modo": 2})
         s.commit()
         return item
+
+
+def _note_not_sold(s: Session, item: PriceReviewItem, decision: GateDecision, now: datetime, run_id: int | None) -> None:
+    """La ficha ya existía y ahora la frena el filtro de lo que no vendemos: el motivo queda en la ficha (una vez)."""
+    if decision.reason != NOT_SOLD or item.state != pr.POR_ACTIVAR:
+        return
+    seen = s.exec(select(PriceReviewEvent.id).where(
+        PriceReviewEvent.item_id == item.id, PriceReviewEvent.kind == "porton",
+        PriceReviewEvent.motive_code == NOT_SOLD).limit(1)).first()
+    if seen is None:
+        pr.add_event(s, item, "porton", run_id=run_id, now=now, motive_code=NOT_SOLD, motive_text=decision.text)
+        s.commit()
 
 
 def _close_gate_item(item_id: int, note: str, code: str, now: datetime) -> None:
@@ -378,7 +401,10 @@ async def _process_run(run_id: int, *, now: datetime | None, client: Any, immedi
                 outcome = "error"
             if outcome:
                 _bump(counts, f"catalogo_{outcome}")
-            if not enabled() or outcome == "tope":
+            if outcome == "sin_lista":
+                log.error("portón #%s: no hay una lista completa de lo que no vendemos: no se activa nada del catálogo "
+                          "apagado", run_id)
+            if not enabled() or outcome in ("tope", "sin_lista"):
                 break
     if counts:
         log.info("portón #%s: %s", run_id, counts)
@@ -482,6 +508,8 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
     if decision.action == ACTIVAR and (hold or said_no):
         decision = GateDecision(BANDEJA, "corregido", decision.verdict)
     if decision.action == ACTIVAR:
+        decision = await _prohibidos_guard(snap, decision, row.name, row.vendure_name)
+    if decision.action == ACTIVAR:
         decision = await _measures_guard(snap, decision)
     if decision.action == ACTIVAR:
         item = await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
@@ -497,7 +525,8 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
         )
 
         try:
-            await actions.auto_gate(int(item.id), actions.ACTIVAR_AUTO, pr.POR_ACTIVAR, client=client)  # type: ignore[arg-type]
+            await actions.auto_gate(int(item.id), actions.ACTIVAR_AUTO, pr.POR_ACTIVAR, client=client,  # type: ignore[arg-type]
+                                    rule=RULE_PACO_GREEN, run_id=run_id)
         except actions.ActionError as exc:
             log.info("portón: %s no se activó solo (%s)", pid, exc.code)
             await asyncio.to_thread(_set_gate, row.id, G_BANDEJA, f"Verde firme, pero no se activó: {exc.message}", now)
@@ -509,6 +538,30 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
     await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
     await asyncio.to_thread(_set_gate, row.id, G_BANDEJA, decision.text, now)
     return "bandeja"
+
+
+# Por qué regla actuó Hugo solo (queda en el evento de la escritura: pricing/auto_actions.py).
+RULE_PACO_GREEN = "verde_firme_subido_por_paco"
+RULE_CATALOG_GREEN = "verde_firme_catalogo_apagado"
+
+
+async def _prohibidos_guard(snap: MarketPriceSnapshot, decision: GateDecision, *names: str | None) -> GateDecision:
+    """Un verde firme se activa solo si su nombre no cae en la lista de lo que no vendemos y la lista completa se pudo
+    cargar (app/prohibidos.py, `prohibidos_gate`). Si no, va a la bandeja con el motivo. Si el chequeo mismo falla, tampoco
+    se activa: sin filtro no hay activación automática."""
+    from app.pricing import (
+        price_review_actions as actions,  # lazy: actions importa el cliente de Vendure
+    )
+
+    try:
+        banned = await actions.prohibido_check(snap.product_id, snap.product_name, *names, auto=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("portón: el filtro de lo que no vendemos falló con %s (%s)", snap.product_id, error_code(exc))
+        banned = (actions.SIN_LISTA, actions.SIN_LISTA_TEXT)
+    if banned is None:
+        return decision
+    code, why = banned
+    return GateDecision(BANDEJA, code[:24], decision.verdict, note=f"Verde firme, pero no se activa: {why}")
 
 
 async def _measures_guard(snap: MarketPriceSnapshot, decision: GateDecision) -> GateDecision:
@@ -589,6 +642,14 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
             await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
             return "verde_dudoso_a_bandeja"
         return "no_firme"
+    decision = await _prohibidos_guard(snap, decision)
+    if decision.action != ACTIVAR:
+        if decision.reason == NO_LIST:
+            # Sin lista completa no se activa nada solo, y tampoco se llena la bandeja con todo el catálogo verde: la
+            # pasada del catálogo se corta acá y se vuelve a probar en la próxima corrida.
+            return "sin_lista"
+        await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
+        return "prohibido_a_bandeja"
     decision = await _measures_guard(snap, decision)
     if decision.action != ACTIVAR:
         await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
@@ -605,7 +666,8 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
     )
 
     try:
-        await actions.auto_gate(int(item.id), actions.ACTIVAR_AUTO, pr.POR_ACTIVAR, client=client)  # type: ignore[arg-type]
+        await actions.auto_gate(int(item.id), actions.ACTIVAR_AUTO, pr.POR_ACTIVAR, client=client,  # type: ignore[arg-type]
+                                rule=RULE_CATALOG_GREEN, run_id=run_id)
     except actions.ActionError as exc:
         log.info("portón: el verde apagado %s no se activó solo (%s)", pid, exc.code)
         return "activar_frenado"
@@ -647,7 +709,8 @@ async def enforce_red(snap: MarketPriceSnapshot, reason: str, *, run_id: int | N
             pr.add_event(s, it, "porton", motive_code=reason[:24], motive_text=REASON_TEXT.get(reason, reason), now=now)
             s.commit()
     try:
-        out = await actions.auto_gate(int(item.id), actions.INACTIVAR_AUTO, item.state, client=client)  # type: ignore[arg-type]
+        out = await actions.auto_gate(int(item.id), actions.INACTIVAR_AUTO, item.state, client=client,  # type: ignore[arg-type]
+                                      rule=reason, run_id=run_id if run_id is not None else snap.run_id)
     except actions.ActionError as exc:
         log.info("portón: %s no se apagó solo (%s)", snap.product_id, exc.code)
         return False

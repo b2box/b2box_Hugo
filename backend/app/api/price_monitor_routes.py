@@ -638,6 +638,24 @@ async def gate_apply_now_status() -> dict[str, Any]:
     return {"running": price_gate.gate_lock.locked(), "last": _last_apply or None}
 
 
+@router.get("/gate/auto-actions")
+async def gate_auto_actions(request: Request, days: int = Query(7, ge=1, le=365),
+                            limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:
+    """«¿Qué prendió y qué apagó Hugo solo?»: las escrituras automáticas en Vendure (portón de precio y reactivación del
+    recálculo) de los últimos `days` días, la más nueva primero: producto, cuándo, cómo quedó, por qué regla, con qué
+    corrida del semáforo y si una persona lo deshizo después. Más el estado de la lista de lo que no vendemos y lo que
+    anotó el piloto automático. Solo un administrador. Solo lee."""
+    from app import prohibidos
+    from app.pricing import auto_actions
+
+    auth.require_admin(request)
+    out = await asyncio.to_thread(auto_actions.list_auto_actions, days, limit=limit)
+    out["modo"] = {"pm_mode": int(runtime.get("pm_mode") or 0), "pm_autopilot": int(runtime.get("pm_autopilot") or 0),
+                   "prohibidos_gate": int(runtime.get("prohibidos_gate") or 0)}
+    out["lista_prohibidos"] = prohibidos.estado(await prohibidos.lista())
+    return out
+
+
 # ─── Medidas con IA ───────────────────────────────────────────────
 
 MEASURE_VERDICTS = ("ok", "dudoso", "mal", "sin_medidas", "error")

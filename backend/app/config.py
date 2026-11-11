@@ -269,6 +269,9 @@ class Settings(EnvSettings):
     estimate_offer_photo: int = 1
     # Modelo de imagen (por el endpoint del juez, OpenRouter) que limpia esa foto.
     estimate_photo_model: str = "google/gemini-2.5-flash-image"
+    # Costo que se ANOTA por foto limpia en `llm_usage` cuando el endpoint no informa el costo de la llamada (USD, precio
+    # de lista del modelo de imagen). Solo sirve para el registro: no cambia qué se llama.
+    estimate_photo_usd_per_image: float = 0.039
     estimate_retention_days: int = 90
     # Fotos subidas que pueden ir a Apify/Qwen: entradas "host/bucket/prefijo/"
     # separadas por coma (S3 path-style: el bucket va en el path). Vacío =
@@ -290,6 +293,10 @@ class Settings(EnvSettings):
     lookup_shared_per_minute: int = 40
     # Llamadas por día al rerank de visión del catálogo (Sonnet), runtime.
     vision_rerank_daily_budget: int = 300
+    # Saltear el rerank de visión cuando CLIP ya está muy seguro (runtime). 0 = nunca se saltea (como siempre). Con un
+    # valor (p. ej. 0.90): si el mejor candidato por imagen llega a ese score, su nombre no lo contradice y la foto es la
+    # del link (no una prestada), /app/lookup afirma con CLIP y no paga la llamada al modelo de visión.
+    vision_skip_clip_score: float = 0.0
     # ── Apify: búsqueda web de ML para el semáforo ─────────────
     # Ver app/pricing/apify_ml_search.py. Reemplaza a la Mac de la oficina (ML la
     # bloquea desde el 20-oct): toma la misma cola y guarda por el mismo camino.
@@ -582,6 +589,17 @@ class Settings(EnvSettings):
     # automático una vez (pm_mode = 2) y corre el portón con la última corrida fresca (verdes firmes con medidas bien →
     # se activan; rojos firmes publicados → se apagan). 0 = no hace nada al arrancar.
     pm_autopilot: int = 1
+    # Lo que no vendemos (app/prohibidos.py): químicos, suplementos, medicamentos, vapeo, armas, inflamables, comida y
+    # cosmética. 1 = ninguna activación (el portón, el recálculo, una persona desde la bandeja, la restauración de
+    # duplicados) prende un producto cuyo nombre cae en la lista: queda en la bandeja con el motivo. Y si no se pudo
+    # cargar una lista completa (ni la de la nube ni el archivo), Hugo no activa nada solo. 0 = no se mira la lista.
+    prohibidos_gate: int = 1
+    # 1 = `/verify` tampoco reenvía a buscar proveedor un producto de la lista (responde `paco_status = "prohibido"`).
+    # 0 = `/verify` solo informa el motivo en `prohibido` y reenvía como siempre.
+    prohibidos_verify: int = 0
+    # La lista en la nube (opcional). Sin las dos, se usa el archivo que viaja con el código. Solo entorno.
+    motor_prohibidos_url: str = ""
+    motor_prohibidos_key: str = ""
     # Antes de activar solo, una IA barata (el modelo del juez, PM_LLM_*: MiMo) mira si las medidas del producto, de la
     # caja individual y de la caja master tienen sentido con el producto (pricing/measures_check.py). 1 = obligatorio:
     # medidas que no cierran, o sin chequear, van a la bandeja en vez de activarse. 0 = no se chequea.

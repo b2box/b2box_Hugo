@@ -862,6 +862,94 @@ async def test_rerank_descarta_y_no_se_muestra_nada(env, monkeypatch):
     assert resp.status == "not_found"
 
 
+def _con_salteo(monkeypatch, score: float) -> None:
+    """`vision_skip_clip_score` con valor, sobre los settings de la fixture."""
+    base = app_routes.runtime.get
+    monkeypatch.setattr(app_routes.runtime, "get",
+                        lambda k: score if k == "vision_skip_clip_score" else base(k))
+
+
+def _rerank_que_cuenta(monkeypatch, verdict) -> list[int]:
+    calls: list[int] = []
+
+    async def fake_pick(query_urls, candidates, *, title=""):  # noqa: ARG001
+        calls.append(1)
+        return verdict
+
+    monkeypatch.setattr(app_routes.vision_rerank, "pick_match", fake_pick)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_por_defecto_el_rerank_corre_aunque_clip_este_seguro(env, monkeypatch):
+    """`vision_skip_clip_score` nace en 0: nada cambia, el modelo mira siempre."""
+    _use_embeddings(monkeypatch, score=0.99)
+    calls = _rerank_que_cuenta(
+        monkeypatch, app_routes.vision_rerank.Verdict(product=_product(), confidence=0.93, reason="ok"))
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert calls == [1] and resp.status == "found" and resp.matched_by == ["image_vision"]
+
+
+@pytest.mark.asyncio
+async def test_con_el_umbral_de_salteo_clip_seguro_no_paga_el_rerank(env, monkeypatch):
+    """CLIP sobre el umbral fuerte y el nombre no lo contradice: se afirma con CLIP, sin llamar al modelo."""
+    _con_salteo(monkeypatch, 0.9)
+    _use_embeddings(monkeypatch, score=0.95)
+    calls = _rerank_que_cuenta(
+        monkeypatch, app_routes.vision_rerank.Verdict(product=None, confidence=0.9, reason="ninguno"))
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL))
+
+    assert calls == []
+    assert resp.status == "found" and "image_embed" in resp.matched_by
+    assert resp.confidence == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_bajo_el_umbral_de_salteo_el_rerank_sigue_corriendo(env, monkeypatch):
+    _con_salteo(monkeypatch, 0.9)
+    _use_embeddings(monkeypatch, score=0.85)
+    calls = _rerank_que_cuenta(
+        monkeypatch, app_routes.vision_rerank.Verdict(product=None, confidence=0.9, reason="ninguno"))
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert calls == [1] and resp.found is False
+
+
+@pytest.mark.asyncio
+async def test_con_foto_prestada_nunca_se_saltea_el_rerank(env, monkeypatch):
+    """La foto no es la del cliente: CLIP solo no alcanza, aunque puntúe altísimo."""
+    _con_salteo(monkeypatch, 0.9)
+
+    async def fake_extract(url):  # noqa: ARG001
+        return ExtractedProduct(image_urls=[PHOTO], title="Lámpara", marketplace="mercadolibre",
+                                canonical_url=url, kind="page", approximate=True)
+
+    _use_embeddings(monkeypatch, score=0.99)
+    monkeypatch.setattr(app_routes.image_from_url, "extract", fake_extract)
+    calls = _rerank_que_cuenta(
+        monkeypatch, app_routes.vision_rerank.Verdict(product=None, confidence=0.9, reason="ninguno"))
+
+    await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_si_el_nombre_contradice_a_clip_no_se_saltea_el_rerank(env, monkeypatch):
+    _con_salteo(monkeypatch, 0.9)
+    _embeddings_con(monkeypatch, title="Zapatillas deportivas running hombre", hits=[(_product(), 0.97)])
+    calls = _rerank_que_cuenta(
+        monkeypatch, app_routes.vision_rerank.Verdict(product=None, confidence=0.9, reason="ninguno"))
+
+    resp = await app_lookup(AppLookupRequest(url=PRODUCT_URL, client=CLIENTE))
+
+    assert calls == [1] and resp.found is False
+
+
 @pytest.mark.asyncio
 async def test_rerank_con_poca_confianza_solo_sugiere(env, monkeypatch):
     _use_embeddings(monkeypatch, score=0.99)

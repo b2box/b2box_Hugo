@@ -299,6 +299,19 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         default_attr="vision_rerank_daily_budget",
         min=0, max=20000, step=50, group="app",
     ),
+    SettingMeta(
+        key="vision_skip_clip_score",
+        label="Rerank de visión: saltearlo si CLIP ya está seguro",
+        description=(
+            "0 = el modelo de visión mira cada búsqueda con fotos (como siempre). Con un valor (p. ej. 0,90): si el mejor "
+            "candidato por imagen llega a ese score, su nombre no lo contradice y la foto es la del link, /app/lookup "
+            "afirma con CLIP y no paga la llamada al modelo de visión. Medir antes de prenderlo: muy bajo y el app afirma "
+            "productos parecidos que no son."
+        ),
+        type="float", parser=float,
+        default_attr="vision_skip_clip_score",
+        min=0.0, max=1.0, step=0.01, group="app",
+    ),
     # Cotizador rápido por foto (app/estimate/)
     SettingMeta(
         key="estimate_enabled",
@@ -705,6 +718,31 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         type="int", parser=int,
         default_attr="pm_autopilot",
         min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="prohibidos_gate",
+        label="Lo que no vendemos: frenar antes de activar",
+        description=(
+            "1 = ningún producto cuyo nombre cae en la lista de lo que no vendemos (químicos, suplementos, medicamentos, "
+            "vapeo, armas, inflamables, comida, cosmética) se activa desde Hugo: ni solo (portón, recálculo) ni con el "
+            "botón de la bandeja. Queda en la bandeja con el motivo. Si la lista completa no se pudo cargar, Hugo no "
+            "activa nada solo. 0 = no se mira la lista."
+        ),
+        type="int", parser=int,
+        default_attr="prohibidos_gate",
+        min=0, max=1, step=1, group="monitor",
+    ),
+    SettingMeta(
+        key="prohibidos_verify",
+        label="Lo que no vendemos: no mandarlo a buscar proveedor",
+        description=(
+            "1 = /verify no reenvía a buscar proveedor un producto de la lista de lo que no vendemos: responde "
+            "paco_status = «prohibido» con el motivo y no gasta la búsqueda. 0 = solo informa el motivo y reenvía como "
+            "siempre."
+        ),
+        type="int", parser=int,
+        default_attr="prohibidos_verify",
+        min=0, max=1, step=1, group="dedup",
     ),
     SettingMeta(
         key="pm_gate_measures_check",

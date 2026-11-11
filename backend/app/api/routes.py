@@ -401,6 +401,9 @@ class VerifyRequest(BaseModel):
     # propio pipeline: el caller YA ES Paco) y Luis (manda a Paco por su cuenta,
     # con un solo camino): en ambos el forward de Hugo sobra y se pagaría doble.
     dedup_only: bool = False
+    # Comparar también contra los productos INACTIVOS de Vendure (lo que se subió y todavía nadie publicó). Default
+    # False: como siempre, solo contra lo habilitado. Lo usa quien está por SUBIR un producto, para no subirlo dos veces.
+    include_disabled: bool = False
 
 
 # Orígenes que van a Paco PRO (b2box_sourcing) en vez de Paco APP.
@@ -426,6 +429,11 @@ class VerifyResponse(BaseModel):
     # (fotos, variantes con precio, código BX, descripción). El admin la usa para
     # llenar el quotation_item sin gastar en Paco.
     matched_product: dict[str, Any] | None = None
+    # Con `include_disabled`: si el producto que matcheó está habilitado en la tienda (False = es uno inactivo).
+    matched_enabled: bool | None = None
+    # Si el nombre cae en la lista de lo que no vendemos: `{"categoria", "palabra", "motivo"}`. Con `prohibidos_verify = 1`
+    # además no se reenvía a buscar proveedor (`paco_status = "prohibido"`).
+    prohibido: dict[str, str] | None = None
 
 
 RADAR_MAX_TERMS = 20
@@ -646,6 +654,33 @@ def _record_verify(
         log.exception("No se pudo registrar AuditLog del verify")
 
 
+def _disabled_as_duplicate_ids() -> set[str]:
+    """Ids de los productos que el control de duplicados apagó (o confirmó como la copia a apagar). Si no se puede
+    leer, ninguno: se compara contra todo, que es lo conservador."""
+    try:
+        with Session(engine) as session:
+            off = session.exec(select(AuditLog.product_id).where(AuditLog.action == "duplicate_disabled")).all()
+            targets = session.exec(select(AuditLog.disable_target_id).where(
+                AuditLog.action == "duplicate_confirmed", AuditLog.disable_target_id.is_not(None))).all()  # type: ignore[union-attr]
+        return {str(x) for x in (*off, *targets) if x and x != PLACEHOLDER_NEW}
+    except Exception:  # noqa: BLE001
+        log.exception("verify: no se pudieron leer los duplicados ya apagados")
+        return set()
+
+
+async def _prohibido(name: str | None):
+    """El veredicto de la lista de lo que no vendemos para este nombre, o None. Nunca lanza: si el filtro falla, /verify
+    sigue como siempre (el freno de verdad está antes de activar)."""
+    from app import prohibidos
+
+    try:
+        found = await prohibidos.lista()
+        return prohibidos.revisar(name, categorias=found.categorias)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify: el filtro de lo que no vendemos falló (%s)", type(exc).__name__)
+        return None
+
+
 @router.post("/radar/ml-supply", dependencies=[Depends(verify_api_key)])
 async def radar_ml_supply_endpoint(payload: RadarMlSupplyRequest) -> dict[str, Any]:
     """Luis (radar): cuántas publicaciones tiene ML Argentina por palabra. Siempre 200: cada término dice si salió
@@ -688,10 +723,13 @@ async def radar_precheck_get(refs: str = Query(..., min_length=1, max_length=50 
 
 @router.get("/api/llm-usage")
 async def llm_usage_summary(days: int = Query(30, ge=1, le=365)) -> dict[str, Any]:
-    """Gasto en modelos de lenguaje y de visión (Claude, Gemini, Qwen, MiMo, OpenAI): por día, por propósito y por modelo."""
+    """Gasto en modelos de lenguaje y de visión (Claude, Gemini, Qwen, MiMo, OpenAI): por día, por propósito y por modelo.
+    En `apify` va lo anotado en `apify_spend` en la misma ventana, por etiqueta."""
     from app import llm_usage
 
-    return await asyncio.to_thread(llm_usage.summary, days)
+    out = await asyncio.to_thread(llm_usage.summary, days)
+    out["apify"] = await asyncio.to_thread(llm_usage.apify_spend, days)
+    return out
 
 
 @router.get("/radar/ml-supply/usage", dependencies=[Depends(verify_api_key)])
@@ -735,9 +773,20 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     _reject_oversized_callback_ctx(payload)
 
     # Catálogo cacheado (TTL): no re-descargamos todo Vendure en cada verify.
-    # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos".
+    # Solo habilitados: un producto apagado no cuenta como "ya lo tenemos". Salvo que quien llama pida
+    # `include_disabled` (está por subir uno nuevo y lo que espera activación también cuenta).
     try:
-        existing = vendure_catalog.enabled_only(await vendure_catalog.get_catalog())
+        existing = await vendure_catalog.get_catalog()
+        if payload.include_disabled:
+            # De lo inactivo no cuenta lo que el control de duplicados ya apagó: es la copia de un producto que sigue
+            # en el catálogo (contra ese sí se compara). Lo demás inactivo cuenta, también lo que alguien retiró: la
+            # respuesta dice `matched_enabled: false` y quien llama decide.
+            off_as_dup = await asyncio.to_thread(_disabled_as_duplicate_ids)
+            existing = [p for p in existing if p.enabled or p.id not in off_as_dup]
+            # Los habilitados primero: si el mismo producto está activo e inactivo, gana el activo.
+            existing = sorted(existing, key=lambda p: not p.enabled)
+        else:
+            existing = vendure_catalog.enabled_only(existing)
     except Exception as exc:  # noqa: BLE001
         log.warning("verify: no se pudo traer el catálogo de Vendure: %s", exc)
         raise HTTPException(502, f"No se pudo consultar Vendure: {type(exc).__name__}")
@@ -766,6 +815,9 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
 
     # ── DUPLICADO ──────────────────────────────────────────────────
     if verdict.is_duplicate and verdict.candidate_id:
+        if payload.include_disabled:
+            hit = next((p for p in existing if p.id == verdict.candidate_id), None)
+            response.matched_enabled = None if hit is None else bool(hit.enabled)
         try:
             response.matched_product = await VendureClient().get_product_full(
                 verdict.candidate_id
@@ -796,6 +848,21 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
         return response
 
     # ── PRODUCTO NUEVO ─────────────────────────────────────────────
+    # Lo que no vendemos: el motivo viaja siempre en la respuesta; con `prohibidos_verify = 1` además se corta acá, antes
+    # de gastar Google Lens o una búsqueda de proveedor.
+    banned = await _prohibido(payload.name)
+    if banned is not None:
+        response.prohibido = {"categoria": banned.categoria, "palabra": banned.palabra, "motivo": banned.motivo}
+        if int(runtime.get("prohibidos_verify") or 0) == 1:
+            if not payload.dedup_only:
+                response.paco_status = "prohibido"
+            _record_verify(
+                payload, verdict, action="verify_prohibido",
+                detail=f"'{short_name}' no se mandó a buscar: {banned.motivo}",
+                dismissed=payload.dedup_only,
+            )
+            return response
+
     if _event_source(payload) == "luis":
         # Pestaña «Subidos a Vendure»: Google Lens ahora, la comparación cuando Paco lo suba. Vale para la consulta
         # (dedup_only) y para el envío a Paco que Luis le pide a Hugo (Luis nunca le habla a Paco directo).
@@ -1080,6 +1147,8 @@ _COSTLY_SETTINGS = frozenset({
     "lookup_shared_daily_limit",
     "lookup_shared_per_minute",
     "vision_rerank_daily_budget",
+    # No gasta (ahorra), pero decide cuándo el app afirma «lo tenemos» sin que un modelo mire las fotos.
+    "vision_skip_clip_score",
     "apify_meli_search_enabled",
     "apify_meli_search_daily_max",
     "pm_lens_enabled",
@@ -1105,6 +1174,9 @@ _COSTLY_SETTINGS = frozenset({
     "pm_autopilot",
     "pm_gate_measures_check",
     "pm_measures_check_daily_max",
+    # Sacan el freno de lo que no vendemos antes de activar o de mandar a buscar proveedor.
+    "prohibidos_gate",
+    "prohibidos_verify",
     # Cuánto tiene que empeorar una ficha mantenida para volver a la bandeja: subirlo a 100 apaga en silencio la
     # vigilancia de lo que se decidió mantener.
     "pm_review_worse_pct",
@@ -1451,6 +1523,7 @@ async def restore_duplicates(
                 pass
 
     unique_ids = sorted(before_state.keys())
+    names = {r.product_id: r.product_name for r in rows if r.product_name}
 
     if not confirm:
         # Categorizar para preview
@@ -1477,7 +1550,11 @@ async def restore_duplicates(
     restored: list[str] = []
     skipped_was_disabled: list[str] = []
     skipped_already_enabled: list[str] = []
+    skipped_prohibido: list[str] = []
+    skipped_sin_nombre: list[str] = []
+    skipped_sin_lista: list[str] = []
     failed: list[dict[str, str]] = []
+    from app.pricing import price_review_actions
 
     for pid in unique_ids:
         # 1) Si tenemos registro explícito de que estaba disabled, lo respetamos
@@ -1496,6 +1573,17 @@ async def restore_duplicates(
                 if current is None:
                     failed.append({"product_id": pid, "error": "Producto no existe en Vendure"})
                     continue
+            # 3) Lo que no vendemos no se vuelve a prender desde acá (con `prohibidos_gate`). Es una acción MASIVA: nadie
+            #    mira producto por producto, así que vale lo mismo que para Hugo solo (`auto=True`): hace falta una lista
+            #    completa y un nombre que mirar. El nombre es el de HOY en Vendure (el del evento viejo puede no serlo, o
+            #    faltar); si no se puede leer, este producto no se restaura.
+            if int(runtime.get("prohibidos_gate") or 0) == 1:
+                today = await client.get_product_name(pid)
+                banned = await price_review_actions.prohibido_check(pid, today, names.get(pid), auto=True)
+                if banned is not None:
+                    {price_review_actions.SIN_LISTA: skipped_sin_lista,
+                     price_review_actions.SIN_NOMBRE: skipped_sin_nombre}.get(banned[0], skipped_prohibido).append(pid)
+                    continue
             await client.enable_product(pid)
             restored.append(pid)
         except Exception as exc:  # noqa: BLE001
@@ -1510,6 +1598,9 @@ async def restore_duplicates(
             f"{len(restored)} restaurados, "
             f"{len(skipped_was_disabled)} respetados (estaban disabled antes), "
             f"{len(skipped_already_enabled)} ya estaban enabled, "
+            f"{len(skipped_prohibido)} frenados por la lista de lo que no vendemos, "
+            f"{len(skipped_sin_nombre)} sin nombre que mirar, "
+            f"{len(skipped_sin_lista)} sin lista completa, "
             f"{len(failed)} fallaron."
         ),
     ))
@@ -1520,6 +1611,9 @@ async def restore_duplicates(
         "restored": len(restored),
         "skipped_was_disabled": len(skipped_was_disabled),
         "skipped_already_enabled": len(skipped_already_enabled),
+        "skipped_prohibido": len(skipped_prohibido),
+        "skipped_sin_nombre": len(skipped_sin_nombre),
+        "skipped_sin_lista": len(skipped_sin_lista),
         "failed": len(failed),
         "failed_details": failed[:10],
     }

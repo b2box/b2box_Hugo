@@ -677,3 +677,72 @@ def test_vision_compare_tiene_rate_limit():
 
     (route,) = [r for r in app_routes.router.routes if r.path.endswith("/vision-compare")]
     assert any(d.call is verify_rate_limit for d in route.dependant.dependencies)
+
+
+# ─── El gasto queda anotado (apify_spend, etiqueta `app_meli_link`) ──
+
+
+def _spend_rows():
+    from app.db.models import ApifySpend
+
+    with Session(engine) as s:
+        return list(s.exec(select(ApifySpend).where(ApifySpend.label == apify_meli.SPEND_LABEL)).all())
+
+
+@pytest.fixture
+def spend_clean(apify_on):
+    from sqlalchemy import delete
+
+    from app.db.models import ApifySpend
+
+    def wipe():
+        with Session(engine) as s:
+            s.execute(delete(ApifySpend).where(ApifySpend.label == apify_meli.SPEND_LABEL))  # type: ignore[arg-type]
+            s.commit()
+
+    wipe()
+    yield
+    wipe()
+
+
+@pytest.mark.asyncio
+async def test_cada_corrida_lanzada_deja_su_gasto_estimado(spend_clean, monkeypatch):
+    FakeApify().install(monkeypatch)
+    assert (await apify_meli.fetch(UP_URL)).found
+    [row] = _spend_rows()
+    assert (row.usd, row.estimated, row.terms) == (0.005, True, 1)
+    # El mismo link sale de la caché: no se paga ni se anota de nuevo.
+    assert (await apify_meli.fetch(UP_URL)).found
+    assert len(_spend_rows()) == 1
+    # Una corrida que no trajo fotos igual se lanzó (y se cobró).
+    FakeApify(payload=[]).install(monkeypatch)
+    assert not (await apify_meli.fetch(_up(1))).found
+    assert len(_spend_rows()) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 402, 403, 404, 429])
+async def test_lo_que_apify_rechaza_antes_de_correr_no_se_anota(spend_clean, monkeypatch, status):
+    FakeApify(status=status).install(monkeypatch)
+    await apify_meli.fetch(UP_URL)
+    assert _spend_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_sin_cupo_o_apagado_no_se_anota_nada(spend_clean, monkeypatch):
+    FakeApify().install(monkeypatch)
+    monkeypatch.setattr(apify_meli, "_daily_budget", lambda: 0)
+    assert await apify_meli.fetch(UP_URL) is None
+    assert _spend_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_si_anotar_el_gasto_falla_el_resultado_sale_igual(spend_clean, monkeypatch):
+    FakeApify().install(monkeypatch)
+
+    def boom():
+        raise RuntimeError("sin base")
+
+    monkeypatch.setattr(apify_meli, "_record_spend", boom)
+    out = await apify_meli.fetch(UP_URL)
+    assert out is not None                     # `fetch` nunca lanza

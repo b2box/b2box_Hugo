@@ -43,6 +43,9 @@ class SpyVendure:
         SpyVendure.calls.append(("read", product_id))
         return product_id != "adm1"
 
+    async def get_product_name(self, product_id):
+        return f"Producto {product_id}"          # el nombre de hoy: lo mira el freno de lo que no vendemos
+
     async def disable_product(self, product_id):
         SpyVendure.calls.append(("disable", product_id))
 

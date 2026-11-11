@@ -47,6 +47,11 @@ ATTENTION = {
     "sin_vuelta_atras": "no se pudo volver atrás porque el producto ya tiene otra ficha abierta: esta se cerró",
     "rojo_tras_reactivar": "Hugo lo había reactivado solo y esta noche volvió a dar rojo firme",
 }
+# Un «reactivar a mano» que en realidad es el freno de lo que no vendemos: su propia frase.
+ATTENTION_BY_CODE = {
+    "prohibido": "no se activó: el nombre cae en la lista de lo que no vendemos",
+    "sin_lista_prohibidos": "no se activó solo: no se pudo cargar la lista de lo que no vendemos",
+}
 CAUSE_TEXT = {
     "a": "caja fuera de rango", "b": "tramos mal armados", "c": "certificado alto",
     "d": "valor bajo por m³", "e": "ML bajo el costo de fábrica", "ninguna": "sin causa clara",
@@ -172,7 +177,8 @@ def render(data: DigestData) -> tuple[str, str]:
         lines.append("")
     if data.attention:
         lines.append(f"PARA MIRAR A MANO ({len(data.attention)})")
-        lines += [_line(item, f" · {ATTENTION[ev.kind]}") for ev, item in data.attention]
+        lines += [_line(item, f" · {ATTENTION_BY_CODE.get(ev.motive_code or '') or ATTENTION[ev.kind]}")
+                  for ev, item in data.attention]
         lines.append("")
     if data.reactivated:
         lines.append(f"REACTIVADOS SOLOS ({len(data.reactivated)})")

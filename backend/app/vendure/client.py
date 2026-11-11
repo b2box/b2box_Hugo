@@ -204,6 +204,7 @@ class ReviewGuard:
     enabled: bool
     approval_status: str | None       # portal de proveedores: None/approved, pending o rejected
     has_supplier_contact: bool        # con contacto, reactivar encola la publicación en los otros canales
+    name: str | None = None           # el nombre de hoy en Vendure (lo mira el filtro de lo que no vendemos)
 
 
 def read_only_document(text: str) -> str:
@@ -1006,6 +1007,15 @@ class VendureClient:
             return None
         return bool(prod.get("enabled"))
 
+    async def get_product_name(self, product_id: str) -> str | None:
+        """El nombre de HOY del producto en Vendure, o None si no existe o no tiene. Lo usa lo que activa sin que una
+        persona mire producto por producto: el nombre guardado en un evento viejo puede no ser el de hoy."""
+        query = self._read_query("query ProductName($id: ID!) { product(id: $id) { id name } }")
+        data = await self._execute_with_retry(query, {"id": str(product_id)}, what=f"get_product_name({product_id})")
+        prod = data.get("product")
+        name = prod.get("name") if isinstance(prod, dict) else None
+        return name.strip() or None if isinstance(name, str) else None
+
     async def estimate_import_price(self, estimate_input: dict[str, Any]) -> dict[str, Any] | None:
         """Precio de importación estimado para un producto que NO está cargado.
 
@@ -1061,7 +1071,7 @@ class VendureClient:
         bandeja mira antes de reactivar. None si el producto no existe. Si el schema no tiene los custom fields, la
         query falla (TransportQueryError) y quien llama no reactiva: no se adivina."""
         query = self._read_query(
-            "query ReviewGuard($id: ID!) { product(id: $id) { id enabled customFields { approvalStatus supplierContact } } }")
+            "query ReviewGuard($id: ID!) { product(id: $id) { id name enabled customFields { approvalStatus supplierContact } } }")
         data = await self._execute_with_retry(query, {"id": str(product_id)}, what=f"get_review_guard({product_id})")
         prod = data.get("product")
         if not isinstance(prod, dict):
@@ -1073,6 +1083,7 @@ class VendureClient:
             enabled=bool(prod.get("enabled")),
             approval_status=(status.strip().lower() or None) if isinstance(status, str) else None,
             has_supplier_contact=isinstance(contact, str) and bool(contact.strip()),
+            name=prod.get("name") if isinstance(prod.get("name"), str) else None,
         )
 
     async def set_enabled(self, product_id: str, enabled: bool) -> bool | None:

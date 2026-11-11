@@ -642,6 +642,24 @@ async def _abandon_estimate(
         base.estimate_status = status
 
 
+def _clip_is_enough(shortlist: list[tuple[VendureProduct, float, str]], title: str, approximate_source: bool,
+                    name_confirm: float, name_reject: float) -> bool:
+    """¿Se puede saltear el rerank de visión? Solo con `vision_skip_clip_score` > 0 (default 0: nunca), con la foto del
+    propio link (no una prestada) y si el candidato que elegiría el camino de CLIP llega a ese score sin que su nombre lo
+    contradiga. Es el mismo candidato y el mismo veto por nombre que usa ese camino."""
+    try:
+        skip = float(runtime.get("vision_skip_clip_score") or 0.0)
+    except (KeyError, TypeError, ValueError):       # si el setting no se puede leer, el rerank corre como siempre
+        skip = 0.0
+    if skip <= 0 or approximate_source or not shortlist:
+        return False
+    selected = _best_embed_candidate(list(shortlist), title, name_confirm, name_reject)
+    if selected is None:
+        return False
+    _product, hit_score, _image, _name_sim, _name_ok, name_vetoed = selected
+    return not name_vetoed and hit_score >= skip
+
+
 async def _pick_match(est, query_urls, shortlist, title):
     """Rerank de visión. Con estimado pedido tiene techo de tiempo: Apify ya
     corre en paralelo y el deadline del estimado es de 50 s."""
@@ -954,7 +972,13 @@ async def _lookup_body(
             shortlist = sorted(best_by_pid.values(), key=lambda c: c[1], reverse=True)
             if not (shortlist and shortlist[0][1] >= match_thr):
                 start_estimate()
-            verdict = await _pick_match(est, query_urls, shortlist, title)
+            if _clip_is_enough(shortlist, title, approximate_source, name_confirm, name_reject):
+                # CLIP ya pasó el umbral fuerte y el nombre no lo contradice: no se paga el modelo de visión. Sigue por
+                # el camino de CLIP de abajo, con sus mismas reglas para afirmar.
+                log.info("lookup: CLIP %.2f sobre el umbral de salteo, sin rerank de visión", shortlist[0][1])
+                verdict = None
+            else:
+                verdict = await _pick_match(est, query_urls, shortlist, title)
 
             if verdict is not None:
                 # None sería "no pude correr el rerank" y cae al bloque de abajo;

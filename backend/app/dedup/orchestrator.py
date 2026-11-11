@@ -30,6 +30,10 @@ from app.vendure.client import VendureProduct
 
 Strategy = Literal["url", "image", "text"]
 
+# Comparaciones contra el catálogo a la vez (find_duplicate_in). Cada una puede bajar las fotos de un producto: 8 a la
+# vez no ahoga al servidor de imágenes ni a un proceso de una CPU.
+_COMPARE_CONCURRENCY = 8
+
 
 @dataclass(slots=True)
 class DedupVerdict:
@@ -130,11 +134,41 @@ async def find_duplicate_in(
     if not existing:
         return DedupVerdict(is_duplicate=False, confidence=0.0)
 
+    # Primero el link, contra TODOS: es exacto, no baja fotos y es el match que gana siempre (abajo también corta la
+    # búsqueda). Sin esta pasada, un link repetido recién se encontraba después de comparar texto y fotos contra todos los
+    # productos anteriores; con ella, «este link ya está en el catálogo» se contesta al instante. El resultado es el
+    # mismo de siempre: el primer producto con ese link.
+    if candidate.source_url:
+        url_th = runtime.get("dedup_url_threshold")
+        for product in existing:
+            url_score = url_similarity(candidate.source_url, product.source_url)
+            if url_score >= url_th:
+                return DedupVerdict(
+                    is_duplicate=True, confidence=url_score, matched_by=["url"],
+                    per_strategy_scores={"url": url_score, "image": 0.0, "text": 0.0}, candidate_id=product.id,
+                )
+
+    # Las comparaciones van de a `_COMPARE_CONCURRENCY` a la vez. Lo que tarda no es la CPU (2.000 productos son décimas
+    # de segundo) sino bajar y hashear fotos, que es espera de red: en serie, 2.000 productos eran más de un minuto.
+    # El resultado se arma en el orden del catálogo, igual que cuando iban de a una.
+    sem = asyncio.Semaphore(max(1, _COMPARE_CONCURRENCY))
+
+    async def _one(product: VendureProduct) -> DedupVerdict:
+        async with sem:
+            return await compare(candidate, _from_vendure(product))
+
+    tasks = [asyncio.ensure_future(_one(p)) for p in existing]
+    try:
+        verdicts = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        raise
+
     best_dup: DedupVerdict | None = None
     closest: DedupVerdict | None = None
     closest_id: str | None = None
-    for product in existing:
-        verdict = await compare(candidate, _from_vendure(product))
+    for product, verdict in zip(existing, verdicts):
         if verdict.is_duplicate:
             if best_dup is None or verdict.confidence > best_dup.confidence:
                 best_dup = verdict

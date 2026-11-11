@@ -988,6 +988,25 @@ class LuisIntake(SQLModel, table=True):
     gate_at: datetime | None = None
 
 
+class ProhibidoAnulado(SQLModel, table=True):
+    """Una persona dijo, para UN producto y UNA categoría, que el freno de lo que no vendemos se equivoca (un falso
+    positivo de la lista). Mientras la fila no esté revocada, ese producto no se frena por esa categoría. Queda quién,
+    cuándo y por qué; no se borra: se revoca (pricing/price_review_actions.py, `allow_not_sold`)."""
+    __tablename__ = "prohibido_anulado"
+    __table_args__ = (Index("ix_prohibido_anulado_product", "product_id", "categoria"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: str = Field(max_length=64)
+    categoria: str = Field(max_length=80)
+    palabra: str = Field(default="", max_length=120)
+    product_name: str | None = Field(default=None, max_length=200)
+    actor: str = Field(max_length=120)
+    at: datetime = Field(default_factory=utcnow)
+    note: str = Field(default="", max_length=500)
+    revoked_at: datetime | None = None
+    revoked_by: str | None = Field(default=None, max_length=120)
+
+
 class LlmUsage(SQLModel, table=True):
     """Una llamada a un modelo de lenguaje o de visión (Claude, Gemini, Qwen, MiMo, OpenAI): modelo, tokens, costo estimado
     y para qué se usó (app/llm_usage.py). Solo números y códigos: nunca el prompt ni la respuesta."""
