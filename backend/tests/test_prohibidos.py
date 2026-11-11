@@ -143,12 +143,12 @@ def test_archivo_vacio_o_roto_tampoco_abre_la_puerta(tmp_path, contenido):
 def test_el_archivo_se_relee_si_cambia(tmp_path):
     ruta = tmp_path / "lista.yaml"
     ruta.write_text("prohibidos:\n  - categoria: uno\n    es: [cosa]\n", encoding="utf-8")
-    assert [c.categoria for c in prohibidos.lista_local(ruta).categorias] == ["uno"]
+    assert [c.categoria for c in prohibidos.lista_local(ruta).categorias][0] == "uno"
     ruta.write_text("prohibidos:\n  - categoria: dos\n    es: [otra]\n", encoding="utf-8")
     import os
 
     os.utime(ruta, (1_900_000_000, 1_900_000_000))
-    assert [c.categoria for c in prohibidos.lista_local(ruta).categorias] == ["dos"]
+    assert [c.categoria for c in prohibidos.lista_local(ruta).categorias][0] == "dos"
 
 
 # ─── La nube ───────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ async def test_con_url_y_clave_se_usa_la_lista_de_la_nube_con_su_cabecera_y_cach
     nube = _Nube(body=NUBE_JSON)
     found = await prohibidos.lista(nube)
     assert found.fuente == prohibidos.FUENTE_NUBE and found.completa and found.version == 3
-    assert [c.categoria for c in found.categorias] == ["suplementos", "pirotecnia"]
+    assert [c.categoria for c in found.categorias][:2] == ["suplementos", "pirotecnia"]
     assert nube.calls[0]["url"] == "https://nube.example/motor-prohibidos"
     assert nube.calls[0]["headers"]["x-motor-key"] == "clave-de-prueba"
     assert prohibidos.revisar("petardo grande", categorias=found.categorias).categoria == "pirotecnia"
@@ -226,3 +226,46 @@ async def test_sin_nube_y_sin_archivo_queda_el_minimo(monkeypatch, tmp_path):
     found = await prohibidos.lista()
     assert found.fuente == prohibidos.FUENTE_MINIMO and not found.completa and found.categorias
     assert prohibidos.estado(found) == {"fuente": "minimo", "version": None, "categorias": 2, "completa": False}
+
+
+# ─── Ninguna fuente puede achicar la protección ────────────────────
+
+
+async def test_una_lista_de_la_nube_con_una_sola_categoria_no_reemplaza_todo(monkeypatch):
+    """Antes una respuesta 200 con una categoría dejaba pasar armas, químicos, vapeo… Lo que falta sale del archivo."""
+    _config(monkeypatch, "https://nube.example/x", "k")
+    body = {"version": 9, "categorias": [{"categoria": "pirotecnia", "es": ["petardo"], "zh": []}]}
+    found = await prohibidos.lista(_Nube(body=body))
+    assert found.fuente == prohibidos.FUENTE_NUBE and found.version == 9
+    nombres = [c.categoria for c in found.categorias]
+    assert nombres[0] == "pirotecnia" and {"suplementos", "quimicos", "armas", "tabaco y vapeo"} <= set(nombres)
+    for texto in ("petardo grande", "vitamina c", "pistola airsoft", "vape desechable", "shampoo anticaspa"):
+        assert prohibidos.revisar(texto, categorias=found.categorias) is not None, texto
+
+
+async def test_dentro_de_una_categoria_que_la_nube_trae_mandan_sus_palabras_salvo_el_minimo(monkeypatch):
+    """La nube puede sacar una palabra de una categoría (así se corrige un falso positivo), pero no las del mínimo."""
+    _config(monkeypatch, "https://nube.example/x", "k")
+    body = {"categorias": [{"categoria": "medicamentos", "es": ["jeringa"], "zh": [], "excepto": []},
+                           {"categoria": "suplementos", "es": ["gomitas"], "zh": [], "excepto": []}]}
+    found = await prohibidos.lista(_Nube(body=body))
+    assert prohibidos.revisar("termometro clinico", categorias=found.categorias) is None       # la nube lo sacó
+    assert prohibidos.revisar("gomitas surtidas", categorias=found.categorias) is not None
+    for texto in ("vitamina c", "creatina 300 g", "保健品"):                                    # el mínimo no se saca
+        v = prohibidos.revisar(texto, categorias=found.categorias)
+        assert v is not None and v.categoria == "suplementos", texto
+
+
+def test_el_archivo_tambien_lleva_el_minimo(tmp_path):
+    ruta = tmp_path / "corta.yaml"
+    ruta.write_text("prohibidos:\n  - categoria: suplementos\n    es: [gomitas]\n", encoding="utf-8")
+    found = prohibidos.lista_local(ruta)
+    assert found.fuente == prohibidos.FUENTE_ARCHIVO
+    assert {c.categoria for c in found.categorias} == {"suplementos", "quimicos"}
+    assert prohibidos.revisar("vitamina c", categorias=found.categorias) is not None
+    assert prohibidos.revisar("pesticida", categorias=found.categorias) is not None
+
+
+def test_con_piso_no_duplica_ni_cambia_lo_que_ya_estaba():
+    base = prohibidos.lista_local().categorias
+    assert prohibidos.con_piso(base, categorias=base, palabras=prohibidos.categorias_de(prohibidos.MINIMO)) == base

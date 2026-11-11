@@ -1931,6 +1931,11 @@ viaja en la imagen, y (3) un mínimo fijo de dos categorías. Con el mínimo el 
 activaciones **automáticas** se niegan (`sin_lista_prohibidos`) hasta que vuelva una lista completa; una persona puede
 seguir decidiendo desde la bandeja. La pasada del catálogo apagado se corta sin llenar la bandeja.
 
+**Ninguna fuente puede achicar la protección.** Si a la lista de la nube le falta una categoría que el archivo tiene, esa
+categoría se toma del archivo (una respuesta 200 con una sola categoría no reemplaza todo), y las palabras del mínimo de
+código rigen siempre. Dentro de una categoría que la nube sí trae mandan sus palabras: ahí es donde una persona corrige
+la lista.
+
 La comparación es la del radar de productos, con sus excepciones: sin tildes ni mayúsculas, **palabra entera** en español
 e inglés («crema» no frena «cremallera»), pedazo de texto en chino, y `excepto` desactiva la categoría para los accesorios
 («molinillo de café», «dispensador de jabón», «pistola de silicona»). `app/prohibidos.yaml` es una **copia** de la lista

@@ -12,6 +12,11 @@ De dónde sale la lista, siempre en este orden (el mismo en los tres sistemas qu
   2. si no hay URL o falla: `prohibidos.yaml`, que viaja al lado de este archivo (adentro de la imagen);
   3. si tampoco: el mínimo fijo de abajo (suplementos y químicos). Nunca «sin lista = todo permitido».
 
+Ninguna fuente puede ACHICAR la protección (`con_piso`): si a la lista de la nube le falta una categoría que el archivo
+tiene, esa categoría se toma del archivo (una respuesta 200 con una sola categoría no reemplaza todo); y las palabras del
+mínimo de código rigen siempre, vengan de donde vengan las demás. Dentro de una categoría que la nube sí trae mandan sus
+palabras: ahí es donde una persona corrige la lista.
+
 `prohibidos.yaml` es una COPIA de la lista canónica del radar de productos: no se edita a mano acá (se vuelve a copiar).
 
 Con el mínimo (3) el filtro sigue frenando lo que conoce, pero la lista NO está completa (`Lista.completa` es False): las
@@ -152,6 +157,35 @@ def categorias_de(crudo: Any, heredar: dict[str, Categoria] | None = None) -> tu
     return tuple(salida)
 
 
+def con_piso(cats: Iterable[Categoria], *, categorias: Iterable[Categoria] = (),
+             palabras: Iterable[Categoria] = ()) -> tuple[Categoria, ...]:
+    """`cats` con un piso debajo: ninguna fuente puede ACHICAR la protección.
+
+      * `categorias` (el archivo que viaja con el código): una categoría que a `cats` le falta se toma entera de ahí. Las
+        que `cats` sí trae quedan como vienen: ahí es donde una persona corrige palabras, y tiene que poder sacar una;
+      * `palabras` (el mínimo fijo en código): rige siempre. Sus categorías se agregan si faltan y, si están, sus
+        palabras se suman a las que haya. Lo del mínimo no se puede sacar desde afuera.
+    """
+    out = list(cats)
+    at = {c.categoria: i for i, c in enumerate(out)}
+    for extra in categorias:
+        if extra.categoria not in at:
+            at[extra.categoria] = len(out)
+            out.append(extra)
+    for floor in palabras:
+        i = at.get(floor.categoria)
+        if i is None:
+            at[floor.categoria] = len(out)
+            out.append(floor)
+            continue
+        c = out[i]
+        es = c.es + tuple(w for w in floor.es if w not in c.es)
+        zh = c.zh + tuple(w for w in floor.zh if w not in c.zh)
+        if (es, zh) != (c.es, c.zh):
+            out[i] = Categoria(c.categoria, c.porque, es, zh, c.excepto)
+    return tuple(out)
+
+
 _CJK = re.compile(r"[一-鿿]")
 
 
@@ -236,6 +270,7 @@ def _leer_archivo(ruta: Path | None = None) -> Lista | None:
         cats = categorias_de(crudo)
         if not cats:
             raise ValueError("sin categorías usables")
+        cats = con_piso(cats, palabras=categorias_de(MINIMO))          # el mínimo rige siempre
         version = crudo.get("version") if isinstance(crudo, dict) else None
         found: Lista | None = Lista(cats, FUENTE_ARCHIVO, version if isinstance(version, int) else None)
         log.info("prohibidos: %d categorías desde el archivo", len(cats))
@@ -293,6 +328,15 @@ async def _leer_nube(http: Any = None) -> Lista | None:
         cats = categorias_de(data, heredar)
         if not cats:
             raise ValueError("sin categorías usables")
+        # La lista de la nube no puede achicar la protección: lo que le falte del archivo se toma del archivo, y el
+        # mínimo de código rige siempre. Una respuesta 200 con una sola categoría ya no reemplaza todo.
+        traia = {c.categoria for c in cats}
+        cats = con_piso(cats, categorias=local.categorias if local is not None else (),
+                        palabras=categorias_de(MINIMO))
+        faltaban = [c.categoria for c in cats if c.categoria not in traia]
+        if faltaban:
+            log.warning("prohibidos: a la lista de la nube le faltan %d categorías (%s): se toman del archivo",
+                        len(faltaban), ", ".join(faltaban)[:200])
         version = data.get("version") if isinstance(data, dict) else None
     except Exception as exc:  # noqa: BLE001  (red, timeout, JSON roto, lista vacía): va el archivo
         # Solo el tipo: el mensaje de httpx puede arrastrar la URL.
