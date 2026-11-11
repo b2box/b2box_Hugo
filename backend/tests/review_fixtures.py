@@ -113,6 +113,8 @@ class FakeReviewVendure:
         if op == "FiscalProfile":
             return {"pricingFiscalProfile": self.profile}
         pid = str(v.get("id") or (v.get("input") or {}).get("id"))
+        if op == "ProductName":
+            return {"product": None if pid not in self.enabled else {"id": pid, "name": self.names.get(pid, f"Producto {pid}")}}
         if op == "GetEnabled":
             return {"product": {"id": pid, "enabled": self.enabled[pid]} if pid in self.enabled else None}
         if op == "ReviewGuard":

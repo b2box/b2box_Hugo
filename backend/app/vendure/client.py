@@ -1007,6 +1007,15 @@ class VendureClient:
             return None
         return bool(prod.get("enabled"))
 
+    async def get_product_name(self, product_id: str) -> str | None:
+        """El nombre de HOY del producto en Vendure, o None si no existe o no tiene. Lo usa lo que activa sin que una
+        persona mire producto por producto: el nombre guardado en un evento viejo puede no ser el de hoy."""
+        query = self._read_query("query ProductName($id: ID!) { product(id: $id) { id name } }")
+        data = await self._execute_with_retry(query, {"id": str(product_id)}, what=f"get_product_name({product_id})")
+        prod = data.get("product")
+        name = prod.get("name") if isinstance(prod, dict) else None
+        return name.strip() or None if isinstance(name, str) else None
+
     async def estimate_import_price(self, estimate_input: dict[str, Any]) -> dict[str, Any] | None:
         """Precio de importación estimado para un producto que NO está cargado.
 

@@ -377,6 +377,8 @@ async def item_detail(
         "hugo_disabled": item.hugo_disabled,
         "actions": price_review_actions.available_actions(item, list(events), decider=decider, mode=mode, pending=pending),
         "decisions_enabled": decider and mode != 0,
+        # Lo que dice hoy la lista de lo que no vendemos de este producto, y si una persona anuló el freno.
+        "not_sold": await price_review_actions.not_sold_status(item),
     })
     return out
 
@@ -428,6 +430,33 @@ async def undo(body: ActionIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
                actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
     """Vuelve al estado y al `enabled` de antes de la última acción humana (hasta 30 días). Sigue con `pm_mode = 0`."""
     return await _act(item_id, price_review_actions.DESHACER, actor, body)
+
+
+class AllowNotSoldIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/items/{item_id}/allow-not-sold")
+async def allow_not_sold(body: AllowNotSoldIn, item_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                         actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """«No es un producto prohibido»: la lista de lo que no vendemos se equivoca con ESTE producto. Saca el freno solo
+    para él (y solo para esa categoría), con quién y por qué en el registro. No activa nada."""
+    try:
+        return await price_review_actions.allow_not_sold(item_id, actor, body.note)
+    except price_review_actions.ActionError as exc:
+        raise HTTPException(exc.status, exc.detail()) from None
+
+
+@router.delete("/items/{item_id}/allow-not-sold")
+async def revoke_not_sold(item_id: int = Path(..., ge=1, le=DB_INT_MAX),
+                          actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
+    """Repone el freno para el producto de esta ficha."""
+    try:
+        return await asyncio.to_thread(price_review_actions.revoke_not_sold, item_id, actor)
+    except price_review_actions.ActionError as exc:
+        raise HTTPException(exc.status, exc.detail()) from None
 
 
 # ─── La persona manda y el semáforo aprende ───────────────────────

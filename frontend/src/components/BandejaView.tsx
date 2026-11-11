@@ -1,6 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, approveReview, decideReview, getReviewItem, getReviewItems, getReviewSummary, undoReview } from "../api";
+import {
+  allowNotSold,
+  ApiError,
+  approveReview,
+  decideReview,
+  getReviewItem,
+  getReviewItems,
+  getReviewSummary,
+  undoReview,
+} from "../api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
@@ -82,6 +91,8 @@ const EVENT_LABEL: Record<string, string> = {
   ya_apagado: "Seguía apagado: no hizo falta escribir",
   vendure_error: "Vendure no aceptó el cambio",
   reactivar_a_mano: "Hay que reactivarlo a mano",
+  anula_prohibido: "Dijo que no es un producto prohibido (anuló el freno para este producto)",
+  repone_prohibido: "Repuso el freno de lo que no vendemos para este producto",
   intent_descartado: "Cambio a medias descartado",
   escritura_huerfana: "Vendure tomó un cambio tarde: revisar a mano",
   vendure_incierto: "Vendure no respondió: no se sabe si tomó el cambio (se revisa solo)",
@@ -705,6 +716,68 @@ const VENDURE_EFFECT: Record<"apagar" | "reactivar" | "nada", string> = {
   nada: "No cambia nada en Vendure.",
 };
 
+// El freno de lo que no vendemos sobre ESTE producto: qué lo frena y, para quien decide, la salida por producto cuando
+// la lista se equivoca (queda quién y por qué). Anular no activa nada: después se activa por el botón de siempre.
+function NotSoldLine({ d, onChanged }: { d: PriceReviewDetail; onChanged: (ok: boolean, text: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const ns = d.not_sold;
+  if (!ns) return null;
+
+  async function run(note: string | null, done: string) {
+    setBusy(true);
+    try {
+      await allowNotSold(d.id, note);
+      onChanged(true, done);
+    } catch (e) {
+      onChanged(false, e instanceof ApiError ? e.message : "No se pudo guardar.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="text-xs space-y-1">
+      {ns.blocked && (
+        <p className="text-warning">
+          La lista de lo que no vendemos frena este producto: {ns.motivo}. No se puede activar desde acá.
+          {d.decisions_enabled && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-2"
+              disabled={busy}
+              onClick={() => {
+                const note = window.prompt(
+                  "¿Por qué no es un producto prohibido? (queda en el registro, con tu nombre)",
+                );
+                if (note && note.trim()) void run(note.trim(), "Freno anulado para este producto. Ya se puede activar.");
+              }}
+            >
+              No es un producto prohibido
+            </Button>
+          )}
+        </p>
+      )}
+      {ns.allowed.map((a) => (
+        <p key={a.categoria + a.at} className="text-muted-foreground">
+          Freno de «{a.categoria}» anulado para este producto por {a.by} ({fmtTime(a.at)}): {a.note}
+          {d.decisions_enabled && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-2"
+              disabled={busy}
+              onClick={() => void run(null, "Vuelve a regir la lista para este producto.")}
+            >
+              Reponer el freno
+            </Button>
+          )}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 function DecisionBlock({ d, onChanged }: { d: PriceReviewDetail; onChanged: () => void }) {
   const [open, setOpen] = useState<ReviewAction | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
@@ -772,6 +845,7 @@ function DecisionBlock({ d, onChanged }: { d: PriceReviewDetail; onChanged: () =
         </div>
       )}
       {reasons.length > 0 && <p className="text-xs text-muted-foreground">{reasons.join(" · ")}.</p>}
+      <NotSoldLine d={d} onChanged={(ok, text) => finished(ok, text)} />
       {notice && (
         <p
           className={cn(

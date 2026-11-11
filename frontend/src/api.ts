@@ -640,6 +640,21 @@ export function undoReview(id: number, input: ReviewActionInput): Promise<Review
   return postReviewAction(id, "undo", { expected_state: input.expectedState, motive_text: input.motiveText ?? null });
 }
 
+// «No es un producto prohibido»: saca el freno de lo que no vendemos para ESTE producto (queda quién y por qué). No
+// activa nada. DELETE lo repone.
+export async function allowNotSold(id: number, note: string | null): Promise<void> {
+  const r = await apiFetch(`/api/price-review/items/${id}/allow-not-sold`, note === null
+    ? { method: "DELETE" }
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note }) });
+  if (!r.ok) {
+    const detail = ((await r.json().catch(() => ({}))) as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+      throw new ApiError(String((detail as { message: unknown }).message), r.status);
+    }
+    throw new ApiError(detailText(detail, r.statusText), r.status);
+  }
+}
+
 // ─── La persona manda y el semáforo aprende ────────────────────────
 // Correcciones humanas al semáforo (alguien prendió un rojo o apagó un verde: Hugo no lo revierte) y los ajustes por
 // segmento que salen de ellas (propuestos, aplicados, con historial y Deshacer). Nada de esto escribe en Vendure.

@@ -43,6 +43,9 @@ class FakeVendure:
         FakeVendure.status_reads.append(product_id)
         return True
 
+    async def get_product_name(self, product_id):
+        return f"Producto {product_id}"          # el nombre de hoy: lo mira el freno de lo que no vendemos
+
     async def disable_product(self, product_id):
         FakeVendure.disabled.append(product_id)
 

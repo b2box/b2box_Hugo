@@ -654,6 +654,20 @@ def _record_verify(
         log.exception("No se pudo registrar AuditLog del verify")
 
 
+def _disabled_as_duplicate_ids() -> set[str]:
+    """Ids de los productos que el control de duplicados apagó (o confirmó como la copia a apagar). Si no se puede
+    leer, ninguno: se compara contra todo, que es lo conservador."""
+    try:
+        with Session(engine) as session:
+            off = session.exec(select(AuditLog.product_id).where(AuditLog.action == "duplicate_disabled")).all()
+            targets = session.exec(select(AuditLog.disable_target_id).where(
+                AuditLog.action == "duplicate_confirmed", AuditLog.disable_target_id.is_not(None))).all()  # type: ignore[union-attr]
+        return {str(x) for x in (*off, *targets) if x and x != PLACEHOLDER_NEW}
+    except Exception:  # noqa: BLE001
+        log.exception("verify: no se pudieron leer los duplicados ya apagados")
+        return set()
+
+
 async def _prohibido(name: str | None):
     """El veredicto de la lista de lo que no vendemos para este nombre, o None. Nunca lanza: si el filtro falla, /verify
     sigue como siempre (el freno de verdad está antes de activar)."""
@@ -764,6 +778,11 @@ async def verify(payload: VerifyRequest) -> VerifyResponse:
     try:
         existing = await vendure_catalog.get_catalog()
         if payload.include_disabled:
+            # De lo inactivo no cuenta lo que el control de duplicados ya apagó: es la copia de un producto que sigue
+            # en el catálogo (contra ese sí se compara). Lo demás inactivo cuenta, también lo que alguien retiró: la
+            # respuesta dice `matched_enabled: false` y quien llama decide.
+            off_as_dup = await asyncio.to_thread(_disabled_as_duplicate_ids)
+            existing = [p for p in existing if p.enabled or p.id not in off_as_dup]
             # Los habilitados primero: si el mismo producto está activo e inactivo, gana el activo.
             existing = sorted(existing, key=lambda p: not p.enabled)
         else:
@@ -1532,6 +1551,8 @@ async def restore_duplicates(
     skipped_was_disabled: list[str] = []
     skipped_already_enabled: list[str] = []
     skipped_prohibido: list[str] = []
+    skipped_sin_nombre: list[str] = []
+    skipped_sin_lista: list[str] = []
     failed: list[dict[str, str]] = []
     from app.pricing import price_review_actions
 
@@ -1552,10 +1573,17 @@ async def restore_duplicates(
                 if current is None:
                     failed.append({"product_id": pid, "error": "Producto no existe en Vendure"})
                     continue
-            # 3) Lo que no vendemos no se vuelve a prender desde acá (con `prohibidos_gate`).
-            if await price_review_actions.prohibido_check(pid, names.get(pid), auto=False) is not None:
-                skipped_prohibido.append(pid)
-                continue
+            # 3) Lo que no vendemos no se vuelve a prender desde acá (con `prohibidos_gate`). Es una acción MASIVA: nadie
+            #    mira producto por producto, así que vale lo mismo que para Hugo solo (`auto=True`): hace falta una lista
+            #    completa y un nombre que mirar. El nombre es el de HOY en Vendure (el del evento viejo puede no serlo, o
+            #    faltar); si no se puede leer, este producto no se restaura.
+            if int(runtime.get("prohibidos_gate") or 0) == 1:
+                today = await client.get_product_name(pid)
+                banned = await price_review_actions.prohibido_check(pid, today, names.get(pid), auto=True)
+                if banned is not None:
+                    {price_review_actions.SIN_LISTA: skipped_sin_lista,
+                     price_review_actions.SIN_NOMBRE: skipped_sin_nombre}.get(banned[0], skipped_prohibido).append(pid)
+                    continue
             await client.enable_product(pid)
             restored.append(pid)
         except Exception as exc:  # noqa: BLE001
@@ -1571,6 +1599,8 @@ async def restore_duplicates(
             f"{len(skipped_was_disabled)} respetados (estaban disabled antes), "
             f"{len(skipped_already_enabled)} ya estaban enabled, "
             f"{len(skipped_prohibido)} frenados por la lista de lo que no vendemos, "
+            f"{len(skipped_sin_nombre)} sin nombre que mirar, "
+            f"{len(skipped_sin_lista)} sin lista completa, "
             f"{len(failed)} fallaron."
         ),
     ))
@@ -1582,6 +1612,8 @@ async def restore_duplicates(
         "skipped_was_disabled": len(skipped_was_disabled),
         "skipped_already_enabled": len(skipped_already_enabled),
         "skipped_prohibido": len(skipped_prohibido),
+        "skipped_sin_nombre": len(skipped_sin_nombre),
+        "skipped_sin_lista": len(skipped_sin_lista),
         "failed": len(failed),
         "failed_details": failed[:10],
     }

@@ -1907,7 +1907,20 @@ Químicos, suplementos, medicamentos, vapeo, armas, inflamables, comida y cosmé
   (`por_activar`) con el motivo («no vendemos suplementos (vitamina)»). Se mira antes de las medidas, para no gastar la IA;
 - **la bandeja** (Activar, Mantener, «Ya lo corregí», Deshacer de un apagado) y la reactivación automática del recálculo:
   la escritura no sale; la ficha vuelve a como estaba con el motivo;
-- **restaurar duplicados**: los saltea y los cuenta en `skipped_prohibido`.
+- **restaurar duplicados** (`POST /api/restore-duplicates`): es una acción masiva, nadie mira producto por producto, así
+  que vale lo mismo que para Hugo solo. Relee el nombre de HOY en Vendure (el del evento viejo puede no serlo, o faltar)
+  y saltea lo que cae en la lista (`skipped_prohibido`), lo que no tiene nombre que mirar (`skipped_sin_nombre`) y todo si
+  no hay una lista completa (`skipped_sin_lista`).
+
+**Sin nombre no es «está bien».** Cuando nadie mira el producto (Hugo solo, o una acción masiva), «no había nada que
+revisar» frena igual que «la lista lo frena» (`sin_nombre_prohibidos`). Una persona que activa UNA ficha desde la bandeja
+no tiene ese freno: está mirando ese producto.
+
+**Si la lista se equivoca con un producto**, quien decide en la bandeja puede anular el freno **para ese producto** (y
+para esa categoría) desde la ficha: «No es un producto prohibido», con un motivo obligatorio. No activa nada: saca el
+freno, para ella y para Hugo, y queda el evento `anula_prohibido` con quién y por qué (tabla `prohibido_anulado`; no se
+borra, se revoca con «Reponer el freno»). Otro producto con el mismo problema sigue frenado. Así un falso positivo no
+obliga a apagar `prohibidos_gate` para todo el catálogo. API: `POST` / `DELETE /api/price-review/items/{id}/allow-not-sold`.
 
 Se miran juntos el nombre de hoy en Vendure, el de la ficha y, si el producto llegó por el radar, el título original con el
 que llegó (suele estar en chino o en inglés: dice cosas que la traducción se come).
@@ -1922,6 +1935,14 @@ La comparación es la del radar de productos, con sus excepciones: sin tildes ni
 e inglés («crema» no frena «cremallera»), pedazo de texto en chino, y `excepto` desactiva la categoría para los accesorios
 («molinillo de café», «dispensador de jabón», «pistola de silicona»). `app/prohibidos.yaml` es una **copia** de la lista
 canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista canónica>`.
+
+**Duplicados contando inactivos y tiempos.** Con `include_disabled`, de lo inactivo no cuenta lo que el control de
+duplicados ya apagó (es la copia de un producto que sigue en el catálogo, y contra ese sí se compara); lo demás inactivo
+cuenta, también lo que alguien retiró, y la respuesta lo dice en `matched_enabled: false`. El link repetido se contesta
+primero, sin comparar nada más. El resto de las comparaciones va de a 8 a la vez: lo que tarda no es la CPU (2.000
+productos son 0,35 s) sino bajar y hashear fotos. Medido con un catálogo de prueba de 2.000 productos, 1.412 comparaciones
+de fotos y 50 ms simulados por comparación: **73 s en serie, 9 s de a 8** (19 s con 4.000). Es una simulación: contra el
+catálogo real la primera pasada sobre los inactivos baja fotos que nunca se habían bajado, y esa no está medida.
 
 `/verify` devuelve siempre el motivo en `prohibido` (`{categoria, palabra, motivo}`). Con `prohibidos_verify = 1`
 (default 0) además **no reenvía** a buscar proveedor: responde `paco_status = "prohibido"`, no gasta Google Lens ni la

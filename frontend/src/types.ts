@@ -848,4 +848,13 @@ export interface PriceReviewDetail extends PriceReviewItemRow {
   decisions_enabled: boolean;
   // false: el costo de fábrica y el fee no vienen (solo los ve quien está en PRICE_REVIEW_VIEWERS).
   costs_visible: boolean;
+  // Lo que dice hoy la lista de lo que no vendemos de este producto (null = no lo frena y no hay nada anulado).
+  // `blocked`: la lista lo frena y nadie lo anuló. `allowed`: lo que una persona anuló para ESTE producto.
+  not_sold?: {
+    blocked: boolean;
+    categoria: string | null;
+    palabra: string | null;
+    motivo: string | null;
+    allowed: { categoria: string; by: string; at: string; note: string }[];
+  } | null;
 }

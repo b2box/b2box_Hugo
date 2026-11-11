@@ -30,6 +30,10 @@ from app.vendure.client import VendureProduct
 
 Strategy = Literal["url", "image", "text"]
 
+# Comparaciones contra el catálogo a la vez (find_duplicate_in). Cada una puede bajar las fotos de un producto: 8 a la
+# vez no ahoga al servidor de imágenes ni a un proceso de una CPU.
+_COMPARE_CONCURRENCY = 8
+
 
 @dataclass(slots=True)
 class DedupVerdict:
@@ -144,11 +148,27 @@ async def find_duplicate_in(
                     per_strategy_scores={"url": url_score, "image": 0.0, "text": 0.0}, candidate_id=product.id,
                 )
 
+    # Las comparaciones van de a `_COMPARE_CONCURRENCY` a la vez. Lo que tarda no es la CPU (2.000 productos son décimas
+    # de segundo) sino bajar y hashear fotos, que es espera de red: en serie, 2.000 productos eran más de un minuto.
+    # El resultado se arma en el orden del catálogo, igual que cuando iban de a una.
+    sem = asyncio.Semaphore(max(1, _COMPARE_CONCURRENCY))
+
+    async def _one(product: VendureProduct) -> DedupVerdict:
+        async with sem:
+            return await compare(candidate, _from_vendure(product))
+
+    tasks = [asyncio.ensure_future(_one(p)) for p in existing]
+    try:
+        verdicts = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        raise
+
     best_dup: DedupVerdict | None = None
     closest: DedupVerdict | None = None
     closest_id: str | None = None
-    for product in existing:
-        verdict = await compare(candidate, _from_vendure(product))
+    for product, verdict in zip(existing, verdicts):
         if verdict.is_duplicate:
             if best_dup is None or verdict.confidence > best_dup.confidence:
                 best_dup = verdict

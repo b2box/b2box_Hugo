@@ -72,7 +72,7 @@ from sqlmodel import Session, select
 
 from app import prohibidos, runtime
 from app.clock import utcnow
-from app.db.models import AuditLog, LuisIntake, PriceReviewEvent, PriceReviewItem
+from app.db.models import AuditLog, LuisIntake, PriceReviewEvent, PriceReviewItem, ProhibidoAnulado
 from app.db.session import engine
 from app.pricing import price_review as pr
 from app.pricing.price_review_digest import clean
@@ -638,8 +638,10 @@ def _manual(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -
 
 # ─── Lo que no vendemos ───────────────────────────────────────────
 
-PROHIBIDO, SIN_LISTA = "prohibido", "sin_lista_prohibidos"
+PROHIBIDO, SIN_LISTA, SIN_NOMBRE = "prohibido", "sin_lista_prohibidos", "sin_nombre_prohibidos"
 SIN_LISTA_TEXT = "no se pudo cargar la lista de lo que no vendemos, y sin ella Hugo no activa nada solo"
+SIN_NOMBRE_TEXT = ("el producto no tiene un nombre para mirar contra la lista de lo que no vendemos, y sin mirarlo no se "
+                   "activa solo")
 
 
 def _not_sold(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -> ActionError:
@@ -669,8 +671,11 @@ async def prohibido_check(product_id: str, *names: str | None, auto: bool) -> tu
     """¿El filtro de lo que no vendemos frena activar este producto? `(código, por qué)` o None.
 
       * con `prohibidos_gate = 0` no se mira nada;
-      * si es Hugo solo (`auto`) y no hay una lista completa (ni la de la nube ni el archivo): frena siempre;
-      * si algún nombre cae en la lista: frena, a Hugo y a una persona.
+      * `auto` = nadie está mirando ESTE producto: Hugo solo (portón, recálculo, vía rápida) o una acción masiva
+        (restaurar duplicados). Ahí frena también si no hay una lista completa (ni la de la nube ni el archivo) y si no
+        hay ningún nombre que mirar: «no había nada que revisar» no es «revisé y está bien»;
+      * si algún nombre cae en la lista: frena, a Hugo y a una persona, salvo que una persona haya anulado el freno para
+        ese producto y esa categoría (`allow_not_sold`).
     """
     if int(runtime.get("prohibidos_gate") or 0) != 1:
         return None
@@ -678,11 +683,113 @@ async def prohibido_check(product_id: str, *names: str | None, auto: bool) -> tu
     if auto and not found.completa:
         return SIN_LISTA, SIN_LISTA_TEXT
     texts = await asyncio.to_thread(product_names, product_id, *names)
+    if auto and not any(prohibidos.normalizar(t) for t in texts):
+        return SIN_NOMBRE, SIN_NOMBRE_TEXT
     verdict = prohibidos.revisar(*texts, categorias=found.categorias)
     if verdict is None:
         return None
-    return PROHIBIDO, (f"{verdict.motivo}. Si la lista se equivoca con este producto, hay que corregir la lista "
-                       "(o activarlo a mano en Vendure)")
+    if await asyncio.to_thread(_allowed_by_a_person, product_id, verdict.categoria):
+        return None
+    return PROHIBIDO, (f"{verdict.motivo}. Si la lista se equivoca con este producto, un decisor puede anular el freno "
+                       "para este producto desde la ficha («No es un producto prohibido»)")
+
+
+# ─── Anular el freno para UN producto (un falso positivo de la lista) ─────────────
+
+
+def _allowed_by_a_person(product_id: str, categoria: str) -> bool:
+    """¿Una persona anuló el freno de esta categoría para este producto (y nadie lo repuso)?"""
+    with Session(engine) as s:
+        return s.exec(select(ProhibidoAnulado.id).where(
+            ProhibidoAnulado.product_id == product_id, ProhibidoAnulado.categoria == categoria,
+            ProhibidoAnulado.revoked_at.is_(None)).limit(1)).first() is not None  # type: ignore[union-attr]
+
+
+def _live_overrides(product_id: str) -> list[ProhibidoAnulado]:
+    with Session(engine, expire_on_commit=False) as s:
+        return list(s.exec(select(ProhibidoAnulado).where(
+            ProhibidoAnulado.product_id == product_id, ProhibidoAnulado.revoked_at.is_(None))  # type: ignore[union-attr]
+            .order_by(ProhibidoAnulado.id)).all())  # type: ignore[arg-type]
+
+
+async def not_sold_status(item: PriceReviewItem, *names: str | None) -> dict[str, Any] | None:
+    """Para la pantalla: qué dice HOY la lista de lo que no vendemos de este producto y si una persona anuló el freno.
+    None si la lista no lo frena y no hay nada anulado. No lee Vendure (usa los nombres que ya tiene Hugo)."""
+    if int(runtime.get("prohibidos_gate") or 0) != 1:
+        return None
+    found = await prohibidos.lista()
+    texts = await asyncio.to_thread(product_names, item.product_id, item.product_name, *names)
+    verdict = prohibidos.revisar(*texts, categorias=found.categorias)
+    live = await asyncio.to_thread(_live_overrides, item.product_id)
+    if verdict is None and not live:
+        return None
+    mine = next((o for o in live if verdict is not None and o.categoria == verdict.categoria), None)
+    return {
+        "blocked": verdict is not None and mine is None,
+        "categoria": verdict.categoria if verdict is not None else None,
+        "palabra": verdict.palabra if verdict is not None else None,
+        "motivo": verdict.motivo if verdict is not None else None,
+        "allowed": [{"categoria": o.categoria, "by": o.actor, "at": o.at.isoformat() + "Z", "note": o.note}
+                    for o in live],
+    }
+
+
+async def allow_not_sold(item_id: int, actor: str, note: str | None, client: VendureClient | None = None) -> dict[str, Any]:
+    """Una persona dice que la lista se equivoca con ESTE producto: deja de frenarlo por esa categoría (a ella y a Hugo).
+    No activa nada: solo saca el freno; la activación sigue por el camino de siempre. Queda el evento `anula_prohibido`
+    con quién y por qué. `ActionError` si la lista no lo frena, falta el motivo o no se puede leer el nombre de hoy."""
+    text = clean(note or "", TEXT_MAX)
+    if len(text) < TEXT_MIN:
+        raise ActionError(400, "motivo_corto", f"Contá por qué no es un producto prohibido (al menos {TEXT_MIN} "
+                          "caracteres): queda en el registro.")
+    item, _pending = _load(item_id)
+    try:
+        today = await (client or VendureClient()).get_product_name(item.product_id)
+    except Exception as exc:  # noqa: BLE001  (sin el nombre de hoy no se anula: podría ser otro producto)
+        log.warning("prohibidos: no se pudo leer el nombre de %s para anular (%s)", item.product_id, error_code(exc))
+        raise ActionError(502, "vendure_error", "No se pudo leer el nombre del producto en Vendure: probá de nuevo en "
+                          "unos minutos.", item) from None
+    found = await prohibidos.lista()
+    texts = await asyncio.to_thread(product_names, item.product_id, today, item.product_name)
+    verdict = prohibidos.revisar(*texts, categorias=found.categorias)
+    if verdict is None:
+        raise ActionError(409, "no_frenado", "La lista de lo que no vendemos no frena este producto.", item)
+    now = utcnow()
+    with Session(engine, expire_on_commit=False) as s:
+        already = s.exec(select(ProhibidoAnulado.id).where(
+            ProhibidoAnulado.product_id == item.product_id, ProhibidoAnulado.categoria == verdict.categoria,
+            ProhibidoAnulado.revoked_at.is_(None)).limit(1)).first()  # type: ignore[union-attr]
+        if already is None:
+            s.add(ProhibidoAnulado(product_id=item.product_id, categoria=verdict.categoria[:80],
+                                   palabra=verdict.palabra[:120], product_name=(today or item.product_name or "")[:200]
+                                   or None, actor=actor[:120], at=now, note=text))
+            s.add(item)
+            pr.add_event(s, item, "anula_prohibido", actor=actor, motive_code=verdict.categoria[:24], motive_text=text,
+                         now=now, payload={"categoria": verdict.categoria, "palabra": verdict.palabra})
+            s.commit()
+    log.info("prohibidos: %s anuló el freno de «%s» para el producto %s", actor, verdict.categoria, item.product_id)
+    return {"item_id": item_id, "product_id": item.product_id, "categoria": verdict.categoria,
+            "palabra": verdict.palabra, "allowed": True}
+
+
+def revoke_not_sold(item_id: int, actor: str) -> dict[str, Any]:
+    """Repone el freno: revoca lo que se había anulado para el producto de esta ficha. Queda el evento."""
+    item, _pending = _load(item_id)
+    now = utcnow()
+    with Session(engine, expire_on_commit=False) as s:
+        rows = s.exec(select(ProhibidoAnulado).where(
+            ProhibidoAnulado.product_id == item.product_id, ProhibidoAnulado.revoked_at.is_(None))).all()  # type: ignore[union-attr]
+        if not rows:
+            raise ActionError(409, "nada_anulado", "Este producto no tiene el freno anulado.", item)
+        for row in rows:
+            row.revoked_at, row.revoked_by = now, actor[:120]
+            s.add(row)
+        s.add(item)
+        pr.add_event(s, item, "repone_prohibido", actor=actor, now=now,
+                     motive_text="Vuelve a regir la lista de lo que no vendemos para este producto.",
+                     payload={"categorias": [r.categoria for r in rows]})
+        s.commit()
+    return {"item_id": item_id, "product_id": item.product_id, "allowed": False, "revoked": len(rows)}
 
 
 async def _prohibido_blocker(item: PriceReviewItem, guard: ReviewGuard | None, actor: str) -> tuple[str, str] | None:

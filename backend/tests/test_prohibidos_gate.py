@@ -258,6 +258,139 @@ def test_restaurar_duplicados_no_prende_un_prohibido(fake):
             s.commit()
 
 
+def _dup_disabled(pid: str, name: str | None) -> None:
+    with Session(engine) as s:
+        s.add(AuditLog(action="duplicate_disabled", source="audit", product_id=pid, product_name=name,
+                       before='{"enabled": true}'))
+        s.commit()
+
+
+@pytest.fixture
+def restore(fake):
+    yield lambda: kit.client(kit.ADMIN).post("/api/restore-duplicates?confirm=true&safe=true").json()
+    with Session(engine) as s:
+        s.execute(delete(AuditLog).where(AuditLog.action.in_(("duplicate_disabled", "duplicates_restored_bulk"))))  # type: ignore[attr-defined]
+        s.commit()
+
+
+def test_restaurar_duplicados_mira_el_nombre_de_hoy_en_vendure_no_el_del_evento_viejo(fake, restore):
+    """El evento guardó un nombre inocente (o ninguno); hoy el producto se llama otra cosa."""
+    fake.enabled.update({"r3": False, "r4": False, "r5": False})
+    fake.names.update({"r3": "Vitamina C 1000 mg", "r4": "Insecticida en aerosol", "r5": "Organizador de escritorio"})
+    _dup_disabled("r3", "Frasco surtido")            # nombre viejo que no dice nada
+    _dup_disabled("r4", None)                        # el evento no tiene nombre
+    _dup_disabled("r5", None)
+    out = restore()
+    assert (out["skipped_prohibido"], out["restored"]) == (2, 1)
+    assert fake.enabled == {"r3": False, "r4": False, "r5": True}
+
+
+def test_restaurar_duplicados_sin_nombre_no_restaura(fake, restore):
+    """«No había nada que revisar» no es «revisé y está bien»."""
+    fake.enabled.update({"r6": False, "r7": False})
+    fake.names.update({"r6": "   ", "r7": "Organizador"})
+    _dup_disabled("r6", None)
+    _dup_disabled("r7", None)
+    out = restore()
+    assert (out["skipped_sin_nombre"], out["restored"]) == (1, 1)
+    assert fake.enabled == {"r6": False, "r7": True}
+
+
+def test_restaurar_duplicados_sin_lista_completa_no_restaura_nada(fake, restore, monkeypatch, tmp_path):
+    sin_lista(monkeypatch, tmp_path)
+    fake.enabled.update({"r8": False})
+    fake.names["r8"] = "Organizador"
+    _dup_disabled("r8", "Organizador")
+    out = restore()
+    assert (out["skipped_sin_lista"], out["restored"]) == (1, 0) and fake.enabled["r8"] is False
+
+
+def test_restaurar_duplicados_con_el_freno_apagado_no_lee_nombres(fake, restore):
+    w.set_setting("prohibidos_gate", 0)
+    fake.enabled["r9"] = False
+    fake.names["r9"] = "Vitamina C"
+    _dup_disabled("r9", None)
+    assert restore()["restored"] == 1 and fake.count("ProductName") == 0
+
+
+# ─── Sin nombre, Hugo solo no activa ───────────────────────────────
+
+
+async def test_la_accion_automatica_sin_ningun_nombre_no_activa(fake):
+    fake.enabled["sn1"] = False
+    fake.names["sn1"] = ""
+    item_id = w.make_item("sn1", pr.POR_ACTIVAR, open_key="sn1", product_name=None)
+    with pytest.raises(actions.ActionError) as exc:
+        await actions.auto_gate(item_id, actions.ACTIVAR_AUTO, pr.POR_ACTIVAR)
+    assert exc.value.extra["reason"] == "sin_nombre_prohibidos" and fake.writes() == []
+    # Una persona sí puede (está mirando ESE producto).
+    r = kit.decide(kit.client(), item_id, "activar", pr.POR_ACTIVAR)
+    assert r.status_code == 200, r.text
+
+
+# ─── Anular el freno para UN producto ──────────────────────────────
+
+ALLOW = "/api/price-review/items/{}/allow-not-sold"
+NOTE = "Son pastillas de freno para bicicleta, no un medicamento"
+
+
+def test_una_persona_anula_el_freno_para_un_producto_y_queda_registrado(fake):
+    fake.enabled.update({"an1": False, "an2": False})
+    fake.names.update({"an1": "Vaper desechable 5000 puff", "an2": "Vaper desechable 8000 puff"})
+    item_id = w.make_item("an1", pr.POR_ACTIVAR, open_key="an1", product_name="Vaper desechable 5000 puff")
+    other = w.make_item("an2", pr.POR_ACTIVAR, open_key="an2", product_name="Vaper desechable 8000 puff")
+    c = kit.client()
+    # Antes: frenado, y la ficha lo dice.
+    assert kit.decide(c, item_id, "activar", pr.POR_ACTIVAR).status_code == 409
+    detail = c.get(f"/api/price-review/items/{item_id}").json()
+    assert detail["not_sold"]["blocked"] is True and detail["not_sold"]["categoria"] == "tabaco y vapeo"
+    # Sin motivo no se anula; quien no decide, tampoco.
+    assert c.post(ALLOW.format(item_id), json={"note": "corto"}).status_code == 400
+    assert kit.client(kit.ADMIN).post(ALLOW.format(item_id), json={"note": NOTE}).status_code == 403
+    r = c.post(ALLOW.format(item_id), json={"note": NOTE})
+    assert r.status_code == 200, r.text
+    assert r.json()["categoria"] == "tabaco y vapeo" and fake.writes() == []        # anular no activa nada
+    ev = events(item_id)[-1]
+    assert (ev.kind, ev.actor, ev.motive_text) == ("anula_prohibido", kit.PAO, NOTE)
+    detail = c.get(f"/api/price-review/items/{item_id}").json()["not_sold"]
+    assert detail["blocked"] is False and detail["allowed"][0]["by"] == kit.PAO
+    # Ahora sí se activa. El otro producto, con el mismo problema, sigue frenado: es POR PRODUCTO.
+    assert kit.decide(c, item_id, "activar", pr.POR_ACTIVAR).status_code == 200
+    assert fake.enabled["an1"] is True
+    assert kit.decide(c, other, "activar", pr.POR_ACTIVAR).status_code == 409 and fake.enabled["an2"] is False
+    with Session(engine) as s:
+        s.execute(delete(actions.ProhibidoAnulado))
+        s.commit()
+
+
+async def test_lo_anulado_tambien_vale_para_hugo_y_se_puede_reponer(fake):
+    run = green(fake, "an3", "Termómetro clínico digital")
+    counts = await price_gate.process_run(run, now=w.NOW)
+    assert counts == {"bandeja": 1} and fake.writes() == []
+    [item] = w.items()
+    c = kit.client()
+    assert c.post(ALLOW.format(item.id), json={"note": NOTE}).status_code == 200
+    assert await actions.prohibido_check("an3", "Termómetro clínico digital", auto=True) is None
+    # Reponer el freno.
+    r = c.delete(ALLOW.format(item.id))
+    assert r.status_code == 200 and r.json()["revoked"] == 1
+    assert (await actions.prohibido_check("an3", "Termómetro clínico digital", auto=True))[0] == "prohibido"
+    assert events(int(item.id))[-1].kind == "repone_prohibido"
+    assert c.delete(ALLOW.format(item.id)).status_code == 409
+    with Session(engine) as s:
+        s.execute(delete(actions.ProhibidoAnulado))
+        s.commit()
+
+
+def test_no_se_anula_lo_que_la_lista_no_frena(fake):
+    fake.enabled["an4"] = False
+    fake.names["an4"] = "Organizador de cocina"
+    item_id = w.make_item("an4", pr.POR_ACTIVAR, open_key="an4", product_name="Organizador de cocina")
+    r = kit.client().post(ALLOW.format(item_id), json={"note": NOTE})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "no_frenado"
+    assert kit.client().get(f"/api/price-review/items/{item_id}").json()["not_sold"] is None
+
+
 # ─── /verify ───────────────────────────────────────────────────────
 
 SOURCE_URL = "https://detail.1688.com/offer/777.html"
@@ -354,3 +487,17 @@ async def test_verify_include_disabled_cuenta_lo_inactivo_y_dice_que_lo_es(verif
     verify_env([_prod("7", enabled=False), _prod("8", enabled=True)])
     out = await routes.verify(_payload(name="Organizador de cocina", dedup_only=True, include_disabled=True))
     assert out.is_duplicate is True and out.candidate_id == "8" and out.matched_enabled is True
+
+
+async def test_verify_include_disabled_no_cuenta_la_copia_que_el_control_de_duplicados_ya_apago(verify_env, monkeypatch):
+    """Un inactivo que Hugo apagó por duplicado es la copia de otro producto: contra ese (el que quedó) sí se compara."""
+    verify_env([_prod("7", enabled=False)])
+    with Session(engine) as s:
+        s.add(AuditLog(action="duplicate_disabled", source="audit", product_id="7", product_name="Organizador de cocina",
+                       product_source_url=SOURCE_URL))
+        s.commit()
+    out = await routes.verify(_payload(name="Organizador de cocina", dedup_only=True, include_disabled=True))
+    assert out.is_duplicate is False
+    with Session(engine) as s:
+        s.execute(delete(AuditLog).where(AuditLog.action == "duplicate_disabled"))
+        s.commit()
