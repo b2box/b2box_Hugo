@@ -2014,6 +2014,14 @@ Queda «listo» solo si:
 
 Lo que no llega a «listo» no abre ficha: queda anotado con el motivo y lo toma la corrida de la noche, como hoy.
 
+**Lo que la vía rápida frenó no lo activa el portón.** Con `pm_mode = 2` el portón activa solo los verdes firmes apagados
+que encuentra en la corrida, y no compara contra el catálogo inactivo. Por eso: (1) un verde firme que la vía rápida
+frenó por duplicado, aprobación o medidas **no deja snapshot** (la medición solo se guarda si no es verde firme, o si pasó
+todo); y (2) el portón, antes de activar cualquier cosa, consulta esos rechazos: lo que la vía rápida vio duplicado va a
+la bandeja con el motivo («la vía rápida lo frenó al subirlo») para que decida una persona, también con la medición de
+otra noche. Lo frenado por medidas vale igual mientras la guarda de medidas del portón esté apagada; con la guarda
+prendida, el portón revisa las medidas él mismo con los datos de hoy.
+
 Cómo mide: espera ~45 s desde el último aviso del producto (el que sube manda varios seguidos); solo productos apagados,
 nunca medidos, sin ficha viva y que vienen de una subida (link de proveedor de 1688 o unidos a lo que mandó el radar); uno
 a la vez y nunca con la corrida de la noche en curso. Primero la API de Mercado Libre (gratis); si no da un idéntico con

@@ -29,7 +29,12 @@ Cómo mide (un producto a la vez, nunca con la corrida de la noche en curso):
     cualquier otra (la noche no la vuelve a pagar);
   * el juez por IA no se usa: un idéntico confirmado solo por el juez no es «firme», así que no cambiaría el resultado;
   * el snapshot se guarda en la ÚLTIMA corrida terminada del semáforo (así el producto aparece hoy en el semáforo, el
-    recálculo y la bandeja lo tratan como a cualquier otro, y la noche siguiente lo vuelve a medir).
+    recálculo y la bandeja lo tratan como a cualquier otro, y la noche siguiente lo vuelve a medir), PERO solo si no es
+    verde firme o si pasó todo. Un verde firme que la vía rápida frenó (duplicado, aprobación, medidas) no deja
+    snapshot: con `pm_mode = 2` el portón activa solo los verdes firmes apagados de la corrida y no mira duplicados
+    contra lo inactivo. Y el portón, antes de activar cualquier cosa, consulta estos rechazos
+    (`price_gate._fast_track_block`): lo que la vía rápida frenó por duplicado va a la bandeja para que decida una
+    persona, también con la medición de otra noche.
 
 Topes: `fast_ready_daily_max` productos por día (hora de Argentina) y `fast_ready_apify_daily_max` búsquedas pagas. Cada
 intento queda en la tabla `fast_ready` con sus tiempos: `GET /api/price-monitor/fast-ready` dice cuántos llegaron a «listo»
@@ -345,14 +350,22 @@ async def _process(row: FastReady, pid: str, client: Any, started: float,
         await asyncio.to_thread(_finish, rid, PENDIENTE, "no_medible_ahora",
                                 snap.ml_error or "No se pudo medir en este momento", **names)
         return "no_medible_ahora"
-    if not await asyncio.to_thread(_attach, snap, int(run_id)):
-        await done(OMITIDO, "ya_medido", "Otra medición llegó antes", **names)
-        return "ya_medido"
-    numbers["snapshot_id"] = snap.id
     ms = int((time.monotonic() - started) * 1000)
     measured_event = motor_eventos.evento(hilo, "medido", "ok", ref=pid, ms=ms, costo_usd=apify_usd,
                                           motivo=f"{snap.color or 'sin_dato'} ({snap.ml_status})")
 
+    async def attach() -> bool:
+        """Guarda la medición en el semáforo. Solo se llama cuando ese snapshot NO puede hacer que el portón active algo
+        que la vía rápida frenó: o no es verde firme, o pasó todos los chequeos."""
+        if not await asyncio.to_thread(_attach, snap, int(run_id)):
+            await done(OMITIDO, "ya_medido", "Otra medición llegó antes", **names)
+            return False
+        numbers["snapshot_id"] = snap.id
+        return True
+
+    # Lo que sigue frena un verde firme. En esos casos el snapshot NO se guarda: con `pm_mode = 2` el portón activa solo
+    # los verdes firmes apagados que encuentra en la corrida, y no mira duplicados contra lo inactivo. Además el portón
+    # consulta estos rechazos antes de activar (price_gate._fast_track_block), también con la medición de otra noche.
     if dup_id is not None or flagged:
         text = (f"Parece duplicado del producto #{dup_id} del catálogo" if dup_id is not None
                 else "El control de duplicados o de fotos ya lo marcó")
@@ -368,6 +381,9 @@ async def _process(row: FastReady, pid: str, client: Any, started: float,
         category = corr.category_of(s, pid)
     decision = price_gate.classify(snap, params, now, rules, category)
     if decision.action != price_gate.ACTIVAR:
+        # No es verde firme: la medición sí queda en el semáforo (con ese snapshot el portón no activa nada).
+        if not await attach():
+            return "ya_medido"
         await done(NO_LISTO, decision.reason, decision.text, **numbers)
         motor_eventos.avisar(measured_event, motor_eventos.evento(hilo, "listo", "frenado", ref=pid,
                                                                   motivo=decision.reason))
@@ -390,6 +406,8 @@ async def _process(row: FastReady, pid: str, client: Any, started: float,
                                                                   costo_usd=measures_usd))
         return "medidas"
 
+    if not await attach():
+        return "ya_medido"
     ready = price_gate.GateDecision(price_gate.BANDEJA, RULE, decision.verdict, note=READY_TEXT)
     item = await asyncio.to_thread(price_gate._ensure_item, snap, pr.POR_ACTIVAR, ready, now, int(run_id))
     if item is None or item.state != pr.POR_ACTIVAR:

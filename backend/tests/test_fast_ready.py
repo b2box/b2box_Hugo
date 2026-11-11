@@ -278,6 +278,96 @@ async def test_pendiente_en_el_portal_de_proveedores_no_queda_listo(world):
     assert row("x7").status == "no_listo" and w.items() == []
 
 
+# ─── Lo que la vía rápida frenó no lo activa el portón ─────────────
+
+
+def _dup_catalog(pid: str) -> list[VendureProduct]:
+    return [VendureProduct(id="900", name="Otro nombre", slug="otro", description="", enabled=False,
+                           source_url=link_of(pid), image_urls=[], product_code=None, featured_image_url=None,
+                           first_variant_price_cents=100, variant_count=1)]
+
+
+def _snapshots(pid: str) -> list[MarketPriceSnapshot]:
+    with Session(engine) as s:
+        return list(s.exec(select(MarketPriceSnapshot).where(MarketPriceSnapshot.product_id == pid)).all())
+
+
+@pytest.mark.parametrize("why", ["duplicado", "medidas", "aprobacion"])
+async def test_un_verde_firme_frenado_no_deja_un_snapshot_que_el_porton_pueda_activar(world, why):
+    """Con `pm_mode = 2` el portón activa solo los verdes firmes apagados de la corrida, y no mira duplicados contra lo
+    inactivo: si la vía rápida guardara el snapshot, lo que ella frenó se activaría solo a los minutos."""
+    from app.pricing import price_gate
+
+    w.set_setting("pm_mode", 2)
+    w.set_setting("pm_gate_catalog_greens", 1)
+    w.set_setting("pm_gate_measures_check", 0)
+    world.upload("g1")
+    if why == "duplicado":
+        world.catalog = _dup_catalog("g1")
+    elif why == "medidas":
+        world.measures = SimpleNamespace(verdict=measures_check.MAL, motive="la caja no cierra", cost_usd=0.0002)
+    else:
+        world.fake.approval["g1"] = "pending"
+    assert await fast_ready.process_one("g1") != "listo"
+    assert _snapshots("g1") == [], "un verde firme frenado no queda en la corrida"
+    # El portón sobre esa corrida (el piloto a los 12 minutos de un reinicio, o «Aplicar ahora»): no hay nada que activar.
+    assert await price_gate.process_run(world.run, now=utcnow()) == {}
+    assert world.fake.writes() == [] and world.fake.enabled["g1"] is False
+
+
+async def test_el_porton_tampoco_activa_un_duplicado_con_la_medicion_de_otra_noche(world):
+    from app.pricing import price_gate
+
+    w.set_setting("pm_mode", 2)
+    w.set_setting("pm_gate_catalog_greens", 1)
+    w.set_setting("pm_gate_measures_check", 0)
+    world.upload("g2")
+    world.catalog = _dup_catalog("g2")
+    assert await fast_ready.process_one("g2") == "duplicado"
+    # La noche siguiente lo mide verde firme por su cuenta.
+    night = w.make_run()
+    w.add_snap(night, "g2", color="verde", prices=GREEN_PRICES, enabled=False, name="Organizador de cocina")
+    counts = await price_gate.process_run(night, now=w.NOW)
+    assert counts == {"catalogo_via_rapida_a_bandeja": 1}
+    assert world.fake.writes() == [] and world.fake.enabled["g2"] is False
+    [item] = w.items()
+    assert item.state == pr.POR_ACTIVAR and "porton:via_rapida_freno" in (item.flags or "")
+    porton = next(e for e in events(int(item.id)) if e.kind == "porton")
+    assert "la vía rápida lo frenó" in (porton.motive_text or "") and "#900" in (porton.motive_text or "")
+    # Una persona, que ve el motivo, sí puede activarlo.
+    assert kit.decide(kit.client(), int(item.id), "activar", pr.POR_ACTIVAR).status_code == 200
+    assert world.fake.enabled["g2"] is True
+
+
+async def test_lo_frenado_por_medidas_lo_vuelve_a_mirar_el_porton_si_tiene_su_guarda_prendida(world, monkeypatch):
+    """Con la guarda de medidas del portón prendida, el portón decide con las medidas de hoy; con la guarda apagada, el
+    rechazo de la vía rápida es el único chequeo que hubo y vale."""
+    from app.pricing import price_gate
+
+    w.set_setting("pm_mode", 2)
+    w.set_setting("pm_gate_catalog_greens", 1)
+    world.measures = SimpleNamespace(verdict=measures_check.MAL, motive="la caja no cierra", cost_usd=0.0002)
+    world.upload("g3")
+    assert await fast_ready.process_one("g3") == "medidas"
+    w.set_setting("pm_gate_measures_check", 0)
+    assert price_gate._fast_track_block("g3") is not None
+    w.set_setting("pm_gate_measures_check", 1)
+    assert price_gate._fast_track_block("g3") is None
+
+
+async def test_si_no_se_puede_consultar_la_via_rapida_el_porton_no_activa(world, monkeypatch):
+    from app.pricing import price_gate
+
+    def boom(_pid):
+        raise RuntimeError("sin base")
+
+    monkeypatch.setattr(price_gate, "_fast_track_block", boom)
+    world.upload("g4")
+    decision = price_gate.GateDecision(price_gate.ACTIVAR, "verde_firme")
+    out = price_gate._fast_track_guard(world.snapshot("g4", world.run), decision)
+    assert out.action == price_gate.BANDEJA and out.reason == price_gate.FAST_TRACK_BLOCK
+
+
 # ─── Lo que ni se mide ─────────────────────────────────────────────
 
 

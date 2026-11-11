@@ -60,6 +60,7 @@ from app import runtime
 from app.clock import utcnow
 from app.db.models import (
     AuditLog,
+    FastReady,
     LuisIntake,
     MarketPriceSnapshot,
     PriceReviewEvent,
@@ -510,6 +511,8 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
     if decision.action == ACTIVAR:
         decision = await _prohibidos_guard(snap, decision, row.name, row.vendure_name)
     if decision.action == ACTIVAR:
+        decision = await asyncio.to_thread(_fast_track_guard, snap, decision)
+    if decision.action == ACTIVAR:
         decision = await _measures_guard(snap, decision)
     if decision.action == ACTIVAR:
         item = await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
@@ -562,6 +565,44 @@ async def _prohibidos_guard(snap: MarketPriceSnapshot, decision: GateDecision, *
         return decision
     code, why = banned
     return GateDecision(BANDEJA, code[:24], decision.verdict, note=f"Verde firme, pero no se activa: {why}")
+
+
+FAST_TRACK_BLOCK = "via_rapida_freno"
+
+
+def _fast_track_block(product_id: str) -> str | None:
+    """¿La vía rápida (pricing/fast_ready.py) frenó este producto al subirlo por algo que el portón NO vuelve a mirar?
+    Devuelve el motivo, o None.
+
+      * `duplicado`: siempre. El portón no compara contra el catálogo inactivo, así que si la vía rápida lo vio duplicado
+        no se activa solo: lo decide una persona;
+      * `medidas_*`: solo con `pm_gate_measures_check = 0`. Con la guarda prendida el portón revisa las medidas él mismo
+        (con los datos de hoy); con la guarda apagada, el rechazo de la vía rápida es el único chequeo que hubo.
+    """
+    with Session(engine) as s:
+        row = s.exec(select(FastReady.reason, FastReady.reason_text).where(
+            FastReady.product_id == product_id, FastReady.status == "no_listo")).first()
+    if row is None:
+        return None
+    reason, text = row
+    if reason == "duplicado" or ((reason or "").startswith("medidas_")
+                                 and int(runtime.get("pm_gate_measures_check") or 0) != 1):
+        return text or reason
+    return None
+
+
+def _fast_track_guard(snap: MarketPriceSnapshot, decision: GateDecision) -> GateDecision:
+    """Un verde firme que la vía rápida frenó no se activa solo: va a la bandeja con el motivo. Si no se puede
+    consultar, tampoco se activa."""
+    try:
+        why = _fast_track_block(snap.product_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("portón: no se pudo consultar la vía rápida para %s (%s)", snap.product_id, error_code(exc))
+        why = "no se pudo consultar lo que decidió la vía rápida"
+    if why is None:
+        return decision
+    return GateDecision(BANDEJA, FAST_TRACK_BLOCK, decision.verdict,
+                        note=f"Verde firme, pero la vía rápida lo frenó al subirlo: {why}. Lo decide una persona")
 
 
 async def _measures_guard(snap: MarketPriceSnapshot, decision: GateDecision) -> GateDecision:
@@ -650,6 +691,10 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
             return "sin_lista"
         await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
         return "prohibido_a_bandeja"
+    decision = await asyncio.to_thread(_fast_track_guard, snap, decision)
+    if decision.action != ACTIVAR:
+        await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
+        return "via_rapida_a_bandeja"
     decision = await _measures_guard(snap, decision)
     if decision.action != ACTIVAR:
         await asyncio.to_thread(_ensure_item, snap, pr.POR_ACTIVAR, decision, now, run_id)
