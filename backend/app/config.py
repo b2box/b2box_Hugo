@@ -588,7 +588,8 @@ class Settings(EnvSettings):
     # Puesta en marcha automática (scheduler/jobs.py `autopilot_kickoff`): 1 = al arrancar, Hugo pasa SOLO a modo
     # automático una vez (pm_mode = 2) y corre el portón con la última corrida fresca (verdes firmes con medidas bien →
     # se activan; rojos firmes publicados → se apagan). 0 = no hace nada al arrancar.
-    pm_autopilot: int = 1
+    # Default 0: nada se activa solo hasta cumplir los números del plan (punto 6). Prenderlo es una decisión explícita.
+    pm_autopilot: int = 0
     # Vía rápida (pricing/fast_ready.py): 1 = cuando Vendure avisa de un producto recién subido, Hugo lo mide en el
     # momento y, si da verde firme con medidas revisadas, sin duplicado y fuera de la lista de lo que no vendemos, lo deja
     # en la bandeja como «listo para publicar» (no lo activa). 0 = apagada: se mide en la corrida de la noche.
@@ -601,6 +602,12 @@ class Settings(EnvSettings):
     # ninguna. Solo entorno.
     motor_eventos_url: str = ""
     motor_eventos_key: str = ""
+    # Gastos de IA en la nube (app/ai_usage_report.py): la edge function `ai-usage-ingest` y su clave, las mismas que usa
+    # Paco. Las dos o ninguna; la URL tiene que ser https. Solo entorno.
+    admin_ai_usage_url: str = ""
+    admin_ai_usage_key: str = ""
+    # Con qué nombre aparece Hugo en Gastos de IA.
+    hugo_ai_usage_feature: str = "hugo"
     # Lo que no vendemos (app/prohibidos.py): químicos, suplementos, medicamentos, vapeo, armas, inflamables, comida y
     # cosmética. 1 = ninguna activación (el portón, el recálculo, una persona desde la bandeja, la restauración de
     # duplicados) prende un producto cuyo nombre cae en la lista: queda en la bandeja con el motivo. Y si no se pudo

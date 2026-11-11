@@ -1230,6 +1230,15 @@ def register_jobs() -> None:
         id=RADAR_PRECHECK_JOB_ID,
         replace_existing=True, coalesce=True, max_instances=1,
     )
+    # Gasto de IA y Apify a la nube (app/ai_usage_report.py). Sin ADMIN_AI_USAGE_URL/KEY sale sin hacer nada.
+    from app import ai_usage_report
+
+    scheduler.add_job(
+        ai_usage_report.reportar,
+        IntervalTrigger(minutes=ai_usage_report.REPORT_EVERY_MIN),
+        id=ai_usage_report.JOB_ID,
+        replace_existing=True, coalesce=True, max_instances=1,
+    )
     # Muestras de desgloses de Vendure para el factor del prechequeo: 05:00 UTC (02:00 ART), antes del semáforo.
     scheduler.add_job(
         price_factor_refresh,
