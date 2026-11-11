@@ -4,6 +4,7 @@
 #   tests     la suite de backend, partida en 4 tandas parejas que corren en paralelo
 #             (backend/scripts/ci_shard.py reparte los archivos; cada archivo cae en una sola tanda)
 #   frontend  el dashboard compila (tsc + vite build)
+#   quarantine  las pocas pruebas de backend/tests/ci_quarantine.txt (dependen de la máquina): se ven, pero no frenan
 #
 # Las dependencias salen SIEMPRE de backend/uv.lock (`uv sync --locked`), como en la imagen: si la suite pasa acá, pasa
 # con las mismas versiones que corren en producción. No necesita ninguna credencial: todo lo externo está simulado.
@@ -62,7 +63,33 @@ jobs:
         run: |
           python backend/scripts/ci_shard.py 4 ${{ matrix.shard }} > shard-files.txt
           echo "Archivos en esta tanda: $(wc -l < shard-files.txt)"
-          xargs backend/.venv/bin/python -m pytest -q -p no:cacheprovider --durations=15 < shard-files.txt
+          # Lo que está en cuarentena corre aparte (job «cuarentena») y no frena este check.
+          # (Con archivos como argumento, pytest toma `backend/` como raíz: los ids van sin ese prefijo.)
+          DESELECT=$(grep -vE '^[[:space:]]*(#|$)' backend/tests/ci_quarantine.txt | sed 's#^backend/#--deselect=#' | tr '\n' ' ')
+          xargs backend/.venv/bin/python -m pytest -q -p no:cacheprovider --durations=15 $DESELECT < shard-files.txt
+
+  quarantine:
+    name: cuarentena (no frena)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+      - name: Dependencias (exactas, del lock)
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Pruebas en cuarentena (backend/tests/ci_quarantine.txt)
+        run: |
+          grep -vE '^[[:space:]]*(#|$)' backend/tests/ci_quarantine.txt > quarantine.txt || true
+          if [ -s quarantine.txt ]; then
+            xargs backend/.venv/bin/python -m pytest -q -p no:cacheprovider < quarantine.txt
+          else
+            echo "No hay pruebas en cuarentena."
+          fi
 
   frontend:
     name: dashboard compila

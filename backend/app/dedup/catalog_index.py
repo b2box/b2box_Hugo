@@ -86,7 +86,7 @@ class _State:
     # Productos con AL MENOS un vector en la matriz. `products` incluye también
     # a los que tenían foto pero cuyo embedding falló: esos no se pueden puntuar.
     vector_ids: frozenset[str] = frozenset()
-    built_at: float = 0.0
+    built_at: float = float("-inf")     # nunca (no 0.0: ver invalidate)
     building: bool = False
     progress_done: int = 0
     progress_total: int = 0
@@ -240,8 +240,9 @@ def _warn_if_thresholds_look_uncentered() -> None:
 
 
 def invalidate() -> None:
-    """Marca el índice como viejo; el próximo ensure_index() lo reconstruye."""
-    _state.built_at = 0.0
+    """Marca el índice como viejo; el próximo ensure_index() lo reconstruye. No con 0.0: `time.monotonic()` cuenta desde
+    que arrancó la máquina, y en una recién prendida «hace 0.0» todavía cae dentro del TTL (ver vendure/catalog.py)."""
+    _state.built_at = float("-inf")
 
 
 async def build(force: bool = False) -> dict:

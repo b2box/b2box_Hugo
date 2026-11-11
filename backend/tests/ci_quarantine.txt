@@ -1,0 +1,11 @@
+# Pruebas en cuarentena en CI: una por línea, con el id de pytest relativo a la raíz del repo.
+#
+# Lo que está acá NO frena el check de la suite: corre aparte, en el job «cuarentena», que muestra su resultado pero no
+# pone la PR en rojo. Es para pruebas cuyo resultado depende de la máquina (cómo se intercalan las tareas, cuántos
+# núcleos tiene) y no del código. Cada línea lleva arriba por qué está y qué haría falta para sacarla. La lista tiene que
+# tender a vacía: una prueba que nadie mira no protege nada.
+
+# Compara una corrida entera del semáforo contra un archivo dorado, con 4 productos a la vez. En el runner de GitHub el
+# caso [defecto-11] hizo una búsqueda web menos que el dorado (las demás combinaciones pasaron); en local pasa siempre.
+# Para sacarla: que la corrida de la prueba sea determinista (un producto a la vez o un orden fijo de las búsquedas).
+backend/tests/test_qa3_regresion_e8209e1.py::test_origin_main_dump_or_compare

@@ -2178,6 +2178,10 @@ un `backend/.env`; no tocan red ni Vendure.
   `python backend/scripts/ci_shard.py 4 2 | xargs python -m pytest -q`;
 - `dashboard compila`: `npm ci && npm run build` en `frontend/`.
 
+- `cuarentena (no frena)`: las pruebas listadas en `backend/tests/ci_quarantine.txt`, cuyo resultado depende de la
+  máquina y no del código. Corren y se ve si pasan, pero no ponen la PR en rojo; las tandas las saltean. Cada una dice en
+  ese archivo por qué está y qué hace falta para sacarla. La lista tiene que tender a vacía.
+
 No usa ninguna credencial. La única prueba que sale a la red es `test_net_guard.py::test_allows_public_https`, que
 resuelve `example.com` por DNS (en una máquina sin DNS falla; en el runner de GitHub pasa).
 
