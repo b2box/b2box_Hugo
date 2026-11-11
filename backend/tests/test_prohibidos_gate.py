@@ -331,6 +331,7 @@ async def test_la_accion_automatica_sin_ningun_nombre_no_activa(fake):
 # ─── Anular el freno para UN producto ──────────────────────────────
 
 ALLOW = "/api/price-review/items/{}/allow-not-sold"
+REVOKE = "/api/price-review/items/{}/revoke-not-sold"
 NOTE = "Son pastillas de freno para bicicleta, no un medicamento"
 
 
@@ -372,11 +373,11 @@ async def test_lo_anulado_tambien_vale_para_hugo_y_se_puede_reponer(fake):
     assert c.post(ALLOW.format(item.id), json={"note": NOTE}).status_code == 200
     assert await actions.prohibido_check("an3", "Termómetro clínico digital", auto=True) is None
     # Reponer el freno.
-    r = c.delete(ALLOW.format(item.id))
+    r = c.post(REVOKE.format(item.id))
     assert r.status_code == 200 and r.json()["revoked"] == 1
     assert (await actions.prohibido_check("an3", "Termómetro clínico digital", auto=True))[0] == "prohibido"
     assert events(int(item.id))[-1].kind == "repone_prohibido"
-    assert c.delete(ALLOW.format(item.id)).status_code == 409
+    assert c.post(REVOKE.format(item.id)).status_code == 409
     with Session(engine) as s:
         s.execute(delete(actions.ProhibidoAnulado))
         s.commit()

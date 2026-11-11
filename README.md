@@ -1920,7 +1920,8 @@ no tiene ese freno: está mirando ese producto.
 para esa categoría) desde la ficha: «No es un producto prohibido», con un motivo obligatorio. No activa nada: saca el
 freno, para ella y para Hugo, y queda el evento `anula_prohibido` con quién y por qué (tabla `prohibido_anulado`; no se
 borra, se revoca con «Reponer el freno»). Otro producto con el mismo problema sigue frenado. Así un falso positivo no
-obliga a apagar `prohibidos_gate` para todo el catálogo. API: `POST` / `DELETE /api/price-review/items/{id}/allow-not-sold`.
+obliga a apagar `prohibidos_gate` para todo el catálogo. API: `POST /api/price-review/items/{id}/allow-not-sold` y
+`POST /api/price-review/items/{id}/revoke-not-sold`.
 
 Se miran juntos el nombre de hoy en Vendure, el de la ficha y, si el producto llegó por el radar, el título original con el
 que llegó (suele estar en chino o en inglés: dice cosas que la traducción se come).

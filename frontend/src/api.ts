@@ -641,11 +641,13 @@ export function undoReview(id: number, input: ReviewActionInput): Promise<Review
 }
 
 // «No es un producto prohibido»: saca el freno de lo que no vendemos para ESTE producto (queda quién y por qué). No
-// activa nada. DELETE lo repone.
+// activa nada. Con `note` null lo repone.
 export async function allowNotSold(id: number, note: string | null): Promise<void> {
-  const r = await apiFetch(`/api/price-review/items/${id}/allow-not-sold`, note === null
-    ? { method: "DELETE" }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note }) });
+  const r = await apiFetch(`/api/price-review/items/${id}/${note === null ? "revoke-not-sold" : "allow-not-sold"}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(note === null ? {} : { note }),
+  });
   if (!r.ok) {
     const detail = ((await r.json().catch(() => ({}))) as { detail?: unknown }).detail;
     if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {

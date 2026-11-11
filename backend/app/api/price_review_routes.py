@@ -449,7 +449,7 @@ async def allow_not_sold(body: AllowNotSoldIn, item_id: int = Path(..., ge=1, le
         raise HTTPException(exc.status, exc.detail()) from None
 
 
-@router.delete("/items/{item_id}/allow-not-sold")
+@router.post("/items/{item_id}/revoke-not-sold")
 async def revoke_not_sold(item_id: int = Path(..., ge=1, le=DB_INT_MAX),
                           actor: str = Depends(auth.require_decider)) -> dict[str, Any]:
     """Repone el freno para el producto de esta ficha."""
