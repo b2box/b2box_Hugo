@@ -26,7 +26,7 @@ from typing import Any
 from sqlmodel import Session, func, select
 
 from app.clock import utcnow
-from app.db.models import LlmUsage
+from app.db.models import ApifySpend, LlmUsage
 from app.db.session import engine
 
 log = logging.getLogger(__name__)
@@ -144,3 +144,22 @@ def summary(days: int = 30, now: datetime | None = None) -> dict[str, Any]:
             unpriced += 1
     return {"days": int(days), "total": total, "by_day": dict(sorted(by_day.items())), "by_purpose": by_purpose,
             "by_model": by_model, "sin_precio": unpriced, "total_historico_usd": round(total_all, 6)}
+
+
+def apify_spend(days: int = 30, now: datetime | None = None) -> dict[str, Any]:
+    """Lo anotado en `apify_spend` en los últimos `days` días, por etiqueta (radar, prechequeo, links de Mercado Libre del
+    app…): corridas, USD y cuántas son estimadas. No incluye lo que cada consumidor guarda en su propia tabla."""
+    now = now or utcnow()
+    since = now - timedelta(days=max(1, int(days)))
+    with Session(engine) as s:
+        rows = s.exec(select(ApifySpend.label, ApifySpend.usd, ApifySpend.estimated)
+                      .where(ApifySpend.created_at >= since)).all()
+    by_label: dict[str, dict[str, Any]] = {}
+    total = 0.0
+    for label, usd, estimated in rows:
+        b = by_label.setdefault(label or "?", {"runs": 0, "usd": 0.0, "estimated_runs": 0})
+        b["runs"] += 1
+        b["usd"] = round(b["usd"] + float(usd or 0.0), 6)
+        b["estimated_runs"] += bool(estimated)
+        total += float(usd or 0.0)
+    return {"total_usd": round(total, 6), "by_label": by_label}

@@ -70,9 +70,9 @@ from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from app import runtime
+from app import prohibidos, runtime
 from app.clock import utcnow
-from app.db.models import AuditLog, PriceReviewEvent, PriceReviewItem
+from app.db.models import AuditLog, LuisIntake, PriceReviewEvent, PriceReviewItem
 from app.db.session import engine
 from app.pricing import price_review as pr
 from app.pricing.price_review_digest import clean
@@ -198,6 +198,9 @@ class _Move:
     intent_id: int | None = None                             # el evento `intent` de esta escritura
     intent_at: datetime | None = None                        # y su hora: desde ahí vale «Hugo lo apagó»
     undoes: str | None = None                                # con Deshacer: el `kind` de la acción que se deshace
+    # Solo las acciones de `hugo:auto`: por qué regla y en qué corrida del semáforo (`{"regla", "corrida"}`). Viaja en el
+    # `intent` y queda en el evento de la escritura: es el registro de «qué hizo Hugo solo» (pricing/auto_actions.py).
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 # ─── Validación ───────────────────────────────────────────────────
@@ -380,10 +383,11 @@ def _plan_undo(item: PriceReviewItem, now: datetime) -> _Move:
 
 async def act(item_id: int, action: str, actor: str, *, expected_state: str, motive_code: str | None = None,
               motive_text: str | None = None, client: VendureClient | None = None,
-              hold: tuple[str, str] | None = None) -> dict[str, Any]:
+              hold: tuple[str, str] | None = None, audit: dict[str, Any] | None = None) -> dict[str, Any]:
     """Hace una acción sobre una ficha y devuelve `{item_id, state, version, wrote}`. Levanta `ActionError` (400, 404,
     409, 502) si no se hizo: la ficha queda como estaba. `hold` = (código, por qué): una reactivación que no se puede hacer
-    sola (el piso de precio del recálculo) y queda «reactivar a mano» por el mismo camino que una guarda."""
+    sola (el piso de precio del recálculo) y queda «reactivar a mano» por el mismo camino que una guarda. `audit` (solo
+    `hugo:auto`) = `{"regla", "corrida"}`: queda en el evento de la escritura."""
     if action not in ACTION_LABEL or (action in AUTO_ACTIONS and actor != pr.ACTOR_AUTO):
         raise ActionError(400, "accion_invalida", "Acción desconocida.")
     code, text = validate(action, motive_code, motive_text)
@@ -406,6 +410,8 @@ async def act(item_id: int, action: str, actor: str, *, expected_state: str, mot
         mv, code = _plan_undo(item, now), "revertido"
     else:
         mv = _plan_move(item, action, actor, code, text, now)
+    if actor == pr.ACTOR_AUTO and audit:
+        mv.audit = _clean_audit(audit)
     mv.before = {"state_since": item.state_since, **{k: getattr(item, k) for k in mv.values if k != "state_since"}}
     _start(item, mv, actor, code, text, now)
     if mv.write is None:
@@ -442,22 +448,39 @@ def _note_correction(item: PriceReviewItem, mv: _Move, actor: str, code: str | N
 
 
 async def auto_reactivate(item_id: int, expected_state: str, client: VendureClient | None = None, *,
-                          hold: tuple[str, str] | None = None) -> dict[str, Any]:
+                          hold: tuple[str, str] | None = None, rule: str = "recalculo_ya_no_rojo",
+                          run_id: int | None = None) -> dict[str, Any]:
     """La reactivación automática del recálculo (pricing/price_recalc.py): corrigiendo → corregido, con actor `hugo:auto`.
     Es `act` tal cual: intención, guardas (`approvalStatus`, duplicado o BX sin foto posterior, sigue apagado), un solo
     intento, verificación, conciliación si queda incierto, evento y AuditLog. Si una guarda frena (o viene `hold`: el
     precio quedó demasiado bajo), la ficha vuelve a como estaba con `reactivar_a_mano` y levanta `ActionError`, como con
     una persona. Con `pm_mode = 0` no corre."""
-    return await act(item_id, REACTIVAR_AUTO, pr.ACTOR_AUTO, expected_state=expected_state, client=client, hold=hold)
+    return await act(item_id, REACTIVAR_AUTO, pr.ACTOR_AUTO, expected_state=expected_state, client=client, hold=hold,
+                     audit={"regla": rule, "corrida": run_id})
 
 
-async def auto_gate(item_id: int, action: str, expected_state: str, client: VendureClient | None = None) -> dict[str, Any]:
+async def auto_gate(item_id: int, action: str, expected_state: str, client: VendureClient | None = None, *,
+                    rule: str | None = None, run_id: int | None = None) -> dict[str, Any]:
     """Las acciones del portón de precio (pricing/price_gate.py): `activar_auto` o `inactivar_auto`, actor `hugo:auto`. Es
     `act` tal cual (intención, guardas, un solo intento, verificación, conciliación, evento y AuditLog). Con `pm_mode` en 0
-    no corre (y el portón solo llama con 2)."""
+    no corre (y el portón solo llama con 2). `rule` y `run_id` (por qué regla y con qué corrida del semáforo) quedan en el
+    evento de la escritura."""
     if action not in (ACTIVAR_AUTO, INACTIVAR_AUTO):
         raise ActionError(400, "accion_invalida", "Acción desconocida.")
-    return await act(item_id, action, pr.ACTOR_AUTO, expected_state=expected_state, client=client)
+    return await act(item_id, action, pr.ACTOR_AUTO, expected_state=expected_state, client=client,
+                     audit={"regla": rule, "corrida": run_id})
+
+
+def _clean_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    """Solo `regla` (código corto) y `corrida` (entero): es lo que entra al evento."""
+    out: dict[str, Any] = {}
+    rule = audit.get("regla")
+    if isinstance(rule, str) and rule.strip():
+        out["regla"] = rule.strip()[:60]
+    run = audit.get("corrida")
+    if isinstance(run, int) and not isinstance(run, bool):
+        out["corrida"] = run
+    return out
 
 
 def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text: str | None, now: datetime) -> None:
@@ -473,13 +496,15 @@ def _start(item: PriceReviewItem, mv: _Move, actor: str, code: str | None, text:
             moved = pr.move_item(s, item, mv.to_state, now=now, **mv.values)
             if moved:
                 ev = pr.add_event(s, item, kind, actor=actor, from_state=mv.from_state, to_state=mv.to_state,
-                                  motive_code=code, motive_text=text, payload=payload or None, now=now)
+                                  motive_code=code, motive_text=text, payload={**payload, **mv.audit} or None, now=now,
+                                  run_id=mv.audit.get("corrida"))
                 intent = None
                 if mv.write is not None:
                     s.flush()
                     intent = pr.add_event(s, item, "intent", actor=actor, from_state=mv.from_state, to_state=mv.to_state,
                                           enabled_before=not mv.write, enabled_after=mv.write, now=now,
-                                          payload={"accion": mv.action, "evento": ev.id, "antes": _dump(mv.before)})
+                                          payload={"accion": mv.action, "evento": ev.id, "antes": _dump(mv.before),
+                                                   **mv.audit})
                 s.commit()
                 mv.intent_id, mv.intent_at = (None, None) if intent is None else (intent.id, intent.at)
         except IntegrityError:
@@ -530,6 +555,9 @@ async def _apply(item: PriceReviewItem, mv: _Move, actor: str, client: VendureCl
         blocker = _reactivation_blocker(item, guard, mv.action)
         if blocker is not None:
             raise _manual(item, mv, actor, *blocker)
+        banned = await _prohibido_blocker(item, guard, actor)
+        if banned is not None:
+            raise _not_sold(item, mv, actor, *banned)
     if not _still_pending(item, mv):
         raise _state_changed(_load(int(item.id))[0])  # type: ignore[arg-type]
     try:
@@ -606,6 +634,60 @@ def _vendure_failed(item: PriceReviewItem) -> ActionError:
 def _manual(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -> ActionError:
     _undo_move(item, mv, actor, "reactivar_a_mano", code, text=f"Hay que reactivarlo a mano: {why}.")
     return ActionError(409, "reactivar_a_mano", f"Hay que reactivarlo a mano en Vendure: {why}.", item, reason=code)
+
+
+# ─── Lo que no vendemos ───────────────────────────────────────────
+
+PROHIBIDO, SIN_LISTA = "prohibido", "sin_lista_prohibidos"
+SIN_LISTA_TEXT = "no se pudo cargar la lista de lo que no vendemos, y sin ella Hugo no activa nada solo"
+
+
+def _not_sold(item: PriceReviewItem, mv: _Move, actor: str, code: str, why: str) -> ActionError:
+    """El freno de lo que no vendemos: la ficha vuelve a como estaba (mismo camino que «reactivar a mano», con su propio
+    motivo) y no se escribe nada en Vendure."""
+    _undo_move(item, mv, actor, "reactivar_a_mano", code, text=f"No se activó: {why}."[:500])
+    return ActionError(409, "reactivar_a_mano", f"No se activó: {why}.", item, reason=code)
+
+
+def product_names(product_id: str, *names: str | None) -> list[str]:
+    """Los nombres con los que se mira la lista: los que vienen (el de Vendure, el de la ficha) más, si el producto lo
+    mandó el radar, el título original con el que llegó (suele ser el del proveedor, en chino o en inglés)."""
+    out = [n for n in names if isinstance(n, str) and n.strip()]
+    try:
+        with Session(engine) as s:
+            rows = s.exec(select(LuisIntake.name, LuisIntake.vendure_name)
+                          .where(LuisIntake.vendure_product_id == product_id).limit(5)).all()
+    except Exception as exc:  # noqa: BLE001  (sin el título original se mira igual con los otros nombres)
+        log.warning("prohibidos: no se pudo leer el título original de %s (%s)", product_id, error_code(exc))
+        rows = []
+    for row in rows:
+        out.extend(n for n in row if isinstance(n, str) and n.strip())
+    return list(dict.fromkeys(out))
+
+
+async def prohibido_check(product_id: str, *names: str | None, auto: bool) -> tuple[str, str] | None:
+    """¿El filtro de lo que no vendemos frena activar este producto? `(código, por qué)` o None.
+
+      * con `prohibidos_gate = 0` no se mira nada;
+      * si es Hugo solo (`auto`) y no hay una lista completa (ni la de la nube ni el archivo): frena siempre;
+      * si algún nombre cae en la lista: frena, a Hugo y a una persona.
+    """
+    if int(runtime.get("prohibidos_gate") or 0) != 1:
+        return None
+    found = await prohibidos.lista()
+    if auto and not found.completa:
+        return SIN_LISTA, SIN_LISTA_TEXT
+    texts = await asyncio.to_thread(product_names, product_id, *names)
+    verdict = prohibidos.revisar(*texts, categorias=found.categorias)
+    if verdict is None:
+        return None
+    return PROHIBIDO, (f"{verdict.motivo}. Si la lista se equivoca con este producto, hay que corregir la lista "
+                       "(o activarlo a mano en Vendure)")
+
+
+async def _prohibido_blocker(item: PriceReviewItem, guard: ReviewGuard | None, actor: str) -> tuple[str, str] | None:
+    return await prohibido_check(item.product_id, guard.name if guard is not None else None, item.product_name,
+                                 auto=actor == pr.ACTOR_AUTO)
 
 
 def _reactivation_blocker(item: PriceReviewItem, guard: ReviewGuard | None,
@@ -731,8 +813,10 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
             payload["con_contacto"] = guard.has_supplier_contact
         if reconciled:
             payload["conciliado"] = True
+        payload.update(mv.audit)
         pr.add_event(s, item, "reactivado" if target else "inactivado", actor=actor, from_state=mv.from_state,
-                     to_state=mv.to_state, enabled_before=not target, enabled_after=target, now=now, payload=payload)
+                     to_state=mv.to_state, enabled_before=not target, enabled_after=target, now=now, payload=payload,
+                     run_id=mv.audit.get("corrida"))
         s.add(_audit_row(item, mv, actor, target, now))
         s.commit()
     return True
@@ -764,7 +848,7 @@ def _orphan_write(s: Session, item: PriceReviewItem, mv: _Move, actor: str, targ
     s.add(_audit_row(item, mv, actor, target, now, " La ficha ya había cambiado: revisar a mano."))
     pr.add_event(s, item, "escritura_huerfana", actor=actor, enabled_before=not target, enabled_after=target, now=now,
                  motive_text="Vendure tomó el cambio cuando la ficha ya había cambiado: revisalo a mano.",
-                 payload={"accion": mv.action, "intent": mv.intent_id})
+                 payload={"accion": mv.action, "intent": mv.intent_id, **mv.audit}, run_id=mv.audit.get("corrida"))
 
 
 # ─── Conciliación (el proceso murió a mitad de una escritura) ─────
@@ -801,7 +885,8 @@ async def _reconcile_one(intent: PriceReviewEvent, client: VendureClient) -> boo
     if item is None or still is None or still.id != intent.id:
         return False                                   # otro proceso ya la resolvió
     mv = _Move(str(data.get("accion") or ""), intent.from_state or item.state, intent.to_state or item.state, target,
-               {}, _parse(data.get("antes") or {}), intent_id=intent.id, intent_at=intent.at)
+               {}, _parse(data.get("antes") or {}), intent_id=intent.id, intent_at=intent.at,
+               audit=_clean_audit(data) if intent.actor == pr.ACTOR_AUTO else {})
     if enabled is target:
         return _confirm(item, mv, intent.actor, target, None, reconciled=True)
     return _undo_move(item, mv, intent.actor, "intent_descartado", "conciliacion",

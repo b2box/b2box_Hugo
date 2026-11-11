@@ -1,0 +1,487 @@
+# Lo que no vendemos. COPIA de la lista canónica (la del radar de productos): NO editar a mano.
+# Se regenera con `python scripts/sync_prohibidos.py <lista canónica>`.
+# Forma y reglas de comparación: ver app/prohibidos.py.
+
+prohibidos:
+- categoria: suplementos
+  porque: 'No vendemos nada que se ingiera: necesita registro ANMAT, la responsabilidad por el consumidor final
+    es nuestra y no la queremos.'
+  es:
+  - suplemento
+  - suplementos
+  - vitamina
+  - vitaminas
+  - multivitaminico
+  - proteina
+  - whey
+  - creatina
+  - creatine
+  - colageno
+  - melatonina
+  - melatonin
+  - probiotico
+  - probioticos
+  - probiotic
+  - probiotics
+  - adelgazante
+  - quemador
+  - gomitas
+  - gummies
+  - gummy
+  - supplement
+  - supplements
+  - protein
+  - vitamin
+  - vitamins
+  - collagen
+  - electrolyte
+  - electrolytes
+  zh:
+  - 保健品
+  - 维生素
+  - 蛋白粉
+  - 胶原蛋白
+  - 益生菌
+  - 褪黑素
+  - 减肥药
+  excepto:
+  - shaker
+  - mezclador
+  - vaso mezclador
+  - 摇摇杯
+  - 摇杯
+- categoria: quimicos
+  porque: 'Químicos: carga peligrosa (IMO/UN), no entran en consolidado y la naviera los rechaza o cobran aparte.
+    No los traemos.'
+  es:
+  - quimico
+  - quimicos
+  - acido
+  - solvente
+  - solventes
+  - thinner
+  - pesticida
+  - pesticidas
+  - insecticida
+  - insecticide
+  - herbicida
+  - fungicida
+  - fertilizante
+  - fertilizer
+  - soda caustica
+  - formol
+  - peroxido
+  - amoniaco
+  - cloro
+  - pinol
+  - chemical
+  - chemicals
+  - pesticide
+  - solvent
+  - acid
+  zh:
+  - 化学品
+  - 农药
+  - 杀虫剂
+  - 除草剂
+  - 溶剂
+  - 强酸
+  - 氢氧化钠
+- categoria: medicamentos
+  porque: 'Medicamentos y productos médicos: registro sanitario, y la importación es de otra categoría. No es nuestro
+    negocio.'
+  es:
+  - medicamento
+  - medicamentos
+  - medico
+  - farmaco
+  - antibiotico
+  - antibiotic
+  - ibuprofeno
+  - paracetamol
+  - jeringa
+  - jeringas
+  - medicine
+  - medication
+  - medical
+  - drug
+  - pharmaceutical
+  - pill
+  - pills
+  - pastillas
+  - capsule
+  - capsules
+  - capsulas
+  - ointment
+  - unguento
+  - analgesico
+  - pain relief
+  - thermometer
+  - termometro
+  - glucose
+  - blood pressure
+  zh:
+  - 药品
+  - 抗生素
+  - 注射器
+  - 处方药
+  excepto:
+  - jeringa de silicona
+  - jeringa de cocina
+  - jeringa de tinta
+  - jeringa para reposteria
+  - ink syringe
+  - pastillero
+  - organizador
+  - organizer
+  - pill box
+  - pill case
+  - cortador
+  - cutter
+  - termometro de cocina
+  - termometro digital de cocina
+  - termometro para carne
+  - termometro de ambiente
+  - termometro de horno
+  - termometro de piscina
+  - termometro para acuario
+  - kitchen thermometer
+  - meat thermometer
+  - food thermometer
+  - oven thermometer
+  - grill thermometer
+  - bbq thermometer
+  - pool thermometer
+  - aquarium thermometer
+  - room thermometer
+  - 药盒
+  - 药品收纳
+  - 厨房温度计
+  - 食品温度计
+- categoria: tabaco y vapeo
+  porque: 'Vapeo y tabaco: prohibida la importación y la venta de vapeadores en Argentina (ANMAT 3226/2011). Ni
+    se mira.'
+  es:
+  - vape
+  - vapes
+  - vaper
+  - vapeador
+  - vapeadores
+  - cigarrillo
+  - cigarrillos
+  - tabaco
+  - narguile
+  - shisha
+  - hookah
+  - nicotina
+  - vaporizer
+  - e-cigarette
+  - nicotine
+  zh:
+  - 电子烟
+  - 烟草
+  - 尼古丁
+  - 水烟
+- categoria: armas
+  porque: 'Armas y todo lo que se le parezca: ni replicas. No pasa aduana y no queremos el antecedente.'
+  es:
+  - arma de fuego
+  - armas de fuego
+  - pistola de aire comprimido
+  - pistola de balines
+  - pistola airsoft
+  - revolver
+  - municion
+  - municiones
+  - airsoft
+  - taser
+  - picana
+  - cuchillo tactico
+  - manopla
+  - firearm
+  - firearms
+  - ammunition
+  - stun gun
+  - brass knuckles
+  - bb gun
+  - pellet gun
+  zh:
+  - 武器
+  - 手枪
+  - 步枪
+  - 气枪
+  - 仿真枪
+  - 弹药
+  - 弩
+  - 甩棍
+  - 电击器
+- categoria: inflamables y aerosoles
+  porque: 'Inflamables y aerosoles presurizados: misma carga peligrosa que los químicos, no van en consolidado.'
+  es:
+  - inflamable
+  - aerosol
+  - aerosoles
+  - encendedor
+  - encendedores
+  - combustible
+  - alcohol en gel
+  - gas butano
+  - bengala
+  - flammable
+  - lighter fuel
+  - butane
+  zh:
+  - 易燃
+  - 打火机油
+  - 丁烷
+  - 气雾剂
+  excepto:
+  - encendedor electrico
+  - encendedor usb
+  - encendedor de cocina
+  - electric lighter
+  - usb lighter
+- categoria: comida y bebida
+  porque: 'Nada que se coma o se tome: necesita registro sanitario y vence. No lo importamos.'
+  es:
+  - food
+  - foods
+  - treat
+  - treats
+  - snack
+  - snacks
+  - kibble
+  - jerky
+  - biscuit
+  - biscuits
+  - coffee
+  - tea
+  - candy
+  - chocolate
+  - drink
+  - beverage
+  - seasoning
+  - sauce
+  - edible
+  - electrolyte
+  - electrolytes
+  - alimento
+  - alimentos
+  - comida
+  - croquetas
+  - galletas
+  - golosinas
+  - premios
+  - bebida
+  - cafe
+  - dulces
+  - sazonador
+  - salsa
+  - purina
+  - pedigree
+  - greenies
+  - sheba
+  - iams
+  - friskies
+  - whiskas
+  - nutro
+  - dentastix
+  - blue buffalo
+  - milk-bone
+  - fancy feast
+  - meow mix
+  - rachael ray nutrish
+  - hill's science diet
+  zh:
+  - 食品
+  - 零食
+  - 狗粮
+  - 猫粮
+  - 咖啡
+  - 糖果
+  excepto:
+  - molinillo
+  - grinder
+  - dispensador
+  - dispenser
+  - molde
+  - mold
+  - mould
+  - contenedor
+  - container
+  - recipiente
+  - storage
+  - organizador
+  - organizer
+  - tetera
+  - kettle
+  - teapot
+  - infusor
+  - infuser
+  - cafetera
+  - coffee maker
+  - taza
+  - mug
+  - termo
+  - tumbler
+  - portavasos
+  - holder
+  - comedero
+  - bebedero
+  - bowl
+  - feeder
+  - lonchera
+  - lunch box
+  - botella
+  - bottle
+  - vaso
+  - cup
+  - salsera
+  - tabla
+  - bandeja
+  - tray
+  - bolsa
+  - bag
+  - cuchara
+  - spoon
+  - scoop
+  - filtro
+  - filter
+  - prensa
+  - press
+  - espumador
+  - frother
+  - procesador
+  - processor
+  - sellador
+  - sealer
+  - dehydrator
+  - deshidratador
+  - juguete
+  - toy
+  - 食品级
+  - 食品盒
+  - 食品袋
+  - 食品夹
+  - 保鲜
+  - 零食盒
+  - 零食袋
+  - 粮桶
+  - 喂食器
+  - 猫粮勺
+  - 狗粮勺
+  - 咖啡机
+  - 咖啡杯
+  - 咖啡壶
+  - 咖啡勺
+  - 咖啡滤
+  - 磨豆机
+  - 糖果色
+  - 糖果盒
+  - 糖果罐
+  - 糖果袋
+  - 模具
+- categoria: limpieza y cosmetica
+  porque: 'Limpieza y cosmetica: son quimicos con otro nombre, y los que se ponen en el cuerpo ademas necesitan
+    registro.'
+  es:
+  - cleaner
+  - detergent
+  - bleach
+  - disinfectant
+  - shampoo
+  - conditioner
+  - soap
+  - lotion
+  - serum
+  - perfume
+  - fragrance
+  - cologne
+  - deodorant
+  - toothpaste
+  - mouthwash
+  - makeup
+  - lipstick
+  - mascara
+  - sunscreen
+  - moisturizer
+  - foundation
+  - concealer
+  - wipes
+  - limpiador
+  - limpiadora
+  - limpiadoras
+  - detergente
+  - blanqueador
+  - desinfectante
+  - jabon
+  - champu
+  - acondicionador
+  - locion
+  - desodorante
+  - maquillaje
+  - labial
+  - protector solar
+  - toallitas
+  - suavizante
+  - arena para gato
+  - clumping litter
+  - fresh step
+  - tidy cats
+  - cream
+  - crema
+  zh:
+  - 洗发水
+  - 沐浴露
+  - 洗洁精
+  - 化妆品
+  - 香水
+  - 口红
+  - 防晒霜
+  excepto:
+  - crema para zapatos
+  - cremallera
+  - shoe cream
+  - dispensador
+  - dispenser
+  - organizador
+  - organizer
+  - jabonera
+  - soap dish
+  - holder
+  - soporte
+  - estante
+  - rack
+  - brocha
+  - brush
+  - cepillo
+  - espejo
+  - mirror
+  - neceser
+  - estuche
+  - case
+  - bolso
+  - bag
+  - atomizador
+  - atomizer
+  - frasco vacio
+  - empty bottle
+  - botella vacia
+  - refillable
+  - recargable
+  - esponja
+  - sponge
+  - aplicador
+  - applicator
+  - removedor
+  - rizador
+  - curler
+  - 收纳
+  - 分装
+  - 空瓶
+  - 按压瓶
+  - 皂液器
+  - 起泡器
+  - 置物架
+  - 化妆刷
+  - 化妆镜

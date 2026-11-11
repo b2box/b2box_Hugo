@@ -53,6 +53,7 @@ class FakeReviewVendure:
         self.enabled: dict[str, bool] = {}
         self.approval: dict[str, str | None] = {}
         self.contact: dict[str, str | None] = {}
+        self.names: dict[str, str] = {}                              # productId -> nombre de hoy en Vendure
         self.writable = False
         self.write_reply: dict[str, dict[str, Any]] = {}            # productId -> `updateProduct` que se devuelve tal cual
         self.script: dict[str, list[tuple[int, dict[str, Any]]]] = {}  # operación -> respuestas en orden, antes de lo normal
@@ -116,7 +117,7 @@ class FakeReviewVendure:
             return {"product": {"id": pid, "enabled": self.enabled[pid]} if pid in self.enabled else None}
         if op == "ReviewGuard":
             return {"product": None if pid not in self.enabled else {
-                "id": pid, "enabled": self.enabled[pid],
+                "id": pid, "name": self.names.get(pid, f"Producto {pid}"), "enabled": self.enabled[pid],
                 "customFields": {"approvalStatus": self.approval.get(pid), "supplierContact": self.contact.get(pid)}}}
         if op == "SetEnabled":
             if pid in self.write_reply:

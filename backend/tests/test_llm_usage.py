@@ -101,3 +101,29 @@ async def test_the_semaforo_judge_records_its_tokens(monkeypatch):
     with Session(engine) as s:
         [row] = s.exec(select(LlmUsage)).all()
     assert row.purpose == "semaforo_juez" and row.input_tokens == 1234 and row.output_tokens == 56
+
+
+def test_apify_spend_suma_por_etiqueta_en_la_ventana():
+    from sqlalchemy import delete
+    from sqlmodel import Session
+
+    from app.db.models import ApifySpend
+    from app.db.session import engine
+
+    labels = ("t_app_meli_link", "t_radar")
+    with Session(engine) as s:
+        s.execute(delete(ApifySpend).where(ApifySpend.label.in_(labels)))  # type: ignore[attr-defined]
+        s.add(ApifySpend(label="t_app_meli_link", terms=1, usd=0.005, estimated=True))
+        s.add(ApifySpend(label="t_app_meli_link", terms=1, usd=0.005, estimated=True))
+        s.add(ApifySpend(label="t_radar", run_id="r1", terms=4, usd=0.01, estimated=False))
+        s.add(ApifySpend(label="t_radar", terms=1, usd=9.0, created_at=utcnow() - timedelta(days=40)))
+        s.commit()
+    try:
+        out = llm_usage.apify_spend(days=7)
+        assert out["by_label"]["t_app_meli_link"] == {"runs": 2, "usd": 0.01, "estimated_runs": 2}
+        assert out["by_label"]["t_radar"] == {"runs": 1, "usd": 0.01, "estimated_runs": 0}
+        assert out["total_usd"] >= 0.02
+    finally:
+        with Session(engine) as s:
+            s.execute(delete(ApifySpend).where(ApifySpend.label.in_(labels)))  # type: ignore[attr-defined]
+            s.commit()

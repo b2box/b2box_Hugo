@@ -58,6 +58,13 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # (~USD 0,005); el techo es para que un cambio de precio del actor no se note
 # recién en la factura.
 _MAX_CHARGE_USD = 0.05
+# Lo que se anota por corrida en `apify_spend` (etiqueta SPEND_LABEL). El endpoint síncrono no informa el costo real, así
+# que es una ESTIMACIÓN (queda marcada `estimated`): el precio por resultado del actor. Se anota toda corrida que llegó a
+# lanzarse, haya traído fotos o no; lo que Apify rechazó antes de correr (token, saldo, actor inexistente) no se anota.
+SPEND_LABEL = "app_meli_link"
+_EST_USD_PER_RUN = 0.005
+# Status con los que la corrida NO llegó a lanzarse: no hay nada que cobrar.
+_NOT_LAUNCHED = frozenset({401, 402, 403, 404, 429})
 # Margen sobre el timeout del actor para el viaje de ida y vuelta a la API.
 _NETWORK_MARGIN_S = 5.0
 # Memoria del actor en MB. Sin esto Apify usa el default del actor (que puede
@@ -363,15 +370,32 @@ async def _fetch(url: str) -> ApifyMeliResult | None:
         if await daily_budget.reserve_async(COUNTER_KEY, budget) is None:
             log.info("Apify: cupo diario agotado (%d), no se manda %s", budget, target[:120])
             return None
-        result, ttl_s = await _run_actor(target)
+        result, ttl_s, launched = await _run_actor(target)
         _cache_put(key, result, ttl_s)
+        if launched:
+            await asyncio.to_thread(_record_spend)
         return result
     finally:
         slots.release()
 
 
-async def _run_actor(target: str) -> tuple[ApifyMeliResult, float]:
-    """Una corrida del actor. (resultado, cuánto vale en la caché)."""
+def _record_spend() -> None:
+    """Una fila en `apify_spend` por corrida lanzada (estimada). Nunca lanza: la corrida ya se pagó."""
+    try:
+        from sqlmodel import Session
+
+        from app.db.models import ApifySpend
+        from app.db.session import engine
+
+        with Session(engine) as s:
+            s.add(ApifySpend(label=SPEND_LABEL, terms=1, usd=_EST_USD_PER_RUN, estimated=True))
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Apify: no se pudo registrar el gasto de la corrida (%s)", type(exc).__name__)
+
+
+async def _run_actor(target: str) -> tuple[ApifyMeliResult, float, bool]:
+    """Una corrida del actor. (resultado, cuánto vale en la caché, si la corrida llegó a lanzarse)."""
     s = get_settings()
     actor = s.apify_meli_actor.strip()
     timeout_s = int(s.apify_meli_timeout_s)
@@ -383,7 +407,7 @@ async def _run_actor(target: str) -> tuple[ApifyMeliResult, float]:
     headers = {"Authorization": f"Bearer {s.apify_token.strip()}", "Accept": "application/json"}
     total = timeout_s + _NETWORK_MARGIN_S
     started = time.monotonic()
-    failed = (ApifyMeliResult(), _CACHE_ERROR_TTL_S)
+    failed = (ApifyMeliResult(), _CACHE_ERROR_TTL_S, True)
     http = _new_client(total)
     try:
         status, body = await asyncio.wait_for(
@@ -403,7 +427,7 @@ async def _run_actor(target: str) -> tuple[ApifyMeliResult, float]:
     if status not in (200, 201):
         log.warning("Apify %s: HTTP %s (%s) en %.0fs para %s", actor, status,
                     _STATUS_REASON.get(status, "error"), elapsed, target[:120])
-        return failed
+        return (failed[0], failed[1], status not in _NOT_LAUNCHED)
     if body is None:
         log.warning("Apify %s: respuesta de más de %d bytes, descartada", actor, _MAX_RESPONSE_BYTES)
         return failed
@@ -420,4 +444,4 @@ async def _run_actor(target: str) -> tuple[ApifyMeliResult, float]:
                  len(result.image_urls), elapsed)
     else:
         log.info("Apify %s no trajo fotos usables de %s (%.0fs)", actor, target[:120], elapsed)
-    return result, _CACHE_TTL_S
+    return result, _CACHE_TTL_S, True

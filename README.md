@@ -1898,6 +1898,62 @@ Con `pm_autopilot = 1` (default), a los 12 minutos de cada arranque (job `autopi
 Los deshabilitados del catálogo tienen su propio tope, `pm_gate_catalog_activations_daily_max` (600 por día ART), así
 cientos se ponen al día en un día sin tocar Configuración. Apagarlo: `pm_autopilot = 0` en Configuración.
 
+### Lo que no vendemos: freno antes de cualquier activación
+
+Químicos, suplementos, medicamentos, vapeo, armas, inflamables, comida y cosmética no se venden. Con `prohibidos_gate = 1`
+(default) **ninguna activación** que pase por Hugo prende un producto cuyo nombre cae en la lista (`app/prohibidos.py`):
+
+- **el portón** (lo que subió Paco y el catálogo apagado): el verde firme NO se activa y queda en la bandeja de Pao
+  (`por_activar`) con el motivo («no vendemos suplementos (vitamina)»). Se mira antes de las medidas, para no gastar la IA;
+- **la bandeja** (Activar, Mantener, «Ya lo corregí», Deshacer de un apagado) y la reactivación automática del recálculo:
+  la escritura no sale; la ficha vuelve a como estaba con el motivo;
+- **restaurar duplicados**: los saltea y los cuenta en `skipped_prohibido`.
+
+Se miran juntos el nombre de hoy en Vendure, el de la ficha y, si el producto llegó por el radar, el título original con el
+que llegó (suele estar en chino o en inglés: dice cosas que la traducción se come).
+
+**Sin lista, Hugo no activa nada solo.** La lista sale, en este orden, de (1) la nube si están `MOTOR_PROHIBIDOS_URL` y
+`MOTOR_PROHIBIDOS_KEY` (`GET` con la cabecera `x-motor-key`; caché de 10 min, tope de 5 s), (2) `app/prohibidos.yaml`, que
+viaja en la imagen, y (3) un mínimo fijo de dos categorías. Con el mínimo el filtro sigue frenando lo que conoce, pero las
+activaciones **automáticas** se niegan (`sin_lista_prohibidos`) hasta que vuelva una lista completa; una persona puede
+seguir decidiendo desde la bandeja. La pasada del catálogo apagado se corta sin llenar la bandeja.
+
+La comparación es la del radar de productos, con sus excepciones: sin tildes ni mayúsculas, **palabra entera** en español
+e inglés («crema» no frena «cremallera»), pedazo de texto en chino, y `excepto` desactiva la categoría para los accesorios
+(«molinillo de café», «dispensador de jabón», «pistola de silicona»). `app/prohibidos.yaml` es una **copia** de la lista
+canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista canónica>`.
+
+`/verify` devuelve siempre el motivo en `prohibido` (`{categoria, palabra, motivo}`). Con `prohibidos_verify = 1`
+(default 0) además **no reenvía** a buscar proveedor: responde `paco_status = "prohibido"`, no gasta Google Lens ni la
+búsqueda y deja un evento `verify_prohibido`.
+
+Apagar el freno (no recomendado): `prohibidos_gate = 0` en Configuración (solo un administrador; el cambio queda en el
+audit log).
+
+### ¿Qué prendió y qué apagó Hugo solo?
+
+`GET /api/price-monitor/gate/auto-actions?days=7` (solo un administrador; solo lee) lista cada escritura automática en
+Vendure de los últimos N días, la más nueva primero: producto, cuándo, cómo quedó (`activo` / `inactivo`), la acción
+(`activar_auto`, `inactivar_auto`, `reactivar_auto`), **por qué regla** (`verde_firme_subido_por_paco`,
+`verde_firme_catalogo_apagado`, `rojo_firme_publicado`, `recalculo_ya_no_rojo`), **con qué corrida** del semáforo y si
+una persona lo deshizo después. Trae también los totales, el modo actual (`pm_mode`, `pm_autopilot`, `prohibidos_gate`),
+de dónde salió la lista de lo que no vendemos y lo que anotó el piloto automático (cuándo pasó a modo 2 y con qué
+corridas corrió al arrancar).
+
+El registro es `price_review_event` (solo se agrega: no se edita ni se borra): cada escritura confirmada es un evento
+`reactivado` (quedó prendido) o `inactivado` (quedó apagado) con actor `hugo:auto`, la corrida en `run_id` y la regla en
+`payload`. Además queda la fila de `audit_log` (`price_review_enabled` / `price_review_disabled`) en la historia del
+producto. Para las escrituras anteriores a este registro la regla se deduce del evento `porton` de la misma ficha
+(`regla_deducida: true`). La misma consulta en SQL:
+
+```sql
+SELECT e.at, e.product_id, i.product_name, e.kind, e.payload, e.run_id
+  FROM price_review_event e JOIN price_review_item i ON i.id = e.item_id
+ WHERE e.actor = 'hugo:auto' AND e.kind IN ('reactivado', 'inactivado')
+   AND e.at >= now() - interval '7 days'
+ ORDER BY e.at DESC;
+```
+
 ### Todo el catálogo apagado y la guarda de medidas
 
 Con `pm_gate_catalog_greens = 1` (default) el portón no se limita a lo que subió Paco: **cualquier producto
@@ -1998,6 +2054,13 @@ envío).
   estimado con Qwen / MiMo / Gemini, rerank de visión del app con Claude / OpenAI) deja una fila en `llm_usage` (proveedor,
   modelo, tokens, costo estimado, para qué; nunca el prompt). Costo: el que calculó quien llama (precios `PM_LLM_PRICE_*`) o
   la tabla de `app/llm_usage.py`. Resumen por día, propósito y modelo.
+  La foto limpia de la oferta del estimado queda con el propósito `estimado_foto` (el costo que informa el endpoint o,
+  si no lo informa, `ESTIMATE_PHOTO_USD_PER_IMAGE` por foto). En `apify` va lo anotado en `apify_spend` en la misma
+  ventana, por etiqueta: `radar_ml`, el prechequeo y `app_meli_link` (los links de Mercado Libre que `/app/lookup` lee con
+  Apify: una fila estimada por corrida lanzada).
+- `vision_skip_clip_score` (default 0 = apagado): con un valor (p. ej. 0,90), si el mejor candidato de CLIP llega a ese
+  score, su nombre no lo contradice y la foto es la del propio link, `/app/lookup` afirma con CLIP y **no paga** el rerank
+  de visión. Medir antes de prenderlo (`calibrate_vision.py`): muy bajo y el app afirma productos parecidos que no son.
 
 ## Auditoría de textos del catálogo (SEO, solo lectura)
 
@@ -2551,6 +2614,9 @@ Ver `.env.example`. Las críticas:
 - `BROWSER_LISTING_RECYCLE_AFTER` — páginas de listado antes de relanzar Firefox (default 75).
 - `OFICINA_SEARCH_KEY` — key del buscador de la oficina (>= 32 caracteres; usá la que genera `tools/oficina_ml_search.py --init`). Sin ella
   los endpoints `/api/oficina/*` no existen (404). `OFICINA_RESULT_TTL_DAYS` (default 7): cuánto vale un resultado de la oficina.
+- `MOTOR_PROHIBIDOS_URL`, `MOTOR_PROHIBIDOS_KEY` — la lista de lo que no vendemos en la nube (opcional; las dos o
+  ninguna). Sin ellas se usa `app/prohibidos.yaml`. `PROHIBIDOS_GATE` (1) y `PROHIBIDOS_VERIFY` (0) son los defaults de
+  los dos interruptores (también en Configuración).
 - `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
   32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
   `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el

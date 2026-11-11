@@ -46,6 +46,7 @@ dependencies = [
     "lxml>=5.1",
     # Utils
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",            # la lista de lo que no vendemos (app/prohibidos.yaml)
     "tenacity>=8.2",
 ]
 
