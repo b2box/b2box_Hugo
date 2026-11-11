@@ -130,6 +130,20 @@ async def find_duplicate_in(
     if not existing:
         return DedupVerdict(is_duplicate=False, confidence=0.0)
 
+    # Primero el link, contra TODOS: es exacto, no baja fotos y es el match que gana siempre (abajo también corta la
+    # búsqueda). Sin esta pasada, un link repetido recién se encontraba después de comparar texto y fotos contra todos los
+    # productos anteriores; con ella, «este link ya está en el catálogo» se contesta al instante. El resultado es el
+    # mismo de siempre: el primer producto con ese link.
+    if candidate.source_url:
+        url_th = runtime.get("dedup_url_threshold")
+        for product in existing:
+            url_score = url_similarity(candidate.source_url, product.source_url)
+            if url_score >= url_th:
+                return DedupVerdict(
+                    is_duplicate=True, confidence=url_score, matched_by=["url"],
+                    per_strategy_scores={"url": url_score, "image": 0.0, "text": 0.0}, candidate_id=product.id,
+                )
+
     best_dup: DedupVerdict | None = None
     closest: DedupVerdict | None = None
     closest_id: str | None = None

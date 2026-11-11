@@ -128,3 +128,53 @@ async def test_compare_text_only_match():
     verdict = await compare(a, b)
     # No exigimos is_duplicate=True (depende del threshold), pero sí alto score
     assert verdict.per_strategy_scores["text"] >= 0.85
+
+
+# ─── find_duplicate_in: el link primero, contra todos ───────────────────────
+
+
+def _vp(pid: str, name: str, url: str | None, enabled: bool = True):
+    from app.vendure.client import VendureProduct
+
+    return VendureProduct(id=pid, name=name, slug=f"p{pid}", description="", enabled=enabled, source_url=url,
+                          image_urls=[], product_code=None, featured_image_url=None, first_variant_price_cents=100,
+                          variant_count=1)
+
+
+@pytest.mark.asyncio
+async def test_un_link_repetido_se_contesta_sin_comparar_texto_ni_fotos(monkeypatch):
+    """Antes el link repetido recién aparecía después de comparar texto y fotos contra todos los productos anteriores."""
+    from app.dedup import orchestrator
+
+    compared: list[str] = []
+    real = orchestrator.compare
+
+    async def spy(a, b):
+        compared.append(b.name)
+        return await real(a, b)
+
+    monkeypatch.setattr(orchestrator, "compare", spy)
+    link = "https://detail.1688.com/offer/5551234.html"
+    catalog = [_vp(str(i), f"Producto distinto {i}", f"https://detail.1688.com/offer/{1000 + i}.html") for i in range(50)]
+    catalog.append(_vp("777", "Otro nombre cualquiera", link + "?spm=abc", enabled=False))
+    out = await orchestrator.find_duplicate_in(
+        CandidateInput(name="Organizador de cocina", description="", source_url=link, image_urls=[]), catalog)
+    assert out.is_duplicate is True and out.candidate_id == "777" and out.matched_by == ["url"]
+    assert out.confidence == 1.0 and out.per_strategy_scores == {"url": 1.0, "image": 0.0, "text": 0.0}
+    assert compared == [], "con el link alcanza: no se compara nada más"
+
+
+@pytest.mark.asyncio
+async def test_el_link_gana_aunque_un_producto_anterior_matchee_por_texto():
+    from app.dedup import orchestrator
+
+    link = "https://detail.1688.com/offer/5559999.html"
+    catalog = [_vp("1", "Organizador de cocina", "https://detail.1688.com/offer/1.html"),
+               _vp("2", "Cualquier otra cosa", link)]
+    out = await orchestrator.find_duplicate_in(
+        CandidateInput(name="Organizador de cocina", description="", source_url=link, image_urls=[]), catalog)
+    assert out.candidate_id == "2" and out.matched_by == ["url"]
+    # Sin link (o con uno que nadie tiene) sigue el camino de siempre: texto y fotos.
+    out = await orchestrator.find_duplicate_in(
+        CandidateInput(name="Organizador de cocina", description="", source_url=None, image_urls=[]), catalog)
+    assert out.is_duplicate is True and out.candidate_id == "1" and out.matched_by == ["text"]
