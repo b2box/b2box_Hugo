@@ -6,9 +6,10 @@
 # tender a vacía: una prueba que nadie mira no protege nada.
 
 # Compara una corrida entera del semáforo contra un archivo dorado, con 4 productos a la vez. En el runner de GitHub el
-# caso [defecto-11] hizo una búsqueda web menos que el dorado (las demás combinaciones pasaron); en local pasa siempre.
+# caso [defecto-11] hizo una búsqueda web menos que el dorado; en local pasa siempre. SOLO ese caso está acá: los otros
+# 11 de la misma prueba siguen frenando, porque es la única regresión de corrida entera que protege al semáforo.
 # Para sacarla: que la corrida de la prueba sea determinista (un producto a la vez o un orden fijo de las búsquedas).
-backend/tests/test_qa3_regresion_e8209e1.py::test_origin_main_dump_or_compare
+backend/tests/test_qa3_regresion_e8209e1.py::test_origin_main_dump_or_compare[defecto-11]
 
 # Tres pedidos casi simultáneos no pueden dejar más de una corrida. Si la primera corrida termina antes de que arranque
 # el segundo pedido (máquina rápida) hay dos corridas legítimas y la prueba falla; si la máquina es lenta, a veces mira la

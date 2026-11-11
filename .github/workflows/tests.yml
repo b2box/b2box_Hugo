@@ -61,6 +61,7 @@ jobs:
       - name: Suite
         run: |
           # Lo que está en cuarentena corre aparte (job «cuarentena») y no frena este check.
+          set -f   # los ids llevan corchetes ([defecto-11]): que el shell no los tome como comodines
           DESELECT=$(grep -vE '^[[:space:]]*(#|$)' backend/tests/ci_quarantine.txt | sed 's/^/--deselect=/' | tr '\n' ' ')
           backend/.venv/bin/python -m pytest -q -p no:cacheprovider --durations=25 $DESELECT
 
