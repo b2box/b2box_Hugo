@@ -23,16 +23,17 @@ Con el mínimo (3) el filtro sigue frenando lo que conoce, pero la lista NO est�
 activaciones automáticas se niegan hasta que vuelva una lista de verdad. Dos categorías no alcanzan para prender productos
 sin que nadie mire.
 
-Comparación (la misma lógica que el radar, con sus excepciones):
+Comparación: la regla v2 del radar de productos, portada tal cual (ver «Cómo se decide» más abajo):
 
-  * todo en minúsculas, sin tildes y con los separadores vueltos espacio;
-  * español / inglés: PALABRA ENTERA («acido» no frena «placido», «crema» no frena «cremallera»); una frase de varias
-    palabras tiene que estar entera;
-  * chino: pedazo de texto (no se separa con espacios);
-  * `excepto` DESACTIVA la categoría para ese producto: «pistola de silicona» es una encoladora, «molinillo de café» es un
-    accesorio. Una palabra suelta ahí vale como comienzo de palabra («organizador» cubre «organizadores»).
+  * NFKC, minúsculas, sin tildes y con los separadores vueltos espacio; en chino, sin los espacios del medio;
+  * español / inglés: PALABRA ENTERA («acido» no frena «placido»), con sus plurales; chino: pedazo de texto;
+  * una excepción (`excepto`) perdona SOLO la palabra prohibida que tiene pegada: «molinillo de café» pasa, «proteína
+    whey 1 kg + shaker de regalo» frena. Ya no apaga la categoría entera;
+  * cada texto del producto se lee por separado;
+  * tres respuestas (`examinar`): `prohibido`, `ok` y `sin_texto`. «No había nada que revisar» no es «ok»: quien activa
+    sin una persona lo trata como freno.
 
-`revisar` es pura (sin red ni base). `lista()` es la única que sale a la red.
+`examinar` y `revisar` son puras (sin red ni base). `lista()` es la única que sale a la red.
 """
 
 from __future__ import annotations
@@ -106,17 +107,38 @@ class Veredicto:
         return f"no vendemos {self.categoria} ({self.palabra})"
 
 
-# ─── Comparación (pura) ────────────────────────────────────────────
+# ─── Normalización ─────────────────────────────────────────────────
 
 
 def _sin_tildes(t: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
 
 
+def _nfkc(texto: str | None) -> str:
+    """Las formas «de compatibilidad» a su letra común: ｖｉｔａｍｉｎａ (ancho completo) es vitamina, ＋ es +, ， es una coma.
+    Sin esto un nombre escrito con esas letras pasaba el filtro entero."""
+    return unicodedata.normalize("NFKC", str(texto or ""))
+
+
 def normalizar(texto: str | None) -> str:
-    """minúsculas, sin tildes, con los separadores vueltos espacio."""
-    t = _sin_tildes(str(texto or "").lower())
+    """NFKC, minúsculas, sin tildes, con los separadores vueltos espacio."""
+    t = _sin_tildes(_nfkc(texto).lower())
     return re.sub(r"[^0-9a-z一-鿿]+", " ", t).strip()
+
+
+_ZH_ESPACIO = re.compile(r"(?<=[一-鿿]) +(?=[一-鿿])")
+
+
+def _zh_junto(texto_norm: str) -> str:
+    """El chino no se separa con espacios: «蛋白 粉» es 蛋白粉. Se sacan los espacios que quedan ENTRE dos caracteres
+    chinos (los que tocan letras o números no)."""
+    return _ZH_ESPACIO.sub("", texto_norm)
+
+
+def tiene_texto(*textos: str | None) -> bool:
+    """¿Hay algo que revisar? Un nombre vacío, o solo números y signos, no es un nombre: de eso no se puede decir que
+    «no está prohibido»."""
+    return any(re.search(r"[a-z一-鿿]", normalizar(t)) for t in textos)
 
 
 def _palabras(valor: Any) -> tuple[str, ...]:
@@ -186,57 +208,241 @@ def con_piso(cats: Iterable[Categoria], *, categorias: Iterable[Categoria] = (),
     return tuple(out)
 
 
-_CJK = re.compile(r"[一-鿿]")
+# ─── Cómo se decide (regla v2) ─────────────────────────────────────
+#
+# Port fiel del comparador canónico (el del radar de productos). No se rediseña acá: si cambia allá, se vuelve a portar,
+# y `tests/test_prohibidos_vectores.py` corre los mismos casos que corren los otros sistemas y exige el 100 %.
+#
+# Una palabra prohibida frena SALVO que una excepción la perdone, y una excepción perdona SOLO la palabra prohibida que
+# tiene pegada: el accesorio y su consumible tienen que nombrar una sola cosa («shaker para proteína», «soap dispenser»,
+# «termómetro de cocina»). Ya no apaga la categoría entera: «Proteína whey 1 kg + shaker de regalo» frena.
+# Rompen esa unión: un corte (+ & , ; |), un número en el medio, un «con / y / incluye / regalo» justo antes del
+# consumible, una preposición después del consumible o un peso después del accesorio. Los plurales frenan igual que el
+# singular (los singulares no se deducen). Cada texto se lee por separado.
+
+_CJK = re.compile(r"[\u4e00-\u9fff]")
+
+#: Corta el nombre en dos productos: «+», «&», coma.
+_CORTE = "xxcortexx"
+#: Artículos y nexos que no dicen nada entre el accesorio y su consumible.
+_ARTICULOS = frozenset({"la", "el", "los", "las", "un", "una", "the", "a", "su", "tu"})
+#: Antes de la palabra prohibida, esto dice que el producto LA TRAE.
+_INCLUYE = frozenset({"con", "with", "y", "e", "and", "mas", "plus", "incluye", "incluyen", "incluido", "incluida",
+                      "includes", "included", "trae", "regalo"})
+#: Después del consumible, una preposición abre SU complemento («alimento PARA perros»).
+_PREPOSICIONES = frozenset({"para", "de", "del", "en", "con", "por", "sin", "x", "for", "of", "with", "in", "y", "e",
+                            "and"})
+_PESO = re.compile(r"^\d+(?:kg|kgs|g|gr|grs|kilo|kilos|lb|lbs)$")
+_UNIDADES_PESO = frozenset({"kg", "kgs", "g", "gr", "grs", "kilo", "kilos", "lb", "lbs"})
+#: Cuántas palabras puede haber entre el accesorio y su consumible cuando el accesorio va primero.
+_MAX_ANTES = 6
+#: Y cuando el consumible va primero («dog food storage container»).
+_MAX_DESPUES = 2
+#: En chino, caracteres entre una cosa y la otra, y lo que delata un regalo.
+_MAX_ZH = 2
+_ZH_REGALO = re.compile(r"[0-9送赠加]")
+_Y = frozenset({"y", "e", "and", "o", "or"})
 
 
-def _exceptuado(texto_norm: str, cat: Categoria) -> bool:
-    """¿Alguna excepción desactiva la categoría para este producto? Frase de varias palabras: entera. Palabra suelta:
-    alcanza con que una palabra del texto EMPIECE así. Chino: pedazo de texto."""
-    espaciado = f" {texto_norm} "
-    tokens = texto_norm.split()
-    for e in cat.excepto:
-        if not e:
+def _tokens(texto: str | None) -> list[str]:
+    """Las palabras del nombre, con un corte donde el nombre suma OTRO producto."""
+    # NFKC antes de buscar los cortes: «＋» y «，» también cortan.
+    crudo = re.sub(r"[+&,;|]", f" {_CORTE} ", _nfkc(texto))
+    return normalizar(crudo).split()
+
+
+def _formas(palabra: str) -> tuple[str, ...]:
+    """La palabra y sus plurales. Solo se AGREGAN plurales: sacarle la «s» a una palabra de la lista inventa singulares
+    que nadie quiso frenar."""
+    if len(palabra) < 3 or not palabra.isalpha():
+        return (palabra,)
+    formas = [palabra, palabra + "s", palabra + "es"]
+    if palabra.endswith("z"):
+        formas.append(palabra[:-1] + "ces")
+    return tuple(formas)
+
+
+def _apariciones(tokens: list[str], frase: str, por_prefijo: bool = False) -> list[tuple[int, int]]:
+    """Dónde aparece `frase` en el nombre: (primera palabra, última palabra). `por_prefijo` es para las excepciones de
+    una sola palabra: «organizador» cubre «organizadores»."""
+    partes = frase.split()
+    if not partes:
+        return []
+    n = len(partes)
+    if n == 1 and por_prefijo:
+        return [(i, i) for i, t in enumerate(tokens) if t.startswith(partes[0])]
+    formas = [_formas(p) for p in partes]
+    return [(i, i + n - 1) for i in range(len(tokens) - n + 1)
+            if all(tokens[i + k] in formas[k] for k in range(n))]
+
+
+def _es_numero(token: str) -> bool:
+    return any(c.isdigit() for c in token)
+
+
+def _perdona(tokens: list[str], prohibida: tuple[int, int], excepcion: tuple[int, int]) -> bool:
+    """¿Esta excepción y esta palabra prohibida nombran UNA sola cosa?"""
+    (pi, pf), (ei, ef) = prohibida, excepcion
+    if not (ef < pi or ei > pf):
+        return True                               # la excepción contiene la palabra: «termómetro de cocina»
+    if ef < pi:
+        # Accesorio primero: «dispensador automático de jabón».
+        medio = tokens[ef + 1:pi]
+        if len(medio) > _MAX_ANTES or _CORTE in medio or any(_es_numero(t) for t in medio):
+            return False
+        previo = next((t for t in reversed(medio) if t not in _ARTICULOS), "")
+        return previo not in _INCLUYE              # «shaker CON proteína»: el producto la trae
+    # Consumible primero: «soap dispenser», «pet food storage container».
+    medio = tokens[pf + 1:ei]
+    if len(medio) > _MAX_DESPUES or _CORTE in medio:
+        return False
+    if any(_es_numero(t) or t in _PREPOSICIONES for t in medio):
+        return False
+    # «alimento balanceado bolsa 20 kg»: lo que se vende por peso es el consumible.
+    despues = tokens[ef + 1:ef + 3]
+    if despues and (_PESO.match(despues[0])
+                    or (despues[0].isdigit() and len(despues) > 1 and despues[1] in _UNIDADES_PESO)):
+        return False
+    return True
+
+
+def _perdonar_coordinadas(tokens: list[str], apariciones: list[tuple[int, int]], perdonadas: list[bool]) -> None:
+    """«Taza mezcladora para café Y BEBIDAS», «soap AND shampoo dispenser»: lo que va coordinado con un consumible ya
+    perdonado es del mismo accesorio. «Shaker y proteína» no entra: ahí la «y» une el accesorio con el consumible."""
+    def salta_articulos(i: int, paso: int) -> int:
+        while 0 <= i < len(tokens) and tokens[i] in _ARTICULOS:
+            i += paso
+        return i
+
+    cambio = True
+    while cambio:
+        cambio = False
+        finales = {pf for (_, pf), ok in zip(apariciones, perdonadas) if ok}
+        inicios = {pi for (pi, _), ok in zip(apariciones, perdonadas) if ok}
+        for k, (pi, pf) in enumerate(apariciones):
+            if perdonadas[k]:
+                continue
+            antes = salta_articulos(pi - 1, -1)
+            despues = salta_articulos(pf + 1, 1)
+            tras_la_y = (0 <= antes < len(tokens) and tokens[antes] in _Y
+                         and salta_articulos(antes - 1, -1) in finales)
+            antes_de_la_y = (0 <= despues < len(tokens) and tokens[despues] in _Y
+                             and salta_articulos(despues + 1, 1) in inicios)
+            if tras_la_y or antes_de_la_y:
+                perdonadas[k] = True
+                cambio = True
+
+
+def _zh_apariciones(texto: str, pedazo: str) -> list[tuple[int, int]]:
+    salida, desde = [], 0
+    while pedazo:
+        i = texto.find(pedazo, desde)
+        if i < 0:
+            break
+        salida.append((i, i + len(pedazo) - 1))
+        desde = i + 1
+    return salida
+
+
+def _zh_perdona(texto: str, prohibida: tuple[int, int], excepcion: tuple[int, int]) -> bool:
+    (pi, pf), (ei, ef) = prohibida, excepcion
+    if not (ef < pi or ei > pf):
+        return True                               # 食品级 contiene 食品
+    medio = texto[ef + 1:pi] if ef < pi else texto[pf + 1:ei]
+    # 蛋白粉摇摇杯 es un shaker; 蛋白粉 1kg 送摇摇杯 es proteína con un regalo.
+    return len(medio) <= _MAX_ZH and not _ZH_REGALO.search(medio)
+
+
+@dataclass(frozen=True)
+class _Lectura:
+    """Lo que dice UN texto sobre UNA categoría."""
+    sin_perdon: tuple[str, ...]   # palabras prohibidas que ninguna excepción cubre
+    hay_excepcion: bool           # nombra algún accesorio de la categoría
+    solo_nombra: bool             # no dice nada más que la palabra prohibida
+
+
+def _leer(texto: str | None, cat: Categoria) -> _Lectura:
+    tokens = _tokens(texto)
+    norm = " ".join(tokens)
+
+    # Español / inglés: PALABRA ENTERA («crema» no matchea «cremallera»).
+    prohibidas = [(ap, p) for p in cat.es for ap in _apariciones(tokens, p)]
+    excepciones = [ap for e in cat.excepto if e and not _CJK.search(e)
+                   for ap in _apariciones(tokens, e, por_prefijo=True)]
+    perdonadas = [any(_perdona(tokens, ap, ex) for ex in excepciones) for ap, _ in prohibidas]
+    _perdonar_coordinadas(tokens, [ap for ap, _ in prohibidas], perdonadas)
+    sin_perdon = [p for (_, p), ok in zip(prohibidas, perdonadas) if not ok]
+
+    # Chino: pedazo de texto, sin los espacios del medio («蛋白 粉» es 蛋白粉).
+    zh = _zh_junto(norm)
+    zh_prohibidas = [(ap, p) for p in cat.zh if p for ap in _zh_apariciones(zh, p)]
+    zh_excepciones = [ap for e in cat.excepto if e and _CJK.search(e) for ap in _zh_apariciones(zh, e)]
+    sin_perdon += [p for ap, p in zh_prohibidas if not any(_zh_perdona(zh, ap, ex) for ex in zh_excepciones)]
+
+    cubiertos = {i for (a, b), _ in prohibidas for i in range(a, b + 1)}
+    resto = [t for i, t in enumerate(tokens)
+             if i not in cubiertos and t != _CORTE and t not in _ARTICULOS and t not in _PREPOSICIONES]
+    return _Lectura(tuple(sin_perdon), bool(excepciones or zh_excepciones),
+                    bool(prohibidas) and not zh_prohibidas and not resto)
+
+
+def _matchea_textos(textos: Iterable[str | None], cat: Categoria) -> str | None:
+    """La palabra que frena este producto en esta categoría, o None. Cada texto se lee por separado: el accesorio de un
+    texto no perdona la palabra prohibida de otro. Única salvedad: si un texto SOLO nombra el consumible («café») y otro
+    es limpiamente el accesorio («molinillo manual», 磨豆机), el producto es el accesorio."""
+    lecturas = [_leer(t, cat) for t in textos if str(t or "").strip()]
+    hay_accesorio_limpio = [lec.hay_excepcion and not lec.sin_perdon for lec in lecturas]
+    for i, lectura in enumerate(lecturas):
+        if not lectura.sin_perdon:
             continue
-        if _CJK.search(e):
-            if e in texto_norm:
-                return True
-        elif " " in e:
-            if f" {e} " in espaciado:
-                return True
-        elif any(t.startswith(e) for t in tokens):
-            return True
-    return False
-
-
-def _matchea(texto_norm: str, cat: Categoria) -> str | None:
-    if _exceptuado(texto_norm, cat):
-        return None
-    tokens = set(texto_norm.split())
-    for p in cat.es:
-        partes = p.split()
-        if len(partes) == 1:
-            if p in tokens:
-                return p
-        elif f" {p} " in f" {texto_norm} ":
-            return p
-    for p in cat.zh:
-        if p and p in texto_norm:
-            return p
+        otro_es_el_accesorio = any(ok for j, ok in enumerate(hay_accesorio_limpio) if j != i)
+        if lectura.solo_nombra and otro_es_el_accesorio:
+            continue
+        return lectura.sin_perdon[0]
     return None
+
+
+PROHIBIDO, OK, SIN_TEXTO = "prohibido", "ok", "sin_texto"
+
+
+@dataclass(frozen=True)
+class Resultado:
+    """Lo que dio la revisión. Tres respuestas, no dos:
+
+      prohibido  cae en la lista (`veredicto` dice por qué);
+      ok         se revisó y no cae;
+      sin_texto  NO HABÍA NADA QUE REVISAR: nombre vacío, o solo números y signos.
+
+    `sin_texto` NO es `ok`. Quien activa SIN una persona lo trata como un freno: no se puede decir que algo no está
+    prohibido si no se sabe qué es. Con una persona delante alcanza con `revisar`."""
+    estado: str
+    veredicto: Veredicto | None = None
+
+    @property
+    def se_puede(self) -> bool:
+        """True solo si se revisó y no cae en la lista."""
+        return self.estado == OK
+
+
+def examinar(*textos: str | None, categorias: Iterable[Categoria] | None = None) -> Resultado:
+    """Revisa los nombres de un producto y dice cuál de las tres respuestas es. Cada texto va por separado (el nombre de
+    la tienda, el de la ficha, el título original). Sin `categorias` usa la lista local (archivo o mínimo)."""
+    if not tiene_texto(*textos):
+        return Resultado(SIN_TEXTO)
+    cats = lista_local().categorias if categorias is None else categorias
+    for cat in cats:
+        palabra = _matchea_textos(textos, cat)
+        if palabra:
+            return Resultado(PROHIBIDO, Veredicto(cat.categoria, cat.porque, palabra))
+    return Resultado(OK)
 
 
 def revisar(*textos: str | None, categorias: Iterable[Categoria] | None = None) -> Veredicto | None:
-    """El primer motivo por el que este producto no se vende, o None. Mira todos los textos juntos (el nombre en español
-    y el original en chino: uno dice cosas que el otro se come). Sin `categorias` usa la lista local (archivo o mínimo)."""
-    cats = lista_local().categorias if categorias is None else categorias
-    texto = normalizar(" ".join(str(t or "") for t in textos))
-    if not texto:
-        return None
-    for cat in cats:
-        palabra = _matchea(texto, cat)
-        if palabra:
-            return Veredicto(cat.categoria, cat.porque, palabra)
-    return None
+    """El primer motivo por el que este producto no se vende, o None.
+
+    OJO: None quiere decir «no cae en la lista» O «no había nada que revisar». Quien decide solo, sin una persona, usa
+    `examinar`, que los distingue."""
+    return examinar(*textos, categorias=categorias).veredicto
 
 
 # ─── De dónde sale la lista ────────────────────────────────────────

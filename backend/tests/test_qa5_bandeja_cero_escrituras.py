@@ -289,11 +289,13 @@ def test_no_module_of_the_review_can_reach_a_write_method_statically():
         assert "paco" not in {m.split(".")[-1] for m in imported}, rel
     routes = (root / "api/price_review_routes.py").read_text()
     assert "@router.put" not in routes and "@router.delete" not in routes and "@router.patch" not in routes
-    # Más las de las correcciones y los ajustes del semáforo, que solo escriben en la base de Hugo (y en match_feedback).
+    # Más las de las correcciones y los ajustes del semáforo, que solo escriben en la base de Hugo (y en match_feedback),
+    # y las dos del freno de lo que no vendemos para UN producto (anular y reponer: solo dejan el registro en la base).
     assert sorted(line.split('"')[1] for line in routes.splitlines() if line.startswith("@router.post")) == [
         "/adjustments/run", "/adjustments/{adj_id}/approve", "/adjustments/{adj_id}/reject", "/adjustments/{adj_id}/undo",
         "/corrections/{correction_id}/motive",
-        "/items/{item_id}/approve", "/items/{item_id}/decision", "/items/{item_id}/undo"]
+        "/items/{item_id}/allow-not-sold", "/items/{item_id}/approve", "/items/{item_id}/decision",
+        "/items/{item_id}/revoke-not-sold", "/items/{item_id}/undo"]
 
 
 def test_the_actions_module_is_the_only_one_that_calls_set_enabled_and_it_never_talks_to_paco():

@@ -1920,7 +1920,8 @@ no tiene ese freno: está mirando ese producto.
 para esa categoría) desde la ficha: «No es un producto prohibido», con un motivo obligatorio. No activa nada: saca el
 freno, para ella y para Hugo, y queda el evento `anula_prohibido` con quién y por qué (tabla `prohibido_anulado`; no se
 borra, se revoca con «Reponer el freno»). Otro producto con el mismo problema sigue frenado. Así un falso positivo no
-obliga a apagar `prohibidos_gate` para todo el catálogo. API: `POST` / `DELETE /api/price-review/items/{id}/allow-not-sold`.
+obliga a apagar `prohibidos_gate` para todo el catálogo. API: `POST /api/price-review/items/{id}/allow-not-sold` y
+`POST /api/price-review/items/{id}/revoke-not-sold`.
 
 Se miran juntos el nombre de hoy en Vendure, el de la ficha y, si el producto llegó por el radar, el título original con el
 que llegó (suele estar en chino o en inglés: dice cosas que la traducción se come).
@@ -1936,10 +1937,24 @@ categoría se toma del archivo (una respuesta 200 con una sola categoría no ree
 código rigen siempre. Dentro de una categoría que la nube sí trae mandan sus palabras: ahí es donde una persona corrige
 la lista.
 
-La comparación es la del radar de productos, con sus excepciones: sin tildes ni mayúsculas, **palabra entera** en español
-e inglés («crema» no frena «cremallera»), pedazo de texto en chino, y `excepto` desactiva la categoría para los accesorios
-(«molinillo de café», «dispensador de jabón», «pistola de silicona»). `app/prohibidos.yaml` es una **copia** de la lista
-canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista canónica>`.
+La comparación es la **regla v2** del radar de productos, portada tal cual:
+
+- NFKC, sin tildes ni mayúsculas (`ｖｉｔａｍｉｎａ` es vitamina); en chino, sin los espacios del medio (`蛋白 粉` es 蛋白粉);
+- **palabra entera** en español e inglés («crema» no frena «cremallera»), **con sus plurales** («Creatinas», «Insecticidas»);
+  pedazo de texto en chino;
+- una excepción (`excepto`) perdona **solo la palabra prohibida que tiene pegada**: el accesorio y su consumible tienen que
+  nombrar una sola cosa («molinillo de café», «dispensador de jabón», «termómetro de cocina»). Ya no apaga la categoría
+  entera: «Proteína whey 1 kg + shaker de regalo» y «Shampoo con dispensador» frenan;
+- cada nombre del producto (el de la tienda, el de la ficha, el título original) se lee por separado: el accesorio de uno
+  no perdona la palabra prohibida de otro;
+- tres respuestas: `prohibido`, `ok` y `sin_texto` (nombre vacío, o solo números y signos).
+
+`backend/tests/prohibidos_vectores.json` es una copia de los 141 casos compartidos por todos los sistemas que usan
+la lista; `test_prohibidos_vectores.py` los corre contra la lista real y exige el 100 %. `app/prohibidos.yaml` es una
+**copia** de la lista canónica: no se edita a mano, se regenera con `python backend/scripts/sync_prohibidos.py <lista
+canónica>`. Lo que la regla NO resuelve es de la lista, no del comparador: hoy siguen frenando, por ejemplo, «Pastillas
+de freno», «Termómetro infrarrojo» y «Fuente de chocolate» (falta la excepción), y pasan «Perfume recargable» y «Bebida
+energizante botella 500 ml» (hay una excepción de más). Para los primeros está la anulación por producto de arriba.
 
 **Duplicados contando inactivos y tiempos.** Con `include_disabled`, de lo inactivo no cuenta lo que el control de
 duplicados ya apagó (es la copia de un producto que sigue en el catálogo, y contra ese sí se compara); lo demás inactivo
@@ -1979,6 +1994,64 @@ SELECT e.at, e.product_id, i.product_name, e.kind, e.payload, e.run_id
    AND e.at >= now() - interval '7 days'
  ORDER BY e.at DESC;
 ```
+
+### Vía rápida: «listo para publicar» en minutos (apagada por defecto)
+
+La activación solo corre de noche: un producto subido a las 15:00 se medía a las 03:00. Con `fast_ready_enabled = 1`
+(default **0**), cuando Vendure avisa de un producto recién subido (`POST /api/vendure/events`), `pricing/fast_ready.py`
+lo mide **en el momento** y, si pasa todo, lo deja en la bandeja como **«listo para publicar»**. **No lo activa**: no
+escribe en Vendure. Lo publica una persona con «Activar» (un click, con las guardas de siempre) o, si el modo automático
+está prendido (`pm_mode = 2`), el portón de la noche como cualquier otro verde firme.
+
+Queda «listo» solo si:
+
+1. no cae en la lista de lo que no vendemos (y la lista completa se pudo cargar);
+2. no es duplicado de otro producto del catálogo, **contando los inactivos**;
+3. da **verde firme** contra Mercado Libre con las mismas reglas del portón (`price_gate.classify`);
+4. está aprobado (o sin estado) en el portal de proveedores;
+5. sus medidas fueron revisadas por la IA y cierran. Acá el chequeo es obligatorio aunque `pm_gate_measures_check` esté
+   en 0: «listo» quiere decir «medidas aprobadas».
+
+Lo que no llega a «listo» no abre ficha: queda anotado con el motivo y lo toma la corrida de la noche, como hoy.
+
+**Lo que la vía rápida frenó no lo activa el portón.** Con `pm_mode = 2` el portón activa solo los verdes firmes apagados
+que encuentra en la corrida, y no compara contra el catálogo inactivo. Por eso: (1) un verde firme que la vía rápida
+frenó por duplicado, aprobación o medidas **no deja snapshot** (la medición solo se guarda si no es verde firme, o si pasó
+todo); y (2) el portón, antes de activar cualquier cosa, consulta esos rechazos: lo que la vía rápida vio duplicado va a
+la bandeja con el motivo («la vía rápida lo frenó al subirlo») para que decida una persona, también con la medición de
+otra noche. Lo frenado por medidas vale igual mientras la guarda de medidas del portón esté apagada; con la guarda
+prendida, el portón revisa las medidas él mismo con los datos de hoy.
+
+Cómo mide: espera ~45 s desde el último aviso del producto (el que sube manda varios seguidos); solo productos apagados,
+nunca medidos, sin ficha viva y que vienen de una subida (link de proveedor de 1688 o unidos a lo que mandó el radar); uno
+a la vez y nunca con la corrida de la noche en curso. Primero la API de Mercado Libre (gratis); si no da un idéntico con
+precio, **una** búsqueda web con el actor de Apify de la noche (~USD 0,02), con cupo propio. El juez por IA no se usa (un
+idéntico confirmado solo por el juez no es «firme»). El snapshot se guarda en la última corrida terminada: el producto
+aparece hoy en el semáforo y la noche siguiente se vuelve a medir. Un producto a medio subir (sin precio o sin foto), o
+que no se pudo medir en ese momento (el índice de fotos todavía no está listo después de un reinicio, o no queda cupo de
+Mercado Libre), no se guarda: se reintenta con el próximo aviso, hasta 3 veces. Los avisos de productos ya medidos o que
+ya están en la bandeja (alguien editó un producto de siempre) ni se anotan. Cada intento tiene un tope de 270 s.
+
+| Setting | Default | Qué es |
+|---|---|---|
+| `fast_ready_enabled` | 0 | El interruptor. Necesita la bandeja prendida (`pm_mode` 1 o 2) |
+| `fast_ready_daily_max` | 20 | Productos medidos por día (hora de Argentina). Pasado el tope, los mide la noche |
+| `fast_ready_apify_daily_max` | 20 | Búsquedas pagas por día (aparte del cupo de la noche). 0 = solo la API de ML |
+
+`GET /api/price-monitor/fast-ready?days=7` (solo un administrador; solo lee): cada intento con su resultado y su motivo,
+cuántos quedaron «listos», **en cuánto tiempo desde el aviso de la subida** (mediana, máximo y cuántos en menos de 5
+minutos, que es el objetivo) y lo gastado (Apify y la IA de medidas). El gasto de Apify va además a `apify_spend`
+(etiqueta `fast_ready`). Tabla nueva: `fast_ready` (se crea sola al arrancar).
+
+### Un hilo por producto (tablero del motor)
+
+`POST /verify` acepta un `hilo` opcional (texto de hasta 128 caracteres que nace en el radar). Hugo lo guarda
+(`luis_intake.hilo`), lo reenvía al buscar proveedor (`hilo` en el pedido de búsqueda, también en un reintento) y, si
+están `MOTOR_EVENTOS_URL` y `MOTOR_EVENTOS_KEY`, avisa cada cambio de estado de ese producto (`app/motor_eventos.py`):
+`duplicado` y `prohibido` al contestar `/verify`, `medido` y `listo` desde la vía rápida, `publicado` cuando una activación
+queda confirmada en Vendure y `error` si no pudo mandar a buscar. El aviso va en segundo plano, con tope de 5 s y de a 200
+eventos; si falla se anota en el log y se sigue. Sin hilo, sin URL o sin clave no se manda nada y todo funciona como
+siempre. El motivo es un código o una frase fija: nunca un mail, un link ni un proveedor.
 
 ### Todo el catálogo apagado y la guarda de medidas
 
@@ -2643,6 +2716,9 @@ Ver `.env.example`. Las críticas:
 - `MOTOR_PROHIBIDOS_URL`, `MOTOR_PROHIBIDOS_KEY` — la lista de lo que no vendemos en la nube (opcional; las dos o
   ninguna). Sin ellas se usa `app/prohibidos.yaml`. `PROHIBIDOS_GATE` (1) y `PROHIBIDOS_VERIFY` (0) son los defaults de
   los dos interruptores (también en Configuración).
+- `MOTOR_EVENTOS_URL`, `MOTOR_EVENTOS_KEY` — a dónde se avisan los cambios de estado de un producto con hilo (opcional; las
+  dos o ninguna; la clave va en la cabecera `x-radar-key`). `FAST_READY_ENABLED` (0), `FAST_READY_DAILY_MAX` (20) y
+  `FAST_READY_APIFY_DAILY_MAX` (20) son los defaults de la vía rápida (también en Configuración).
 - `VENDURE_EVENTS_KEY` — key de los avisos de Vendure al guardar (`POST /api/vendure/events`, header `X-Hugo-Events-Key`;
   32 caracteres o más y al menos 12 distintos, por ejemplo `openssl rand -hex 32`). La misma va en Vendure como
   `HUGO_EVENTS_KEY`, con `HUGO_EVENTS_URL` = la URL exacta sin `/` final. Vacía o floja = 404 y el recálculo queda con el

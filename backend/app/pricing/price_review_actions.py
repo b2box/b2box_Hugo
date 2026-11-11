@@ -683,9 +683,11 @@ async def prohibido_check(product_id: str, *names: str | None, auto: bool) -> tu
     if auto and not found.completa:
         return SIN_LISTA, SIN_LISTA_TEXT
     texts = await asyncio.to_thread(product_names, product_id, *names)
-    if auto and not any(prohibidos.normalizar(t) for t in texts):
-        return SIN_NOMBRE, SIN_NOMBRE_TEXT
-    verdict = prohibidos.revisar(*texts, categorias=found.categorias)
+    result = prohibidos.examinar(*texts, categorias=found.categorias)      # cada nombre se lee por separado
+    if result.estado == prohibidos.SIN_TEXTO:
+        # No había nada que revisar (sin nombre, o solo números y signos): para quien no mira el producto, es un freno.
+        return (SIN_NOMBRE, SIN_NOMBRE_TEXT) if auto else None
+    verdict = result.veredicto
     if verdict is None:
         return None
     if await asyncio.to_thread(_allowed_by_a_person, product_id, verdict.categoria):
@@ -926,7 +928,25 @@ def _confirm(item: PriceReviewItem, mv: _Move, actor: str, target: bool, guard: 
                      run_id=mv.audit.get("corrida"))
         s.add(_audit_row(item, mv, actor, target, now))
         s.commit()
+    if target:
+        _announce_published(item.product_id, actor)
     return True
+
+
+def _announce_published(product_id: str, actor: str) -> None:
+    """Tablero del motor: el producto quedó publicado (solo si llegó con hilo). Nunca lanza ni espera. El motivo dice si
+    fue Hugo solo o una persona, nunca quién."""
+    try:
+        from app import motor_eventos
+
+        if motor_eventos.configurado() is None:
+            return
+        hilo = motor_eventos.hilo_de_producto(product_id)
+        motor_eventos.avisar(motor_eventos.evento(
+            hilo, "publicado", "ok", ref=product_id,
+            motivo="lo activó Hugo solo" if actor == pr.ACTOR_AUTO else "lo activó una persona desde la bandeja"))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("price_review: no se pudo avisar la publicación de %s (%s)", product_id, error_code(exc))
 
 
 def _audit_row(item: PriceReviewItem, mv: _Move, actor: str, target: bool, now: datetime, extra: str = "") -> AuditLog:

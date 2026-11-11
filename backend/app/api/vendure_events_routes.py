@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.api.oficina_routes import _IpTable, _ip_key, _key_matches, _read_body, _window
 from app.config import get_settings
-from app.pricing import luis_intake, price_gate, price_recalc
+from app.pricing import fast_ready, luis_intake, price_gate, price_recalc
 from app.security import client_ip, weak_key_reason
 
 log = logging.getLogger(__name__)
@@ -144,5 +144,11 @@ async def vendure_events(request: Request) -> dict[str, Any]:
     task.add_done_callback(_TASKS.discard)
     # Portón de precio (solo con pm_mode = 2): si una persona prendió un rojo o apagó un verde, se anota la corrección.
     price_gate.notify(list(changes))
+    # Vía rápida (solo con fast_ready_enabled = 1): un producto recién subido se mide en el momento y, si pasa todo, queda
+    # «listo para publicar» en la bandeja. No activa nada.
+    try:
+        fast_ready.notify(list(changes))
+    except Exception as exc:  # noqa: BLE001  (la vía rápida nunca tira el aviso)
+        log.warning("vendure events: la vía rápida no pudo anotar los avisos (%s)", type(exc).__name__)
     log.info("vendure events: %d avisos, %d productos anotados (%s)", len(body.events), queued, client_ip(request))
     return {"queued": queued}

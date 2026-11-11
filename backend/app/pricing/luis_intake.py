@@ -95,9 +95,10 @@ def intake_key(source_url: str | None) -> str | None:
 
 
 def record(source_url: str | None, name: str | None, image_urls: list[str] | None,
-           paco_search_id: str | None = None) -> int | None:
+           paco_search_id: str | None = None, hilo: str | None = None) -> int | None:
     """Guarda (o refresca) la fila de este producto. None si el link no sirve o no hay foto usable. Idempotente por
-    producto: Luis puede pedir /verify varias veces por el mismo."""
+    producto: Luis puede pedir /verify varias veces por el mismo. `hilo` (opcional): el hilo del producto en el tablero
+    del motor; el primero que llega queda."""
     key = intake_key(source_url)
     image = next((u for u in (image_urls or []) if allowed_image_url(u)), None)
     if not key or not image:
@@ -112,6 +113,8 @@ def record(source_url: str | None, name: str | None, image_urls: list[str] | Non
             row.name = clean_line(name or "", 300) or row.name
         if paco_search_id:
             row.paco_search_id = paco_search_id[:64]
+        if hilo and not row.hilo:
+            row.hilo = hilo[:128]
         s.commit()
         return row.id
 

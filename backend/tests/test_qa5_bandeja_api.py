@@ -375,13 +375,19 @@ async def test_without_deciders_nothing_can_be_decided_and_there_are_no_other_wr
                 assert r.status_code == 403 and "PRICE_REVIEW_DECIDERS" in r.json()["detail"], (sub, r.status_code)
             else:
                 assert r.status_code in (404, 405), (sub, method, r.status_code)
+    for sub in ("allow-not-sold", "revoke-not-sold"):
+        r = client.post(f"{BASE}/items/{item.id}/{sub}", json={"note": "no es un producto prohibido"})
+        assert r.status_code == 403 and "PRICE_REVIEW_DECIDERS" in r.json()["detail"], (sub, r.status_code)
     assert q.rows(PriceReviewItem)[0].decision is None and q.rows(PriceReviewItem)[0].state == "propuesto"
     assert q.rows(PriceReviewEvent) and {e.kind for e in q.rows(PriceReviewEvent)} == {"propuesto"}
     openapi = client.get("/openapi.json")
     if openapi.status_code == 200:
         paths = {p: set(v) for p, v in openapi.json()["paths"].items() if p.startswith(BASE)}
         posts = {p for p, methods in paths.items() if methods != {"get"}}
-        assert posts == {f"{BASE}/items/{{item_id}}/{s}" for s in ("approve", "decision", "undo")} | {
+        # `allow-not-sold` / `revoke-not-sold`: anular y reponer el freno de lo que no vendemos para UN producto. Son de
+        # quien decide (abajo se prueba el 403) y no escriben en Vendure.
+        assert posts == {f"{BASE}/items/{{item_id}}/{s}" for s in ("approve", "decision", "undo", "allow-not-sold",
+                                                                    "revoke-not-sold")} | {
             f"{BASE}/corrections/{{correction_id}}/motive", f"{BASE}/adjustments/run",
             *(f"{BASE}/adjustments/{{adj_id}}/{s}" for s in ("approve", "reject", "undo"))}, paths
         assert all(paths[p] == {"post"} for p in posts), paths

@@ -656,6 +656,18 @@ async def gate_auto_actions(request: Request, days: int = Query(7, ge=1, le=365)
     return out
 
 
+@router.get("/fast-ready")
+async def fast_ready_report(request: Request, days: int = Query(7, ge=1, le=90),
+                            limit: int = Query(200, ge=1, le=2000)) -> dict[str, Any]:
+    """La vía rápida (pricing/fast_ready.py): los productos recién subidos que Hugo midió en el momento, cuáles quedaron
+    «listos para publicar», en cuánto tiempo desde el aviso de la subida (objetivo: menos de 5 minutos) y cuánto se gastó.
+    Solo un administrador. Solo lee."""
+    from app.pricing import fast_ready
+
+    auth.require_admin(request)
+    return await asyncio.to_thread(fast_ready.report, days, limit=limit)
+
+
 # ─── Medidas con IA ───────────────────────────────────────────────
 
 MEASURE_VERDICTS = ("ok", "dudoso", "mal", "sin_medidas", "error")
