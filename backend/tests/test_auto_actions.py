@@ -87,7 +87,10 @@ async def test_dice_si_una_persona_lo_deshizo_y_respeta_la_ventana_de_dias(fake)
     assert row["deshecho_por"] == kit.PAO and out["totals"]["deshechos_por_una_persona"] == 1
     # Lo que hace una persona (el Deshacer apagó el producto) no es de Hugo: no suma.
     assert out["totals"]["apagados"] == 1
-    assert auto_actions.list_auto_actions(1, now=w.NOW + timedelta(days=30))["items"] == []
+    # Las escrituras llevan la hora real (no w.NOW): la ventana se corre desde ahí, si no la prueba depende de la fecha.
+    from app.clock import utcnow
+
+    assert auto_actions.list_auto_actions(1, now=utcnow() + timedelta(days=30))["items"] == []
 
 
 async def test_una_escritura_vieja_sin_regla_la_deduce_del_porton(fake):

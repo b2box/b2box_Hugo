@@ -50,6 +50,8 @@ ACTION_TEXT = {
 RULE_TEXT = {
     "verde_firme_subido_por_paco": "Verde firme de un producto recién subido",
     "verde_firme_catalogo_apagado": "Verde firme de un producto apagado del catálogo",
+    "sin_dato_ml_subido_por_paco": "No está en ML y las medidas están bien: producto recién subido",
+    "sin_dato_ml_catalogo_apagado": "No está en ML y las medidas están bien: producto apagado del catálogo",
     "rojo_firme_publicado": "Rojo firme publicado",
     "recalculo_ya_no_rojo": "Lo había apagado Hugo, se corrigió en Vendure y ya no es rojo firme",
     "verde_firme": "Verde firme",
