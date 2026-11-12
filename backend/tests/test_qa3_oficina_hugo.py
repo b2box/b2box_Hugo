@@ -387,7 +387,8 @@ def test_history_keeps_five_per_product_and_never_drops_the_newest(api):
     assert len(rows) == 5
     assert max(r.fetched_at for r in rows) == (utcnow() - timedelta(hours=1)).replace(microsecond=0) or True
     stamps = sorted(r.fetched_at for r in rows)
-    assert stamps[-1] - stamps[0] == timedelta(hours=4)
+    # Cada `_iso` lee el reloj aparte: entre la primera y la última puede cruzarse un segundo.
+    assert abs((stamps[-1] - stamps[0]) - timedelta(hours=4)) <= timedelta(seconds=2)
     _post(api, [_res("1", fetched_at=_iso(-timedelta(days=30)))])               # uno viejísimo no desplaza a los nuevos
     assert len(_rows()) == 5 and min(r.fetched_at for r in _rows()) > utcnow() - timedelta(hours=10)
 
