@@ -588,6 +588,8 @@ class Settings(EnvSettings):
     # «No está en ML» cuenta como verde (pricing/price_gate.py `not_on_ml`): 1 = un producto apagado que ML BUSCÓ y no
     # tiene con precio se activa solo si sus medidas están bien (exige pm_gate_measures_check = 1). 0 = va a la bandeja.
     pm_gate_sin_dato: int = 0
+    # Tope diario (hora ART) de activaciones por «no está en ML», aparte del de los verdes.
+    pm_gate_sin_dato_daily_max: int = 20
     # Puesta en marcha automática (scheduler/jobs.py `autopilot_kickoff`): 1 = al arrancar, Hugo pasa SOLO a modo
     # automático una vez (pm_mode = 2) y corre el portón con la última corrida fresca (verdes firmes con medidas bien →
     # se activan; rojos firmes publicados → se apagan). 0 = no hace nada al arrancar.

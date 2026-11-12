@@ -719,6 +719,17 @@ SETTINGS_SCHEMA: list[SettingMeta] = [
         min=0, max=1, step=1, group="monitor",
     ),
     SettingMeta(
+        key="pm_gate_sin_dato_daily_max",
+        label="Portón: activaciones por día de lo que no está en ML",
+        description=(
+            "Cuántos productos puede activar Hugo por día (hora de Argentina) porque ML no los tiene, aparte y además "
+            "de los topes de los verdes. 0 = ninguno."
+        ),
+        type="int", parser=int,
+        default_attr="pm_gate_sin_dato_daily_max",
+        min=0, max=600, step=5, group="monitor",
+    ),
+    SettingMeta(
         key="pm_autopilot",
         label="Piloto automático al arrancar",
         description=(

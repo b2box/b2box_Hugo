@@ -66,6 +66,7 @@ from app.db.models import (
     FastReady,
     LuisIntake,
     MarketPriceSnapshot,
+    PriceMonitorRun,
     PriceReviewEvent,
     PriceReviewItem,
 )
@@ -117,10 +118,33 @@ REASON_TEXT = {
 _ML_NO_DATA = "no_data"
 _ML_API_OFF = "API de ML apagada"
 _WEB_SEARCHED = ("ok", "empty")          # la web de ML (servidor u oficina) contestó: con o sin publicaciones
+# ML SÍ tiene el idéntico con precio, pero se descartaron sus vendedores: eso no es «no está en ML».
+_ML_SELLERS_DROPPED = "las fichas no tienen vendedores"
+SIN_DATO_KEY = "pm_gate_sin_dato_activations"
+SIN_DATO_MAX_AGE = timedelta(hours=48)
+# Corte por corrida: si ML casi no devolvió idénticos con precio en toda la corrida (estrangulado, bloqueado o la
+# API cambió), un «no hay» no es creíble y esa corrida no activa nada por «no está en ML».
+SIN_DATO_MIN_RUN_OK = 10
 
 
 def enabled() -> bool:
     return int(runtime.get("pm_mode") or 0) == 2
+
+
+def _run_found_enough_on_ml(run_id: int) -> bool:
+    """¿La corrida encontró idénticos con precio en ML para al menos `SIN_DATO_MIN_RUN_OK` productos? Si no, ML no estaba
+    contestando de verdad y sus «no hay» no valen para activar."""
+    with Session(engine) as s:
+        run = s.get(PriceMonitorRun, run_id)
+    return run is not None and int(run.n_ok or 0) >= SIN_DATO_MIN_RUN_OK
+
+
+def _sin_dato_quota(decision: GateDecision, now: datetime) -> bool:
+    """Tope diario propio (hora ART) de lo que se activa por «no está en ML», aparte y además del de los verdes."""
+    if decision.reason != "sin_dato_ml":
+        return True
+    cap = int(runtime.get("pm_gate_sin_dato_daily_max") or 0)
+    return daily_budget.reserve(SIN_DATO_KEY, cap, None, None, daily_budget.today_art(now)) is not None
 
 
 def sin_dato_counts_as_green() -> bool:
@@ -129,11 +153,17 @@ def sin_dato_counts_as_green() -> bool:
     return int(runtime.get("pm_gate_sin_dato") or 0) == 1 and int(runtime.get("pm_gate_measures_check") or 0) == 1
 
 
-def not_on_ml(snap: MarketPriceSnapshot | None) -> bool:
+def not_on_ml(snap: MarketPriceSnapshot | None, now: datetime | None = None) -> bool:
     """¿ML se buscó de verdad y no tiene este producto con precio? PURA. No cuenta: una búsqueda que falló o no se hizo
     (API apagada sin web, bloqueo, sin cupo), lo que no se puede medir (sin precio, foto o nombre), ni un producto cuyos
-    SIMILARES en ML dan rojo (hay algo parecido más barato)."""
+    SIMILARES en ML dan rojo (hay algo parecido más barato), ni un idéntico cuyos vendedores se descartaron, ni un dato
+    de más de 48 h."""
     if snap is None or snap.ml_status != _ML_NO_DATA or snap.color != semaforo.SIN_DATO or snap.unmeasurable:
+        return False
+    if (snap.ml_error or "").startswith(_ML_SELLERS_DROPPED):
+        return False
+    seen = snap.data_at or snap.captured_at
+    if seen is None or seen < (now or utcnow()) - SIN_DATO_MAX_AGE:
         return False
     if not snap.our_price_cents or snap.our_price_cents <= 0:
         return False
@@ -170,7 +200,7 @@ def classify(snap: MarketPriceSnapshot | None, params: pr.ReviewParams, now: dat
     """Qué hace el portón con este snapshot. PURA (sin red, sin base). `rules` = los ajustes aprendidos aplicados: un caso
     firme que cae en un segmento ajustado y no pasa su corte va a la bandeja (`ajuste:<id>`). Con `sin_dato_ok`, lo que
     ML buscó y no tiene (`not_on_ml`) se activa como un verde (después pasa igual por prohibidos, vía rápida y medidas)."""
-    if sin_dato_ok and not_on_ml(snap):
+    if sin_dato_ok and not_on_ml(snap, now):
         return GateDecision(ACTIVAR, "sin_dato_ml")
     if snap is None or snap.ml_status != "ok" or snap.color == semaforo.SIN_DATO:
         return GateDecision(BANDEJA, "sin_dato")
@@ -389,6 +419,7 @@ async def _process_run(run_id: int, *, now: datetime | None, client: Any, immedi
     now = now or utcnow()
     params = pr.ReviewParams.from_runtime()
     rules = await asyncio.to_thread(learn.active_rules)
+    sin_dato = sin_dato_counts_as_green() and await asyncio.to_thread(_run_found_enough_on_ml, run_id)
     try:
         reds = await asyncio.to_thread(_published_reds, run_id)
         if immediate_reds:
@@ -413,7 +444,7 @@ async def _process_run(run_id: int, *, now: datetime | None, client: Any, immedi
         return counts
     for row in rows:
         try:
-            outcome = await _one(row, run_id, params, rules, now, client)
+            outcome = await _one(row, run_id, params, rules, now, client, sin_dato=sin_dato)
         except Exception as exc:  # noqa: BLE001  (un producto no frena a los demás)
             log.warning("portón #%s: el producto %s falló (%s)", run_id, row.vendure_product_id, error_code(exc))
             outcome = "error"
@@ -423,13 +454,14 @@ async def _process_run(run_id: int, *, now: datetime | None, client: Any, immedi
             return counts
     if int(runtime.get("pm_gate_catalog_greens") or 0) == 1:
         try:
-            greens = await asyncio.to_thread(_catalog_greens, run_id, {str(r.vendure_product_id) for r in rows})
+            greens = await asyncio.to_thread(_catalog_greens, run_id, {str(r.vendure_product_id) for r in rows},
+                                             sin_dato, now)
         except Exception as exc:  # noqa: BLE001
             log.warning("portón #%s: no se pudieron leer los verdes apagados (%s)", run_id, error_code(exc))
             greens = []
         for snap in greens:
             try:
-                outcome = await _catalog_green(snap, run_id, params, rules, now, client)
+                outcome = await _catalog_green(snap, run_id, params, rules, now, client, sin_dato=sin_dato)
             except Exception as exc:  # noqa: BLE001
                 log.warning("portón #%s: el verde apagado %s falló (%s)", run_id, snap.product_id, error_code(exc))
                 outcome = "error"
@@ -494,7 +526,7 @@ async def _published_red(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
 
 
 async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: list[learn.Rule], now: datetime,
-               client: Any) -> str:
+               client: Any, *, sin_dato: bool = False) -> str:
     pid = str(row.vendure_product_id)
     with Session(engine, expire_on_commit=False) as s:
         snap = _latest_snapshot(s, pid, run_id)
@@ -518,7 +550,7 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
         return "apagado_a_mano"
     if item is not None and item.state not in (pr.POR_ACTIVAR,):
         return "ficha_de_una_persona"                    # ya la tiene la bandeja de rojos (o mantenida): no se toca
-    decision = classify(snap, params, now, rules, category, sin_dato_ok=sin_dato_counts_as_green())
+    decision = classify(snap, params, now, rules, category, sin_dato_ok=sin_dato)
     if snap.product_enabled:
         if snap.color == semaforo.ROJO and row.gate_status in (G_ROJO, G_BANDEJA):
             # La persona manda: alguien lo prendió con rojo. Hugo no lo revierte; lo anota y no lo toca por un tiempo.
@@ -552,8 +584,8 @@ async def _one(row: LuisIntake, run_id: int, params: pr.ReviewParams, rules: lis
         if item is None or item.state != pr.POR_ACTIVAR:
             return "sin_ficha"
         cap = int(runtime.get("pm_gate_activations_daily_max") or 0)
-        if await asyncio.to_thread(daily_budget.reserve, ACTIVATIONS_KEY, cap, None, None,
-                                   daily_budget.today_art(now)) is None:
+        if not await asyncio.to_thread(_sin_dato_quota, decision, now) or await asyncio.to_thread(
+                daily_budget.reserve, ACTIVATIONS_KEY, cap, None, None, daily_budget.today_art(now)) is None:
             await asyncio.to_thread(_set_gate, row.id, G_BANDEJA, REASON_TEXT["tope_del_dia"], now)
             return "tope"
         from app.pricing import (
@@ -665,7 +697,8 @@ def _mark_snapshot_enabled(snap_id: int) -> None:
 # ─── El resto del catálogo apagado ────────────────────────────────
 
 
-def _catalog_greens(run_id: int, skip: set[str]) -> list[MarketPriceSnapshot]:
+def _catalog_greens(run_id: int, skip: set[str], sin_dato: bool = False,
+                    now: datetime | None = None) -> list[MarketPriceSnapshot]:
     """Los productos APAGADOS que esta corrida midió en verde (sin los que ya decidió el paso de Luis), del mejor margen
     al peor: si se corta por el tope, se activaron los más claros. Con `pm_gate_sin_dato`, después de los verdes van los
     que ML buscó y no tiene (`not_on_ml`)."""
@@ -675,7 +708,7 @@ def _catalog_greens(run_id: int, skip: set[str]) -> list[MarketPriceSnapshot]:
             MarketPriceSnapshot.product_enabled == False)  # noqa: E712
             .order_by(MarketPriceSnapshot.id).limit(MAX_PER_RUN * 4)).all()
         missing: list[MarketPriceSnapshot] = []
-        if sin_dato_counts_as_green():
+        if sin_dato:
             missing = list(s.exec(select(MarketPriceSnapshot).where(
                 MarketPriceSnapshot.run_id == run_id, MarketPriceSnapshot.color == semaforo.SIN_DATO,
                 MarketPriceSnapshot.ml_status == _ML_NO_DATA,
@@ -683,7 +716,7 @@ def _catalog_greens(run_id: int, skip: set[str]) -> list[MarketPriceSnapshot]:
                 .order_by(MarketPriceSnapshot.id).limit(MAX_PER_RUN * 4)).all())
     out = sorted((sn for sn in snaps if sn.product_id not in skip),
                  key=lambda sn: (-(sn.est_margin_pct or 0.0), sn.id or 0))
-    return out + [sn for sn in missing if sn.product_id not in skip and not_on_ml(sn)]
+    return out + [sn for sn in missing if sn.product_id not in skip and not_on_ml(sn, now)]
 
 
 def _other_flow_off(s: Session, product_id: str) -> bool:
@@ -706,7 +739,7 @@ def _human_ever_said_no(s: Session, product_id: str, our_price_cents: int | None
 
 
 async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.ReviewParams, rules: list[learn.Rule],
-                         now: datetime, client: Any) -> str:
+                         now: datetime, client: Any, *, sin_dato: bool = False) -> str:
     """Un producto apagado del catálogo con verde: si es verde firme y las medidas cierran, Hugo lo ACTIVA (ficha
     `por_activar` → `activado`, mismo protocolo, tope propio del catálogo). Un verde firme con medidas que no cierran, o un
     verde que no es firme, queda en revisión (bandeja de Pao) con el motivo."""
@@ -722,7 +755,7 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
         category = corr.category_of(s, pid)
     if item is not None and item.state != pr.POR_ACTIVAR:
         return "ficha_de_una_persona"
-    decision = classify(snap, params, now, rules, category, sin_dato_ok=sin_dato_counts_as_green())
+    decision = classify(snap, params, now, rules, category, sin_dato_ok=sin_dato)
     if decision.action != ACTIVAR:
         if decision.reason.startswith(("verde_dudoso:", "precio_bajo", "ajuste:")):
             # Verde pero no firme: no se sube solo, queda en revisión (bandeja de Pao) con el motivo.
@@ -749,8 +782,8 @@ async def _catalog_green(snap: MarketPriceSnapshot, run_id: int, params: pr.Revi
     if item is None or item.state != pr.POR_ACTIVAR:
         return "sin_ficha"
     cap = int(runtime.get("pm_gate_catalog_activations_daily_max") or 0)
-    if await asyncio.to_thread(daily_budget.reserve, CATALOG_ACTIVATIONS_KEY, cap, None, None,
-                               daily_budget.today_art(now)) is None:
+    if not await asyncio.to_thread(_sin_dato_quota, decision, now) or await asyncio.to_thread(
+            daily_budget.reserve, CATALOG_ACTIVATIONS_KEY, cap, None, None, daily_budget.today_art(now)) is None:
         return "tope"
     from app.pricing import (
         price_review_actions as actions,  # lazy: actions importa el cliente de Vendure

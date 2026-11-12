@@ -382,6 +382,19 @@ def _missing(run: int, pid: str, **kw: Any) -> None:
     w.add_snap(run, pid, **{**base, **kw})
 
 
+def _run_ml_ok(n_ok: int = 50) -> int:
+    """Una corrida en la que ML sí contestó (encontró idénticos con precio para `n_ok` productos)."""
+    from app.db.models import PriceMonitorRun
+
+    run = w.make_run()
+    with Session(engine) as s:
+        r = s.get(PriceMonitorRun, run)
+        r.n_ok = n_ok
+        s.add(r)
+        s.commit()
+    return run
+
+
 def _rule_of(pid: str) -> str | None:
     from app.db.models import PriceReviewEvent
 
@@ -402,8 +415,10 @@ def test_not_on_ml_only_when_ml_really_searched(fake):
     _missing(run, "nm6", ml_status="skipped", unmeasurable="sin_precio")     # no se puede medir
     _missing(run, "nm7", estimated_color="rojo")                             # hay similares más baratos
     _missing(run, "nm8", our=0)                                              # sin precio nuestro
+    _missing(run, "nm9", ml_error="las fichas no tienen vendedores que cuenten")  # ML sí lo tiene
+    _missing(run, "nm10", data_at=w.NOW - timedelta(hours=60))               # dato viejo
     got = {pid: price_gate.classify(w.snap_of(run, pid), p, w.NOW, sin_dato_ok=True)
-           for pid in ("nm1", "nm2", "nm3", "nm4", "nm5", "nm6", "nm7", "nm8")}
+           for pid in ("nm1", "nm2", "nm3", "nm4", "nm5", "nm6", "nm7", "nm8", "nm9", "nm10")}
     assert {pid for pid, d in got.items() if d.action == price_gate.ACTIVAR} == {"nm1", "nm3"}
     assert got["nm1"].reason == "sin_dato_ml"
     # Sin la opción, «sin dato» sigue yendo a la bandeja.
@@ -411,7 +426,7 @@ def test_not_on_ml_only_when_ml_really_searched(fake):
 
 
 async def test_catalog_not_on_ml_with_sane_measures_is_activated_only_with_the_setting(fake, ai):
-    run = w.make_run()
+    run = _run_ml_ok()
     _missing(run, "cg40")
     fake.enabled["cg40"] = False
     w.set_setting("pm_gate_sin_dato", 0)
@@ -428,7 +443,7 @@ async def test_catalog_not_on_ml_with_sane_measures_is_activated_only_with_the_s
 
 async def test_catalog_not_on_ml_with_bad_or_missing_measures_goes_to_the_tray(fake, ai):
     ai["client"] = FakeAI(AI_BAD)
-    run = w.make_run()
+    run = _run_ml_ok()
     _missing(run, "cg41")
     _missing(run, "cg42", specs=None)
     for pid in ("cg41", "cg42"):
@@ -442,7 +457,7 @@ async def test_catalog_not_on_ml_with_bad_or_missing_measures_goes_to_the_tray(f
 
 
 async def test_not_on_ml_never_activates_without_the_measures_guard(fake, ai):
-    run = w.make_run()
+    run = _run_ml_ok()
     _missing(run, "cg43")
     fake.enabled["cg43"] = False
     w.set_setting("pm_gate_sin_dato", 1)
@@ -456,7 +471,7 @@ async def test_not_on_ml_never_activates_without_the_measures_guard(fake, ai):
 
 
 async def test_paco_upload_not_on_ml_with_sane_measures_is_activated(fake, ai):
-    run = w.make_run()
+    run = _run_ml_ok()
     _missing(run, "cg44")
     fake.enabled["cg44"] = False
     with Session(engine) as s:
@@ -471,3 +486,30 @@ async def test_paco_upload_not_on_ml_with_sane_measures_is_activated(fake, ai):
         w.set_setting("pm_gate_sin_dato", 0)
     assert counts == {"activado": 1} and fake.enabled["cg44"] is True
     assert _rule_of("cg44") == price_gate.RULE_PACO_SIN_DATO
+
+
+async def test_not_on_ml_waits_when_ml_barely_answered_in_the_run(fake, ai):
+    run = _run_ml_ok(n_ok=3)                    # ML casi no devolvió nada: sus «no hay» no valen
+    _missing(run, "cg45")
+    fake.enabled["cg45"] = False
+    w.set_setting("pm_gate_sin_dato", 1)
+    try:
+        counts = await price_gate.process_run(run, now=w.NOW)
+    finally:
+        w.set_setting("pm_gate_sin_dato", 0)
+    assert counts == {} and fake.writes() == []
+
+
+async def test_not_on_ml_has_its_own_daily_cap(fake, ai):
+    run = _run_ml_ok()
+    for pid in ("cg46", "cg47"):
+        _missing(run, pid)
+        fake.enabled[pid] = False
+    w.set_setting("pm_gate_sin_dato", 1)
+    w.set_setting("pm_gate_sin_dato_daily_max", 1)
+    try:
+        counts = await price_gate.process_run(run, now=w.NOW)
+    finally:
+        w.set_setting("pm_gate_sin_dato", 0)
+        w.set_setting("pm_gate_sin_dato_daily_max", 20)
+    assert counts == {"catalogo_activado": 1, "catalogo_tope": 1} and fake.writes() == [True]
